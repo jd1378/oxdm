@@ -1,0 +1,104 @@
+[package]
+name = "oxdm"
+description = "a download manager using odl"
+version = "0.0.1"
+edition = "2024"
+repository = "https://github.com/jd1378/oxdm"
+homepage = "https://github.com/jd1378/oxdm"
+license = "AGPL-3.0"
+authors = ["jd1378 <javad.mnjd@hotmail.com>"]
+
+[dependencies]
+odl = { version = "1.1.0", default-features = false }
+eframe = { version = "0.34", default-features = false, features = ["glow", "wayland", "x11"] }
+egui = "0.34"
+egui_extras = { version = "0.34", features = ["image", "svg"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "io-util", "net", "time", "fs", "process", "io-std", "signal"] }
+tokio-util = "0.7"
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = { version = "2", features = ["serde"] }
+percent-encoding = "2"
+indexmap = { version = "2", features = ["serde"] }
+dirs = "6"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+async-trait = "0.1"
+humantime = "2"
+rusqlite = { version = "0.32", features = ["bundled", "chrono"] }
+arboard = "3"
+tokio-tungstenite = "0.24"
+dark-light = "2"
+notify-rust = "4"
+rand = "0.9"
+base64 = "0.22"
+aes-gcm = "0.10"
+reqwest = { version = "0.12", default-features = false, features = ["http2", "gzip", "brotli", "native-tls", "stream", "json"] }
+semver = "1"
+sha2 = "0.10"
+libc = "0.2"
+fs4 = "0.13"
+interprocess = { version = "2", features = ["tokio"] }
+single-instance = "0.3"
+image = { version = "0.25", default-features = false, features = ["png"] }
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
+egui_flex = "0.6.0"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+ksni = "0.3.4"
+keyring = { version = "3", features = ["linux-native-sync-persistent"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+tray-icon = "0.19"
+muda = "0.15"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Console",
+    "Win32_System_Threading",
+] }
+raw-window-handle = "0.6"
+keyring = { version = "3", features = ["windows-native"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
+
+# Keep our crate unoptimised (fast incremental + debugger), but build
+# dependencies at -O3 so egui 0.34's Skrifa hinting + epaint tessellation
+# aren't the dev-build bottleneck on subprocess spawn.
+[profile.dev]
+opt-level = 0
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[[bin]]
+name = "oxdm"
+path = "src/main.rs"
+
+[[bin]]
+name = "oxdm-native-host"
+path = "src/bin/oxdm-native-host.rs"
+
+[[bin]]
+name = "oxdm-updater"
+path = "src/bin/oxdm-updater.rs"
+
+[[bin]]
+name = "oxdm-fixture"
+path = "src/bin/oxdm-fixture.rs"

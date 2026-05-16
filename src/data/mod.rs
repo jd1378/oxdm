@@ -1,0 +1,32 @@
+//! Application state and the bridge to `odl`.
+//!
+//! This is the only layer permitted to import `odl::*`. Everything outside
+//! observes it through `domain` types and `DomainEvent`s. Wiring lives in
+//! [`AppState`]; the runner that drives one job through `odl` is
+//! [`runner::JobRunner`]; pause/cancel policy is hidden behind
+//! [`pause::PauseStrategy`].
+
+pub mod crypto;
+mod events;
+mod hooks;
+pub mod keyring;
+mod mapping;
+mod pause;
+mod queue_scheduler;
+mod resolvers;
+mod runner;
+pub mod state;
+pub mod store;
+mod update_channel;
+
+pub use events::{ConflictKind, DomainEvent};
+pub use hooks::spawn as spawn_hook_executor;
+pub use pause::{CancelResumeStrategy, PauseStrategy};
+pub use queue_scheduler::spawn as spawn_queue_scheduler;
+pub use runner::PartCounters;
+pub use state::{
+    AppState, JobEntry, ProbeResult, RemoveOpts, decode_pairing_code, encode_pairing_code,
+};
+pub use update_channel::{
+    HttpFeedUpdateChannel, NoopUpdateChannel, UpdateChannel, UpdateInfo, UpdaterEvent,
+};

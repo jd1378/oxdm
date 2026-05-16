@@ -1,0 +1,134 @@
+//! Per-job advanced settings — the "Advanced", "Connection", "Cookies"
+//! and "Headers" tabs of the Properties dialog. Pulled into `domain`
+//! (out of the dialog file) so the IPC protocol can ferry the whole
+//! bundle without pulling in any UI types.
+//!
+//! The on-the-wire shape is a single `Advanced` blob; the daemon
+//! stores it as JSON in the `advanced_json` column on `jobs`. Defaults
+//! mirror the dialog's old hard-coded defaults.
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyMode {
+    Inherit,
+    None,
+    System,
+    Http,
+    Https,
+    Socks5,
+}
+
+impl Default for ProxyMode {
+    fn default() -> Self {
+        Self::Inherit
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProxyAdv {
+    pub mode: ProxyMode,
+    pub host: String,
+    pub port: String,
+    pub auth_enabled: bool,
+    pub username: String,
+    /// Plaintext password as edited in the dialog. Encryption-at-rest
+    /// for per-job proxy passwords already exists via
+    /// `Job::enc_proxy_password`; this field is the UI-side scratch
+    /// buffer and will be wired through to that column in a later pass.
+    pub password: String,
+    pub remote_dns: bool,
+    pub bypass: String,
+}
+
+impl Default for ProxyAdv {
+    fn default() -> Self {
+        Self {
+            mode: ProxyMode::Inherit,
+            host: String::new(),
+            port: String::new(),
+            auth_enabled: false,
+            username: String::new(),
+            password: String::new(),
+            remote_dns: true,
+            bypass: "localhost, 127.0.0.1, *.lan".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthScheme {
+    None,
+    Basic,
+    Bearer,
+    Digest,
+}
+
+impl Default for AuthScheme {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AuthAdv {
+    pub scheme: AuthScheme,
+    pub username: String,
+    /// See `ProxyAdv::password` — same caveat applies.
+    pub password: String,
+    pub token: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct CustomHeader {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Advanced {
+    pub user_agent: String,
+    pub referer: String,
+    pub cookies_enabled: bool,
+    pub cookie_jar: String,
+    pub segments: i64,
+    /// 0 = unlimited.
+    pub speed_kbps: i64,
+    #[serde(default)]
+    pub speed_unit_mb: bool,
+    pub timeout: i64,
+    pub retries: i64,
+    pub auto_verify: bool,
+    pub open_when_done: bool,
+    pub run_command: String,
+    #[serde(default)]
+    pub headers: Vec<CustomHeader>,
+    #[serde(default)]
+    pub proxy: ProxyAdv,
+    #[serde(default)]
+    pub auth: AuthAdv,
+}
+
+impl Default for Advanced {
+    fn default() -> Self {
+        Self {
+            user_agent: "oxdm/2.4.1 (Macintosh; arm64; like wget)".into(),
+            referer: String::new(),
+            cookies_enabled: true,
+            cookie_jar: String::new(),
+            segments: 8,
+            speed_kbps: 0,
+            speed_unit_mb: false,
+            timeout: 30,
+            retries: 5,
+            auto_verify: true,
+            open_when_done: false,
+            run_command: String::new(),
+            headers: Vec::new(),
+            proxy: ProxyAdv::default(),
+            auth: AuthAdv::default(),
+        }
+    }
+}
