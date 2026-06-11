@@ -58,6 +58,7 @@ pub enum Msg {
     Save,
     Saved(Result<(), String>),
     Cancel,
+    WinResized(f32, f32),
     ShotTick,
     Shot(iced::window::Screenshot),
     Noop,
@@ -329,6 +330,9 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
         }
         Msg::Saved(_) => iced::exit(),
         Msg::Cancel => iced::exit(),
+        Msg::WinResized(w, h) => {
+            chrome::enforce_min_size(iced::Size::new(w, h), iced::Size::new(640.0, 480.0))
+        }
         Msg::ShotTick => {
             if let Some(shot) = &mut st.shot
                 && let Some(task) = shot.tick()
@@ -349,7 +353,15 @@ pub fn subscription(app: &App) -> Subscription<Msg> {
     let App::Ready(st) = app else {
         return Subscription::none();
     };
-    let mut subs = vec![crate::gui::ipc::all_events().map(Msg::Daemon)];
+    let mut subs = vec![
+        iced::event::listen_with(|event, _status, _id| match event {
+            iced::Event::Window(iced::window::Event::Resized(size)) => {
+                Some(Msg::WinResized(size.width, size.height))
+            }
+            _ => None,
+        }),
+        crate::gui::ipc::all_events().map(Msg::Daemon),
+    ];
     if st.shot.is_some() {
         subs.push(Shot::frames().map(|_| Msg::ShotTick));
     }

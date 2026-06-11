@@ -576,6 +576,8 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
         }
         Msg::WindowResized(w, h) => {
             m.win_size = (w, h);
+            let clamp =
+                chrome::enforce_min_size(iced::Size::new(w, h), iced::Size::new(820.0, 520.0));
             let due = m
                 .last_size_save
                 .is_none_or(|t| t.elapsed().as_millis() > 1000);
@@ -586,7 +588,7 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                     height: h,
                 });
             }
-            Task::none()
+            clamp
         }
         Msg::AboutCheckUpdate => {
             m.about.update = UpdateUi::Checking;

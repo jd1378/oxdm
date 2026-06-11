@@ -30,6 +30,18 @@ pub fn window_task<M: Send + 'static>(control: WindowControl) -> Task<M> {
     }
 }
 
+/// Snap the window back to its minimum size when a resize event
+/// reports a smaller one. Belt-and-braces on top of winit's
+/// `min_inner_size`: headless X servers have no WM to enforce hints,
+/// and some compositors ignore them for borderless windows.
+pub fn enforce_min_size<M: Send + 'static>(size: iced::Size, min: iced::Size) -> Task<M> {
+    if size.width >= min.width && size.height >= min.height {
+        return Task::none();
+    }
+    let clamped = iced::Size::new(size.width.max(min.width), size.height.max(min.height));
+    window::latest().and_then(move |id| window::resize(id, clamped))
+}
+
 /// Default borderless window settings shared by all oxdm windows.
 pub fn window_settings(size: iced::Size, min_size: iced::Size) -> window::Settings {
     #[allow(unused_mut)]

@@ -38,6 +38,7 @@ pub enum Msg {
     Send,
     Sent(Result<(), String>),
     Cancel,
+    WinResized(f32, f32),
     ShotTick,
     Shot(iced::window::Screenshot),
     Noop,
@@ -263,6 +264,9 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
         }
         Msg::Sent(_) => iced::exit(),
         Msg::Cancel => iced::exit(),
+        Msg::WinResized(w, h) => {
+            chrome::enforce_min_size(iced::Size::new(w, h), iced::Size::new(520.0, 360.0))
+        }
         Msg::ShotTick => {
             if let Some(shot) = &mut st.shot
                 && let Some(task) = shot.tick()
@@ -280,9 +284,17 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
 }
 
 pub fn subscription(app: &App) -> Subscription<Msg> {
+    let resize = iced::event::listen_with(|event, _status, _id| match event {
+        iced::Event::Window(iced::window::Event::Resized(size)) => {
+            Some(Msg::WinResized(size.width, size.height))
+        }
+        _ => None,
+    });
     match app {
-        App::Ready(st) if st.shot.is_some() => Shot::frames().map(|_| Msg::ShotTick),
-        _ => Subscription::none(),
+        App::Ready(st) if st.shot.is_some() => {
+            Subscription::batch([resize, Shot::frames().map(|_| Msg::ShotTick)])
+        }
+        _ => resize,
     }
 }
 
