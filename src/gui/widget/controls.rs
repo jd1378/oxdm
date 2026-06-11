@@ -259,7 +259,8 @@ pub fn col_header_sortable<'a, M: Clone + 'a>(
         text(label.to_uppercase())
             .font(theme::BODY_BOLD)
             .size(11.0)
-            .color(color),
+            .color(color)
+            .wrapping(iced::widget::text::Wrapping::None),
     ]
     .spacing(4.0)
     .align_y(Alignment::Center);

@@ -74,6 +74,7 @@ pub enum Msg {
     Modifiers(iced::keyboard::Modifiers),
     CursorMoved(f32, f32),
     MouseReleased,
+    ColHandleHover(SortColumn, bool),
     WindowResized(f32, f32),
     ColResizeStart(SortColumn),
     HeaderRightClick,
@@ -198,6 +199,7 @@ pub struct Main {
     pub columns: crate::gui::ui_prefs::ColumnsState,
     /// Active header drag: (column, cursor x at start, width at start).
     pub col_drag: Option<(SortColumn, f32, f32)>,
+    pub col_handle_hover: Option<SortColumn>,
     pub columns_menu: bool,
     pub shot: Option<Shot>,
 }
@@ -238,6 +240,7 @@ impl Main {
             last_size_save: None,
             columns: crate::gui::ui_prefs::load().columns.unwrap_or_default(),
             col_drag: None,
+            col_handle_hover: None,
             columns_menu: false,
             shot: Shot::from_env(),
             snap,
@@ -552,6 +555,14 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
         }
         Msg::ColResizeStart(col) => {
             m.col_drag = Some((col, m.cursor.0, m.columns.width(col as usize)));
+            Task::none()
+        }
+        Msg::ColHandleHover(col, on) => {
+            if on {
+                m.col_handle_hover = Some(col);
+            } else if m.col_handle_hover == Some(col) {
+                m.col_handle_hover = None;
+            }
             Task::none()
         }
         Msg::HeaderRightClick => {
@@ -1496,12 +1507,33 @@ fn tab_strip(m: &Main) -> Element<'_, Msg> {
 
 fn header_cell<'a>(m: &Main, label: &'a str, col: SortColumn, width: f32) -> Element<'a, Msg> {
     let (active_col, desc) = m.sort;
+    let t2 = m.tokens;
+    // Always-visible separator line in the handle, like the egui
+    // header: 1px border_subtle idle, 2px fg_2 while hovered/dragging.
+    let active =
+        m.col_handle_hover == Some(col) || matches!(m.col_drag, Some((c, _, _)) if c == col);
+    let (line_w, line_color) = if active {
+        (2.0, t2.fg_2)
+    } else {
+        (1.0, t2.border_subtle)
+    };
     let handle = mouse_area(
-        container(iced::widget::Space::new())
-            .width(Length::Fixed(RESIZE_HANDLE_W))
-            .height(Length::Fixed(HEADER_H)),
+        container(
+            container(iced::widget::Space::new())
+                .width(Length::Fixed(line_w))
+                .height(Length::Fixed(HEADER_H))
+                .style(move |_| container::Style {
+                    background: Some(line_color.into()),
+                    ..Default::default()
+                }),
+        )
+        .width(Length::Fixed(RESIZE_HANDLE_W))
+        .height(Length::Fixed(HEADER_H))
+        .align_x(Alignment::Center),
     )
     .on_press(Msg::ColResizeStart(col))
+    .on_enter(Msg::ColHandleHover(col, true))
+    .on_exit(Msg::ColHandleHover(col, false))
     .interaction(iced::mouse::Interaction::ResizingHorizontally);
     mouse_area(
         row![

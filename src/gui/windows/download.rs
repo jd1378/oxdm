@@ -627,8 +627,9 @@ fn running_view(st: &State) -> Element<'_, Msg> {
                         striped,
                         st.anim_t,
                     ),
-                    tabs,
-                    hairline(t.border_subtle),
+                    // Tabs + hairline as one unspaced group so the
+                    // active underline sits on the hairline.
+                    column![tabs, hairline(t.border_subtle)],
                     scrollable(tab_body).height(Length::Fill),
                 ]
                 .spacing(theme::space::S3)
