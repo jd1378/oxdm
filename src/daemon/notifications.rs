@@ -40,13 +40,5 @@ pub fn spawn(state: Arc<AppState>) {
 }
 
 fn notify(summary: &str, body: &str) {
-    let mut n = notify_rust::Notification::new();
-    n.summary(summary).body(body).appname("oxdm");
-    #[cfg(target_os = "windows")]
-    {
-        n.app_id("oxdm");
-    }
-    if let Err(e) = n.show() {
-        tracing::debug!(error = %e, "notification failed (no daemon?)");
-    }
+    crate::platform::show_notification(summary.to_owned(), body.to_owned());
 }

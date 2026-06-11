@@ -163,9 +163,5 @@ fn notify_user(path: &Path, reason: &str) {
         "{}\nRe-run tools/install-native-host.sh to restore the canonical path.\n\nDetail: {reason}",
         path.display()
     );
-    let _ = notify_rust::Notification::new()
-        .summary(summary)
-        .body(&body)
-        .timeout(notify_rust::Timeout::Milliseconds(15_000))
-        .show();
+    crate::platform::show_notification(summary.to_owned(), body);
 }

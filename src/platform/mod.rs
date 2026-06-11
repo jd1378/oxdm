@@ -265,3 +265,23 @@ pub fn attach_close_high_fds(cmd: &mut std::process::Command) {
         }
     }
 }
+
+/// Show a desktop notification from a plain thread.
+///
+/// notify-rust's sync `show()` drives zbus with an internal
+/// `block_on` that panics on tokio runtime threads ("Cannot start a
+/// runtime from within a runtime"); every daemon call site runs on
+/// the runtime, so the blocking dance is isolated here.
+pub fn show_notification(summary: String, body: String) {
+    std::thread::spawn(move || {
+        let mut n = notify_rust::Notification::new();
+        n.summary(&summary).body(&body).appname("oxdm");
+        #[cfg(target_os = "windows")]
+        {
+            n.app_id("oxdm");
+        }
+        if let Err(e) = n.show() {
+            tracing::debug!(error = %e, "notification failed (no daemon?)");
+        }
+    });
+}

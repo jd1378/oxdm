@@ -51,10 +51,7 @@ async fn execute(hook: &QueueHook) -> Result<(), String> {
         QueueHook::Notify { title, body } => {
             #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
             {
-                let _ = notify_rust::Notification::new()
-                    .summary(title)
-                    .body(body)
-                    .show();
+                crate::platform::show_notification(title.clone(), body.clone());
             }
             #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
             {
