@@ -195,6 +195,9 @@ pub struct Main {
     pub db_error: Option<String>,
     pub modifiers: iced::keyboard::Modifiers,
     pub cursor: (f32, f32),
+    /// Cursor position captured when a popup menu opened — menus
+    /// must not follow the moving mouse.
+    pub menu_anchor: (f32, f32),
     pub win_size: (f32, f32),
     pub last_size_save: Option<std::time::Instant>,
     pub columns: crate::gui::ui_prefs::ColumnsState,
@@ -237,6 +240,7 @@ impl Main {
             db_error: None,
             modifiers: iced::keyboard::Modifiers::default(),
             cursor: (0.0, 0.0),
+            menu_anchor: (0.0, 0.0),
             win_size: (0.0, 0.0),
             last_size_save: None,
             columns: crate::gui::ui_prefs::load().columns.unwrap_or_default(),
@@ -526,6 +530,7 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                 m.select_anchor = Some(id);
             }
             m.context_menu = Some(id);
+            m.menu_anchor = m.cursor;
             Task::none()
         }
         Msg::CloseOverlay => {
@@ -575,6 +580,7 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
         }
         Msg::HeaderRightClick => {
             m.columns_menu = true;
+            m.menu_anchor = m.cursor;
             Task::none()
         }
         Msg::ColToggle(col) => {
@@ -2155,7 +2161,7 @@ fn context_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>, id: JobId) -> E
 
     // Anchor at the cursor (egui opens context menus at the click
     // point); clamp so the menu stays inside the window.
-    let (cx, cy) = m.cursor;
+    let (cx, cy) = m.menu_anchor;
     let cy = cy - titlebar::HEIGHT - 1.0; // overlay stack starts below the bar
     let (mw, mh) = (268.0, 290.0);
     let (ww, wh) = if m.win_size.0 > 0.0 {
@@ -2226,7 +2232,7 @@ fn columns_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, 
     .on_press(Msg::CloseOverlay)
     .on_right_press(Msg::CloseOverlay);
 
-    let (cx, cy) = m.cursor;
+    let (cx, cy) = m.menu_anchor;
     let cy = cy - titlebar::HEIGHT - 1.0;
     let (mw, mh) = (188.0, 200.0);
     let (ww, wh) = if m.win_size.0 > 0.0 {
