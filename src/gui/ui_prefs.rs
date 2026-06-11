@@ -7,6 +7,46 @@ use serde::{Deserialize, Serialize};
 pub struct UiPrefs {
     #[serde(default)]
     pub window: Option<WindowPrefs>,
+    #[serde(default)]
+    pub columns: Option<ColumnsState>,
+}
+
+/// Main-table column widths + visibility, indexed by
+/// `windows::main::SortColumn as usize` (Name..Date). Same wire shape
+/// as the egui-era struct so existing ui-prefs.json files load.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ColumnsState {
+    pub widths: [f32; 6],
+    pub hidden: [bool; 6],
+}
+
+pub const COL_MIN_W: f32 = 50.0;
+
+impl Default for ColumnsState {
+    fn default() -> Self {
+        Self {
+            widths: [380.0, 92.0, 280.0, 100.0, 90.0, 130.0],
+            hidden: [false; 6],
+        }
+    }
+}
+
+impl ColumnsState {
+    pub fn width(&self, idx: usize) -> f32 {
+        self.widths[idx].max(COL_MIN_W)
+    }
+    pub fn set_width(&mut self, idx: usize, w: f32) {
+        self.widths[idx] = w.max(COL_MIN_W);
+    }
+    pub fn is_visible(&self, idx: usize) -> bool {
+        !self.hidden[idx]
+    }
+    /// Name (idx 0) is always visible.
+    pub fn toggle(&mut self, idx: usize) {
+        if idx != 0 {
+            self.hidden[idx] = !self.hidden[idx];
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -42,5 +82,11 @@ pub fn save(prefs: &UiPrefs) {
 pub fn save_window(w: WindowPrefs) {
     let mut prefs = load();
     prefs.window = Some(w);
+    save(&prefs);
+}
+
+pub fn save_columns(c: &ColumnsState) {
+    let mut prefs = load();
+    prefs.columns = Some(c.clone());
     save(&prefs);
 }

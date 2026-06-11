@@ -24,11 +24,7 @@ use crate::ipc_local::Client;
 use crate::ipc_local::protocol::{Event, JobCounters, SnapshotData};
 
 const SIDEBAR_W: f32 = 220.0;
-const W_SIZE: f32 = 92.0;
-const W_STATUS: f32 = 280.0;
-const W_SPEED: f32 = 100.0;
-const W_ETA: f32 = 90.0;
-const W_DATE: f32 = 130.0;
+const RESIZE_HANDLE_W: f32 = 6.0;
 const ROW_H: f32 = 48.0;
 const HEADER_H: f32 = 22.0;
 
@@ -77,7 +73,11 @@ pub enum Msg {
     KeyPressed(iced::keyboard::Key, iced::keyboard::Modifiers),
     Modifiers(iced::keyboard::Modifiers),
     CursorMoved(f32, f32),
+    MouseReleased,
     WindowResized(f32, f32),
+    ColResizeStart(SortColumn),
+    HeaderRightClick,
+    ColToggle(SortColumn),
     // About overlay
     AboutCheckUpdate,
     AboutChecked(Result<Option<crate::data::UpdateInfo>, String>),
@@ -195,6 +195,10 @@ pub struct Main {
     pub cursor: (f32, f32),
     pub win_size: (f32, f32),
     pub last_size_save: Option<std::time::Instant>,
+    pub columns: crate::gui::ui_prefs::ColumnsState,
+    /// Active header drag: (column, cursor x at start, width at start).
+    pub col_drag: Option<(SortColumn, f32, f32)>,
+    pub columns_menu: bool,
     pub shot: Option<Shot>,
 }
 
@@ -232,6 +236,9 @@ impl Main {
             cursor: (0.0, 0.0),
             win_size: (0.0, 0.0),
             last_size_save: None,
+            columns: crate::gui::ui_prefs::load().columns.unwrap_or_default(),
+            col_drag: None,
+            columns_menu: false,
             shot: Shot::from_env(),
             snap,
         }
@@ -519,6 +526,7 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
         }
         Msg::CloseOverlay => {
             m.context_menu = None;
+            m.columns_menu = false;
             if !matches!(m.overlay, Overlay::DbError | Overlay::SecretsLocked) {
                 m.overlay = Overlay::None;
             }
@@ -531,6 +539,28 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
         }
         Msg::CursorMoved(x, y) => {
             m.cursor = (x, y);
+            if let Some((col, start_x, start_w)) = m.col_drag {
+                m.columns.set_width(col as usize, start_w + (x - start_x));
+            }
+            Task::none()
+        }
+        Msg::MouseReleased => {
+            if m.col_drag.take().is_some() {
+                crate::gui::ui_prefs::save_columns(&m.columns);
+            }
+            Task::none()
+        }
+        Msg::ColResizeStart(col) => {
+            m.col_drag = Some((col, m.cursor.0, m.columns.width(col as usize)));
+            Task::none()
+        }
+        Msg::HeaderRightClick => {
+            m.columns_menu = true;
+            Task::none()
+        }
+        Msg::ColToggle(col) => {
+            m.columns.toggle(col as usize);
+            crate::gui::ui_prefs::save_columns(&m.columns);
             Task::none()
         }
         Msg::WindowResized(w, h) => {
@@ -1045,6 +1075,9 @@ pub fn subscription(app: &App) -> Subscription<Msg> {
                 iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
                     Some(Msg::CursorMoved(position.x, position.y))
                 }
+                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                    iced::mouse::Button::Left,
+                )) => Some(Msg::MouseReleased),
                 iced::Event::Window(iced::window::Event::Resized(size)) => {
                     Some(Msg::WindowResized(size.width, size.height))
                 }
@@ -1131,6 +1164,8 @@ fn main_view(m: &Main) -> Element<'_, Msg> {
 
     let overlaid: Element<'_, Msg> = if let Some(id) = m.context_menu {
         context_menu_overlay(m, base, id)
+    } else if m.columns_menu {
+        columns_menu_overlay(m, base)
     } else if m.snap.conflict_head.is_some()
         && matches!(m.overlay, Overlay::None | Overlay::Context)
     {
@@ -1459,32 +1494,62 @@ fn tab_strip(m: &Main) -> Element<'_, Msg> {
 
 // ---------------------------------------------------------------- table
 
-fn header_cell<'a>(m: &Main, label: &'a str, col: SortColumn, width: Length) -> Element<'a, Msg> {
+fn header_cell<'a>(m: &Main, label: &'a str, col: SortColumn, width: f32) -> Element<'a, Msg> {
     let (active_col, desc) = m.sort;
-    container(col_header_sortable(
-        &m.tokens,
-        label,
-        active_col == col,
-        desc,
-        Msg::SetSort(col),
-    ))
-    .width(width)
-    .padding([0.0, theme::space::S2])
-    .align_y(Alignment::Center)
-    .height(Length::Fixed(HEADER_H))
+    let handle = mouse_area(
+        container(iced::widget::Space::new())
+            .width(Length::Fixed(RESIZE_HANDLE_W))
+            .height(Length::Fixed(HEADER_H)),
+    )
+    .on_press(Msg::ColResizeStart(col))
+    .interaction(iced::mouse::Interaction::ResizingHorizontally);
+    mouse_area(
+        row![
+            container(col_header_sortable(
+                &m.tokens,
+                label,
+                active_col == col,
+                desc,
+                Msg::SetSort(col),
+            ))
+            .width(Length::Fixed(width - RESIZE_HANDLE_W))
+            .padding([0.0, theme::space::S2])
+            .align_y(Alignment::Center)
+            .height(Length::Fixed(HEADER_H)),
+            handle,
+        ]
+        .align_y(Alignment::Center),
+    )
+    .on_right_press(Msg::HeaderRightClick)
     .into()
 }
 
+const TABLE_COLS: [(SortColumn, &str); 6] = [
+    (SortColumn::Name, "Name"),
+    (SortColumn::Size, "Size"),
+    (SortColumn::Status, "Status"),
+    (SortColumn::Speed, "Speed"),
+    (SortColumn::Eta, "Time left"),
+    (SortColumn::Date, "Date added"),
+];
+
 fn table(m: &Main) -> Element<'_, Msg> {
     let t = &m.tokens;
-    let header = container(row![
-        header_cell(m, "Name", SortColumn::Name, Length::Fill),
-        header_cell(m, "Size", SortColumn::Size, Length::Fixed(W_SIZE)),
-        header_cell(m, "Status", SortColumn::Status, Length::Fixed(W_STATUS)),
-        header_cell(m, "Speed", SortColumn::Speed, Length::Fixed(W_SPEED)),
-        header_cell(m, "Time left", SortColumn::Eta, Length::Fixed(W_ETA)),
-        header_cell(m, "Date added", SortColumn::Date, Length::Fixed(W_DATE)),
-    ])
+    let mut header_row = row![];
+    for (col, label) in TABLE_COLS {
+        if !m.columns.is_visible(col as usize) {
+            continue;
+        }
+        header_row = header_row.push(header_cell(m, label, col, m.columns.width(col as usize)));
+    }
+    let header = container(
+        mouse_area(
+            container(header_row)
+                .width(Length::Fill)
+                .height(Length::Fixed(HEADER_H)),
+        )
+        .on_right_press(Msg::HeaderRightClick),
+    )
     .width(Length::Fill);
 
     let jobs = m.visible_jobs();
@@ -1554,7 +1619,8 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
         ]
         .spacing(2.0),
     )
-    .width(Length::Fill)
+    .width(Length::Fixed(m.columns.width(SortColumn::Name as usize)))
+    .clip(true)
     .padding([0.0, theme::space::S2])
     .align_y(Alignment::Center)
     .height(Length::Fill);
@@ -1566,14 +1632,17 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
             .size(12.0)
             .color(t.fg_2)
             .into(),
-        Length::Fixed(W_SIZE),
+        Length::Fixed(m.columns.width(SortColumn::Size as usize)),
     );
 
     let status_cell: Element<'_, Msg> = if phase.is_terminal()
         || matches!(phase, Phase::Paused | Phase::Cancelled | Phase::Queued)
     {
         let (color, label) = phase_style(t, phase);
-        cell(status_dot(color, label, 12.0), Length::Fixed(W_STATUS))
+        cell(
+            status_dot(color, label, 12.0),
+            Length::Fixed(m.columns.width(SortColumn::Status as usize)),
+        )
     } else {
         let frac = match (c.map(|c| c.downloaded), total) {
             (Some(d), Some(tot)) if tot > 0 => d as f64 / tot as f64,
@@ -1582,7 +1651,7 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
         let (_, label) = phase_style(t, phase);
         cell(
             inline_progress(t, frac as f32, label, selected, Length::Fill, 22.0),
-            Length::Fixed(W_STATUS),
+            Length::Fixed(m.columns.width(SortColumn::Status as usize)),
         )
     };
 
@@ -1597,7 +1666,7 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
         .size(12.0)
         .color(t.fg_2)
         .into(),
-        Length::Fixed(W_SPEED),
+        Length::Fixed(m.columns.width(SortColumn::Speed as usize)),
     );
 
     let eta_cell = cell(
@@ -1606,7 +1675,7 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
             .size(12.0)
             .color(t.fg_2)
             .into(),
-        Length::Fixed(W_ETA),
+        Length::Fixed(m.columns.width(SortColumn::Eta as usize)),
     );
 
     let date_cell = cell(
@@ -1615,7 +1684,7 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
             .size(11.0)
             .color(t.fg_3)
             .into(),
-        Length::Fixed(W_DATE),
+        Length::Fixed(m.columns.width(SortColumn::Date as usize)),
     );
 
     let t2 = *t;
@@ -2011,6 +2080,77 @@ fn context_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>, id: JobId) -> E
     let (cx, cy) = m.cursor;
     let cy = cy - titlebar::HEIGHT - 1.0; // overlay stack starts below the bar
     let (mw, mh) = (268.0, 290.0);
+    let (ww, wh) = if m.win_size.0 > 0.0 {
+        (m.win_size.0, m.win_size.1 - titlebar::HEIGHT - 1.0)
+    } else {
+        (1240.0, 760.0)
+    };
+    let left = cx.min(ww - mw).max(0.0);
+    let top = cy.min(wh - mh).max(0.0);
+    iced::widget::stack![
+        base,
+        scrim,
+        container(iced::widget::opaque(menu)).padding(iced::Padding {
+            left,
+            top,
+            ..Default::default()
+        }),
+    ]
+    .into()
+}
+
+fn columns_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg> {
+    let t = &m.tokens;
+    let t2 = *t;
+
+    let mut items = column![
+        container(text("Columns").font(theme::BODY).size(11.0).color(t.fg_3))
+            .padding([2.0, theme::space::S2]),
+        hairline(t.border_subtle),
+    ]
+    .width(Length::Fixed(180.0));
+    for (col, label) in TABLE_COLS {
+        let enabled = col != SortColumn::Name;
+        items = items.push(
+            container(crate::gui::widget::checkbox(
+                t,
+                label,
+                m.columns.is_visible(col as usize),
+                enabled,
+                move |_| Msg::ColToggle(col),
+            ))
+            .padding([4.0, theme::space::S2]),
+        );
+    }
+
+    let menu = container(items)
+        .padding(theme::space::S1)
+        .style(move |_| container::Style {
+            background: Some(t2.bg_raised.into()),
+            border: iced::Border {
+                color: t2.border_default,
+                width: 1.0,
+                radius: theme::radius::SM.into(),
+            },
+            shadow: iced::Shadow {
+                color: color::with_alpha(iced::Color::BLACK, 80.0 / 255.0),
+                offset: iced::Vector::new(0.0, 4.0),
+                blur_radius: 16.0,
+            },
+            ..Default::default()
+        });
+
+    let scrim = mouse_area(
+        container(iced::widget::Space::new())
+            .width(Length::Fill)
+            .height(Length::Fill),
+    )
+    .on_press(Msg::CloseOverlay)
+    .on_right_press(Msg::CloseOverlay);
+
+    let (cx, cy) = m.cursor;
+    let cy = cy - titlebar::HEIGHT - 1.0;
+    let (mw, mh) = (188.0, 200.0);
     let (ww, wh) = if m.win_size.0 > 0.0 {
         (m.win_size.0, m.win_size.1 - titlebar::HEIGHT - 1.0)
     } else {
