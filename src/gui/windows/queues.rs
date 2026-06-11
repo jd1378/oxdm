@@ -331,7 +331,7 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
         Msg::Saved(_) => iced::exit(),
         Msg::Cancel => iced::exit(),
         Msg::WinResized(w, h) => {
-            chrome::enforce_min_size(iced::Size::new(w, h), iced::Size::new(640.0, 480.0))
+            chrome::enforce_min_size(iced::Size::new(w, h), iced::Size::new(640.0, 510.0))
         }
         Msg::ShotTick => {
             if let Some(shot) = &mut st.shot
@@ -851,7 +851,7 @@ pub fn launch_queues() {
         .antialiasing(true)
         .window(chrome::window_settings(
             iced::Size::new(820.0, 620.0),
-            iced::Size::new(640.0, 480.0),
+            iced::Size::new(640.0, 510.0),
         ));
     for f in theme::fonts::ALL {
         app = app.font(*f);
