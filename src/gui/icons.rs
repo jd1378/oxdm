@@ -44,7 +44,14 @@ fn handle(name: &str) -> svg::Handle {
             })
             .clone()
     } else {
-        debug_assert!(false, "unknown icon name: {name}");
+        // Render nothing, like the egui icon helper did — a missing
+        // icon must not take the window down. Warn once per name
+        // (handle() runs every frame).
+        static WARNED: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+        let warned = WARNED.get_or_init(|| Mutex::new(std::collections::HashSet::new()));
+        if warned.lock().unwrap().insert(name.to_owned()) {
+            tracing::warn!("unknown icon name: {name}");
+        }
         svg::Handle::from_memory(Vec::new())
     }
 }

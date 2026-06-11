@@ -110,7 +110,11 @@ where
         // Default Arrow handle is a heavy filled triangle; the design
         // uses a thin 14px Lucide chevron, overlaid below.
         .handle(pick_list::Handle::None)
-        .padding([0.0, theme::control::INPUT_PAD_X])
+        // Pad to control::H_MD like TextInput (13px text ~17px line).
+        .padding([
+            (theme::control::H_MD - 13.0 * 1.3) / 2.0,
+            theme::control::INPUT_PAD_X,
+        ])
         .style(move |_th, status| {
             let hovered = matches!(
                 status,
