@@ -2,15 +2,54 @@
 //! borderless windows: 6px bands on the four edges, 14px corner
 //! squares, mapped to `window::drag_resize`.
 
-use iced::widget::{container, mouse_area, stack};
+use iced::widget::{canvas, container, mouse_area, stack};
 use iced::window::Direction;
-use iced::{Border, Element, Length};
+use iced::{Border, Element, Length, Point};
 
 use crate::gui::chrome::WindowControl;
 use crate::gui::theme::Tokens;
 
 const EDGE: f32 = 6.0;
 const CORNER: f32 = 14.0;
+/// Visible diagonal hash + extra hit zone for the SE grip (egui parity).
+const SE_GRIP: f32 = 22.0;
+
+/// Diagonal hash painted in the bottom-right corner for resize
+/// affordance: 4 hairlines, 1.2px, fg_4, 4px apart (matches the egui
+/// `utils::resize` grip).
+struct Grip {
+    color: iced::Color,
+}
+
+impl<M> canvas::Program<M> for Grip {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &iced::Renderer,
+        _theme: &iced::Theme,
+        bounds: iced::Rectangle,
+        _cursor: iced::mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let (w, h) = (bounds.width, bounds.height);
+        let pad = 4.0;
+        for i in 0..4 {
+            let off = pad + (i as f32) * 4.0;
+            let mut b = canvas::path::Builder::new();
+            b.move_to(Point::new(w - off, h - pad));
+            b.line_to(Point::new(w - pad, h - off));
+            frame.stroke(
+                &b.build(),
+                canvas::Stroke::default()
+                    .with_color(self.color)
+                    .with_width(1.2),
+            );
+        }
+        vec![frame.into_geometry()]
+    }
+}
 
 fn grip<'a, M: Clone + 'a>(
     w: Length,
@@ -144,5 +183,30 @@ pub fn resizable<'a, M: Clone + 'a>(
         .width(Length::Fill)
         .height(Length::Fill);
 
-    stack![bordered, overlay].into()
+    // Painted SE grip + a larger 22px grab zone on top of it.
+    let grip_visual = container(
+        canvas(Grip { color: t.fg_4 })
+            .width(Length::Fixed(SE_GRIP))
+            .height(Length::Fixed(SE_GRIP)),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .align_x(iced::alignment::Horizontal::Right)
+    .align_y(iced::alignment::Vertical::Bottom);
+
+    let grip_zone = container(
+        mouse_area(
+            container(iced::widget::Space::new())
+                .width(Length::Fixed(SE_GRIP))
+                .height(Length::Fixed(SE_GRIP)),
+        )
+        .on_press(on_control(WindowControl::Resize(Direction::SouthEast)))
+        .interaction(I::ResizingDiagonallyUp),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .align_x(iced::alignment::Horizontal::Right)
+    .align_y(iced::alignment::Vertical::Bottom);
+
+    stack![bordered, grip_visual, overlay, grip_zone].into()
 }

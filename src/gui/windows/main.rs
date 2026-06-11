@@ -347,7 +347,9 @@ pub fn boot() -> (App, Task<Msg>) {
                     .await?;
                 let snap = client.snapshot().await?;
                 let db_error = client.db_status().await.ok().flatten();
-                let secrets_locked = !client.secrets_status().await.unwrap_or(true);
+                // `secrets_status` returns `locked` directly (true =
+                // keyring/master key unavailable).
+                let secrets_locked = client.secrets_status().await.unwrap_or(false);
                 Ok((client, snap, db_error, secrets_locked))
             },
             Msg::Connected,
