@@ -370,7 +370,7 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             )
         }
         Msg::WinResized(w, h) => {
-            chrome::enforce_min_size(iced::Size::new(w, h), iced::Size::new(530.0, 410.0))
+            chrome::enforce_min_size(iced::Size::new(w, h), iced::Size::new(530.0, 418.0))
         }
         Msg::ShotTick => {
             if let Some(shot) = &mut st.shot
@@ -1140,7 +1140,7 @@ pub fn launch_download(_id: JobId) {
         .antialiasing(true)
         .window(chrome::window_settings(
             iced::Size::new(540.0, 460.0),
-            iced::Size::new(530.0, 410.0),
+            iced::Size::new(530.0, 418.0),
         ));
     for f in theme::fonts::ALL {
         app = app.font(*f);

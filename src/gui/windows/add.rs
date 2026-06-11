@@ -473,7 +473,7 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
             } else if st.detected().is_some() {
                 417.0
             } else {
-                260.0
+                268.0
             };
             iced::window::latest()
                 .and_then(move |id| iced::window::resize(id, iced::Size::new(520.0, h)))
@@ -588,7 +588,7 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
         }
         Msg::Cancel => iced::exit(),
         Msg::WinResized(w, h) => {
-            chrome::enforce_min_size(iced::Size::new(w, h), iced::Size::new(520.0, 260.0))
+            chrome::enforce_min_size(iced::Size::new(w, h), iced::Size::new(520.0, 268.0))
         }
         Msg::ShotTick => {
             if let Some(shot) = &mut st.shot
@@ -1236,8 +1236,8 @@ pub fn launch_add(_edit_id: Option<JobId>, _prefill: Option<String>) {
         .default_font(theme::BODY)
         .antialiasing(true)
         .window(chrome::window_settings(
-            iced::Size::new(520.0, 260.0),
-            iced::Size::new(520.0, 260.0),
+            iced::Size::new(520.0, 268.0),
+            iced::Size::new(520.0, 268.0),
         ));
     for f in theme::fonts::ALL {
         app = app.font(*f);
