@@ -133,6 +133,7 @@ pub struct TabBtn<'a, M> {
     count: Option<u64>,
     active: bool,
     font_size: f32,
+    bottom_gap: f32,
     on_press: Option<M>,
 }
 
@@ -144,6 +145,7 @@ impl<'a, M: Clone + 'a> TabBtn<'a, M> {
             icon_size: 20.0,
             pad_x: 14.0,
             height: 36.0,
+            bottom_gap: 0.0,
             count: None,
             active: false,
             font_size: 12.0,
@@ -164,6 +166,12 @@ impl<'a, M: Clone + 'a> TabBtn<'a, M> {
     }
     pub fn height(mut self, h: f32) -> Self {
         self.height = h;
+        self
+    }
+    /// Extra space between the label (centered in `height`) and the
+    /// underline, growing the tab downward.
+    pub fn bottom_gap(mut self, gap: f32) -> Self {
+        self.bottom_gap = gap;
         self
     }
     pub fn count(mut self, n: u64) -> Self {
@@ -221,10 +229,14 @@ impl<'a, M: Clone + 'a> TabBtn<'a, M> {
         // stack sizes to the (shrink) content; the Fill-width underline
         // then matches the content width exactly.
         let body = iced::widget::stack![
-            container(content)
-                .height(Length::Fixed(self.height))
-                .padding([0.0, self.pad_x])
-                .align_y(Alignment::Center),
+            container(
+                container(content)
+                    .height(Length::Fixed(self.height))
+                    .align_y(Alignment::Center)
+            )
+            .height(Length::Fixed(self.height + self.bottom_gap))
+            .padding([0.0, self.pad_x])
+            .align_y(iced::alignment::Vertical::Top),
             container(
                 container(iced::widget::Space::new())
                     .width(Length::Fill)

@@ -1194,6 +1194,7 @@ fn advanced_section(st: &AddState) -> Element<'_, Msg> {
 fn adv_tab<'a>(t: &Tokens, label: &'a str, tab: AdvTab, current: AdvTab) -> Element<'a, Msg> {
     TabBtn::new(label)
         .height(28.0)
+        .bottom_gap(6.0)
         .pad_x(10.0)
         .font_size(11.0)
         .active(tab == current)
