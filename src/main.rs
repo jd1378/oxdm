@@ -28,11 +28,14 @@ fn main() {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 // iced_winit dumps every window's full WindowAttributes
                 // at INFO on creation; winit warns about XSETTINGS/randr
-                // quirks on every X11 connect. Both spam per-window
+                // quirks on every X11 connect; sctk_adwaita warns about
+                // unsupported tokens in GNOME's button-layout gsetting
+                // (e.g. `icon:`) even though our borderless windows
+                // never show its frame. All spam per-window
                 // subprocesses — keep them at warn/error.
                 .unwrap_or_else(|_| {
                     tracing_subscriber::EnvFilter::new(
-                        "info,oxdm=debug,iced_winit=warn,winit=error",
+                        "info,oxdm=debug,iced_winit=warn,winit=error,sctk_adwaita=error",
                     )
                 }),
         )
