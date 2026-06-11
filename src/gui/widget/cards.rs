@@ -259,6 +259,19 @@ impl<'a, M: Clone + 'a> TabBtn<'a, M> {
     }
 }
 
+/// Vertical scrollable with a reserved right gutter so the scrollbar
+/// rail never covers content (egui reserved `bar_width` the same way).
+pub fn vscroll<'a, M: 'a>(content: impl Into<Element<'a, M>>) -> iced::widget::Scrollable<'a, M> {
+    iced::widget::scrollable(
+        container(content)
+            .width(Length::Fill)
+            .padding(iced::Padding {
+                right: 12.0,
+                ..Default::default()
+            }),
+    )
+}
+
 /// 1px hairline.
 pub fn hairline<'a, M: 'a>(color: Color) -> Element<'a, M> {
     container(iced::widget::Space::new())

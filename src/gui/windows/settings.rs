@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use iced::widget::{column, container, mouse_area, row, scrollable, text, text_editor};
+use iced::widget::{column, container, mouse_area, row, text, text_editor};
 use iced::{Alignment, Element, Length, Subscription, Task};
 
 use crate::domain::{Category, Settings, Theme as AppTheme};
@@ -669,7 +669,7 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
         hairline(t.border_subtle),
         row![
             sidebar,
-            scrollable(
+            crate::gui::widget::vscroll(
                 container(body)
                     .padding(theme::space::S4)
                     .width(Length::Fill)

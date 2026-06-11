@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use iced::widget::{column, container, row, scrollable, text};
+use iced::widget::{column, container, row, text};
 use iced::{Alignment, Element, Length, Subscription, Task};
 
 use crate::data::ProbeResult;
@@ -416,9 +416,15 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
     let page = column![
         titlebar::titlebar(t, "Send to oxdm", false, Msg::Window),
         hairline(t.border_subtle),
-        container(column![header, scrollable(list).height(Length::Fill)].spacing(theme::space::S2))
-            .padding(theme::space::S4)
-            .height(Length::Fill),
+        container(
+            column![
+                header,
+                crate::gui::widget::vscroll(list).height(Length::Fill)
+            ]
+            .spacing(theme::space::S2)
+        )
+        .padding(theme::space::S4)
+        .height(Length::Fill),
         hairline(t.border_subtle),
         footer_el,
     ];

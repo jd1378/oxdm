@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use iced::widget::{column, container, row, scrollable, text};
+use iced::widget::{column, container, row, text};
 use iced::{Alignment, Element, Length, Subscription, Task};
 
 use crate::domain::{JobId, OnCompletion, Phase, ShutdownAction};
@@ -645,7 +645,7 @@ fn running_view(st: &State) -> Element<'_, Msg> {
                     // Tabs + hairline as one unspaced group so the
                     // active underline sits on the hairline.
                     column![tabs, hairline(t.border_subtle)],
-                    scrollable(tab_body).height(Length::Fill),
+                    crate::gui::widget::vscroll(tab_body).height(Length::Fill),
                 ]
                 .spacing(theme::space::S3)
             )
@@ -842,7 +842,9 @@ fn info_tab(st: &State) -> Element<'_, Msg> {
                 .height(Length::Fixed(28.0)),
             );
         }
-        scrollable(rows).height(Length::Shrink).into()
+        crate::gui::widget::vscroll(rows)
+            .height(Length::Shrink)
+            .into()
     };
 
     column![

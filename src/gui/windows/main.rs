@@ -1594,7 +1594,7 @@ fn table(m: &Main) -> Element<'_, Msg> {
         for job in jobs {
             rows = rows.push(job_row(m, job));
         }
-        scrollable(rows)
+        crate::gui::widget::vscroll(rows)
             .width(Length::Fill)
             .height(Length::Fill)
             .into()

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use iced::widget::{column, container, row, scrollable, text, text_editor};
+use iced::widget::{column, container, row, text, text_editor};
 use iced::{Alignment, Element, Length, Subscription, Task};
 
 use crate::domain::{Checksum, JobId, Phase};
@@ -691,7 +691,7 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
         hairline(t.border_subtle),
         tabs,
         hairline(t.border_subtle),
-        scrollable(
+        crate::gui::widget::vscroll(
             container(body)
                 .padding(theme::space::S3)
                 .width(Length::Fill)

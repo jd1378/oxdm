@@ -715,7 +715,7 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
     }
     let on_finish = section_card(t, "clock", "When the queue finishes", finish_col.into());
 
-    let editor = scrollable(
+    let editor = crate::gui::widget::vscroll(
         container(column![head, concurrency, schedule, on_finish].spacing(theme::space::S3))
             .padding(theme::space::S4)
             .width(Length::Fill),

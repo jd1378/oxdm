@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use iced::widget::{column, container, row, scrollable, text, text_editor};
+use iced::widget::{column, container, row, text, text_editor};
 use iced::{Alignment, Element, Length, Subscription, Task};
 
 use crate::data::ProbeResult;
@@ -766,7 +766,7 @@ fn ready_view(st: &AddState) -> Element<'_, Msg> {
     let page = column![
         titlebar::titlebar(t, title, false, Msg::Window),
         hairline(t.border_subtle),
-        scrollable(
+        crate::gui::widget::vscroll(
             container(body)
                 .padding(theme::space::S4)
                 .width(Length::Fill)
