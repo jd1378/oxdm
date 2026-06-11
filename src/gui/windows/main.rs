@@ -75,6 +75,7 @@ pub enum Msg {
     CursorMoved(f32, f32),
     MouseReleased,
     ColHandleHover(SortColumn, bool),
+    TableScrolled(f32),
     WindowResized(f32, f32),
     ColResizeStart(SortColumn),
     HeaderRightClick,
@@ -557,6 +558,13 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             m.col_drag = Some((col, m.cursor.0, m.columns.width(col as usize)));
             Task::none()
         }
+        Msg::TableScrolled(x) => iced::widget::operation::scroll_to(
+            iced::widget::Id::new("tbl-header"),
+            iced::widget::scrollable::AbsoluteOffset {
+                x: Some(x),
+                y: None,
+            },
+        ),
         Msg::ColHandleHover(col, on) => {
             if on {
                 m.col_handle_hover = Some(col);
@@ -1576,32 +1584,39 @@ fn table(m: &Main) -> Element<'_, Msg> {
         }
         header_row = header_row.push(header_cell(m, label, col, m.columns.width(col as usize)));
     }
+    // Header scrolls horizontally in lockstep with the body (synced
+    // via TableScrolled -> scroll_to); its own scrollbar is hidden.
     let header = container(
         mouse_area(
-            container(header_row)
+            scrollable(header_row)
+                .id(iced::widget::Id::new("tbl-header"))
+                .direction(scrollable::Direction::Horizontal(
+                    scrollable::Scrollbar::new()
+                        .width(0.0)
+                        .scroller_width(0.0)
+                        .margin(0.0),
+                ))
                 .width(Length::Fill)
-                .height(Length::Fixed(HEADER_H))
-                .clip(true),
+                .height(Length::Fixed(HEADER_H)),
         )
         .on_right_press(Msg::HeaderRightClick),
     )
-    .width(Length::Fill)
-    .padding(iced::Padding {
-        right: crate::gui::widget::SCROLL_GUTTER,
-        ..Default::default()
-    });
+    .width(Length::Fill);
 
     let jobs = m.visible_jobs();
     let body: Element<'_, Msg> = if jobs.is_empty() {
         empty_state(m)
     } else {
         let mut rows = column![];
-        for job in jobs {
+        for job in &jobs {
             rows = rows.push(job_row(m, job));
         }
-        // Horizontal overflow is clipped (egui hid the h-scrollbar);
-        // only vertical scrolling, with the reserved gutter.
-        crate::gui::widget::vscroll(container(rows).width(Length::Fill).clip(true))
+        scrollable(rows)
+            .direction(scrollable::Direction::Both {
+                vertical: scrollable::Scrollbar::new(),
+                horizontal: scrollable::Scrollbar::new(),
+            })
+            .on_scroll(|vp| Msg::TableScrolled(vp.absolute_offset().x))
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
@@ -1753,24 +1768,34 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
         }
     };
 
-    let row_el = container(
-        row![
-            name_cell,
-            size_cell,
-            status_cell,
-            speed_cell,
-            eta_cell,
-            date_cell
-        ]
-        .align_y(Alignment::Center)
-        .height(Length::Fill),
-    )
-    .height(Length::Fixed(ROW_H))
-    .width(Length::Fill)
-    .style(move |_| container::Style {
-        background: bg(false).map(Into::into),
-        ..Default::default()
-    });
+    let mut cells = row![].align_y(Alignment::Center).height(Length::Fill);
+    let vis = |c: SortColumn| m.columns.is_visible(c as usize);
+    cells = cells.push(name_cell);
+    if vis(SortColumn::Size) {
+        cells = cells.push(size_cell);
+    }
+    if vis(SortColumn::Status) {
+        cells = cells.push(status_cell);
+    }
+    if vis(SortColumn::Speed) {
+        cells = cells.push(speed_cell);
+    }
+    if vis(SortColumn::Eta) {
+        cells = cells.push(eta_cell);
+    }
+    if vis(SortColumn::Date) {
+        cells = cells.push(date_cell);
+    }
+
+    // NOTE: width must be Shrink — Fill resolves to zero inside the
+    // horizontally-unbounded table scrollable and collapses the row.
+    let row_el = container(cells)
+        .height(Length::Fixed(ROW_H))
+        .width(Length::Shrink)
+        .style(move |_| container::Style {
+            background: bg(false).map(Into::into),
+            ..Default::default()
+        });
 
     let (ctrl, shift) = (m.modifiers.command(), m.modifiers.shift());
     mouse_area(row_el)
