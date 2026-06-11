@@ -726,6 +726,7 @@ fn info_tab(st: &State) -> Element<'_, Msg> {
             avg,
             accent: t.action_primary,
             grid: color::with_alpha(t.fg_4, 170.0 / 255.0),
+            label_color: t.fg_3,
         };
         let legend_item = |label: &'static str, value: String, color: iced::Color| {
             row![

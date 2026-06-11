@@ -269,6 +269,18 @@ fn inputs_page(t: &theme::Tokens) -> Element<'static, Msg> {
                 .view(t),
         ],
         eyebrow_label(t, "progress"),
+        container(widget::rate_chart(
+            widget::RateChart {
+                samples: vec![0.2, 0.5, 1.4, 2.5, 2.2, 2.5, 1.9],
+                max: 2.5,
+                avg: 1.6,
+                accent: t.action_primary,
+                grid: color::with_alpha(t.fg_4, 170.0 / 255.0),
+                label_color: t.fg_3,
+            },
+            124.0,
+        ))
+        .width(Length::Fixed(400.0)),
         widget::pill_progress(
             0.63,
             Length::Fixed(260.0),

@@ -201,6 +201,7 @@ pub struct RateChart {
     pub avg: f32,
     pub accent: Color,
     pub grid: Color,
+    pub label_color: Color,
 }
 
 pub fn rate_chart<'a, M: 'a>(chart: RateChart, height: f32) -> Element<'a, M> {
@@ -224,21 +225,44 @@ impl<M> canvas::Program<M> for RateChart {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
         let size = bounds.size();
         let max = self.max.max(1.0);
+        // Inset the plot's top so the top gridline's label fits inside
+        // the canvas (egui padded the plot rect the same way).
+        let top_inset = 12.0;
+        let plot_y = |fraq: f32| top_inset + (size.height - top_inset) * (1.0 - fraq);
 
-        // Dotted gridlines at 0 / 33 / 67 / 100%.
+        // Dotted gridlines at 0 / 33 / 67 / 100% with speed labels
+        // above each line (egui parity: mono 10, fg_3; "0 B/s" pinned
+        // at the bottom, the rest only once data sets the scale).
+        let has_data = !self.samples.is_empty();
         for fraq in [0.0_f32, 0.33, 0.67, 1.0] {
-            let y = size.height * (1.0 - fraq);
+            let y = plot_y(fraq);
             let mut x = 0.0;
             while x < size.width {
                 let path = canvas::Path::rectangle(Point::new(x, y), Size::new(1.8, 1.2));
                 frame.fill(&path, self.grid);
                 x += 1.8 + 4.5;
             }
+            if fraq == 0.0 || has_data {
+                let label = if fraq == 0.0 {
+                    "0 B/s".to_owned()
+                } else {
+                    crate::gui::format::format_speed((max * fraq) as f64)
+                };
+                frame.fill_text(canvas::Text {
+                    content: label,
+                    position: Point::new(0.0, y - 2.0),
+                    color: self.label_color,
+                    size: 10.0.into(),
+                    font: crate::gui::theme::MONO,
+                    align_y: iced::alignment::Vertical::Bottom,
+                    ..canvas::Text::default()
+                });
+            }
         }
 
         // Average dashed line.
         if self.avg > 0.0 {
-            let y = size.height * (1.0 - (self.avg / max).clamp(0.0, 1.0));
+            let y = plot_y((self.avg / max).clamp(0.0, 1.0));
             let mut x = 0.0;
             while x < size.width {
                 let path = canvas::Path::rectangle(Point::new(x, y), Size::new(6.0, 1.2));
@@ -252,7 +276,7 @@ impl<M> canvas::Program<M> for RateChart {
             let pt = |i: usize| {
                 Point::new(
                     i as f32 * step,
-                    size.height * (1.0 - (self.samples[i] / max).clamp(0.0, 1.0)),
+                    plot_y((self.samples[i] / max).clamp(0.0, 1.0)),
                 )
             };
             // Area fill.
