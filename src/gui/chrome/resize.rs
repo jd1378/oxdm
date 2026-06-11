@@ -119,7 +119,7 @@ pub fn resizable<'a, M: Clone + 'a>(
             fixed,
             edge,
             Direction::NorthWest,
-            I::ResizingDiagonallyUp,
+            I::ResizingDiagonallyDown,
             &on_control,
         ),
         grip(
@@ -133,7 +133,7 @@ pub fn resizable<'a, M: Clone + 'a>(
             fixed,
             edge,
             Direction::NorthEast,
-            I::ResizingDiagonallyDown,
+            I::ResizingDiagonallyUp,
             &on_control,
         ),
     ])
@@ -164,7 +164,7 @@ pub fn resizable<'a, M: Clone + 'a>(
             fixed,
             edge,
             Direction::SouthWest,
-            I::ResizingDiagonallyDown,
+            I::ResizingDiagonallyUp,
             &on_control,
         ),
         grip(
@@ -178,7 +178,7 @@ pub fn resizable<'a, M: Clone + 'a>(
             fixed,
             edge,
             Direction::SouthEast,
-            I::ResizingDiagonallyUp,
+            I::ResizingDiagonallyDown,
             &on_control,
         ),
     ])
@@ -206,7 +206,7 @@ pub fn resizable<'a, M: Clone + 'a>(
                 .height(Length::Fixed(SE_GRIP)),
         )
         .on_press(on_control(WindowControl::Resize(Direction::SouthEast)))
-        .interaction(I::ResizingDiagonallyUp),
+        .interaction(I::ResizingDiagonallyDown),
     )
     .width(Length::Fill)
     .height(Length::Fill)
