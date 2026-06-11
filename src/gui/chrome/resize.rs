@@ -35,7 +35,12 @@ impl<M> canvas::Program<M> for Grip {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
         let (w, h) = (bounds.width, bounds.height);
         let pad = 4.0;
-        for i in 0..4 {
+        // Start at i=1: the i=0 hash would be a zero-length segment
+        // (off == pad), which tiny-skia's stroker rejects with a
+        // "path stroking failed" warning every frame. egui drew the
+        // same degenerate (invisible) line; skipping it is visually
+        // identical.
+        for i in 1..4 {
             let off = pad + (i as f32) * 4.0;
             let mut b = canvas::path::Builder::new();
             b.move_to(Point::new(w - off, h - pad));
