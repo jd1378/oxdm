@@ -108,6 +108,7 @@ pub enum Msg {
     DbExit,
     DbReset,
     SecretsWipe,
+    SecretsWiped(Result<(), String>),
     ShotTick,
     Shot(iced::window::Screenshot),
     Noop,
@@ -805,15 +806,24 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             .chain(iced::exit())
         }
         Msg::SecretsWipe => {
-            m.overlay = Overlay::None;
             let client = m.client.clone();
             Task::perform(
-                async move {
-                    let _ = client.wipe_job_secrets().await;
-                },
-                |_| Msg::Noop,
+                async move { client.wipe_job_secrets().await },
+                Msg::SecretsWiped,
             )
         }
+        Msg::SecretsWiped(res) => match res {
+            Ok(()) => {
+                m.overlay = Overlay::None;
+                refresh(m.client.clone())
+            }
+            Err(e) => {
+                tracing::warn!("wipe_job_secrets failed: {e}");
+                m.db_error = Some(format!("Could not wipe job secrets: {e}"));
+                m.overlay = Overlay::DbError;
+                Task::none()
+            }
+        },
         Msg::Context(action) => {
             m.context_menu = None;
             context_action(m, action)
@@ -1091,9 +1101,9 @@ fn splash<'a>(message: String) -> Element<'a, Msg> {
 fn main_view(m: &Main) -> Element<'_, Msg> {
     let t = &m.tokens;
 
+    // Overlays/modals cover the body only — the titlebar stays above
+    // them (matches the egui app, whose scrim started below the bar).
     let body = column![
-        titlebar::titlebar(t, "oxdm", m.maximized, Msg::Window),
-        hairline(t.border_subtle),
         row![
             sidebar(m),
             vdivider(t.border_subtle, f32::MAX),
@@ -1112,20 +1122,12 @@ fn main_view(m: &Main) -> Element<'_, Msg> {
         statusbar(m),
     ];
 
-    let with_bg = container(body)
+    let base: Element<'_, Msg> = container(body)
         .width(Length::Fill)
         .height(Length::Fill)
-        .style({
-            let t = *t;
-            move |_| container::Style {
-                background: Some(t.bg_page.into()),
-                text_color: Some(t.fg_1),
-                ..Default::default()
-            }
-        });
+        .into();
 
-    let base: Element<'_, Msg> = with_bg.into();
-    let content: Element<'_, Msg> = if let Some(id) = m.context_menu {
+    let overlaid: Element<'_, Msg> = if let Some(id) = m.context_menu {
         context_menu_overlay(m, base, id)
     } else if m.snap.conflict_head.is_some()
         && matches!(m.overlay, Overlay::None | Overlay::Context)
@@ -1145,7 +1147,23 @@ fn main_view(m: &Main) -> Element<'_, Msg> {
         }
     };
 
-    chrome::resize::resizable(t, content, true, Msg::Window)
+    let content = container(column![
+        titlebar::titlebar(t, "oxdm", m.maximized, Msg::Window),
+        hairline(t.border_subtle),
+        overlaid,
+    ])
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .style({
+        let t = *t;
+        move |_| container::Style {
+            background: Some(t.bg_page.into()),
+            text_color: Some(t.fg_1),
+            ..Default::default()
+        }
+    });
+
+    chrome::resize::resizable(t, content.into(), true, Msg::Window)
 }
 
 // ---------------------------------------------------------------- sidebar
@@ -1989,9 +2007,10 @@ fn context_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>, id: JobId) -> E
     // Anchor at the cursor (egui opens context menus at the click
     // point); clamp so the menu stays inside the window.
     let (cx, cy) = m.cursor;
+    let cy = cy - titlebar::HEIGHT - 1.0; // overlay stack starts below the bar
     let (mw, mh) = (268.0, 290.0);
     let (ww, wh) = if m.win_size.0 > 0.0 {
-        m.win_size
+        (m.win_size.0, m.win_size.1 - titlebar::HEIGHT - 1.0)
     } else {
         (1240.0, 760.0)
     };
@@ -2000,7 +2019,7 @@ fn context_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>, id: JobId) -> E
     iced::widget::stack![
         base,
         scrim,
-        container(menu).padding(iced::Padding {
+        container(iced::widget::opaque(menu)).padding(iced::Padding {
             left,
             top,
             ..Default::default()

@@ -720,29 +720,32 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
             .view(t),
     );
 
-    let page = column![
-        titlebar::titlebar(t, "oxdm — Queues & scheduling", false, Msg::Window),
-        hairline(t.border_subtle),
+    let body: Element<'_, Msg> = column![
         row![sidebar, editor].height(Length::Fill),
         hairline(t.border_subtle),
         footer_el,
-    ];
+    ]
+    .into();
 
-    let base = container(page)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(move |_| container::Style {
-            background: Some(t2.bg_page.into()),
-            text_color: Some(t2.fg_1),
-            ..Default::default()
-        });
-
-    let content: Element<'_, Msg> = if st.confirm_delete {
-        delete_overlay(st, base.into())
+    let overlaid: Element<'_, Msg> = if st.confirm_delete {
+        delete_overlay(st, body)
     } else {
-        base.into()
+        body
     };
-    chrome::resize::resizable(t, content, true, Msg::Window)
+
+    let content = container(column![
+        titlebar::titlebar(t, "oxdm — Queues & scheduling", false, Msg::Window),
+        hairline(t.border_subtle),
+        overlaid,
+    ])
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .style(move |_| container::Style {
+        background: Some(t2.bg_page.into()),
+        text_color: Some(t2.fg_1),
+        ..Default::default()
+    });
+    chrome::resize::resizable(t, content.into(), true, Msg::Window)
 }
 
 fn delete_overlay<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a, Msg> {
@@ -799,21 +802,23 @@ fn delete_overlay<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a, Msg>
         ..Default::default()
     });
 
-    let scrim = mouse_area(
-        container(iced::widget::Space::new())
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(|_| container::Style {
-                background: Some(color::with_alpha(iced::Color::BLACK, 120.0 / 255.0).into()),
-                ..Default::default()
-            }),
-    )
-    .on_press(Msg::DeleteCancel);
+    let scrim = iced::widget::opaque(
+        mouse_area(
+            container(iced::widget::Space::new())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(|_| container::Style {
+                    background: Some(color::with_alpha(iced::Color::BLACK, 120.0 / 255.0).into()),
+                    ..Default::default()
+                }),
+        )
+        .on_press(Msg::DeleteCancel),
+    );
 
     iced::widget::stack![
         base,
         scrim,
-        container(card)
+        container(iced::widget::opaque(card))
             .width(Length::Fill)
             .height(Length::Fill)
             .align_x(Alignment::Center)

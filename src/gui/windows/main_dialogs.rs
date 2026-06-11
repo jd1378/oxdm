@@ -125,23 +125,26 @@ pub fn modal<'a>(
             ..Default::default()
         });
 
-    let mut scrim = mouse_area(
-        container(iced::widget::Space::new())
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(|_| container::Style {
-                background: Some(color::with_alpha(iced::Color::BLACK, 120.0 / 255.0).into()),
-                ..Default::default()
-            }),
+    // `opaque` swallows every event so nothing reaches the base
+    // layer; the mouse_area on top of it turns a backdrop click into
+    // dismiss (or a no-op for terminal modals).
+    let scrim = iced::widget::opaque(
+        mouse_area(
+            container(iced::widget::Space::new())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(|_| container::Style {
+                    background: Some(color::with_alpha(iced::Color::BLACK, 120.0 / 255.0).into()),
+                    ..Default::default()
+                }),
+        )
+        .on_press(on_dismiss.unwrap_or(Msg::Noop)),
     );
-    if let Some(msg) = on_dismiss {
-        scrim = scrim.on_press(msg);
-    }
 
     iced::widget::stack![
         base,
         scrim,
-        container(boxed)
+        container(iced::widget::opaque(boxed))
             .width(Length::Fill)
             .height(Length::Fill)
             .align_x(Alignment::Center)

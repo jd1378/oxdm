@@ -173,18 +173,12 @@ pub fn present(
         }
     };
 
-    let damage = last_layers
-        .and_then(|last_layers| {
-            (surface.background_color == background_color).then(|| {
-                damage::diff(
-                    last_layers,
-                    renderer.layers(),
-                    |layer| vec![layer.bounds],
-                    Layer::damage,
-                )
-            })
-        })
-        .unwrap_or_else(|| vec![Rectangle::with_size(viewport.logical_size())]);
+    // oxdm fix: always repaint the full frame. Partial-present left
+    // stale regions (and compounded translucent overlay quads) on some
+    // backends/buffer ages; a full software redraw at our window sizes
+    // is cheap and artifact-free.
+    let _ = last_layers;
+    let damage = vec![Rectangle::with_size(viewport.logical_size())];
 
     if damage.is_empty() {
         if let Some(last_layers) = last_layers {
