@@ -15,7 +15,7 @@ use crate::gui::chrome::{self, WindowControl, titlebar};
 use crate::gui::format::format_bytes;
 use crate::gui::shot::Shot;
 use crate::gui::theme::{self, Tokens};
-use crate::gui::widget::{Btn, checkbox, combo, hairline};
+use crate::gui::widget::{Btn, checkbox, combo, hairline, sibling};
 use crate::ipc_local::Client;
 use crate::ipc_local::protocol::AddJobReq;
 
@@ -418,12 +418,17 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
         hairline(t.border_subtle),
         container(
             column![
-                header,
+                sibling(header.into()),
                 crate::gui::widget::vscroll(list).height(Length::Fill)
             ]
             .spacing(theme::space::S2)
         )
-        .padding(theme::space::S4)
+        .padding(iced::Padding {
+            top: theme::space::S4,
+            bottom: theme::space::S4,
+            left: theme::space::S4,
+            right: theme::space::S4 - crate::gui::widget::SCROLL_GUTTER,
+        })
         .height(Length::Fill),
         hairline(t.border_subtle),
         footer_el,

@@ -1580,11 +1580,16 @@ fn table(m: &Main) -> Element<'_, Msg> {
         mouse_area(
             container(header_row)
                 .width(Length::Fill)
-                .height(Length::Fixed(HEADER_H)),
+                .height(Length::Fixed(HEADER_H))
+                .clip(true),
         )
         .on_right_press(Msg::HeaderRightClick),
     )
-    .width(Length::Fill);
+    .width(Length::Fill)
+    .padding(iced::Padding {
+        right: crate::gui::widget::SCROLL_GUTTER,
+        ..Default::default()
+    });
 
     let jobs = m.visible_jobs();
     let body: Element<'_, Msg> = if jobs.is_empty() {
@@ -1594,7 +1599,9 @@ fn table(m: &Main) -> Element<'_, Msg> {
         for job in jobs {
             rows = rows.push(job_row(m, job));
         }
-        crate::gui::widget::vscroll(rows)
+        // Horizontal overflow is clipped (egui hid the h-scrollbar);
+        // only vertical scrolling, with the reserved gutter.
+        crate::gui::widget::vscroll(container(rows).width(Length::Fill).clip(true))
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
@@ -1648,8 +1655,16 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
 
     let name_cell = container(
         column![
-            text(name).font(theme::BODY_BOLD).size(13.0).color(t.fg_1),
-            text(host).font(theme::MONO).size(10.0).color(t.fg_3),
+            text(name)
+                .font(theme::BODY_BOLD)
+                .size(13.0)
+                .color(t.fg_1)
+                .wrapping(iced::widget::text::Wrapping::None),
+            text(host)
+                .font(theme::MONO)
+                .size(10.0)
+                .color(t.fg_3)
+                .wrapping(iced::widget::text::Wrapping::None),
         ]
         .spacing(2.0),
     )
@@ -1665,6 +1680,7 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
             .font(theme::MONO)
             .size(12.0)
             .color(t.fg_2)
+            .wrapping(iced::widget::text::Wrapping::None)
             .into(),
         Length::Fixed(m.columns.width(SortColumn::Size as usize)),
     );
@@ -1699,6 +1715,7 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
         .font(theme::MONO)
         .size(12.0)
         .color(t.fg_2)
+        .wrapping(iced::widget::text::Wrapping::None)
         .into(),
         Length::Fixed(m.columns.width(SortColumn::Speed as usize)),
     );
@@ -1708,6 +1725,7 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
             .font(theme::MONO)
             .size(12.0)
             .color(t.fg_2)
+            .wrapping(iced::widget::text::Wrapping::None)
             .into(),
         Length::Fixed(m.columns.width(SortColumn::Eta as usize)),
     );
@@ -1717,6 +1735,7 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
             .font(theme::MONO)
             .size(11.0)
             .color(t.fg_3)
+            .wrapping(iced::widget::text::Wrapping::None)
             .into(),
         Length::Fixed(m.columns.width(SortColumn::Date as usize)),
     );

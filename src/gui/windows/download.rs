@@ -19,7 +19,7 @@ use crate::gui::shot::Shot;
 use crate::gui::theme::{self, Tokens};
 use crate::gui::widget::{
     Btn, RateChart, TabBtn, TextInput, checkbox, collapsible_card, combo, hairline, pill_progress,
-    rate_chart, striped_progress,
+    rate_chart, sibling, striped_progress,
 };
 use crate::gui::windows::add::footer;
 use crate::ipc_local::Client;
@@ -631,8 +631,8 @@ fn running_view(st: &State) -> Element<'_, Msg> {
             hairline(t.border_subtle),
             container(
                 column![
-                    header_card(st),
-                    striped_progress(
+                    sibling(header_card(st)),
+                    sibling(striped_progress(
                         st.frac(),
                         Length::Fill,
                         10.0,
@@ -641,15 +641,20 @@ fn running_view(st: &State) -> Element<'_, Msg> {
                         gradient,
                         striped,
                         st.anim_t,
-                    ),
+                    )),
                     // Tabs + hairline as one unspaced group so the
                     // active underline sits on the hairline.
-                    column![tabs, hairline(t.border_subtle)],
+                    sibling(column![tabs, hairline(t.border_subtle)].into()),
                     crate::gui::widget::vscroll(tab_body).height(Length::Fill),
                 ]
                 .spacing(theme::space::S3)
             )
-            .padding(theme::space::S4)
+            .padding(iced::Padding {
+                top: theme::space::S4,
+                bottom: theme::space::S4,
+                left: theme::space::S4,
+                right: theme::space::S4 - crate::gui::widget::SCROLL_GUTTER,
+            })
             .height(Length::Fill),
             hairline(t.border_subtle),
             footer_el,

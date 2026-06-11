@@ -717,7 +717,12 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
 
     let editor = crate::gui::widget::vscroll(
         container(column![head, concurrency, schedule, on_finish].spacing(theme::space::S3))
-            .padding(theme::space::S4)
+            .padding(iced::Padding {
+                top: theme::space::S4,
+                bottom: theme::space::S4,
+                left: theme::space::S4,
+                right: theme::space::S4 - crate::gui::widget::SCROLL_GUTTER,
+            })
             .width(Length::Fill),
     )
     .height(Length::Fill);

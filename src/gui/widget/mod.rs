@@ -8,7 +8,10 @@ pub mod pills;
 pub mod striped;
 
 pub use button::{Btn, BtnSize};
-pub use cards::{TabBtn, card, collapsible_card, hairline, section_card, vdivider, vscroll};
+pub use cards::{
+    SCROLL_GUTTER, TabBtn, card, collapsible_card, hairline, section_card, sibling, vdivider,
+    vscroll,
+};
 pub use controls::{
     checkbox, col_header, col_header_sortable, combo, number_stepper, segmented, toggle,
 };

@@ -693,7 +693,12 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
         hairline(t.border_subtle),
         crate::gui::widget::vscroll(
             container(body)
-                .padding(theme::space::S3)
+                .padding(iced::Padding {
+                    top: theme::space::S3,
+                    bottom: theme::space::S3,
+                    left: theme::space::S3,
+                    right: theme::space::S3 - crate::gui::widget::SCROLL_GUTTER,
+                })
                 .width(Length::Fill)
         )
         .height(Length::Fill),

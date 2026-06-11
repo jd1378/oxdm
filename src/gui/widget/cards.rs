@@ -259,6 +259,22 @@ impl<'a, M: Clone + 'a> TabBtn<'a, M> {
     }
 }
 
+/// Width of the gutter reserved for the scrollbar rail.
+pub const SCROLL_GUTTER: f32 = 12.0;
+
+/// Pad a non-scrolling sibling of a [`vscroll`] on the right by the
+/// gutter width so its edge lines up with the scroll content (the
+/// outer container's right padding is reduced by the same amount).
+pub fn sibling<'a, M: 'a>(el: Element<'a, M>) -> Element<'a, M> {
+    container(el)
+        .width(Length::Fill)
+        .padding(iced::Padding {
+            right: SCROLL_GUTTER,
+            ..Default::default()
+        })
+        .into()
+}
+
 /// Vertical scrollable with a reserved right gutter so the scrollbar
 /// rail never covers content (egui reserved `bar_width` the same way).
 pub fn vscroll<'a, M: 'a>(content: impl Into<Element<'a, M>>) -> iced::widget::Scrollable<'a, M> {
@@ -266,7 +282,7 @@ pub fn vscroll<'a, M: 'a>(content: impl Into<Element<'a, M>>) -> iced::widget::S
         container(content)
             .width(Length::Fill)
             .padding(iced::Padding {
-                right: 12.0,
+                right: SCROLL_GUTTER,
                 ..Default::default()
             }),
     )
