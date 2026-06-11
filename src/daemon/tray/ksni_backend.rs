@@ -19,7 +19,7 @@ pub fn install(rt: Handle, state: Arc<AppState>) {
         state: state.clone(),
         active: Vec::new(),
         any_downloading: false,
-        theme: crate::ui::theme::system_theme(),
+        theme: crate::gui::theme::system_theme(),
     };
     let cell_spawn = cell.clone();
     tokio::spawn(async move {
@@ -46,7 +46,7 @@ pub fn install(rt: Handle, state: Arc<AppState>) {
     // OS theme follow-on: when the system light/dark preference flips,
     // notify the ksni tray so it re-emits its pixmap.
     let cell_theme = cell.clone();
-    crate::ui::theme::on_system_theme_change(move |theme| {
+    crate::gui::theme::on_system_theme_change(move |theme| {
         let cell_theme = cell_theme.clone();
         tokio::spawn(async move {
             if let Some(h) = cell_theme.get() {
@@ -93,7 +93,7 @@ struct OxdmTray {
     state: Arc<AppState>,
     active: Vec<ActiveJob>,
     any_downloading: bool,
-    theme: crate::ui::theme::ResolvedTheme,
+    theme: crate::gui::theme::ResolvedTheme,
 }
 
 impl Tray for OxdmTray {
@@ -105,9 +105,9 @@ impl Tray for OxdmTray {
     }
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {
         if self.any_downloading {
-            crate::ui::icon::ksni_icon_downloading(self.theme)
+            crate::gui::app_icon::ksni_icon_downloading(self.theme)
         } else {
-            crate::ui::icon::ksni_icon_normal(self.theme)
+            crate::gui::app_icon::ksni_icon_normal(self.theme)
         }
     }
     fn activate(&mut self, _x: i32, _y: i32) {

@@ -5,7 +5,7 @@
 // invocations still see stdout / stderr.
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
-use oxdm::{daemon, single_instance, ui};
+use oxdm::{daemon, single_instance};
 
 #[cfg(target_os = "windows")]
 fn attach_parent_console() {
@@ -26,7 +26,15 @@ fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,oxdm=debug")),
+                // iced_winit dumps every window's full WindowAttributes
+                // at INFO on creation; winit warns about XSETTINGS/randr
+                // quirks on every X11 connect. Both spam per-window
+                // subprocesses — keep them at warn/error.
+                .unwrap_or_else(|_| {
+                    tracing_subscriber::EnvFilter::new(
+                        "info,oxdm=debug,iced_winit=warn,winit=error",
+                    )
+                }),
         )
         .init();
 
@@ -38,7 +46,7 @@ fn main() {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         Some("gui") => match args.next().as_deref() {
-            Some("main") => ui::launch_main(),
+            Some("main") => oxdm::gui::windows::main::launch_main(),
             Some("download") => {
                 let Some(id_str) = args.next() else {
                     eprintln!("oxdm gui download <job-id>");
@@ -48,7 +56,7 @@ fn main() {
                     eprintln!("invalid job id: {id_str}");
                     std::process::exit(2);
                 };
-                ui::launch_download(id);
+                oxdm::gui::windows::download::launch_download(id);
             }
             Some("properties") => {
                 let Some(id_str) = args.next() else {
@@ -59,7 +67,7 @@ fn main() {
                     eprintln!("invalid job id: {id_str}");
                     std::process::exit(2);
                 };
-                ui::launch_properties(id);
+                oxdm::gui::windows::properties::launch_properties(id);
             }
             Some("add") => {
                 let mut edit_id: Option<oxdm::domain::JobId> = None;
@@ -71,42 +79,21 @@ fn main() {
                         edit_id = Some(id);
                     }
                 }
-                ui::launch_add(edit_id, prefill_url);
+                oxdm::gui::windows::add::launch_add(edit_id, prefill_url);
             }
             Some("settings") => {
-                use oxdm::ui::dialogs::settings::SettingsTab;
-                let mut tab: Option<SettingsTab> = None;
-                let mut highlight_proxy = false;
-                while let Some(a) = args.next() {
-                    match a.as_str() {
-                        "--tab" => {
-                            tab = args.next().and_then(|s| match s.as_str() {
-                                "general" => Some(SettingsTab::General),
-                                "downloads" => Some(SettingsTab::Downloads),
-                                "categories" => Some(SettingsTab::Categories),
-                                "network" => Some(SettingsTab::Network),
-                                "browser" => Some(SettingsTab::Browser),
-                                "notifications" => Some(SettingsTab::Notifications),
-                                "advanced" => Some(SettingsTab::Advanced),
-                                "about" => Some(SettingsTab::About),
-                                _ => None,
-                            });
-                        }
-                        "--highlight-proxy" => highlight_proxy = true,
-                        _ => {}
-                    }
-                }
-                ui::launch_settings(tab, highlight_proxy);
+                // --tab / --highlight-proxy are re-parsed inside the window.
+                oxdm::gui::windows::settings::launch_settings();
             }
             Some("queues") => {
-                ui::launch_queues();
+                oxdm::gui::windows::queues::launch_queues();
             }
             Some("batch") => {
                 let Some(path) = args.next() else {
                     eprintln!("oxdm gui batch <staged-json-path>");
                     std::process::exit(2);
                 };
-                ui::launch_batch(std::path::PathBuf::from(path));
+                oxdm::gui::windows::batch::launch_batch(std::path::PathBuf::from(path));
             }
             other => {
                 eprintln!("unknown gui command: {other:?}");

@@ -10,9 +10,6 @@ authors = ["jd1378 <javad.mnjd@hotmail.com>"]
 
 [dependencies]
 odl = { version = "1.1.0", default-features = false }
-eframe = { version = "0.34", default-features = false, features = ["glow", "wayland", "x11"] }
-egui = "0.34"
-egui_extras = { version = "0.34", features = ["image", "svg"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "io-util", "net", "time", "fs", "process", "io-std", "signal"] }
 tokio-util = "0.7"
 futures = "0.3"
@@ -46,7 +43,7 @@ interprocess = { version = "2", features = ["tokio"] }
 single-instance = "0.3"
 image = { version = "0.25", default-features = false, features = ["png"] }
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
-egui_flex = "0.6.0"
+iced = { version = "0.14", default-features = false, features = ["tiny-skia", "wayland", "x11", "tokio", "canvas", "svg", "image", "advanced"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
@@ -77,8 +74,8 @@ tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
 
 # Keep our crate unoptimised (fast incremental + debugger), but build
-# dependencies at -O3 so egui 0.34's Skrifa hinting + epaint tessellation
-# aren't the dev-build bottleneck on subprocess spawn.
+# dependencies at -O3 so iced/tiny-skia rasterisation isn't the
+# dev-build bottleneck on subprocess spawn.
 [profile.dev]
 opt-level = 0
 debug = "line-tables-only"
@@ -99,6 +96,8 @@ path = "src/bin/oxdm-native-host.rs"
 name = "oxdm-updater"
 path = "src/bin/oxdm-updater.rs"
 
-[[bin]]
-name = "oxdm-fixture"
-path = "src/bin/oxdm-fixture.rs"
+# iced 0.14.0's tiny-skia backend double-transforms canvas clip bounds
+# (draw_primitive_group pre-multiplies, the renderer multiplies again),
+# shifting/clipping all nested canvas geometry. Vendored with a 2-line fix.
+[patch.crates-io]
+iced_tiny_skia = { path = "vendor/iced_tiny_skia" }

@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::ui::attach_close_high_fds;
+use crate::platform::attach_close_high_fds;
 
 use tokio::runtime::Handle;
 

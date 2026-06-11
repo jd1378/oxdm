@@ -58,7 +58,7 @@ pub fn install(rt: Handle, state: Arc<AppState>) {
 }
 
 fn run_owner(rt: Handle, state: Arc<AppState>, jobs_rx: mpsc::Receiver<Vec<Job>>) {
-    let icon = crate::ui::icon::tray_icon_normal(crate::ui::theme::system_theme());
+    let icon = crate::gui::app_icon::tray_icon_normal(crate::gui::theme::system_theme());
     let menu = Menu::new();
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
@@ -81,7 +81,7 @@ fn run_owner(rt: Handle, state: Arc<AppState>, jobs_rx: mpsc::Receiver<Vec<Job>>
     let mut dyn_map: HashMap<MenuId, JobId> = HashMap::new();
 
     let mut last_jobs: Vec<Job> = Vec::new();
-    let mut last_theme = crate::ui::theme::system_theme();
+    let mut last_theme = crate::gui::theme::system_theme();
     rebuild_now(&tray, &mut actions, &mut dyn_map, &last_jobs, last_theme);
 
     let menu_chan = muda::MenuEvent::receiver();
@@ -100,7 +100,7 @@ fn run_owner(rt: Handle, state: Arc<AppState>, jobs_rx: mpsc::Receiver<Vec<Job>>
             last_jobs = jobs;
             rebuild_now(&tray, &mut actions, &mut dyn_map, &last_jobs, last_theme);
         }
-        let cur_theme = crate::ui::theme::system_theme();
+        let cur_theme = crate::gui::theme::system_theme();
         if cur_theme != last_theme {
             last_theme = cur_theme;
             rebuild_now(&tray, &mut actions, &mut dyn_map, &last_jobs, last_theme);
@@ -169,7 +169,7 @@ fn rebuild_now(
     actions: &mut ActionIds,
     dyn_map: &mut HashMap<MenuId, JobId>,
     jobs: &[Job],
-    theme: crate::ui::theme::ResolvedTheme,
+    theme: crate::gui::theme::ResolvedTheme,
 ) {
     let menu = Menu::new();
     let open = MenuItem::new("Open", true, None);
@@ -205,9 +205,9 @@ fn rebuild_now(
     let _ = tray.set_menu(Some(Box::new(menu)));
     let any_downloading = jobs.iter().any(|j| j.status.phase == Phase::Downloading);
     let icon = if any_downloading {
-        crate::ui::icon::tray_icon_downloading(theme)
+        crate::gui::app_icon::tray_icon_downloading(theme)
     } else {
-        crate::ui::icon::tray_icon_normal(theme)
+        crate::gui::app_icon::tray_icon_normal(theme)
     };
     if let Some(i) = icon {
         let _ = tray.set_icon(Some(i));

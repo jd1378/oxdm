@@ -1,0 +1,2033 @@
+//! Main window: sidebar (categories / queues / tools), toolbar, tab
+//! strip, jobs table, statusbar — plus in-window overlays (context
+//! menu, remove/about/host/conflict dialogs, db/secrets recovery).
+
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+use iced::widget::{column, container, mouse_area, row, scrollable, text};
+use iced::{Alignment, Element, Length, Subscription, Task};
+
+use super::main_dialogs::{self, AboutState, HostState, RemoveState, UpdateUi};
+use crate::domain::{Category, JobId, Phase, QueueId};
+use crate::gui::chrome::{self, WindowControl, titlebar};
+use crate::gui::format::{format_bytes, format_eta, format_speed};
+use crate::gui::ipc::DaemonSignal;
+use crate::gui::shot::Shot;
+use crate::gui::theme::{self, Tokens};
+use crate::gui::widget::{
+    Btn, BtnSize, TabBtn, col_header_sortable, hairline, inline_progress, search_field, status_dot,
+    swatch, vdivider,
+};
+use crate::gui::{color, icons};
+use crate::ipc_local::Client;
+use crate::ipc_local::protocol::{Event, JobCounters, SnapshotData};
+
+const SIDEBAR_W: f32 = 220.0;
+const W_SIZE: f32 = 92.0;
+const W_STATUS: f32 = 280.0;
+const W_SPEED: f32 = 100.0;
+const W_ETA: f32 = 90.0;
+const W_DATE: f32 = 130.0;
+const ROW_H: f32 = 48.0;
+const HEADER_H: f32 = 22.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidebarFilter {
+    All,
+    Category(Category),
+    Queue(QueueId),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tab {
+    All,
+    Active,
+    Finished,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortColumn {
+    Name,
+    Size,
+    Status,
+    Speed,
+    Eta,
+    Date,
+}
+
+#[derive(Clone)]
+pub enum Msg {
+    Connected(Result<(Arc<Client>, SnapshotData, Option<String>, bool), String>),
+    Snapshot(SnapshotData),
+    Daemon(DaemonSignal),
+    Window(WindowControl),
+    SetFilter(SidebarFilter),
+    ToggleSection(u8),
+    SetTab(Tab),
+    SetSort(SortColumn),
+    SetSearch(String),
+    RowClick(JobId, bool, bool),
+    RowDoubleClick(JobId),
+    RowRightClick(JobId),
+    Toolbar(ToolbarAction),
+    Tool(ToolAction),
+    CloseOverlay,
+    Context(ContextAction),
+    KeyPressed(iced::keyboard::Key, iced::keyboard::Modifiers),
+    Modifiers(iced::keyboard::Modifiers),
+    CursorMoved(f32, f32),
+    WindowResized(f32, f32),
+    // About overlay
+    AboutCheckUpdate,
+    AboutChecked(Result<Option<crate::data::UpdateInfo>, String>),
+    AboutDownloadUpdate,
+    AboutRepository,
+    AboutDonate,
+    // Host settings overlay
+    HostsLoaded(Vec<crate::domain::HostSetting>),
+    HostSearch(String),
+    HostSelect(String),
+    HostAdd,
+    HostDelete,
+    HostHost(String),
+    HostSpeedEnabled(bool),
+    HostSpeedKbs(String),
+    HostThreads(String),
+    HostUsername(String),
+    HostPassword(String),
+    HostReveal(bool),
+    HostUserAgent(String),
+    HostSave,
+    // Remove overlay
+    RemoveDeleteOnDisk(bool),
+    RemoveDontAsk(bool),
+    RemoveConfirm,
+    // Conflict / recovery
+    Conflict(JobId, u64, crate::data::ConflictKind, ConflictChoice),
+    DbExit,
+    DbReset,
+    SecretsWipe,
+    ShotTick,
+    Shot(iced::window::Screenshot),
+    Noop,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolbarAction {
+    AddUrl,
+    PauseQueue,
+    StopAll,
+    Clean,
+    Schedule,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolAction {
+    Scheduler,
+    Settings,
+    BrowserExtension,
+    PerHost,
+    About,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextAction {
+    Open,
+    OpenFolder,
+    Resume,
+    Pause,
+    Delete,
+    Restart,
+    CopyUrl,
+    Properties,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictChoice {
+    Restart,
+    Abort,
+    Resume,
+    Numbered,
+    Replace,
+    Ack,
+}
+
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+pub enum Overlay {
+    #[default]
+    None,
+    Context,
+    About,
+    Host,
+    Remove,
+    DbError,
+    SecretsLocked,
+}
+
+pub enum App {
+    Connecting,
+    Failed(String),
+    Ready(Box<Main>),
+}
+
+pub struct Main {
+    pub client: Arc<Client>,
+    pub snap: SnapshotData,
+    pub counters: HashMap<JobId, JobCounters>,
+    pub tokens: Tokens,
+    pub filter: SidebarFilter,
+    pub tab: Tab,
+    pub sort: (SortColumn, bool), // (column, descending)
+    pub search: String,
+    pub selection: HashSet<JobId>,
+    pub select_anchor: Option<JobId>,
+    pub collapsed_sections: HashSet<u8>,
+    pub maximized: bool,
+    pub context_menu: Option<JobId>,
+    pub overlay: Overlay,
+    pub about: AboutState,
+    pub host: HostState,
+    pub remove: Option<RemoveState>,
+    pub db_error: Option<String>,
+    pub modifiers: iced::keyboard::Modifiers,
+    pub cursor: (f32, f32),
+    pub win_size: (f32, f32),
+    pub last_size_save: Option<std::time::Instant>,
+    pub shot: Option<Shot>,
+}
+
+impl Main {
+    fn new(client: Arc<Client>, snap: SnapshotData) -> Self {
+        let tokens = Tokens::from_settings(&snap.settings);
+        let counters = snap.counters.iter().map(|c| (c.id, c.clone())).collect();
+        let main_q = snap
+            .queues
+            .iter()
+            .find(|q| q.builtin)
+            .map(|q| q.id)
+            .or_else(|| snap.queues.first().map(|q| q.id));
+        Self {
+            client,
+            tokens,
+            counters,
+            filter: main_q
+                .map(SidebarFilter::Queue)
+                .unwrap_or(SidebarFilter::All),
+            tab: Tab::All,
+            sort: (SortColumn::Date, true),
+            search: String::new(),
+            selection: HashSet::new(),
+            select_anchor: None,
+            collapsed_sections: HashSet::new(),
+            maximized: false,
+            context_menu: None,
+            overlay: Overlay::None,
+            about: AboutState::default(),
+            host: HostState::default(),
+            remove: None,
+            db_error: None,
+            modifiers: iced::keyboard::Modifiers::default(),
+            cursor: (0.0, 0.0),
+            win_size: (0.0, 0.0),
+            last_size_save: None,
+            shot: Shot::from_env(),
+            snap,
+        }
+    }
+
+    fn phase(&self, id: JobId) -> Phase {
+        self.counters
+            .get(&id)
+            .map(|c| c.phase)
+            .or_else(|| {
+                self.snap
+                    .jobs
+                    .iter()
+                    .find(|j| j.id == id)
+                    .map(|j| j.status.phase)
+            })
+            .unwrap_or(Phase::Queued)
+    }
+
+    /// Jobs passing the sidebar filter + search (before tab filter).
+    fn sidebar_filtered(&self) -> Vec<&crate::domain::Job> {
+        let needle = self.search.trim().to_lowercase();
+        self.snap
+            .jobs
+            .iter()
+            .filter(|j| match self.filter {
+                SidebarFilter::All => true,
+                SidebarFilter::Category(c) => j.category == c,
+                SidebarFilter::Queue(q) => j.queue_id == q,
+            })
+            .filter(|j| {
+                needle.is_empty()
+                    || j.filename
+                        .as_deref()
+                        .unwrap_or("")
+                        .to_lowercase()
+                        .contains(&needle)
+                    || j.url.as_str().to_lowercase().contains(&needle)
+            })
+            .collect()
+    }
+
+    fn visible_jobs(&self) -> Vec<&crate::domain::Job> {
+        let mut jobs: Vec<_> = self
+            .sidebar_filtered()
+            .into_iter()
+            .filter(|j| match self.tab {
+                Tab::All => true,
+                Tab::Active => !self.phase(j.id).is_terminal(),
+                Tab::Finished => self.phase(j.id) == Phase::Completed,
+            })
+            .collect();
+        let (col, desc) = self.sort;
+        jobs.sort_by(|a, b| {
+            let ord = match col {
+                SortColumn::Name => a
+                    .filename
+                    .as_deref()
+                    .unwrap_or("")
+                    .to_lowercase()
+                    .cmp(&b.filename.as_deref().unwrap_or("").to_lowercase()),
+                SortColumn::Size => {
+                    let sa = self.counters.get(&a.id).and_then(|c| c.total).unwrap_or(0);
+                    let sb = self.counters.get(&b.id).and_then(|c| c.total).unwrap_or(0);
+                    sa.cmp(&sb)
+                }
+                SortColumn::Status => (self.phase(a.id) as u8).cmp(&(self.phase(b.id) as u8)),
+                SortColumn::Speed => {
+                    let sa = self.counters.get(&a.id).map(|c| c.speed_bps).unwrap_or(0.0);
+                    let sb = self.counters.get(&b.id).map(|c| c.speed_bps).unwrap_or(0.0);
+                    sa.total_cmp(&sb)
+                }
+                SortColumn::Eta => {
+                    let ea = eta_of(self.counters.get(&a.id)).unwrap_or(u64::MAX);
+                    let eb = eta_of(self.counters.get(&b.id)).unwrap_or(u64::MAX);
+                    ea.cmp(&eb)
+                }
+                SortColumn::Date => a.created_at.cmp(&b.created_at),
+            };
+            if desc { ord.reverse() } else { ord }
+        });
+        jobs
+    }
+
+    fn cat_count(&self, cat: Option<Category>) -> u64 {
+        self.snap
+            .jobs
+            .iter()
+            .filter(|j| cat.is_none_or(|c| j.category == c))
+            .count() as u64
+    }
+}
+
+fn eta_of(c: Option<&JobCounters>) -> Option<u64> {
+    let c = c?;
+    let total = c.total?;
+    if c.speed_bps <= 1.0 || total <= c.downloaded {
+        return None;
+    }
+    Some(((total - c.downloaded) as f64 / c.speed_bps) as u64)
+}
+
+pub fn boot() -> (App, Task<Msg>) {
+    (
+        App::Connecting,
+        Task::perform(
+            async {
+                let client = Client::connect_retry(std::time::Duration::from_secs(8))
+                    .await
+                    .map_err(|e| e.to_string())?;
+                client
+                    .hello(crate::ipc_local::protocol::GuiKind::Main)
+                    .await?;
+                let snap = client.snapshot().await?;
+                let db_error = client.db_status().await.ok().flatten();
+                let secrets_locked = !client.secrets_status().await.unwrap_or(true);
+                Ok((client, snap, db_error, secrets_locked))
+            },
+            Msg::Connected,
+        ),
+    )
+}
+
+fn act<F>(fut: F) -> Task<Msg>
+where
+    F: std::future::Future<Output = Result<(), String>> + Send + 'static,
+{
+    Task::perform(
+        async move {
+            if let Err(e) = fut.await {
+                tracing::warn!("ipc action failed: {e}");
+            }
+        },
+        |_| Msg::Noop,
+    )
+}
+
+fn refresh(client: Arc<Client>) -> Task<Msg> {
+    Task::perform(async move { client.snapshot().await }, |r| match r {
+        Ok(snap) => Msg::Snapshot(snap),
+        Err(_) => Msg::Noop,
+    })
+}
+
+pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
+    match msg {
+        Msg::Connected(Ok((client, snap, db_error, secrets_locked))) => {
+            let mut m = Main::new(client, snap);
+            if let Some(e) = db_error {
+                m.db_error = Some(e);
+                m.overlay = Overlay::DbError;
+            } else if secrets_locked {
+                m.overlay = Overlay::SecretsLocked;
+            }
+            *app = App::Ready(Box::new(m));
+            Task::none()
+        }
+        Msg::Connected(Err(e)) => {
+            *app = App::Failed(e);
+            Task::none()
+        }
+        Msg::Window(ctl) => {
+            if let (App::Ready(m), WindowControl::ToggleMaximize) = (&mut *app, ctl) {
+                m.maximized = !m.maximized;
+            }
+            chrome::window_task(ctl)
+        }
+        msg => {
+            let App::Ready(main) = app else {
+                return Task::none();
+            };
+            update_main(main, msg)
+        }
+    }
+}
+
+fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
+    match msg {
+        Msg::Connected(_) | Msg::Window(_) => unreachable!(),
+        Msg::Snapshot(snap) => {
+            m.tokens = Tokens::from_settings(&snap.settings);
+            m.counters = snap.counters.iter().map(|c| (c.id, c.clone())).collect();
+            m.snap = snap;
+            m.selection
+                .retain(|id| m.snap.jobs.iter().any(|j| j.id == *id));
+            Task::none()
+        }
+        Msg::Daemon(DaemonSignal::Lost) => iced::exit(),
+        Msg::Daemon(DaemonSignal::Event(ev)) => match ev {
+            Event::Counters(list) => {
+                for c in list {
+                    m.counters.insert(c.id, c);
+                }
+                Task::none()
+            }
+            Event::JobsChanged
+            | Event::QueuesChanged
+            | Event::SettingsChanged
+            | Event::ActiveQueuesChanged
+            | Event::ConflictChanged => refresh(m.client.clone()),
+            Event::Close => iced::exit(),
+            Event::Focus | Event::ShowMainWindow => iced::window::latest().and_then(|id| {
+                Task::batch([
+                    iced::window::minimize(id, false),
+                    iced::window::gain_focus(id),
+                ])
+            }),
+            Event::OpenDownloadDialog(id) => {
+                let client = m.client.clone();
+                act(async move { client.open_download_window(id).await })
+            }
+            _ => Task::none(),
+        },
+        Msg::SetFilter(f) => {
+            m.filter = f;
+            m.selection.clear();
+            Task::none()
+        }
+        Msg::ToggleSection(s) => {
+            if !m.collapsed_sections.remove(&s) {
+                m.collapsed_sections.insert(s);
+            }
+            Task::none()
+        }
+        Msg::SetTab(tab) => {
+            m.tab = tab;
+            Task::none()
+        }
+        Msg::SetSort(col) => {
+            if m.sort.0 == col {
+                m.sort.1 = !m.sort.1;
+            } else {
+                m.sort = (col, matches!(col, SortColumn::Date));
+            }
+            Task::none()
+        }
+        Msg::SetSearch(s) => {
+            m.search = s;
+            Task::none()
+        }
+        Msg::RowClick(id, ctrl, shift) => {
+            m.context_menu = None;
+            if ctrl {
+                if !m.selection.remove(&id) {
+                    m.selection.insert(id);
+                }
+                m.select_anchor = Some(id);
+            } else if shift && m.select_anchor.is_some() {
+                let order: Vec<JobId> = m.visible_jobs().iter().map(|j| j.id).collect();
+                let a = order.iter().position(|x| Some(*x) == m.select_anchor);
+                let b = order.iter().position(|x| *x == id);
+                if let (Some(a), Some(b)) = (a, b) {
+                    let (lo, hi) = (a.min(b), a.max(b));
+                    m.selection = order[lo..=hi].iter().copied().collect();
+                }
+            } else {
+                m.selection.clear();
+                m.selection.insert(id);
+                m.select_anchor = Some(id);
+            }
+            Task::none()
+        }
+        Msg::RowDoubleClick(id) => {
+            let client = m.client.clone();
+            if m.phase(id) == Phase::Completed {
+                if let Some(job) = m.snap.jobs.iter().find(|j| j.id == id) {
+                    let path = job.save_dir.join(job.filename.as_deref().unwrap_or(""));
+                    crate::platform::open_path(&path);
+                }
+                Task::none()
+            } else {
+                act(async move { client.open_download_window(id).await })
+            }
+        }
+        Msg::RowRightClick(id) => {
+            if !m.selection.contains(&id) {
+                m.selection.clear();
+                m.selection.insert(id);
+                m.select_anchor = Some(id);
+            }
+            m.context_menu = Some(id);
+            Task::none()
+        }
+        Msg::CloseOverlay => {
+            m.context_menu = None;
+            if !matches!(m.overlay, Overlay::DbError | Overlay::SecretsLocked) {
+                m.overlay = Overlay::None;
+            }
+            Task::none()
+        }
+        Msg::KeyPressed(key, mods) => handle_key(m, key, mods),
+        Msg::Modifiers(mods) => {
+            m.modifiers = mods;
+            Task::none()
+        }
+        Msg::CursorMoved(x, y) => {
+            m.cursor = (x, y);
+            Task::none()
+        }
+        Msg::WindowResized(w, h) => {
+            m.win_size = (w, h);
+            let due = m
+                .last_size_save
+                .is_none_or(|t| t.elapsed().as_millis() > 1000);
+            if due {
+                m.last_size_save = Some(std::time::Instant::now());
+                crate::gui::ui_prefs::save_window(crate::gui::ui_prefs::WindowPrefs {
+                    width: w,
+                    height: h,
+                });
+            }
+            Task::none()
+        }
+        Msg::AboutCheckUpdate => {
+            m.about.update = UpdateUi::Checking;
+            let client = m.client.clone();
+            Task::perform(
+                async move { client.update_check().await },
+                Msg::AboutChecked,
+            )
+        }
+        Msg::AboutChecked(res) => {
+            m.about.update = match res {
+                Ok(Some(info)) => UpdateUi::Available(info),
+                Ok(None) => UpdateUi::UpToDate,
+                Err(e) => UpdateUi::Error(e),
+            };
+            Task::none()
+        }
+        Msg::AboutDownloadUpdate => {
+            if let UpdateUi::Available(info) = m.about.update.clone() {
+                m.about.update = UpdateUi::Downloading(info.version.clone());
+                let client = m.client.clone();
+                Task::perform(
+                    async move {
+                        let name = format!("oxdm-update-{}", info.version);
+                        client.add_update_job(info.url.clone(), Some(name)).await
+                    },
+                    |_| Msg::Noop,
+                )
+            } else {
+                Task::none()
+            }
+        }
+        Msg::AboutRepository => {
+            crate::platform::open_url("https://github.com/jd1378/oxdm");
+            Task::none()
+        }
+        Msg::AboutDonate => {
+            crate::platform::open_url("https://github.com/sponsors/jd1378");
+            Task::none()
+        }
+        Msg::HostsLoaded(hosts) => {
+            m.host.hosts = hosts;
+            Task::none()
+        }
+        Msg::HostSearch(v) => {
+            m.host.search = v;
+            Task::none()
+        }
+        Msg::HostSelect(host) => {
+            if let Some(h) = m.host.hosts.iter().find(|h| h.host == host).cloned() {
+                m.host.hydrate(&h);
+            }
+            Task::none()
+        }
+        Msg::HostAdd => {
+            let hosts = std::mem::take(&mut m.host.hosts);
+            let search = std::mem::take(&mut m.host.search);
+            m.host = HostState {
+                hosts,
+                search,
+                ..Default::default()
+            };
+            Task::none()
+        }
+        Msg::HostDelete => {
+            let Some(host) = m.host.selected.clone() else {
+                return Task::none();
+            };
+            m.host.hosts.retain(|h| h.host != host);
+            let reload = m.host.hosts.clone();
+            m.host = HostState {
+                hosts: reload,
+                ..Default::default()
+            };
+            let client = m.client.clone();
+            Task::perform(async move { client.delete_host(host).await }, |_| Msg::Noop)
+        }
+        Msg::HostHost(v) => {
+            m.host.host = v;
+            Task::none()
+        }
+        Msg::HostSpeedEnabled(v) => {
+            m.host.speed_enabled = v;
+            Task::none()
+        }
+        Msg::HostSpeedKbs(v) => {
+            m.host.speed_kbs = v;
+            Task::none()
+        }
+        Msg::HostThreads(v) => {
+            m.host.threads = v;
+            Task::none()
+        }
+        Msg::HostUsername(v) => {
+            m.host.username = v;
+            Task::none()
+        }
+        Msg::HostPassword(v) => {
+            m.host.password = v;
+            Task::none()
+        }
+        Msg::HostReveal(v) => {
+            m.host.password_revealed = v;
+            Task::none()
+        }
+        Msg::HostUserAgent(v) => {
+            m.host.user_agent = v;
+            Task::none()
+        }
+        Msg::HostSave => {
+            let setting = m.host.build();
+            let old = m.host.selected.clone();
+            let client = m.client.clone();
+            Task::perform(
+                async move {
+                    if let Some(old) = old
+                        && old != setting.host
+                    {
+                        let _ = client.delete_host(old).await;
+                    }
+                    client.upsert_host(setting).await?;
+                    client.host_list().await
+                },
+                |r| match r {
+                    Ok(hosts) => Msg::HostsLoaded(hosts),
+                    Err(_) => Msg::Noop,
+                },
+            )
+        }
+        Msg::RemoveDeleteOnDisk(v) => {
+            if let Some(r) = &mut m.remove {
+                r.delete_on_disk = v;
+            }
+            Task::none()
+        }
+        Msg::RemoveDontAsk(v) => {
+            if let Some(r) = &mut m.remove {
+                r.dont_ask_again = v;
+            }
+            Task::none()
+        }
+        Msg::RemoveConfirm => {
+            m.overlay = Overlay::None;
+            let Some(r) = m.remove.take() else {
+                return Task::none();
+            };
+            let client = m.client.clone();
+            let mut settings = m.snap.settings.clone();
+            Task::perform(
+                async move {
+                    for id in &r.ids {
+                        let _ = client
+                            .remove(
+                                *id,
+                                crate::data::RemoveOpts {
+                                    purge_partial: !r.completed,
+                                    delete_final_file: r.completed && r.delete_on_disk,
+                                },
+                            )
+                            .await;
+                    }
+                    if r.dont_ask_again {
+                        if r.completed {
+                            settings.remove_confirm_completed = false;
+                        } else {
+                            settings.remove_confirm_incomplete = false;
+                        }
+                        let _ = client.update_settings(settings).await;
+                    }
+                },
+                |_| Msg::Noop,
+            )
+        }
+        Msg::Conflict(id, token, kind, choice) => {
+            let client = m.client.clone();
+            Task::perform(
+                async move {
+                    use crate::data::ConflictKind as K;
+                    use crate::ipc_local::protocol::{
+                        FileChangedRes, FinalFileRes, NotResumableRes, SameDownloadRes,
+                    };
+                    let r = match (kind, choice) {
+                        (K::FileChanged, ConflictChoice::Restart) => {
+                            client
+                                .resolve_file_changed(id, token, FileChangedRes::Restart)
+                                .await
+                        }
+                        (K::FileChanged, _) => {
+                            client
+                                .resolve_file_changed(id, token, FileChangedRes::Abort)
+                                .await
+                        }
+                        (K::NotResumable, ConflictChoice::Restart) => {
+                            client
+                                .resolve_not_resumable(id, token, NotResumableRes::Restart)
+                                .await
+                        }
+                        (K::NotResumable, _) => {
+                            client
+                                .resolve_not_resumable(id, token, NotResumableRes::Abort)
+                                .await
+                        }
+                        (K::SameDownloadExists, ConflictChoice::Resume) => {
+                            client
+                                .resolve_same_download(id, token, SameDownloadRes::Resume)
+                                .await
+                        }
+                        (K::SameDownloadExists, ConflictChoice::Numbered) => {
+                            client
+                                .resolve_same_download(
+                                    id,
+                                    token,
+                                    SameDownloadRes::AddNumberAndContinue,
+                                )
+                                .await
+                        }
+                        (K::SameDownloadExists, _) => {
+                            client
+                                .resolve_same_download(id, token, SameDownloadRes::Abort)
+                                .await
+                        }
+                        (K::FinalFileExists, ConflictChoice::Replace) => {
+                            client
+                                .resolve_final_file(id, token, FinalFileRes::Replace)
+                                .await
+                        }
+                        (K::FinalFileExists, ConflictChoice::Numbered) => {
+                            client
+                                .resolve_final_file(id, token, FinalFileRes::AddNumberAndContinue)
+                                .await
+                        }
+                        (K::FinalFileExists, _) => {
+                            client
+                                .resolve_final_file(id, token, FinalFileRes::Abort)
+                                .await
+                        }
+                        (K::UrlBroken | K::CredentialsInvalid, _) => Ok(()),
+                    };
+                    let _ = r;
+                    let _ = client.pop_conflict().await;
+                },
+                |_| Msg::Noop,
+            )
+        }
+        Msg::DbExit => {
+            let client = m.client.clone();
+            Task::perform(async move { client.daemon_quit().await }, |_| Msg::Noop)
+                .chain(iced::exit())
+        }
+        Msg::DbReset => {
+            m.overlay = Overlay::None;
+            m.db_error = None;
+            let client = m.client.clone();
+            Task::perform(
+                async move {
+                    let _ = client.reset_database().await;
+                },
+                |_| Msg::Noop,
+            )
+            .chain(iced::exit())
+        }
+        Msg::SecretsWipe => {
+            m.overlay = Overlay::None;
+            let client = m.client.clone();
+            Task::perform(
+                async move {
+                    let _ = client.wipe_job_secrets().await;
+                },
+                |_| Msg::Noop,
+            )
+        }
+        Msg::Context(action) => {
+            m.context_menu = None;
+            context_action(m, action)
+        }
+        Msg::Toolbar(action) => {
+            let client = m.client.clone();
+            match action {
+                ToolbarAction::AddUrl => {
+                    act(async move { client.open_add_window(None, None).await })
+                }
+                ToolbarAction::PauseQueue => {
+                    let q = match m.filter {
+                        SidebarFilter::Queue(q) => Some(q),
+                        _ => None,
+                    };
+                    match q {
+                        Some(q) => act(async move { client.stop_queue(q).await }),
+                        None => Task::none(),
+                    }
+                }
+                ToolbarAction::StopAll => act(async move { client.pause_all().await }),
+                ToolbarAction::Clean => {
+                    let done: Vec<JobId> = m
+                        .snap
+                        .jobs
+                        .iter()
+                        .filter(|j| m.phase(j.id) == Phase::Completed)
+                        .map(|j| j.id)
+                        .collect();
+                    act(async move {
+                        for id in done {
+                            client
+                                .remove(id, crate::data::RemoveOpts::default())
+                                .await?;
+                        }
+                        Ok(())
+                    })
+                }
+                ToolbarAction::Schedule => act(async move { client.open_queues_window().await }),
+            }
+        }
+        Msg::Tool(tool) => {
+            let client = m.client.clone();
+            match tool {
+                ToolAction::Scheduler => act(async move { client.open_queues_window().await }),
+                ToolAction::Settings => {
+                    act(async move { client.open_settings_window(None, false).await })
+                }
+                ToolAction::BrowserExtension => act(async move {
+                    client
+                        .open_settings_window(Some("browser".into()), false)
+                        .await
+                }),
+                ToolAction::PerHost => {
+                    m.overlay = Overlay::Host;
+                    m.host = HostState::default();
+                    let client = m.client.clone();
+                    Task::perform(async move { client.host_list().await }, |r| match r {
+                        Ok(hosts) => Msg::HostsLoaded(hosts),
+                        Err(_) => Msg::Noop,
+                    })
+                }
+                ToolAction::About => {
+                    m.overlay = Overlay::About;
+                    m.about = AboutState::default();
+                    Task::none()
+                }
+            }
+        }
+        Msg::ShotTick => {
+            if let Some(shot) = &mut m.shot {
+                if let Some(task) = shot.tick() {
+                    return task.map(Msg::Shot);
+                }
+            }
+            Task::none()
+        }
+        Msg::Shot(s) => match &m.shot {
+            Some(shot) => shot.save_and_exit(s),
+            None => Task::none(),
+        },
+        Msg::Noop => Task::none(),
+    }
+}
+
+fn handle_key(
+    m: &mut Main,
+    key: iced::keyboard::Key,
+    mods: iced::keyboard::Modifiers,
+) -> Task<Msg> {
+    use iced::keyboard::Key;
+    use iced::keyboard::key::Named;
+    m.modifiers = mods;
+    match key.as_ref() {
+        Key::Character("n") if mods.command() => {
+            update_main(m, Msg::Toolbar(ToolbarAction::AddUrl))
+        }
+        Key::Character("q") if mods.command() => {
+            let client = m.client.clone();
+            Task::perform(async move { client.daemon_quit().await }, |_| Msg::Noop)
+                .chain(iced::exit())
+        }
+        Key::Named(Named::Delete) if !m.selection.is_empty() && m.overlay == Overlay::None => {
+            request_remove(m)
+        }
+        Key::Named(Named::Escape) => update_main(m, Msg::CloseOverlay),
+        _ => Task::none(),
+    }
+}
+
+/// Delete request: show the confirm overlay when settings demand it,
+/// else remove immediately.
+fn request_remove(m: &mut Main) -> Task<Msg> {
+    let ids: Vec<JobId> = m.selection.iter().copied().collect();
+    if ids.is_empty() {
+        return Task::none();
+    }
+    let completed = ids.iter().all(|id| m.phase(*id) == Phase::Completed);
+    let need_confirm = if completed {
+        m.snap.settings.remove_confirm_completed
+    } else {
+        m.snap.settings.remove_confirm_incomplete
+    };
+    let filename = if ids.len() == 1 {
+        m.snap
+            .jobs
+            .iter()
+            .find(|j| j.id == ids[0])
+            .and_then(|j| j.filename.clone())
+            .unwrap_or_else(|| "download".to_owned())
+    } else {
+        format!("{} downloads", ids.len())
+    };
+    m.remove = Some(RemoveState {
+        ids,
+        filename,
+        completed,
+        delete_on_disk: false,
+        dont_ask_again: false,
+    });
+    if need_confirm {
+        m.overlay = Overlay::Remove;
+        Task::none()
+    } else {
+        update_main(m, Msg::RemoveConfirm)
+    }
+}
+
+fn context_action(m: &mut Main, action: ContextAction) -> Task<Msg> {
+    let ids: Vec<JobId> = m.selection.iter().copied().collect();
+    let client = m.client.clone();
+    match action {
+        ContextAction::Open | ContextAction::OpenFolder => {
+            for id in &ids {
+                if let Some(job) = m.snap.jobs.iter().find(|j| j.id == *id) {
+                    let path = match action {
+                        ContextAction::Open => {
+                            job.save_dir.join(job.filename.as_deref().unwrap_or(""))
+                        }
+                        _ => job.save_dir.clone(),
+                    };
+                    crate::platform::open_path(&path);
+                }
+            }
+            Task::none()
+        }
+        ContextAction::Resume => act(async move {
+            for id in ids {
+                client.resume(id).await?;
+            }
+            Ok(())
+        }),
+        ContextAction::Pause => act(async move {
+            for id in ids {
+                client.pause(id).await?;
+            }
+            Ok(())
+        }),
+        ContextAction::Delete => request_remove(m),
+        ContextAction::Restart => act(async move {
+            for id in ids {
+                client.restart_job(id).await?;
+            }
+            Ok(())
+        }),
+        ContextAction::CopyUrl => {
+            let urls: Vec<String> = m
+                .snap
+                .jobs
+                .iter()
+                .filter(|j| ids.contains(&j.id))
+                .map(|j| j.url.to_string())
+                .collect();
+            iced::clipboard::write(urls.join("\n"))
+        }
+        ContextAction::Properties => act(async move {
+            for id in ids {
+                client.open_properties_window(id).await?;
+            }
+            Ok(())
+        }),
+    }
+}
+
+pub fn subscription(app: &App) -> Subscription<Msg> {
+    let mut subs = vec![];
+    if let App::Ready(m) = app {
+        subs.push(crate::gui::ipc::all_events().map(Msg::Daemon));
+        subs.push(iced::event::listen_with(
+            |event, _status, _id| match event {
+                iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                    key, modifiers, ..
+                }) => Some(Msg::KeyPressed(key, modifiers)),
+                iced::Event::Keyboard(iced::keyboard::Event::ModifiersChanged(mods)) => {
+                    Some(Msg::Modifiers(mods))
+                }
+                iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                    Some(Msg::CursorMoved(position.x, position.y))
+                }
+                iced::Event::Window(iced::window::Event::Resized(size)) => {
+                    Some(Msg::WindowResized(size.width, size.height))
+                }
+                _ => None,
+            },
+        ));
+        if m.shot.is_some() {
+            subs.push(Shot::frames().map(|_| Msg::ShotTick));
+        }
+    }
+    Subscription::batch(subs)
+}
+
+pub fn theme_of(app: &App) -> iced::Theme {
+    match app {
+        App::Ready(m) => m.tokens.iced_theme(),
+        _ => default_tokens().iced_theme(),
+    }
+}
+
+fn default_tokens() -> Tokens {
+    match crate::gui::theme::system_theme() {
+        theme::ResolvedTheme::Light => Tokens::light(),
+        theme::ResolvedTheme::Warm => Tokens::warm(),
+        theme::ResolvedTheme::Dark => Tokens::dark(),
+    }
+}
+
+pub fn view(app: &App) -> Element<'_, Msg> {
+    match app {
+        App::Connecting => splash("Connecting to the oxdm daemon…".to_owned()),
+        App::Failed(e) => splash(format!("Could not reach the daemon: {e}")),
+        App::Ready(m) => main_view(m),
+    }
+}
+
+fn splash<'a>(message: String) -> Element<'a, Msg> {
+    let t = default_tokens();
+    container(
+        text(message)
+            .font(theme::BODY_MEDIUM)
+            .size(14.0)
+            .color(t.fg_2),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .align_x(Alignment::Center)
+    .align_y(Alignment::Center)
+    .style(move |_| container::Style {
+        background: Some(t.bg_page.into()),
+        ..Default::default()
+    })
+    .into()
+}
+
+fn main_view(m: &Main) -> Element<'_, Msg> {
+    let t = &m.tokens;
+
+    let body = column![
+        titlebar::titlebar(t, "oxdm", m.maximized, Msg::Window),
+        hairline(t.border_subtle),
+        row![
+            sidebar(m),
+            vdivider(t.border_subtle, f32::MAX),
+            column![
+                toolbar(m),
+                hairline(t.border_subtle),
+                tab_strip(m),
+                hairline(t.border_subtle),
+                table(m),
+            ]
+            .width(Length::Fill)
+            .height(Length::Fill),
+        ]
+        .height(Length::Fill),
+        hairline(t.border_subtle),
+        statusbar(m),
+    ];
+
+    let with_bg = container(body)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style({
+            let t = *t;
+            move |_| container::Style {
+                background: Some(t.bg_page.into()),
+                text_color: Some(t.fg_1),
+                ..Default::default()
+            }
+        });
+
+    let base: Element<'_, Msg> = with_bg.into();
+    let content: Element<'_, Msg> = if let Some(id) = m.context_menu {
+        context_menu_overlay(m, base, id)
+    } else if m.snap.conflict_head.is_some()
+        && matches!(m.overlay, Overlay::None | Overlay::Context)
+    {
+        main_dialogs::conflict(m, base)
+    } else {
+        match m.overlay {
+            Overlay::About => main_dialogs::about(m, base),
+            Overlay::Host => main_dialogs::host_settings(m, base),
+            Overlay::Remove => main_dialogs::remove_confirm(m, base),
+            Overlay::DbError => {
+                let err = m.db_error.clone().unwrap_or_default();
+                main_dialogs::db_error(m, base, &err)
+            }
+            Overlay::SecretsLocked => main_dialogs::secrets_locked(m, base),
+            _ => base,
+        }
+    };
+
+    chrome::resize::resizable(t, content, true, Msg::Window)
+}
+
+// ---------------------------------------------------------------- sidebar
+
+fn sidebar_row<'a>(
+    t: &Tokens,
+    leader: Element<'a, Msg>,
+    label: &str,
+    count: Option<u64>,
+    active: bool,
+    msg: Msg,
+) -> Element<'a, Msg> {
+    let t2 = *t;
+    let fg = if active { t.action_primary_fg } else { t.fg_2 };
+    let mut r = row![
+        leader,
+        text(label.to_owned())
+            .font(theme::BODY)
+            .size(12.0)
+            .color(fg)
+    ]
+    .spacing(theme::space::S2)
+    .align_y(Alignment::Center);
+    if let Some(n) = count {
+        let count_fg = if active {
+            color::with_alpha(iced::Color::WHITE, 0.85)
+        } else {
+            t.fg_3
+        };
+        r = r.push(iced::widget::Space::new().width(Length::Fill)).push(
+            text(n.to_string())
+                .font(theme::MONO)
+                .size(11.0)
+                .color(count_fg),
+        );
+    }
+    mouse_area(
+        container(r)
+            .width(Length::Fill)
+            .height(Length::Fixed(26.0))
+            .align_y(Alignment::Center)
+            .padding(iced::Padding {
+                left: 12.0,
+                right: 10.0,
+                ..Default::default()
+            })
+            .style(move |_| container::Style {
+                background: active.then(|| t2.action_primary.into()),
+                border: iced::Border {
+                    radius: theme::control::RADIUS.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+    )
+    .on_press(msg)
+    .interaction(iced::mouse::Interaction::Pointer)
+    .into()
+}
+
+fn section_header<'a>(t: &Tokens, label: &'a str, idx: u8, open: bool) -> Element<'a, Msg> {
+    let chev = if open {
+        "chevron-down"
+    } else {
+        "chevron-right"
+    };
+    mouse_area(
+        container(
+            row![
+                icons::icon(chev, 14.0, color::with_alpha(t.fg_3, 0.85)),
+                text(label.to_uppercase())
+                    .font(theme::BODY_BOLD)
+                    .size(10.0)
+                    .color(t.fg_3),
+            ]
+            .spacing(6.0)
+            .align_y(Alignment::Center),
+        )
+        .height(Length::Fixed(28.0))
+        .align_y(Alignment::Center)
+        .padding(iced::Padding {
+            left: 10.0,
+            ..Default::default()
+        }),
+    )
+    .on_press(Msg::ToggleSection(idx))
+    .interaction(iced::mouse::Interaction::Pointer)
+    .into()
+}
+
+fn queue_color(t: &Tokens, name: &str, builtin: bool) -> iced::Color {
+    if builtin {
+        return t.action_primary;
+    }
+    let palette = [
+        t.cat_music,
+        t.cat_programs,
+        t.cat_pictures,
+        t.cat_videos,
+        t.cat_documents,
+        t.cat_compressed,
+        t.status_info,
+        t.status_success,
+    ];
+    let mut h: u32 = 0;
+    for b in name.bytes() {
+        h = h.wrapping_mul(131).wrapping_add(b as u32);
+    }
+    palette[(h as usize) % palette.len()]
+}
+
+fn sidebar(m: &Main) -> Element<'_, Msg> {
+    let t = &m.tokens;
+    let mut col = column![]
+        .spacing(2.0)
+        .padding(iced::Padding::new(theme::space::S1));
+
+    // CATEGORIES
+    let cats_open = !m.collapsed_sections.contains(&0);
+    col = col.push(section_header(t, "Categories", 0, cats_open));
+    if cats_open {
+        let all_active = m.filter == SidebarFilter::All;
+        col = col.push(sidebar_row(
+            t,
+            icons::icon("layers", 17.0, leader_fg(t, all_active)),
+            "All downloads",
+            Some(m.cat_count(None)),
+            all_active,
+            Msg::SetFilter(SidebarFilter::All),
+        ));
+        for (cat, icon, label) in [
+            (Category::Compressed, "archive", "Compressed"),
+            (Category::Programs, "package", "Programs"),
+            (Category::Videos, "film", "Videos"),
+            (Category::Music, "music", "Music"),
+            (Category::Pictures, "image", "Pictures"),
+            (Category::Documents, "file-text", "Documents"),
+        ] {
+            let active = m.filter == SidebarFilter::Category(cat);
+            col = col.push(sidebar_row(
+                t,
+                icons::icon(icon, 17.0, leader_fg(t, active)),
+                label,
+                Some(m.cat_count(Some(cat))),
+                active,
+                Msg::SetFilter(SidebarFilter::Category(cat)),
+            ));
+        }
+    }
+
+    // QUEUES
+    let queues_open = !m.collapsed_sections.contains(&1);
+    col = col.push(section_header(t, "Queues", 1, queues_open));
+    if queues_open {
+        for q in &m.snap.queues {
+            let active = m.filter == SidebarFilter::Queue(q.id);
+            let count = m.snap.jobs.iter().filter(|j| j.queue_id == q.id).count() as u64;
+            col = col.push(sidebar_row(
+                t,
+                swatch(8.0, 2.0, queue_color(t, &q.name, q.builtin)),
+                &q.name,
+                Some(count),
+                active,
+                Msg::SetFilter(SidebarFilter::Queue(q.id)),
+            ));
+        }
+    }
+
+    // TOOLS
+    let tools_open = !m.collapsed_sections.contains(&2);
+    col = col.push(section_header(t, "Tools", 2, tools_open));
+    if tools_open {
+        for (action, icon, label) in [
+            (ToolAction::Scheduler, "calendar", "Scheduler"),
+            (ToolAction::Settings, "settings", "Settings"),
+            (ToolAction::BrowserExtension, "puzzle", "Browser extension"),
+            (ToolAction::PerHost, "globe", "Per host settings"),
+            (ToolAction::About, "info", "About"),
+        ] {
+            col = col.push(sidebar_row(
+                t,
+                icons::icon(icon, 17.0, t.fg_2),
+                label,
+                None,
+                false,
+                Msg::Tool(action),
+            ));
+        }
+    }
+
+    let t2 = *t;
+    container(scrollable(col).height(Length::Fill))
+        .width(Length::Fixed(SIDEBAR_W))
+        .height(Length::Fill)
+        .style(move |_| container::Style {
+            background: Some(t2.bg_sidebar.into()),
+            ..Default::default()
+        })
+        .into()
+}
+
+fn leader_fg(t: &Tokens, active: bool) -> iced::Color {
+    if active { t.action_primary_fg } else { t.fg_2 }
+}
+
+// ---------------------------------------------------------------- toolbar
+
+fn toolbar(m: &Main) -> Element<'_, Msg> {
+    let t = &m.tokens;
+    let queue_active = match m.filter {
+        SidebarFilter::Queue(q) => m.snap.active_queues.contains(&q),
+        _ => !m.snap.active_queues.is_empty(),
+    };
+    let bar = row![
+        Btn::new("Add URL")
+            .primary()
+            .icon("plus")
+            .on_press(Msg::Toolbar(ToolbarAction::AddUrl))
+            .view(t),
+        container(vdivider(t.border_subtle, 24.0)).padding([0.0, theme::space::S1]),
+        Btn::new("Pause queue")
+            .toolbar()
+            .icon("pause")
+            .enabled(queue_active)
+            .on_press(Msg::Toolbar(ToolbarAction::PauseQueue))
+            .view(t),
+        Btn::new("Stop all")
+            .toolbar()
+            .icon("square")
+            .on_press(Msg::Toolbar(ToolbarAction::StopAll))
+            .view(t),
+        Btn::new("Clean")
+            .toolbar()
+            .icon("trash-2")
+            .on_press(Msg::Toolbar(ToolbarAction::Clean))
+            .view(t),
+        container(vdivider(t.border_subtle, 24.0)).padding([0.0, theme::space::S1]),
+        Btn::new("Schedule")
+            .toolbar()
+            .icon("calendar")
+            .on_press(Msg::Toolbar(ToolbarAction::Schedule))
+            .view(t),
+        iced::widget::Space::new().width(Length::Fill),
+        search_field(t, &m.search, "Search...", 200.0, Msg::SetSearch),
+    ]
+    .spacing(theme::space::S2)
+    .align_y(Alignment::Center);
+
+    container(bar)
+        .width(Length::Fill)
+        .padding([theme::space::S2 - 2.0, theme::space::S4])
+        .into()
+}
+
+// ---------------------------------------------------------------- tabs
+
+fn tab_strip(m: &Main) -> Element<'_, Msg> {
+    let t = &m.tokens;
+    let base = m.sidebar_filtered();
+    let n_all = base.len() as u64;
+    let n_active = base.iter().filter(|j| !m.phase(j.id).is_terminal()).count() as u64;
+    let n_done = base
+        .iter()
+        .filter(|j| m.phase(j.id) == Phase::Completed)
+        .count() as u64;
+
+    container(row![
+        TabBtn::new("All")
+            .count(n_all)
+            .active(m.tab == Tab::All)
+            .on_press(Msg::SetTab(Tab::All))
+            .view(t),
+        TabBtn::new("Active")
+            .count(n_active)
+            .active(m.tab == Tab::Active)
+            .on_press(Msg::SetTab(Tab::Active))
+            .view(t),
+        TabBtn::new("Finished")
+            .count(n_done)
+            .active(m.tab == Tab::Finished)
+            .on_press(Msg::SetTab(Tab::Finished))
+            .view(t),
+    ])
+    .padding(iced::Padding {
+        left: theme::space::S4,
+        ..Default::default()
+    })
+    .width(Length::Fill)
+    .into()
+}
+
+// ---------------------------------------------------------------- table
+
+fn header_cell<'a>(m: &Main, label: &'a str, col: SortColumn, width: Length) -> Element<'a, Msg> {
+    let (active_col, desc) = m.sort;
+    container(col_header_sortable(
+        &m.tokens,
+        label,
+        active_col == col,
+        desc,
+        Msg::SetSort(col),
+    ))
+    .width(width)
+    .padding([0.0, theme::space::S2])
+    .align_y(Alignment::Center)
+    .height(Length::Fixed(HEADER_H))
+    .into()
+}
+
+fn table(m: &Main) -> Element<'_, Msg> {
+    let t = &m.tokens;
+    let header = container(row![
+        header_cell(m, "Name", SortColumn::Name, Length::Fill),
+        header_cell(m, "Size", SortColumn::Size, Length::Fixed(W_SIZE)),
+        header_cell(m, "Status", SortColumn::Status, Length::Fixed(W_STATUS)),
+        header_cell(m, "Speed", SortColumn::Speed, Length::Fixed(W_SPEED)),
+        header_cell(m, "Time left", SortColumn::Eta, Length::Fixed(W_ETA)),
+        header_cell(m, "Date added", SortColumn::Date, Length::Fixed(W_DATE)),
+    ])
+    .width(Length::Fill);
+
+    let jobs = m.visible_jobs();
+    let body: Element<'_, Msg> = if jobs.is_empty() {
+        empty_state(m)
+    } else {
+        let mut rows = column![];
+        for job in jobs {
+            rows = rows.push(job_row(m, job));
+        }
+        scrollable(rows)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    };
+
+    column![header, hairline(t.border_subtle), body,]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+fn empty_state(m: &Main) -> Element<'_, Msg> {
+    let t = &m.tokens;
+    let (title, hint) = match m.tab {
+        _ if !m.search.trim().is_empty() => ("No matches", "Try a different search."),
+        Tab::Active => (
+            "Nothing active",
+            "Queued and running downloads appear here.",
+        ),
+        Tab::Finished => ("Nothing finished yet", "Completed downloads appear here."),
+        Tab::All => ("No downloads yet", "Add a URL above to start."),
+    };
+    container(
+        column![
+            icons::icon("download", 39.0, t.fg_3),
+            text(title).font(theme::DISPLAY).size(20.0).color(t.fg_1),
+            text(hint).font(theme::BODY).size(13.0).color(t.fg_3),
+        ]
+        .spacing(theme::space::S2)
+        .align_x(Alignment::Center),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .align_x(Alignment::Center)
+    .padding(iced::Padding {
+        top: 90.0,
+        ..Default::default()
+    })
+    .into()
+}
+
+fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
+    let t = &m.tokens;
+    let id = job.id;
+    let selected = m.selection.contains(&id);
+    let c = m.counters.get(&id);
+    let phase = m.phase(id);
+
+    let name = job.filename.clone().unwrap_or_else(|| job.url.to_string());
+    let host = job.url.host_str().unwrap_or("").to_owned();
+
+    let name_cell = container(
+        column![
+            text(name).font(theme::BODY_BOLD).size(13.0).color(t.fg_1),
+            text(host).font(theme::MONO).size(10.0).color(t.fg_3),
+        ]
+        .spacing(2.0),
+    )
+    .width(Length::Fill)
+    .padding([0.0, theme::space::S2])
+    .align_y(Alignment::Center)
+    .height(Length::Fill);
+
+    let total = c.and_then(|c| c.total);
+    let size_cell = cell(
+        text(total.map(format_bytes).unwrap_or_else(|| "—".into()))
+            .font(theme::MONO)
+            .size(12.0)
+            .color(t.fg_2)
+            .into(),
+        Length::Fixed(W_SIZE),
+    );
+
+    let status_cell: Element<'_, Msg> = if phase.is_terminal()
+        || matches!(phase, Phase::Paused | Phase::Cancelled | Phase::Queued)
+    {
+        let (color, label) = phase_style(t, phase);
+        cell(status_dot(color, label, 12.0), Length::Fixed(W_STATUS))
+    } else {
+        let frac = match (c.map(|c| c.downloaded), total) {
+            (Some(d), Some(tot)) if tot > 0 => d as f64 / tot as f64,
+            _ => 0.0,
+        };
+        let (_, label) = phase_style(t, phase);
+        cell(
+            inline_progress(t, frac as f32, label, selected, Length::Fill, 22.0),
+            Length::Fixed(W_STATUS),
+        )
+    };
+
+    let speed = c.map(|c| c.speed_bps).unwrap_or(0.0);
+    let speed_cell = cell(
+        text(if phase == Phase::Downloading {
+            format_speed(speed)
+        } else {
+            "—".into()
+        })
+        .font(theme::MONO)
+        .size(12.0)
+        .color(t.fg_2)
+        .into(),
+        Length::Fixed(W_SPEED),
+    );
+
+    let eta_cell = cell(
+        text(eta_of(c).map(format_eta).unwrap_or_else(|| "—".into()))
+            .font(theme::MONO)
+            .size(12.0)
+            .color(t.fg_2)
+            .into(),
+        Length::Fixed(W_ETA),
+    );
+
+    let date_cell = cell(
+        text(format_short_date(&job.created_at))
+            .font(theme::MONO)
+            .size(11.0)
+            .color(t.fg_3)
+            .into(),
+        Length::Fixed(W_DATE),
+    );
+
+    let t2 = *t;
+    let bg = move |hovered: bool| {
+        if selected && hovered {
+            Some(color::mix(t2.bg_surface, t2.action_primary, 0.32))
+        } else if selected {
+            Some(color::mix(t2.bg_surface, t2.action_primary, 0.14))
+        } else if hovered {
+            Some(t2.bg_sunken)
+        } else {
+            None
+        }
+    };
+
+    let row_el = container(
+        row![
+            name_cell,
+            size_cell,
+            status_cell,
+            speed_cell,
+            eta_cell,
+            date_cell
+        ]
+        .align_y(Alignment::Center)
+        .height(Length::Fill),
+    )
+    .height(Length::Fixed(ROW_H))
+    .width(Length::Fill)
+    .style(move |_| container::Style {
+        background: bg(false).map(Into::into),
+        ..Default::default()
+    });
+
+    let (ctrl, shift) = (m.modifiers.command(), m.modifiers.shift());
+    mouse_area(row_el)
+        .on_press(Msg::RowClick(id, ctrl, shift))
+        .on_double_click(Msg::RowDoubleClick(id))
+        .on_right_press(Msg::RowRightClick(id))
+        .into()
+}
+
+fn cell(content: Element<'_, Msg>, width: Length) -> Element<'_, Msg> {
+    container(content)
+        .width(width)
+        .padding([0.0, theme::space::S2])
+        .align_y(Alignment::Center)
+        .height(Length::Fill)
+        .into()
+}
+
+fn phase_style(t: &Tokens, phase: Phase) -> (iced::Color, String) {
+    match phase {
+        Phase::Evaluating
+        | Phase::ResolvingConflicts
+        | Phase::Downloading
+        | Phase::Assembling
+        | Phase::Flushing
+        | Phase::Verifying => (t.action_primary, "Downloading".to_owned()),
+        Phase::Queued => (t.status_info, "Queued".to_owned()),
+        Phase::Paused => (t.fg_3, "Paused".to_owned()),
+        Phase::Cancelled => (t.fg_3, "Cancelled".to_owned()),
+        Phase::Completed => (t.status_success, "Complete".to_owned()),
+        Phase::Failed => (t.status_danger, "Failed".to_owned()),
+    }
+}
+
+fn format_short_date(dt: &chrono::DateTime<chrono::Utc>) -> String {
+    use chrono::Datelike;
+    let local = dt.with_timezone(&chrono::Local);
+    let now = chrono::Local::now();
+    let today = now.date_naive();
+    let date = local.date_naive();
+    let hm = local.format("%H:%M").to_string();
+    if date == today {
+        format!("Today, {hm}")
+    } else if date == today.pred_opt().unwrap_or(today) {
+        format!("Yesterday, {hm}")
+    } else if date.year() == today.year() {
+        local.format("%b %d").to_string()
+    } else {
+        local.format("%b %d, %Y").to_string()
+    }
+}
+
+// ---------------------------------------------------------------- statusbar
+
+fn statusbar(m: &Main) -> Element<'_, Msg> {
+    let t = &m.tokens;
+    let n_downloading = m
+        .snap
+        .jobs
+        .iter()
+        .filter(|j| m.phase(j.id) == Phase::Downloading)
+        .count();
+    let total_speed: f64 = m
+        .counters
+        .values()
+        .filter(|c| c.phase == Phase::Downloading)
+        .map(|c| c.speed_bps)
+        .sum();
+
+    let (dot_color, label) = if n_downloading > 0 {
+        (t.action_primary, format!("{n_downloading} downloading"))
+    } else {
+        (t.fg_4, "Idle".to_owned())
+    };
+
+    let queue_name = match m.filter {
+        SidebarFilter::Queue(q) => m
+            .snap
+            .queues
+            .iter()
+            .find(|x| x.id == q)
+            .map(|x| x.name.clone())
+            .unwrap_or_default(),
+        _ => "—".to_owned(),
+    };
+    let max_x = m
+        .snap
+        .queues
+        .iter()
+        .find(|q| matches!(m.filter, SidebarFilter::Queue(id) if id == q.id))
+        .and_then(|q| q.max_concurrent)
+        .unwrap_or(m.snap.settings.max_concurrent_downloads);
+
+    let sep = || {
+        container(crate::gui::widget::dot(3.0, m.tokens.fg_4))
+            .padding([0.0, theme::space::S1])
+            .align_y(Alignment::Center)
+    };
+
+    let mut left = row![
+        container(status_dot(dot_color, label, 11.0)).align_y(Alignment::Center),
+        sep(),
+        icons::icon(
+            "activity",
+            14.0,
+            if total_speed > 1.0 { t.fg_2 } else { t.fg_4 }
+        ),
+        text(if total_speed > 1.0 {
+            format_speed(total_speed)
+        } else {
+            "—".into()
+        })
+        .font(theme::BODY_BOLD)
+        .size(11.0)
+        .color(t.fg_2),
+        sep(),
+        text(format!("Queue: {queue_name}"))
+            .font(theme::BODY)
+            .size(11.0)
+            .color(t.fg_3),
+        sep(),
+        text(format!("max {max_x}\u{00d7}"))
+            .font(theme::BODY)
+            .size(11.0)
+            .color(t.fg_3),
+    ]
+    .spacing(theme::space::S2)
+    .align_y(Alignment::Center);
+
+    if !m.selection.is_empty() {
+        left = left.push(sep()).push(
+            text(format!(
+                "{}/{} selected",
+                m.selection.len(),
+                m.visible_jobs().len()
+            ))
+            .font(theme::BODY)
+            .size(11.0)
+            .color(t.fg_3),
+        );
+    }
+
+    let proxy_set = m
+        .snap
+        .settings
+        .proxy
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty());
+    let (proxy_icon, proxy_label) = if proxy_set {
+        ("shield", "Proxied")
+    } else {
+        ("globe", "Direct")
+    };
+    let free = free_disk_str(&m.snap.settings.download_dir);
+
+    let right = row![
+        Btn::new(free)
+            .toolbar()
+            .icon("hard-drive")
+            .size(BtnSize::Sm)
+            .on_press(Msg::Noop)
+            .view(t),
+        sep(),
+        Btn::new(proxy_label)
+            .toolbar()
+            .icon(proxy_icon)
+            .size(BtnSize::Sm)
+            .on_press(Msg::Tool(ToolAction::Settings))
+            .view(t),
+    ]
+    .spacing(theme::space::S2)
+    .align_y(Alignment::Center);
+
+    let t2 = *t;
+    container(
+        row![left, iced::widget::Space::new().width(Length::Fill), right]
+            .align_y(Alignment::Center),
+    )
+    .width(Length::Fill)
+    .height(Length::Fixed(28.0))
+    .padding([0.0, theme::space::S3])
+    .align_y(Alignment::Center)
+    .style(move |_| container::Style {
+        background: Some(t2.bg_sidebar.into()),
+        ..Default::default()
+    })
+    .into()
+}
+
+fn free_disk_str(path: &std::path::Path) -> String {
+    let mut probe = path;
+    let probe = loop {
+        if probe.exists() {
+            break probe;
+        }
+        match probe.parent() {
+            Some(p) => probe = p,
+            None => break path,
+        }
+    };
+    match fs4::available_space(probe) {
+        Ok(free) => format!("{} free", format_bytes(free)),
+        Err(_) => "— free".to_owned(),
+    }
+}
+
+// ---------------------------------------------------------------- context menu
+
+fn context_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>, id: JobId) -> Element<'a, Msg> {
+    let t = &m.tokens;
+    let phase = m.phase(id);
+    let t2 = *t;
+
+    let item = |icon: &'a str, label: &'a str, kbd: Option<&'a str>, enabled: bool, msg: Msg| {
+        let fg = if enabled { t2.fg_1 } else { t2.fg_4 };
+        let mut r = row![
+            icons::icon(icon, 15.0, fg),
+            text(label).font(theme::BODY).size(13.0).color(fg),
+        ]
+        .spacing(theme::space::S2)
+        .align_y(Alignment::Center);
+        if let Some(kbd) = kbd {
+            r = r.push(iced::widget::Space::new().width(Length::Fill)).push(
+                text(kbd).font(theme::MONO).size(11.0).color(if enabled {
+                    t2.fg_3
+                } else {
+                    t2.fg_4
+                }),
+            );
+        }
+        let inner = container(r)
+            .width(Length::Fill)
+            .height(Length::Fixed(28.0))
+            .align_y(Alignment::Center)
+            .padding([0.0, theme::space::S2]);
+        if enabled {
+            iced::widget::button(inner)
+                .padding(0)
+                .width(Length::Fill)
+                .style(move |_th, status| iced::widget::button::Style {
+                    background: matches!(
+                        status,
+                        iced::widget::button::Status::Hovered
+                            | iced::widget::button::Status::Pressed
+                    )
+                    .then(|| t2.bg_sunken.into()),
+                    text_color: fg,
+                    border: iced::Border {
+                        radius: theme::radius::XS.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .on_press(msg)
+                .into()
+        } else {
+            Element::from(inner)
+        }
+    };
+    let separator = || {
+        container(hairline(t2.border_subtle))
+            .padding([theme::space::S0, 0.0])
+            .width(Length::Fill)
+    };
+
+    let can_resume = matches!(phase, Phase::Paused | Phase::Cancelled | Phase::Failed);
+    let can_pause = phase.is_running();
+    let done = phase == Phase::Completed;
+
+    let menu = container(
+        column![
+            item(
+                "file",
+                "Open",
+                Some("Ctrl+O"),
+                done,
+                Msg::Context(ContextAction::Open)
+            ),
+            item(
+                "folder",
+                "Open Containing Folder",
+                Some("Ctrl+F"),
+                true,
+                Msg::Context(ContextAction::OpenFolder)
+            ),
+            item(
+                "play",
+                "Resume",
+                Some("Ctrl+R"),
+                can_resume,
+                Msg::Context(ContextAction::Resume)
+            ),
+            item(
+                "pause",
+                "Pause",
+                Some("Ctrl+P"),
+                can_pause,
+                Msg::Context(ContextAction::Pause)
+            ),
+            separator(),
+            item(
+                "trash-2",
+                "Delete",
+                Some("Delete"),
+                true,
+                Msg::Context(ContextAction::Delete)
+            ),
+            item(
+                "rotate-cw",
+                "Restart Download",
+                None,
+                true,
+                Msg::Context(ContextAction::Restart)
+            ),
+            item(
+                "copy",
+                "Copy URL",
+                None,
+                true,
+                Msg::Context(ContextAction::CopyUrl)
+            ),
+            separator(),
+            item(
+                "info",
+                "Show Properties",
+                None,
+                true,
+                Msg::Context(ContextAction::Properties)
+            ),
+        ]
+        .width(Length::Fixed(260.0)),
+    )
+    .padding(theme::space::S1)
+    .style(move |_| container::Style {
+        background: Some(t2.bg_raised.into()),
+        border: iced::Border {
+            color: t2.border_default,
+            width: 1.0,
+            radius: theme::radius::SM.into(),
+        },
+        shadow: iced::Shadow {
+            color: color::with_alpha(iced::Color::BLACK, 80.0 / 255.0),
+            offset: iced::Vector::new(0.0, 4.0),
+            blur_radius: 16.0,
+        },
+        ..Default::default()
+    });
+
+    let scrim = mouse_area(
+        container(iced::widget::Space::new())
+            .width(Length::Fill)
+            .height(Length::Fill),
+    )
+    .on_press(Msg::CloseOverlay)
+    .on_right_press(Msg::CloseOverlay);
+
+    // Anchor at the cursor (egui opens context menus at the click
+    // point); clamp so the menu stays inside the window.
+    let (cx, cy) = m.cursor;
+    let (mw, mh) = (268.0, 290.0);
+    let (ww, wh) = if m.win_size.0 > 0.0 {
+        m.win_size
+    } else {
+        (1240.0, 760.0)
+    };
+    let left = cx.min(ww - mw).max(0.0);
+    let top = cy.min(wh - mh).max(0.0);
+    iced::widget::stack![
+        base,
+        scrim,
+        container(menu).padding(iced::Padding {
+            left,
+            top,
+            ..Default::default()
+        }),
+    ]
+    .into()
+}
+
+// ---------------------------------------------------------------- launch
+
+pub fn launch_main() {
+    let saved = crate::gui::ui_prefs::load().window;
+    let size = saved
+        .map(|w| iced::Size::new(w.width.max(820.0), w.height.max(520.0)))
+        .unwrap_or(iced::Size::new(1240.0, 760.0));
+    let mut app = iced::application(boot, update, view)
+        .title(|_: &App| "oxdm".to_owned())
+        .theme(theme_of)
+        .subscription(subscription)
+        .default_font(theme::BODY)
+        .antialiasing(true)
+        .window(chrome::window_settings(size, iced::Size::new(820.0, 520.0)));
+    for f in theme::fonts::ALL {
+        app = app.font(*f);
+    }
+    if let Err(e) = app.run() {
+        eprintln!("gui error: {e}");
+        std::process::exit(1);
+    }
+}

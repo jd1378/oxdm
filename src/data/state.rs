@@ -926,7 +926,7 @@ impl AppState {
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(200));
             let mut cmd = std::process::Command::new(&exe);
-            crate::ui::attach_close_high_fds(&mut cmd);
+            crate::platform::attach_close_high_fds(&mut cmd);
             #[cfg(unix)]
             {
                 use std::os::unix::process::CommandExt;
