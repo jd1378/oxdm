@@ -85,6 +85,11 @@ pub struct Settings {
     pub update_feed_url: String,
     /// UI theme.
     pub theme: Theme,
+    /// Control / row sizing density. `Comfortable` is the default
+    /// touch-friendly spacing; `Compact` tightens control heights and
+    /// row padding for dense lists.
+    #[serde(default)]
+    pub ui_density: Density,
     /// Honour reduce-motion. When `true`, animation sites bypass
     /// `animate_value_with_time` and paint the final value directly.
     /// Mirrors CSS `prefers-reduced-motion: reduce`. See
@@ -157,6 +162,16 @@ pub enum Theme {
     Light,
     Dark,
     Warm,
+}
+
+/// UI sizing density. Drives control heights / row padding in the
+/// presentation layer (`theme::control` picks an `H_*` set per value).
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Density {
+    #[default]
+    Comfortable,
+    Compact,
 }
 
 /// Per `PLAN §9 / §5`: how oxdm reacts when a backgrounded job hits a
@@ -273,6 +288,7 @@ impl Default for Settings {
             show_complete_dialog: true,
             update_feed_url: String::new(),
             theme: Theme::System,
+            ui_density: Density::Comfortable,
             reduce_motion: false,
             theme_overrides: IndexMap::new(),
             category_extensions: IndexMap::new(),

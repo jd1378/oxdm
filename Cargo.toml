@@ -37,6 +37,9 @@ aes-gcm = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["http2", "gzip", "brotli", "native-tls", "stream", "json"] }
 semver = "1"
 sha2 = "0.10"
+sha1 = "0.10"
+md-5 = "0.10"
+trash = "5"
 libc = "0.2"
 fs4 = "0.13"
 interprocess = { version = "2", features = ["tokio"] }

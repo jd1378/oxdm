@@ -92,3 +92,39 @@ pub struct Checksum {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected: Option<String>,
 }
+
+/// Compute the hex digest of a file with the given algorithm by streaming it
+/// in chunks (constant memory regardless of file size). Blocking I/O — call
+/// off any async UI executor.
+///
+/// Lives in `domain` so the GUI can verify a completed download's integrity
+/// without importing the download engine's hasher (keeps layering intact).
+pub fn compute_file(path: &std::path::Path, algo: Algo) -> std::io::Result<String> {
+    use std::io::Read;
+
+    /// 1 MiB read buffer — balances syscall count against memory.
+    const CHUNK: usize = 1 << 20;
+
+    fn stream<D: sha2::digest::Digest>(mut f: std::fs::File) -> std::io::Result<Vec<u8>> {
+        let mut hasher = D::new();
+        let mut buf = vec![0u8; CHUNK];
+        loop {
+            let n = f.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        Ok(hasher.finalize().to_vec())
+    }
+
+    let f = std::fs::File::open(path)?;
+    let bytes = match algo {
+        Algo::Md5 => stream::<md5::Md5>(f)?,
+        Algo::Sha1 => stream::<sha1::Sha1>(f)?,
+        Algo::Sha256 => stream::<sha2::Sha256>(f)?,
+        Algo::Sha384 => stream::<sha2::Sha384>(f)?,
+        Algo::Sha512 => stream::<sha2::Sha512>(f)?,
+    };
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}

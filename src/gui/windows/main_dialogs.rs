@@ -15,7 +15,7 @@ use crate::gui::widget::{
 };
 use crate::gui::{color, icons};
 
-use super::main::{Main, Msg};
+use super::main::{Main, Msg, RemoveKind};
 
 // ---------------------------------------------------------------- states
 
@@ -93,6 +93,8 @@ pub struct RemoveState {
     pub ids: Vec<crate::domain::JobId>,
     pub filename: String,
     pub completed: bool,
+    /// Destructive disposition pre-selected by the context-menu morph.
+    pub kind: RemoveKind,
     pub delete_on_disk: bool,
     pub dont_ask_again: bool,
 }
@@ -555,12 +557,50 @@ pub fn host_settings<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg
 pub fn remove_confirm<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg> {
     let t = &m.tokens;
     let t2 = *t;
-    let st = m.remove.as_ref().expect("remove overlay state");
+    // Defensive: the overlay is only shown with state present, but a
+    // future edit could set `Overlay::Remove` without it — degrade to
+    // the base view instead of panicking.
+    let Some(st) = m.remove.as_ref() else {
+        return base;
+    };
 
-    let message = if st.completed {
-        "This only removes the entry from oxdm."
-    } else {
-        "Partial (.part) files will be deleted from disk."
+    // Headline/accent/CTA morph with the pre-selected kind (B4: the
+    // modifier picked the option, this dialog still confirms it).
+    let (hero_icon, hero_color, message, cta_label, cta_icon): (
+        &str,
+        iced::Color,
+        &str,
+        &str,
+        &str,
+    ) = match st.kind {
+        RemoveKind::Trash => (
+            "trash-2",
+            color::ochre::O400,
+            "The file will be moved to your system Trash (recoverable).",
+            "Move to Trash",
+            "trash-2",
+        ),
+        RemoveKind::Permanent => (
+            "triangle-alert",
+            color::rust::R300,
+            "The file will be permanently deleted from disk. This cannot be undone.",
+            "Delete permanently",
+            "trash-2",
+        ),
+        RemoveKind::Entry if st.completed => (
+            "triangle-alert",
+            t.status_danger,
+            "This only removes the entry from oxdm.",
+            "Remove",
+            "trash-2",
+        ),
+        RemoveKind::Entry => (
+            "triangle-alert",
+            t.status_danger,
+            "Partial (.part) files will be deleted from disk.",
+            "Remove",
+            "trash-2",
+        ),
     };
     let dont_label = if st.completed {
         "Don't ask again for completed downloads"
@@ -571,7 +611,7 @@ pub fn remove_confirm<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Ms
     let mut card = column![
         container(
             row![
-                icons::icon("triangle-alert", 22.0, t.status_danger),
+                icons::icon(hero_icon, 22.0, hero_color),
                 column![
                     text(st.filename.clone())
                         .font(theme::BODY_BOLD)
@@ -598,7 +638,9 @@ pub fn remove_confirm<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Ms
     ]
     .spacing(theme::space::S3);
 
-    if st.completed {
+    // On-disk delete toggle: meaningful only for completed entries that
+    // aren't going to Trash (Trash moves the file itself).
+    if st.completed && st.kind != RemoveKind::Trash {
         card = card.push(checkbox(
             t,
             "Also delete file on disk",
@@ -607,13 +649,17 @@ pub fn remove_confirm<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Ms
             Msg::RemoveDeleteOnDisk,
         ));
     }
-    card = card.push(checkbox(
-        t,
-        dont_label,
-        st.dont_ask_again,
-        true,
-        Msg::RemoveDontAsk,
-    ));
+    // "Don't ask again" only applies to the safe entry-only removal —
+    // irreversible kinds always confirm (B4), so don't offer to skip it.
+    if st.kind == RemoveKind::Entry {
+        card = card.push(checkbox(
+            t,
+            dont_label,
+            st.dont_ask_again,
+            true,
+            Msg::RemoveDontAsk,
+        ));
+    }
     card = card.push(
         row![
             iced::widget::Space::new().width(Length::Fill),
@@ -622,9 +668,9 @@ pub fn remove_confirm<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Ms
                 .icon("x")
                 .on_press(Msg::CloseOverlay)
                 .view(t),
-            Btn::new("Remove")
+            Btn::new(cta_label)
                 .danger_filled()
-                .icon("trash-2")
+                .icon(cta_icon)
                 .on_press(Msg::RemoveConfirm)
                 .view(t),
         ]
@@ -804,6 +850,173 @@ pub fn db_error<'a>(m: &'a Main, base: Element<'a, Msg>, error: &str) -> Element
     ]
     .spacing(theme::space::S3);
     modal(t, base, card.into(), 460.0, None)
+}
+
+// ------------------------------------------------------ browser extensions
+
+// Each vendor's extension store landing page (design §3.8). We do NOT
+// fake an "Installed ✓" state — there is no reliable detection — so the
+// button always reads "Open store page". Brave/Arc reuse the Chrome
+// Web Store; Safari ships via the Mac App Store.
+const BROWSER_STORES: [(&str, &str, &str); 7] = [
+    (
+        "Chrome",
+        "Chrome Web Store",
+        "https://chromewebstore.google.com/",
+    ),
+    (
+        "Firefox",
+        "Firefox Add-ons",
+        "https://addons.mozilla.org/firefox/",
+    ),
+    (
+        "Edge",
+        "Edge Add-ons",
+        "https://microsoftedge.microsoft.com/addons/",
+    ),
+    (
+        "Brave",
+        "Chrome Web Store",
+        "https://chromewebstore.google.com/",
+    ),
+    (
+        "Opera",
+        "Opera Add-ons",
+        "https://addons.opera.com/extensions/",
+    ),
+    (
+        "Arc",
+        "Chrome Web Store",
+        "https://chromewebstore.google.com/",
+    ),
+    ("Safari", "Mac App Store", "https://apps.apple.com/"),
+];
+
+pub fn browser_extensions<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg> {
+    let t = &m.tokens;
+    let t2 = *t;
+
+    // Hero band (design `.fr-hero`): clay-tinted glow + flow title.
+    let glow = color::mix(t.bg_surface, t.action_primary, 0.12);
+    let tile_bg = color::mix(t.bg_surface, t.action_primary, 0.20);
+    let hero = container(
+        column![
+            container(icons::icon("puzzle", 30.0, t.action_primary))
+                .width(Length::Fixed(56.0))
+                .height(Length::Fixed(56.0))
+                .align_x(Alignment::Center)
+                .align_y(Alignment::Center)
+                .style(move |_| container::Style {
+                    background: Some(tile_bg.into()),
+                    border: iced::Border {
+                        radius: theme::radius::SM.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            text("Capture downloads from your browser")
+                .font(theme::DISPLAY)
+                .size(20.0)
+                .color(t.fg_1),
+            text("Install the oxdm helper extension to send links straight to oxdm.")
+                .font(theme::BODY)
+                .size(13.0)
+                .color(t.fg_2),
+        ]
+        .spacing(theme::space::S2)
+        .align_x(Alignment::Center),
+    )
+    .width(Length::Fill)
+    .padding(theme::space::S4)
+    .style(move |_| container::Style {
+        background: Some(glow.into()),
+        border: iced::Border {
+            color: t2.border_subtle,
+            width: 1.0,
+            radius: theme::surface::RADIUS.into(),
+        },
+        ..Default::default()
+    });
+
+    let mut list = column![].spacing(theme::space::S1);
+    for (name, store, url) in BROWSER_STORES {
+        let mark = container(
+            text(name.chars().next().unwrap_or('?').to_string())
+                .font(theme::DISPLAY)
+                .size(15.0)
+                .color(t.action_primary),
+        )
+        .width(Length::Fixed(32.0))
+        .height(Length::Fixed(32.0))
+        .align_x(Alignment::Center)
+        .align_y(Alignment::Center)
+        .style(move |_| container::Style {
+            background: Some(tile_bg.into()),
+            border: iced::Border {
+                radius: theme::radius::SM.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let r = row![
+            mark,
+            column![
+                text(name).font(theme::BODY_BOLD).size(13.0).color(t.fg_1),
+                text(store).font(theme::MONO).size(10.0).color(t.fg_3),
+            ]
+            .spacing(2.0),
+            iced::widget::Space::new().width(Length::Fill),
+            Btn::new("Open store page")
+                .secondary()
+                .size(BtnSize::Sm)
+                .icon("globe")
+                .on_press(Msg::OpenStore(url))
+                .view(t),
+        ]
+        .spacing(theme::space::S3)
+        .align_y(Alignment::Center);
+        list = list.push(
+            container(r)
+                .width(Length::Fill)
+                .padding([theme::space::S1, theme::space::S2])
+                .style(move |_| container::Style {
+                    background: Some(t2.bg_raised.into()),
+                    border: iced::Border {
+                        color: t2.border_subtle,
+                        width: 1.0,
+                        radius: theme::radius::SM.into(),
+                    },
+                    ..Default::default()
+                }),
+        );
+    }
+
+    let privacy = row![
+        icons::icon("shield", 14.0, t.status_success),
+        text("The extension reads only download URLs — never page content or browsing history.")
+            .font(theme::BODY)
+            .size(11.0)
+            .color(t.fg_3),
+    ]
+    .spacing(6.0)
+    .align_y(Alignment::Center);
+
+    let card = column![
+        hero,
+        scrollable(list).height(Length::Fixed(264.0)),
+        privacy,
+        row![
+            iced::widget::Space::new().width(Length::Fill),
+            Btn::new("Close")
+                .ghost()
+                .on_press(Msg::CloseOverlay)
+                .view(t),
+        ]
+        .align_y(Alignment::Center),
+    ]
+    .spacing(theme::space::S3);
+
+    modal(t, base, card.into(), 560.0, Some(Msg::CloseOverlay))
 }
 
 pub fn secrets_locked<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg> {

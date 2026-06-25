@@ -9,7 +9,7 @@ use iced::widget::{column, container, mouse_area, row, scrollable, text};
 use iced::{Alignment, Element, Length, Subscription, Task};
 
 use super::main_dialogs::{self, AboutState, HostState, RemoveState, UpdateUi};
-use crate::domain::{Category, JobId, Phase, QueueId};
+use crate::domain::{Category, Density, JobId, Phase, QueueId};
 use crate::gui::chrome::{self, WindowControl, titlebar};
 use crate::gui::format::{format_bytes, format_eta, format_speed};
 use crate::gui::ipc::DaemonSignal;
@@ -25,8 +25,37 @@ use crate::ipc_local::protocol::{Event, JobCounters, SnapshotData};
 
 const SIDEBAR_W: f32 = 232.0; // design `.main-grid` sidebar column = 232px
 const RESIZE_HANDLE_W: f32 = 6.0;
-const ROW_H: f32 = 48.0;
 const HEADER_H: f32 = 22.0;
+
+// Row heights per UI `Density` (design `--density`). Comfortable keeps
+// the roomy default; Compact tightens the vertical rhythm. Applied to
+// the jobs-table row and the sidebar/list nav rows only.
+const ROW_H_COMFORTABLE: f32 = 48.0;
+const ROW_H_COMPACT: f32 = 40.0;
+const SIDEBAR_ROW_H_COMFORTABLE: f32 = 26.0;
+const SIDEBAR_ROW_H_COMPACT: f32 = 22.0;
+
+// Queue live-dot (design `.q-live-dot`): a small moss dot shown next to
+// a queue's color chip while that queue has ≥1 running job.
+const LIVE_DOT_SIZE: f32 = 7.0;
+
+// Toast (design `.toast`): bottom-right surface card with a 3px left
+// accent border, auto-dismissed after `TOAST_TTL_MS`.
+const TOAST_TTL_MS: u64 = 3000;
+const TOAST_ACCENT_W: f32 = 3.0;
+const TOAST_W: f32 = 320.0;
+const TOAST_GAP: f32 = 8.0;
+const TOAST_MARGIN: f32 = 16.0;
+
+// Pulse clock (design `pulse` keyframe). Drives the live-dot's alpha;
+// the whole subscription is gated on `!reduce_motion` (W6).
+const PULSE_TICK_MS: u64 = 60;
+const PULSE_SPEED: f32 = 3.2; // radians/sec of the sine pulse
+const PULSE_MIN_ALPHA: f32 = 0.35;
+
+// Drag-to-add overlay (design `.drag-overlay`): full-window clay wash
+// (`rgba(201,112,63,.88)` ≈ clay-400 @ .88) with a centered glyph tile.
+const DRAG_WASH_ALPHA: f32 = 0.88;
 
 // Resize grip (design `ResizableHeader`): 1px quiet idle grip, 3px
 // clay grip at ~70% height on hover, 3px clay-500 while dragging.
@@ -116,9 +145,20 @@ pub enum Msg {
     HostUserAgent(String),
     HostSave,
     // Remove overlay
+    RemoveAs(RemoveKind),
     RemoveDeleteOnDisk(bool),
     RemoveDontAsk(bool),
     RemoveConfirm,
+    // Drag-to-add (design `.drag-overlay`)
+    DragHover(bool),
+    DragDropped(std::path::PathBuf),
+    // Toasts (design `.toast`)
+    Toast(ToastSeverity, String),
+    ToastExpired(u64),
+    // Pulse clock for the queue live-dot (gated on !reduce_motion)
+    AnimTick,
+    // Browser-extensions overlay store link
+    OpenStore(&'static str),
     // Conflict / recovery
     Conflict(JobId, u64, crate::data::ConflictKind, ConflictChoice),
     DbExit,
@@ -154,10 +194,37 @@ pub enum ContextAction {
     OpenFolder,
     Resume,
     Pause,
-    Delete,
     Restart,
     CopyUrl,
     Properties,
+}
+
+/// How the destructive context-menu row resolves once confirmed.
+/// Modifiers morph the row (Finder-like); confirmation is never skipped
+/// (B4) — the kind only PRE-SELECTS the destructive option.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoveKind {
+    /// "Remove from list" — entry only (purges `.part` for incomplete).
+    Entry,
+    /// ⇧ "Move to Trash" — recoverable; final file to the OS trash.
+    Trash,
+    /// ⇧⌥ "Delete permanently" — irreversible on-disk delete.
+    Permanent,
+}
+
+/// Toast severity drives the 3px left-accent color (design `.toast`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToastSeverity {
+    Info,
+    Success,
+    Error,
+}
+
+#[derive(Debug, Clone)]
+pub struct Toast {
+    pub id: u64,
+    pub severity: ToastSeverity,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,6 +245,7 @@ pub enum Overlay {
     About,
     Host,
     Remove,
+    BrowserExtensions,
     DbError,
     SecretsLocked,
 }
@@ -220,6 +288,15 @@ pub struct Main {
     pub col_handle_hover: Option<SortColumn>,
     pub columns_menu: bool,
     pub shot: Option<Shot>,
+    /// Active toasts, newest last (rendered bottom-right).
+    pub toasts: Vec<Toast>,
+    pub next_toast_id: u64,
+    /// A URL/file is being dragged over the window (drag-to-add wash).
+    pub drag_hover: bool,
+    /// Accumulating pulse clock for the queue live-dot (seconds).
+    pub anim_t: f32,
+    /// Job count at the last snapshot — used to toast genuine adds.
+    pub prev_job_count: usize,
 }
 
 impl Main {
@@ -262,8 +339,51 @@ impl Main {
             col_handle_hover: None,
             columns_menu: false,
             shot: Shot::from_env(),
+            toasts: Vec::new(),
+            next_toast_id: 0,
+            drag_hover: false,
+            anim_t: 0.0,
+            prev_job_count: snap.jobs.len(),
             snap,
         }
+    }
+
+    /// Table row height for the active UI density.
+    fn row_h(&self) -> f32 {
+        match self.snap.settings.ui_density {
+            Density::Comfortable => ROW_H_COMFORTABLE,
+            Density::Compact => ROW_H_COMPACT,
+        }
+    }
+
+    /// Sidebar/list nav row height for the active UI density.
+    fn sidebar_row_h(&self) -> f32 {
+        match self.snap.settings.ui_density {
+            Density::Comfortable => SIDEBAR_ROW_H_COMFORTABLE,
+            Density::Compact => SIDEBAR_ROW_H_COMPACT,
+        }
+    }
+
+    /// Queue ids that currently host ≥1 running job (N2: keyed off
+    /// `Phase::is_running`, not `== Downloading`).
+    fn live_queues(&self) -> HashSet<QueueId> {
+        self.snap
+            .jobs
+            .iter()
+            .filter(|j| self.phase(j.id).is_running())
+            .map(|j| j.queue_id)
+            .collect()
+    }
+
+    fn push_toast(&mut self, severity: ToastSeverity, message: String) -> u64 {
+        let id = self.next_toast_id;
+        self.next_toast_id += 1;
+        self.toasts.push(Toast {
+            id,
+            severity,
+            message,
+        });
+        id
     }
 
     fn phase(&self, id: JobId) -> Phase {
@@ -407,6 +527,18 @@ fn refresh(client: Arc<Client>) -> Task<Msg> {
     })
 }
 
+/// Push a toast and schedule its expiry. The TTL timer is a one-shot
+/// task keyed to the toast id (no periodic subscription needed).
+fn spawn_toast(m: &mut Main, severity: ToastSeverity, message: String) -> Task<Msg> {
+    let id = m.push_toast(severity, message);
+    Task::perform(
+        async move {
+            tokio::time::sleep(std::time::Duration::from_millis(TOAST_TTL_MS)).await;
+        },
+        move |_| Msg::ToastExpired(id),
+    )
+}
+
 pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
     match msg {
         Msg::Connected(Ok((client, snap, db_error, secrets_locked))) => {
@@ -445,9 +577,22 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
         Msg::Snapshot(snap) => {
             m.tokens = Tokens::from_settings(&snap.settings);
             m.counters = snap.counters.iter().map(|c| (c.id, c.clone())).collect();
+            let new_count = snap.jobs.len();
+            // Toast genuine adds (count grew). Removals are toasted from
+            // the confirm path, so only surface increases here.
+            let added = new_count.saturating_sub(m.prev_job_count);
+            m.prev_job_count = new_count;
             m.snap = snap;
             m.selection
                 .retain(|id| m.snap.jobs.iter().any(|j| j.id == *id));
+            if added > 0 {
+                let msg = if added == 1 {
+                    "Download added".to_owned()
+                } else {
+                    format!("{added} downloads added")
+                };
+                return spawn_toast(m, ToastSeverity::Info, msg);
+            }
             Task::none()
         }
         Msg::Daemon(DaemonSignal::Lost) => iced::exit(),
@@ -746,6 +891,38 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                 },
             )
         }
+        Msg::RemoveAs(kind) => {
+            m.context_menu = None;
+            request_remove(m, kind)
+        }
+        Msg::DragHover(on) => {
+            m.drag_hover = on;
+            Task::none()
+        }
+        Msg::DragDropped(path) => {
+            m.drag_hover = false;
+            // iced only delivers file drops (paths); a path string is a
+            // valid Add prefill (the Add flow resolves URLs vs files).
+            let prefill = path.to_string_lossy().into_owned();
+            if prefill.trim().is_empty() {
+                return Task::none();
+            }
+            let client = m.client.clone();
+            act(async move { client.open_add_window(None, Some(prefill)).await })
+        }
+        Msg::Toast(severity, message) => spawn_toast(m, severity, message),
+        Msg::ToastExpired(id) => {
+            m.toasts.retain(|t| t.id != id);
+            Task::none()
+        }
+        Msg::AnimTick => {
+            m.anim_t += PULSE_TICK_MS as f32 / 1000.0;
+            Task::none()
+        }
+        Msg::OpenStore(url) => {
+            crate::platform::open_url(url);
+            Task::none()
+        }
         Msg::RemoveDeleteOnDisk(v) => {
             if let Some(r) = &mut m.remove {
                 r.delete_on_disk = v;
@@ -763,17 +940,51 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             let Some(r) = m.remove.take() else {
                 return Task::none();
             };
+            let trash = matches!(r.kind, RemoveKind::Trash);
+            // Resolve final paths up-front (the snapshot is borrowed
+            // here; the async block must own its data).
+            let trash_paths: Vec<std::path::PathBuf> = if trash {
+                r.ids
+                    .iter()
+                    .filter_map(|id| {
+                        m.snap.jobs.iter().find(|j| j.id == *id).and_then(|j| {
+                            j.status
+                                .final_path
+                                .clone()
+                                .or_else(|| j.filename.as_ref().map(|f| j.save_dir.join(f)))
+                        })
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let n = r.ids.len();
             let client = m.client.clone();
             let mut settings = m.snap.settings.clone();
             Task::perform(
                 async move {
+                    // N4: surface the FIRST trash failure as an error
+                    // toast (no DBus / cross-device → never silent). The
+                    // entry is still removed below so the list stays sane.
+                    let mut trash_err: Option<String> = None;
+                    for p in trash_paths {
+                        let res = tokio::task::spawn_blocking(move || trash::delete(&p))
+                            .await
+                            .map_err(|e| e.to_string())
+                            .and_then(|r| r.map_err(|e| e.to_string()));
+                        if let Err(e) = res {
+                            trash_err.get_or_insert(e);
+                        }
+                    }
                     for id in &r.ids {
                         let _ = client
                             .remove(
                                 *id,
                                 crate::data::RemoveOpts {
                                     purge_partial: !r.completed,
-                                    delete_final_file: r.completed && r.delete_on_disk,
+                                    // Trash already moved the file; never
+                                    // double-delete on disk.
+                                    delete_final_file: r.completed && r.delete_on_disk && !trash,
                                 },
                             )
                             .await;
@@ -786,8 +997,21 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                         }
                         let _ = client.update_settings(settings).await;
                     }
+                    trash_err
                 },
-                |_| Msg::Noop,
+                move |trash_err| match trash_err {
+                    Some(e) => {
+                        Msg::Toast(ToastSeverity::Error, format!("Couldn't move to Trash: {e}"))
+                    }
+                    None => {
+                        let what = if n == 1 {
+                            "Removed download".to_owned()
+                        } else {
+                            format!("Removed {n} downloads")
+                        };
+                        Msg::Toast(ToastSeverity::Success, what)
+                    }
+                },
             )
         }
         Msg::Conflict(id, token, kind, choice) => {
@@ -945,11 +1169,10 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                 ToolAction::Settings => {
                     act(async move { client.open_settings_window(None, false).await })
                 }
-                ToolAction::BrowserExtension => act(async move {
-                    client
-                        .open_settings_window(Some("browser".into()), false)
-                        .await
-                }),
+                ToolAction::BrowserExtension => {
+                    m.overlay = Overlay::BrowserExtensions;
+                    Task::none()
+                }
                 ToolAction::PerHost => {
                     m.overlay = Overlay::Host;
                     m.host = HostState::default();
@@ -1000,7 +1223,9 @@ fn handle_key(
                 .chain(iced::exit())
         }
         Key::Named(Named::Delete) if !m.selection.is_empty() && m.overlay == Overlay::None => {
-            request_remove(m)
+            // Keyboard Delete is the SAFE default (entry only); the
+            // destructive escalation lives on the context menu.
+            request_remove(m, RemoveKind::Entry)
         }
         Key::Named(Named::Escape) => update_main(m, Msg::CloseOverlay),
         _ => Task::none(),
@@ -1008,8 +1233,9 @@ fn handle_key(
 }
 
 /// Delete request: show the confirm overlay when settings demand it,
-/// else remove immediately.
-fn request_remove(m: &mut Main) -> Task<Msg> {
+/// else remove immediately. `kind` PRE-SELECTS the destructive option
+/// (B4) — confirmation is NEVER skipped for the irreversible kinds.
+fn request_remove(m: &mut Main, kind: RemoveKind) -> Task<Msg> {
     let ids: Vec<JobId> = m.selection.iter().copied().collect();
     if ids.is_empty() {
         return Task::none();
@@ -1034,10 +1260,16 @@ fn request_remove(m: &mut Main) -> Task<Msg> {
         ids,
         filename,
         completed,
-        delete_on_disk: false,
+        kind,
+        // Permanent pre-checks "also delete file on disk" for completed
+        // entries; the user can still untick before confirming.
+        delete_on_disk: matches!(kind, RemoveKind::Permanent) && completed,
         dont_ask_again: false,
     });
-    if need_confirm {
+    // Trash / Permanent are irreversible → ALWAYS confirm (B4); only the
+    // safe entry-only removal honors the "don't ask again" preference.
+    let force_confirm = !matches!(kind, RemoveKind::Entry);
+    if need_confirm || force_confirm {
         m.overlay = Overlay::Remove;
         Task::none()
     } else {
@@ -1075,7 +1307,6 @@ fn context_action(m: &mut Main, action: ContextAction) -> Task<Msg> {
             }
             Ok(())
         }),
-        ContextAction::Delete => request_remove(m),
         ContextAction::Restart => act(async move {
             for id in ids {
                 client.restart_job(id).await?;
@@ -1122,14 +1353,46 @@ pub fn subscription(app: &App) -> Subscription<Msg> {
                 iced::Event::Window(iced::window::Event::Resized(size)) => {
                     Some(Msg::WindowResized(size.width, size.height))
                 }
+                // Drag-to-add (design `.drag-overlay`). NOTE: file-drop
+                // events are compositor-dependent and may not deliver on
+                // all Wayland/X11 setups — the code is correct but cannot
+                // be verified headless.
+                iced::Event::Window(iced::window::Event::FileHovered(_)) => {
+                    Some(Msg::DragHover(true))
+                }
+                iced::Event::Window(iced::window::Event::FilesHoveredLeft) => {
+                    Some(Msg::DragHover(false))
+                }
+                iced::Event::Window(iced::window::Event::FileDropped(path)) => {
+                    Some(Msg::DragDropped(path))
+                }
                 _ => None,
             },
         ));
         if m.shot.is_some() {
             subs.push(Shot::frames().map(|_| Msg::ShotTick));
         }
+        // Pulse clock for the queue live-dot. Gated on !reduce_motion
+        // (W6) and only while a queue actually has running work.
+        if !m.snap.settings.reduce_motion && m.snap.jobs.iter().any(|j| m.phase(j.id).is_running())
+        {
+            subs.push(
+                iced::time::every(std::time::Duration::from_millis(PULSE_TICK_MS))
+                    .map(|_| Msg::AnimTick),
+            );
+        }
     }
     Subscription::batch(subs)
+}
+
+/// Pulsing alpha for the live-dot (design `pulse` keyframe). Static at
+/// full opacity when motion is reduced.
+fn pulse_alpha(m: &Main) -> f32 {
+    if m.snap.settings.reduce_motion {
+        return 1.0;
+    }
+    let s = (m.anim_t * PULSE_SPEED).sin() * 0.5 + 0.5; // 0..1
+    PULSE_MIN_ALPHA + (1.0 - PULSE_MIN_ALPHA) * s
 }
 
 pub fn theme_of(app: &App) -> iced::Theme {
@@ -1216,6 +1479,7 @@ fn main_view(m: &Main) -> Element<'_, Msg> {
             Overlay::About => main_dialogs::about(m, base),
             Overlay::Host => main_dialogs::host_settings(m, base),
             Overlay::Remove => main_dialogs::remove_confirm(m, base),
+            Overlay::BrowserExtensions => main_dialogs::browser_extensions(m, base),
             Overlay::DbError => {
                 let err = m.db_error.clone().unwrap_or_default();
                 main_dialogs::db_error(m, base, &err)
@@ -1225,10 +1489,24 @@ fn main_view(m: &Main) -> Element<'_, Msg> {
         }
     };
 
+    // Drag-to-add wash sits above any modal; toasts sit above that
+    // (non-modal, never block input). Both live below the titlebar so
+    // the window chrome stays interactive.
+    let with_drag: Element<'_, Msg> = if m.drag_hover {
+        drag_overlay(m, overlaid)
+    } else {
+        overlaid
+    };
+    let with_toasts: Element<'_, Msg> = if m.toasts.is_empty() {
+        with_drag
+    } else {
+        toast_layer(m, with_drag)
+    };
+
     let content = container(column![
         titlebar::titlebar(t, "oxdm", m.maximized, Msg::Window),
         hairline(t.border_subtle),
-        overlaid,
+        with_toasts,
     ])
     .width(Length::Fill)
     .height(Length::Fill)
@@ -1244,6 +1522,118 @@ fn main_view(m: &Main) -> Element<'_, Msg> {
     chrome::resize::resizable(t, content.into(), true, Msg::Window)
 }
 
+// ------------------------------------------------------- drag-to-add wash
+
+/// Full-window clay wash with a centered glyph tile (design
+/// `.drag-overlay`). Non-interactive — purely a hint while hovering.
+fn drag_overlay<'a>(_m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg> {
+    let wash = color::with_alpha(color::clay::C400, DRAG_WASH_ALPHA);
+    let tile = container(
+        column![
+            icons::icon("download", 44.0, iced::Color::WHITE),
+            text("Drop a file to add")
+                .font(theme::DISPLAY)
+                .size(22.0)
+                .color(iced::Color::WHITE),
+            text("Release to open the Add dialog")
+                .font(theme::BODY)
+                .size(13.0)
+                .color(color::with_alpha(iced::Color::WHITE, 0.85)),
+        ]
+        .spacing(theme::space::S2)
+        .align_x(Alignment::Center),
+    )
+    .padding(theme::space::S5)
+    .style(|_| container::Style {
+        background: Some(color::with_alpha(iced::Color::WHITE, 0.12).into()),
+        border: iced::Border {
+            color: color::with_alpha(iced::Color::WHITE, 0.45),
+            width: 1.0,
+            radius: theme::surface::RADIUS.into(),
+        },
+        ..Default::default()
+    });
+    let layer = container(tile)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(Alignment::Center)
+        .align_y(Alignment::Center)
+        .style(move |_| container::Style {
+            background: Some(wash.into()),
+            ..Default::default()
+        });
+    iced::widget::stack![base, layer].into()
+}
+
+// ---------------------------------------------------------------- toasts
+
+fn toast_card<'a>(t: &Tokens, toast: &'a Toast) -> Element<'a, Msg> {
+    let (accent, icon) = match toast.severity {
+        ToastSeverity::Info => (color::clay::C400, "info"),
+        ToastSeverity::Success => (t.status_success, "circle-check"),
+        ToastSeverity::Error => (t.status_danger, "circle-alert"),
+    };
+    let t2 = *t;
+    let body = row![
+        icons::icon(icon, 15.0, accent),
+        text(toast.message.clone())
+            .font(theme::BODY)
+            .size(12.5)
+            .color(t.fg_1),
+    ]
+    .spacing(theme::space::S2)
+    .align_y(Alignment::Center);
+    // 3px left accent rail + surface card.
+    container(
+        row![
+            container(iced::widget::Space::new())
+                .width(Length::Fixed(TOAST_ACCENT_W))
+                .height(Length::Fill)
+                .style(move |_| container::Style {
+                    background: Some(accent.into()),
+                    ..Default::default()
+                }),
+            container(body)
+                .padding(theme::space::S2)
+                .width(Length::Fill),
+        ]
+        .align_y(Alignment::Center),
+    )
+    .width(Length::Fixed(TOAST_W))
+    .style(move |_| container::Style {
+        background: Some(t2.bg_raised.into()),
+        border: iced::Border {
+            color: t2.border_default,
+            width: 1.0,
+            radius: theme::radius::SM.into(),
+        },
+        shadow: iced::Shadow {
+            color: color::with_alpha(iced::Color::BLACK, 70.0 / 255.0),
+            offset: iced::Vector::new(0.0, 3.0),
+            blur_radius: 14.0,
+        },
+        ..Default::default()
+    })
+    .into()
+}
+
+/// Bottom-right toast stack (design `.toast`). Non-modal: the layer
+/// fills the body but only the cards paint, so input passes through.
+fn toast_layer<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg> {
+    let t = &m.tokens;
+    let mut col = column![].spacing(TOAST_GAP);
+    for toast in &m.toasts {
+        col = col.push(toast_card(t, toast));
+    }
+    let anchored = container(col)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(Alignment::End)
+        .align_y(Alignment::End)
+        .padding(TOAST_MARGIN);
+    iced::widget::stack![base, anchored].into()
+}
+
 // ---------------------------------------------------------------- sidebar
 
 fn sidebar_row<'a>(
@@ -1252,6 +1642,7 @@ fn sidebar_row<'a>(
     label: &str,
     count: Option<u64>,
     active: bool,
+    height: f32,
     msg: Msg,
 ) -> Element<'a, Msg> {
     let t2 = *t;
@@ -1288,7 +1679,7 @@ fn sidebar_row<'a>(
             .align_y(Alignment::Center),
     )
     .width(Length::Fill)
-    .height(Length::Fixed(26.0))
+    .height(Length::Fixed(height))
     .padding(iced::Padding {
         left: 12.0,
         right: 10.0,
@@ -1402,6 +1793,9 @@ fn queue_color(t: &Tokens, name: &str, builtin: bool) -> iced::Color {
 
 fn sidebar(m: &Main) -> Element<'_, Msg> {
     let t = &m.tokens;
+    let rh = m.sidebar_row_h();
+    let live = m.live_queues();
+    let pa = pulse_alpha(m);
     let mut col = column![]
         .spacing(2.0)
         .padding(iced::Padding::new(theme::space::S1));
@@ -1417,6 +1811,7 @@ fn sidebar(m: &Main) -> Element<'_, Msg> {
             "All downloads",
             Some(m.cat_count(None)),
             all_active,
+            rh,
             Msg::SetFilter(SidebarFilter::All),
         ));
         for (cat, icon, label) in [
@@ -1434,6 +1829,7 @@ fn sidebar(m: &Main) -> Element<'_, Msg> {
                 label,
                 Some(m.cat_count(Some(cat))),
                 active,
+                rh,
                 Msg::SetFilter(SidebarFilter::Category(cat)),
             ));
         }
@@ -1452,12 +1848,30 @@ fn sidebar(m: &Main) -> Element<'_, Msg> {
         for q in &m.snap.queues {
             let active = m.filter == SidebarFilter::Queue(q.id);
             let count = m.snap.jobs.iter().filter(|j| j.queue_id == q.id).count() as u64;
+            let chip = swatch(8.0, 2.0, queue_color(t, &q.name, q.builtin));
+            // Live-dot (design `.q-live-dot`): pulsing moss dot when the
+            // queue has ≥1 running job (N2). Pulse gated on !reduce_motion.
+            let leader: Element<'_, Msg> = if live.contains(&q.id) {
+                row![
+                    chip,
+                    crate::gui::widget::dot(
+                        LIVE_DOT_SIZE,
+                        color::with_alpha(color::moss::M400, pa),
+                    ),
+                ]
+                .spacing(5.0)
+                .align_y(Alignment::Center)
+                .into()
+            } else {
+                chip
+            };
             col = col.push(sidebar_row(
                 t,
-                swatch(8.0, 2.0, queue_color(t, &q.name, q.builtin)),
+                leader,
                 &q.name,
                 Some(count),
                 active,
+                rh,
                 Msg::SetFilter(SidebarFilter::Queue(q.id)),
             ));
         }
@@ -1480,6 +1894,7 @@ fn sidebar(m: &Main) -> Element<'_, Msg> {
                 label,
                 None,
                 false,
+                rh,
                 Msg::Tool(action),
             ));
         }
@@ -1566,6 +1981,10 @@ fn tab_strip(m: &Main) -> Element<'_, Msg> {
     let base = m.sidebar_filtered();
     let n_all = base.len() as u64;
     let n_active = base.iter().filter(|j| !m.phase(j.id).is_terminal()).count() as u64;
+    // Tab-meta active count keys off `is_running()` (N2) — Queued/Paused
+    // don't count as "active" in the live readout, unlike the Active tab
+    // badge above (which is legitimate tab semantics: not-yet-finished).
+    let n_running = base.iter().filter(|j| m.phase(j.id).is_running()).count() as u64;
     let n_done = base
         .iter()
         .filter(|j| m.phase(j.id) == Phase::Completed)
@@ -1591,8 +2010,8 @@ fn tab_strip(m: &Main) -> Element<'_, Msg> {
     .align_y(Alignment::Center);
 
     // Right-side live readout (design `.tab-meta`): "● N active · speed"
-    // in clay-500 mono, shown only while downloads are active.
-    if n_active > 0 {
+    // in clay-500 mono, shown only while downloads are running (N2).
+    if n_running > 0 {
         let active_speed: f64 = base
             .iter()
             .filter(|j| m.phase(j.id) == Phase::Downloading)
@@ -1600,9 +2019,9 @@ fn tab_strip(m: &Main) -> Element<'_, Msg> {
             .map(|c| c.speed_bps)
             .sum();
         let label = if active_speed > 1.0 {
-            format!("{n_active} active \u{00b7} {}", format_speed(active_speed))
+            format!("{n_running} active \u{00b7} {}", format_speed(active_speed))
         } else {
-            format!("{n_active} active")
+            format!("{n_running} active")
         };
         bar = bar
             .push(iced::widget::Space::new().width(Length::Fill))
@@ -1952,7 +2371,7 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
     // NOTE: width must be Shrink — Fill resolves to zero inside the
     // horizontally-unbounded table scrollable and collapses the row.
     let row_el = container(cells)
-        .height(Length::Fixed(ROW_H))
+        .height(Length::Fixed(m.row_h()))
         .width(Length::Shrink)
         .style(move |_| container::Style {
             background: bg(false).map(Into::into),
@@ -2016,6 +2435,7 @@ fn phase_style(t: &Tokens, phase: Phase) -> (iced::Color, String) {
         | Phase::Assembling
         | Phase::Flushing
         | Phase::Verifying => (t.action_primary, "Downloading".to_owned()),
+        Phase::Reconnecting => (t.action_primary, "Reconnecting".to_owned()),
         Phase::Queued => (t.status_info, "Queued".to_owned()),
         Phase::Paused => (t.fg_3, "Paused".to_owned()),
         Phase::Cancelled => (t.fg_3, "Cancelled".to_owned()),
@@ -2267,6 +2687,75 @@ fn context_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>, id: JobId) -> E
     let can_pause = phase.is_running();
     let done = phase == Phase::Completed;
 
+    // Destructive row morphs with live modifiers (design: Finder-like):
+    // default neutral "Remove from list" → ⇧ ochre "Move to Trash" →
+    // ⇧⌥ rust "Delete permanently". Every kind routes through the Remove
+    // confirm (B4) — the modifier only PRE-SELECTS the option.
+    //
+    // Trash/Permanent act on the FINISHED file, so they're only offered
+    // when EVERY selected job is Completed. For any non-completed job
+    // there is no final file and removal would purge its `.part`
+    // (irrecoverable) — which would betray the "recoverable" promise —
+    // so non-completed selections get entry-only removal regardless of
+    // modifiers.
+    let all_done = !m.selection.is_empty()
+        && m.selection
+            .iter()
+            .all(|sid| m.phase(*sid) == Phase::Completed);
+    let destruct: Element<'a, Msg> = {
+        let morph = if all_done {
+            (m.modifiers.shift(), m.modifiers.alt())
+        } else {
+            (false, false)
+        };
+        let (label, kbd, fg, kind) = match morph {
+            (true, true) => (
+                "Delete permanently",
+                "\u{21e7}\u{2325}",
+                color::rust::R300,
+                RemoveKind::Permanent,
+            ),
+            (true, false) => (
+                "Move to Trash",
+                "\u{21e7}",
+                color::ochre::O400,
+                RemoveKind::Trash,
+            ),
+            _ => ("Remove from list", "Del", t2.fg_1, RemoveKind::Entry),
+        };
+        let r = row![
+            icons::icon("trash-2", 15.0, fg),
+            text(label).font(theme::BODY).size(13.0).color(fg),
+            iced::widget::Space::new().width(Length::Fill),
+            text(kbd).font(theme::MONO).size(11.0).color(t2.fg_3),
+        ]
+        .spacing(theme::space::S2)
+        .align_y(Alignment::Center);
+        let inner = container(r)
+            .width(Length::Fill)
+            .height(Length::Fixed(28.0))
+            .align_y(Alignment::Center)
+            .padding([0.0, theme::space::S2]);
+        iced::widget::button(inner)
+            .padding(0)
+            .width(Length::Fill)
+            .style(move |_th, status| iced::widget::button::Style {
+                background: matches!(
+                    status,
+                    iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed
+                )
+                .then(|| t2.bg_sunken.into()),
+                text_color: fg,
+                border: iced::Border {
+                    radius: theme::radius::XS.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .on_press(Msg::RemoveAs(kind))
+            .into()
+    };
+
     let menu = container(
         column![
             item(
@@ -2298,13 +2787,7 @@ fn context_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>, id: JobId) -> E
                 Msg::Context(ContextAction::Pause)
             ),
             separator(),
-            item(
-                "trash-2",
-                "Delete",
-                Some("Delete"),
-                true,
-                Msg::Context(ContextAction::Delete)
-            ),
+            destruct,
             item(
                 "rotate-cw",
                 "Restart Download",

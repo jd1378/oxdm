@@ -360,6 +360,7 @@ fn snapshot_counters(id: JobId, entry: &JobEntry) -> JobCounters {
     };
     let is_resumable = entry.is_resumable.load(AtomicOrd::Acquire);
     let running = entry.running.load(AtomicOrd::Acquire);
+    let retries = entry.retries.load(AtomicOrd::Relaxed);
     let parts = entry
         .parts
         .read()
@@ -384,6 +385,7 @@ fn snapshot_counters(id: JobId, entry: &JobEntry) -> JobCounters {
         speed_bps,
         is_resumable,
         running,
+        retries,
         parts,
     }
 }

@@ -16,7 +16,7 @@ use crate::domain::{
 
 /// Schema version. Bump on every breaking change. Migrations are a
 /// match on the read-back version; tiny enough to keep DIY.
-const SCHEMA_VERSION: i32 = 2;
+const SCHEMA_VERSION: i32 = 3;
 
 /// Async-friendly handle around a blocking `rusqlite::Connection`.
 #[derive(Clone)]
@@ -126,6 +126,9 @@ impl Store {
                      advanced_json         TEXT NOT NULL DEFAULT '{}',
                      checksums_json        TEXT NOT NULL DEFAULT '[]',
                      category              TEXT NOT NULL DEFAULT '\"other\"',
+                     started_at            TEXT,
+                     finished_at           TEXT,
+                     retries               INTEGER NOT NULL DEFAULT 0,
                      FOREIGN KEY(queue_id) REFERENCES queues(id) ON DELETE RESTRICT
                  );
                  CREATE INDEX IF NOT EXISTS idx_jobs_queue ON jobs(queue_id, queue_position);
@@ -174,6 +177,22 @@ impl Store {
                             conn.execute_batch(
                                 "ALTER TABLE jobs ADD COLUMN advanced_json TEXT NOT NULL DEFAULT '{}';
                                  ALTER TABLE jobs ADD COLUMN checksums_json TEXT NOT NULL DEFAULT '[]';",
+                            )
+                        })
+                        .await
+                        .map_err(StoreError::Sql)?;
+                    }
+                    3 => {
+                        // v3: per-job run stats. `started_at` /
+                        // `finished_at` are nullable RFC3339 timestamps
+                        // (NULL = not yet started / finished);
+                        // `retries` counts PartRetrying events and
+                        // defaults to 0 so existing rows hydrate clean.
+                        self.with_conn(|conn| {
+                            conn.execute_batch(
+                                "ALTER TABLE jobs ADD COLUMN started_at TEXT;
+                                 ALTER TABLE jobs ADD COLUMN finished_at TEXT;
+                                 ALTER TABLE jobs ADD COLUMN retries INTEGER NOT NULL DEFAULT 0;",
                             )
                         })
                         .await
@@ -509,7 +528,8 @@ impl Store {
                             max_connections, phase, created_at, speed_limit_override, queue_id, \
                             downloaded, total, final_path, proxy, auth_user, \
                             auth_password_enc, proxy_password_enc, cookies_enc, \
-                            advanced_json, checksums_json, category \
+                            advanced_json, checksums_json, category, \
+                            started_at, finished_at, retries \
                      FROM jobs ORDER BY created_at ASC",
                 )?;
                 let iter = stmt.query_map([], |row| {
@@ -536,6 +556,9 @@ impl Store {
                         advanced_json: row.get::<_, String>(19).unwrap_or_else(|_| "{}".into()),
                         checksums_json: row.get::<_, String>(20).unwrap_or_else(|_| "[]".into()),
                         category: row.get(21).unwrap_or_else(|_| "\"other\"".into()),
+                        started_at: row.get(22).ok(),
+                        finished_at: row.get(23).ok(),
+                        retries: row.get(24).unwrap_or(0),
                     })
                 })?;
                 iter.collect::<Result<Vec<_>, _>>()
@@ -555,8 +578,9 @@ impl Store {
                     max_connections, phase, created_at, speed_limit_override, queue_id, \
                     downloaded, total, final_path, proxy, auth_user, \
                     auth_password_enc, proxy_password_enc, cookies_enc, \
-                    advanced_json, checksums_json, category) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22) \
+                    advanced_json, checksums_json, category, \
+                    started_at, finished_at, retries) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25) \
                  ON CONFLICT(id) DO UPDATE SET \
                     url=excluded.url, save_dir=excluded.save_dir, \
                     filename=excluded.filename, referrer=excluded.referrer, \
@@ -575,7 +599,10 @@ impl Store {
                     cookies_enc=excluded.cookies_enc, \
                     advanced_json=excluded.advanced_json, \
                     checksums_json=excluded.checksums_json, \
-                    category=excluded.category",
+                    category=excluded.category, \
+                    started_at=excluded.started_at, \
+                    finished_at=excluded.finished_at, \
+                    retries=excluded.retries",
                 params![
                     row.id,
                     row.url,
@@ -599,6 +626,9 @@ impl Store {
                     row.advanced_json,
                     row.checksums_json,
                     row.category,
+                    row.started_at,
+                    row.finished_at,
+                    row.retries,
                 ],
             )
         })
@@ -706,6 +736,9 @@ struct JobRow {
     advanced_json: String,
     checksums_json: String,
     category: String,
+    started_at: Option<String>,
+    finished_at: Option<String>,
+    retries: i64,
 }
 
 struct QueueRow {
@@ -807,6 +840,9 @@ impl JobRow {
                 .map_err(|e| StoreError::Other(e.to_string()))?,
             category: serde_json::to_string(&job.category)
                 .map_err(|e| StoreError::Other(e.to_string()))?,
+            started_at: job.started_at.map(|d| d.to_rfc3339()),
+            finished_at: job.finished_at.map(|d| d.to_rfc3339()),
+            retries: job.retries as i64,
         })
     }
 
@@ -853,6 +889,18 @@ impl JobRow {
         let advanced = serde_json::from_str(&self.advanced_json).unwrap_or_default();
         let checksums = serde_json::from_str(&self.checksums_json).unwrap_or_default();
 
+        // Run-stat timestamps are best-effort: a garbled value yields
+        // None rather than wedging the row. `retries` clamps negatives
+        // (column is NOT NULL DEFAULT 0, but tolerate manual edits).
+        let parse_ts = |s: &Option<String>| -> Option<chrono::DateTime<chrono::Utc>> {
+            s.as_deref()
+                .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
+                .map(|d| d.with_timezone(&chrono::Utc))
+        };
+        let started_at = parse_ts(&self.started_at);
+        let finished_at = parse_ts(&self.finished_at);
+        let retries = self.retries.max(0) as u32;
+
         Ok(Job {
             id: JobId(id),
             url,
@@ -869,6 +917,9 @@ impl JobRow {
             speed_limit_override: self.speed_limit_override.map(|v| v as u64),
             queue_id,
             created_at,
+            started_at,
+            finished_at,
+            retries,
             status,
             advanced,
             checksums,
@@ -887,6 +938,7 @@ fn phase_to_str(p: Phase) -> &'static str {
         Phase::Assembling => "assembling",
         Phase::Flushing => "flushing",
         Phase::Verifying => "verifying",
+        Phase::Reconnecting => "reconnecting",
         Phase::Paused => "paused",
         Phase::Completed => "completed",
         Phase::Failed => "failed",
@@ -903,6 +955,7 @@ fn phase_from_str(s: &str) -> Option<Phase> {
         "assembling" => Phase::Assembling,
         "flushing" => Phase::Flushing,
         "verifying" => Phase::Verifying,
+        "reconnecting" => Phase::Reconnecting,
         "paused" => Phase::Paused,
         "completed" => Phase::Completed,
         "failed" => Phase::Failed,
@@ -954,6 +1007,9 @@ mod tests {
             enc_cookies: None,
             queue_id,
             created_at: chrono::Utc::now(),
+            started_at: None,
+            finished_at: None,
+            retries: 0,
             status,
             advanced: crate::domain::Advanced::default(),
             checksums: Vec::new(),
@@ -1062,6 +1118,82 @@ mod tests {
         assert_eq!(listed.len(), 1);
         // No runner exists post-restart; transient phases must demote.
         assert_eq!(listed[0].status.phase, Phase::Paused);
+    }
+
+    #[tokio::test]
+    async fn migrates_v2_db_to_v3_adding_run_stat_columns() {
+        // Hand-build a v2-shaped DB (no started_at/finished_at/retries),
+        // then open it through `Store` and confirm the v3 ALTER arm runs
+        // cleanly and the old row hydrates with the new defaults.
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("oxdm.db");
+        let queue_id = QueueId(uuid::Uuid::new_v4());
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "PRAGMA foreign_keys=ON;
+                 CREATE TABLE schema_version (version INTEGER NOT NULL);
+                 INSERT INTO schema_version (version) VALUES (2);
+                 CREATE TABLE queues (
+                     id TEXT PRIMARY KEY, name TEXT NOT NULL,
+                     builtin INTEGER NOT NULL DEFAULT 0,
+                     schedule_json TEXT NOT NULL DEFAULT '{\"kind\":\"manual\"}',
+                     on_start_json TEXT NOT NULL DEFAULT '[]',
+                     on_finish_json TEXT NOT NULL DEFAULT '[]',
+                     max_concurrent INTEGER, stop_on_error INTEGER NOT NULL DEFAULT 0,
+                     position INTEGER NOT NULL DEFAULT 0, color INTEGER );
+                 CREATE TABLE jobs (
+                     id TEXT PRIMARY KEY, url TEXT NOT NULL, save_dir TEXT NOT NULL,
+                     filename TEXT, referrer TEXT,
+                     headers_json TEXT NOT NULL DEFAULT '{}',
+                     max_connections INTEGER, speed_limit_override INTEGER,
+                     queue_id TEXT NOT NULL, queue_position INTEGER NOT NULL DEFAULT 0,
+                     phase TEXT NOT NULL, downloaded INTEGER NOT NULL DEFAULT 0,
+                     total INTEGER, final_path TEXT, proxy TEXT, auth_user TEXT,
+                     auth_password_enc TEXT, proxy_password_enc TEXT, cookies_enc TEXT,
+                     created_at TEXT NOT NULL,
+                     advanced_json TEXT NOT NULL DEFAULT '{}',
+                     checksums_json TEXT NOT NULL DEFAULT '[]',
+                     category TEXT NOT NULL DEFAULT '\"other\"',
+                     FOREIGN KEY(queue_id) REFERENCES queues(id) ON DELETE RESTRICT );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO queues (id, name, builtin) VALUES (?1, 'Main', 1)",
+                params![queue_id.to_string()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO jobs (id, url, save_dir, filename, queue_id, phase, created_at) \
+                 VALUES (?1, 'https://example.com/old.zip', '/tmp', 'old.zip', ?2, 'completed', ?3)",
+                params![
+                    JobId::new().to_string(),
+                    queue_id.to_string(),
+                    chrono::Utc::now().to_rfc3339(),
+                ],
+            )
+            .unwrap();
+        }
+
+        // Open via Store → migration ladder runs 2 → 3.
+        let store = Store::open(db).await.unwrap();
+        let listed = store.list_jobs().await.unwrap();
+        assert_eq!(listed.len(), 1);
+        let j = &listed[0];
+        assert_eq!(j.filename.as_deref(), Some("old.zip"));
+        // Pre-existing row hydrates with the new-column defaults.
+        assert_eq!(j.started_at, None);
+        assert_eq!(j.finished_at, None);
+        assert_eq!(j.retries, 0);
+
+        // And the new columns are now writable end-to-end.
+        let mut updated = j.clone();
+        updated.retries = 4;
+        updated.finished_at = Some(chrono::Utc::now());
+        store.upsert_job(&updated).await.unwrap();
+        let reread = store.list_jobs().await.unwrap();
+        assert_eq!(reread[0].retries, 4);
+        assert!(reread[0].finished_at.is_some());
     }
 
     #[tokio::test]

@@ -50,6 +50,11 @@ pub enum Phase {
     Flushing,
     Verifying,
     Paused,
+    /// oxdm-synth: at least one part is mid-retry (odl emits
+    /// `PartRetrying`). The transfer is still live — the runner has not
+    /// failed — so this counts as a running phase. Restored to
+    /// `Downloading` once every retrying part resumes.
+    Reconnecting,
     Completed,
     Failed,
     Cancelled,
@@ -69,6 +74,7 @@ impl Phase {
                 | Self::Assembling
                 | Self::Flushing
                 | Self::Verifying
+                | Self::Reconnecting
         )
     }
 }
@@ -185,6 +191,21 @@ pub struct Job {
     /// queue.
     pub queue_id: QueueId,
     pub created_at: DateTime<Utc>,
+    /// First `Downloading` transition of the current run. `None` until
+    /// the job actually starts transferring (a queued-then-removed job
+    /// never gets one). Set-once per run; cleared on restart /
+    /// cancel-to-queued. Persisted in the `started_at` column.
+    #[serde(default)]
+    pub started_at: Option<DateTime<Utc>>,
+    /// `Completed` transition timestamp. `None` until completion.
+    /// Persisted in the `finished_at` column.
+    #[serde(default)]
+    pub finished_at: Option<DateTime<Utc>>,
+    /// Cumulative count of `PartRetrying` events observed during the
+    /// current run. Reset on restart / cancel-to-queued. Persisted in
+    /// the `retries` column.
+    #[serde(default)]
+    pub retries: u32,
     pub status: JobStatus,
     /// Per-job advanced settings (Properties dialog → Advanced /
     /// Connection / Cookies / Headers tabs). Persisted as JSON in the

@@ -19,4 +19,4 @@ pub use job::{
     ShutdownAction, SpeedSample,
 };
 pub use queue::{Queue, QueueHook, QueueId, QueueSchedule, WeekDayMask, random_vivid_color};
-pub use settings::{ConflictWhileHidden, Settings, Theme};
+pub use settings::{ConflictWhileHidden, Density, Settings, Theme};

@@ -12,7 +12,7 @@
 use indexmap::IndexMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use tokio::sync::{RwLock, broadcast};
 use tokio_util::sync::CancellationToken;
 
@@ -44,6 +44,23 @@ pub struct JobEntry {
     /// for the visible status pill.
     pub live_phase: AtomicU8,
     pub counters: Arc<LiveCounters>,
+    /// First `Downloading` transition of the current run, as epoch
+    /// milliseconds. `0` = None (not yet started). Set-once per run by
+    /// the live bridge; reset on restart / cancel-to-queued. Spliced
+    /// onto `Job::started_at` for the UI.
+    pub started_at_ms: AtomicI64,
+    /// `Completed` transition timestamp, epoch milliseconds. `0` = None.
+    /// Spliced onto `Job::finished_at`.
+    pub finished_at_ms: AtomicI64,
+    /// Cumulative count of `PartRetrying` events this run. Spliced onto
+    /// `Job::retries`.
+    pub retries: AtomicU32,
+    /// ULIDs of parts currently mid-retry. Drives the `Reconnecting`
+    /// phase: non-empty ⇒ at least one part is retrying. Keyed by ulid
+    /// (rather than a bare counter) so a sibling part's progress tick
+    /// can't spuriously clear a still-retrying part — debounces the
+    /// banner. Cleared on restart / cancel-to-queued.
+    pub retrying_parts: std::sync::Mutex<std::collections::HashSet<String>>,
     pub parts: std::sync::RwLock<IndexMap<String, Arc<PartCounters>>>,
     pub cancel: std::sync::Mutex<CancellationToken>,
     pub running: AtomicBool,
@@ -87,10 +104,20 @@ impl JobEntry {
         let counters = LiveCounters::new();
         counters.set_downloaded(job.status.downloaded);
         counters.set_total(job.status.total);
+        // Seed the run-stat atomics from the persisted snapshot so a
+        // freshly loaded entry already reports its last-known
+        // started_at / finished_at / retries. `0` = None.
+        let started_at_ms = job.started_at.map(|d| d.timestamp_millis()).unwrap_or(0);
+        let finished_at_ms = job.finished_at.map(|d| d.timestamp_millis()).unwrap_or(0);
+        let retries = job.retries;
         Self {
             job,
             live_phase: AtomicU8::new(encode_phase(phase)),
             counters,
+            started_at_ms: AtomicI64::new(started_at_ms),
+            finished_at_ms: AtomicI64::new(finished_at_ms),
+            retries: AtomicU32::new(retries),
+            retrying_parts: std::sync::Mutex::new(std::collections::HashSet::new()),
             parts: std::sync::RwLock::new(IndexMap::new()),
             cancel: std::sync::Mutex::new(CancellationToken::new()),
             running: AtomicBool::new(false),
@@ -109,6 +136,20 @@ impl JobEntry {
 
     pub fn set_phase(&self, p: Phase) {
         self.live_phase.store(encode_phase(p), Ordering::Release);
+    }
+
+    /// Clear the per-run stats (started_at / finished_at / retries /
+    /// in-flight retrying parts). Called when a job re-enters a clean
+    /// pre-run state (restart, cancel-to-queued) so the next run starts
+    /// its timing and retry tally from scratch. Set-once within a run,
+    /// cleared on re-run (plan W4).
+    pub fn reset_run_stats(&self) {
+        self.started_at_ms.store(0, Ordering::Release);
+        self.finished_at_ms.store(0, Ordering::Release);
+        self.retries.store(0, Ordering::Release);
+        if let Ok(mut g) = self.retrying_parts.lock() {
+            g.clear();
+        }
     }
 
     /// Zero the live speed counters. Called on pause so the dialog and
@@ -136,6 +177,7 @@ pub(crate) fn encode_phase(p: Phase) -> u8 {
         Phase::Completed => 8,
         Phase::Failed => 9,
         Phase::Cancelled => 10,
+        Phase::Reconnecting => 11,
     }
 }
 
@@ -151,6 +193,7 @@ pub(crate) fn decode_phase(v: u8) -> Phase {
         8 => Phase::Completed,
         9 => Phase::Failed,
         10 => Phase::Cancelled,
+        11 => Phase::Reconnecting,
         _ => Phase::Queued,
     }
 }
@@ -1155,6 +1198,9 @@ impl AppState {
             speed_limit_override: None,
             queue_id: self.main_queue_id,
             created_at: chrono::Utc::now(),
+            started_at: None,
+            finished_at: None,
+            retries: 0,
             status: JobStatus::default(),
             advanced: crate::domain::Advanced::default(),
             checksums: Vec::new(),
@@ -1498,6 +1544,10 @@ impl AppState {
             match outcome {
                 Ok(o) => {
                     entry.set_phase(Phase::Completed);
+                    // Stamp the completion time once. `splice_live`
+                    // reads this back inside `persist_job` below, so the
+                    // `finished_at` column is written in the same flush.
+                    entry.finished_at_ms.store(now_ms(), Ordering::Relaxed);
                     entry.reset_live_speed();
                     // Pin counters to "100%": odl may not emit a final
                     // Progress(downloaded == total) before the Completed
@@ -1622,6 +1672,7 @@ impl AppState {
             .job_entry(id)
             .await
             .ok_or_else(|| JobError::Other("job not found".into()))?;
+        entry.reset_run_stats();
         entry.set_phase(Phase::Queued);
         self.persist_job(id).await;
         let _ = self.events.send(DomainEvent::JobUpdated {
@@ -1650,6 +1701,7 @@ impl AppState {
 
         entry.reset_live_speed();
         entry.counters.reset_progress();
+        entry.reset_run_stats();
         if let Ok(mut g) = entry.final_path.write() {
             *g = None;
         }
@@ -1890,7 +1942,29 @@ pub(crate) fn splice_live(entry: &JobEntry) -> Job {
     {
         j.status.final_path = Some(p);
     }
+    // Overlay live run-stats from the entry atomics (epoch-ms → option,
+    // `0` = None). These are the authoritative in-session values;
+    // `persist_job` round-trips them back to the store via this same
+    // splice, so the columns stay in sync.
+    j.started_at = ms_to_datetime(entry.started_at_ms.load(Ordering::Relaxed));
+    j.finished_at = ms_to_datetime(entry.finished_at_ms.load(Ordering::Relaxed));
+    j.retries = entry.retries.load(Ordering::Relaxed);
     j
+}
+
+/// Current wall-clock as epoch milliseconds — matches the `0 = None`
+/// encoding used by the run-stat atomics.
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+/// Epoch-milliseconds → `Option<DateTime<Utc>>`, treating `0` as None.
+fn ms_to_datetime(ms: i64) -> Option<chrono::DateTime<chrono::Utc>> {
+    if ms == 0 {
+        None
+    } else {
+        chrono::DateTime::from_timestamp_millis(ms)
+    }
 }
 
 /// Per-job working directory for `metadata.pb` + every `.part`. Lives
@@ -1918,11 +1992,20 @@ async fn clone_entry_with_job(old: &Arc<JobEntry>, new_job: Job) -> Arc<JobEntry
         .map(|g| g.clone())
         .unwrap_or_default();
     let final_path = old.final_path.read().map(|g| g.clone()).unwrap_or(None);
+    let retrying_parts = old
+        .retrying_parts
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_default();
     let resolver = old.resolver.read().await.clone();
     Arc::new(JobEntry {
         job: new_job,
         live_phase: AtomicU8::new(old.live_phase.load(Ordering::Acquire)),
         counters: old.counters.clone(),
+        started_at_ms: AtomicI64::new(old.started_at_ms.load(Ordering::Acquire)),
+        finished_at_ms: AtomicI64::new(old.finished_at_ms.load(Ordering::Acquire)),
+        retries: AtomicU32::new(old.retries.load(Ordering::Acquire)),
+        retrying_parts: std::sync::Mutex::new(retrying_parts),
         parts: std::sync::RwLock::new(parts),
         cancel: std::sync::Mutex::new(cancel_token),
         running: AtomicBool::new(old.running.load(Ordering::Acquire)),
@@ -2083,10 +2166,40 @@ impl LiveBridge for StateLiveBridge {
             } => {
                 if let Ok(jobs) = state.jobs.try_read()
                     && let Some(entry) = jobs.get(&id)
-                    && let Ok(parts) = entry.parts.try_read()
-                    && let Some(p) = parts.get(ulid)
                 {
-                    p.downloaded.store(*downloaded, Ordering::Relaxed);
+                    if let Ok(parts) = entry.parts.try_read()
+                        && let Some(p) = parts.get(ulid)
+                    {
+                        p.downloaded.store(*downloaded, Ordering::Relaxed);
+                    }
+                    // This part is making progress again — drop it from
+                    // the retrying set. Removing by ulid (not a blanket
+                    // counter decrement) means a sibling part's tick
+                    // can't clear a still-retrying part. When the last
+                    // retrying part clears, restore Downloading — but
+                    // only if we are still in Reconnecting, so we never
+                    // clobber a later Assembling / Verifying transition.
+                    if let Ok(mut retrying) = entry.retrying_parts.lock()
+                        && retrying.remove(ulid)
+                        && retrying.is_empty()
+                        && entry.phase() == Phase::Reconnecting
+                    {
+                        entry.set_phase(Phase::Downloading);
+                    }
+                }
+            }
+            OdlProgressEvent::PartRetrying { ulid, .. } => {
+                if let Ok(jobs) = state.jobs.try_read()
+                    && let Some(entry) = jobs.get(&id)
+                {
+                    // Count every retry event (plan W2). Mark this part
+                    // as retrying and surface the Reconnecting banner
+                    // while ≥1 part is mid-retry (plan W1).
+                    entry.retries.fetch_add(1, Ordering::Relaxed);
+                    if let Ok(mut retrying) = entry.retrying_parts.lock() {
+                        retrying.insert(ulid.clone());
+                    }
+                    entry.set_phase(Phase::Reconnecting);
                 }
             }
             OdlProgressEvent::PartSpeed {
@@ -2115,7 +2228,18 @@ impl LiveBridge for StateLiveBridge {
                 if let Ok(jobs) = state.jobs.try_read()
                     && let Some(entry) = jobs.get(&id)
                 {
-                    entry.set_phase(crate::data::mapping::phase_from_odl(*p));
+                    let phase = crate::data::mapping::phase_from_odl(*p);
+                    // First Downloading transition of the run stamps
+                    // started_at (set-once; `0` = unset).
+                    if phase == Phase::Downloading {
+                        let _ = entry.started_at_ms.compare_exchange(
+                            0,
+                            now_ms(),
+                            Ordering::AcqRel,
+                            Ordering::Relaxed,
+                        );
+                    }
+                    entry.set_phase(phase);
                 }
             }
             OdlProgressEvent::Cancelled => {

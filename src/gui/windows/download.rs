@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use iced::widget::{column, container, row, text};
-use iced::{Alignment, Element, Length, Subscription, Task};
+use iced::widget::{canvas, column, container, row, stack, text};
+use iced::{Alignment, Element, Length, Point, Rectangle, Subscription, Task};
 
 use crate::domain::checksum::{Algo, CsStatus};
 use crate::domain::{JobError, JobId, OnCompletion, Phase, ShutdownAction};
@@ -56,6 +56,24 @@ const PATH_TRUNCATE_CHARS: usize = 52;
 /// Middle-truncation budget for displayed hashes.
 const HASH_TRUNCATE_CHARS: usize = 40;
 
+// --- Completion burst (design §3.3 `.complete-burst`, anim `cb-pop`) -
+/// 88px burst stage — two pulsing rings around a gradient check circle.
+const BURST_STAGE: f32 = 88.0;
+/// Inner gradient circle diameter (design 64px clay circle).
+const BURST_CIRCLE: f32 = 64.0;
+/// Check / shield-alert glyph size, centered over the burst circle.
+const BURST_ICON: f32 = 30.0;
+/// Outer-ring max radius as a fraction of the stage half-extent — the
+/// rings breathe between the circle edge and this on each pulse.
+const BURST_RING_MAX: f32 = 0.96;
+/// Burst/pulse oscillation rate (rad/s feel applied to `anim_t`).
+const PULSE_RATE: f32 = 3.2;
+
+// --- Reconnect banner (design §3.3 `.reconnect-banner`, ochre) -------
+/// Banner background alpha floor/ceiling for the gentle ochre pulse.
+const RECONNECT_PULSE_MIN: f32 = 0.55;
+const RECONNECT_PULSE_MAX: f32 = 1.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Info,
@@ -102,6 +120,9 @@ pub enum Msg {
     Copy(String),
     Reveal(PathBuf),
     CsPaste(String),
+    // Local checksum compute (hash `final_path` off the UI executor).
+    CsCompute,
+    CsComputed(Result<String, String>),
     WinResized(f32, f32),
     ShotTick,
     Shot(iced::window::Screenshot),
@@ -139,8 +160,25 @@ pub struct State {
     /// Hash the user pasted into the completed-view ChecksumBox to
     /// compare against the job's saved checksum (verify, not compute).
     cs_paste: String,
+    /// Local "Compute from file" state — drives the button label and the
+    /// match/mismatch render once a digest comes back.
+    cs_compute: CsCompute,
+
+    /// Gates every animation (reconnect pulse, completion burst). Read
+    /// once at boot from `Settings.reduce_motion` (W6).
+    reduce_motion: bool,
 
     shot: Option<Shot>,
+}
+
+/// Local-compute lifecycle for the completed-view ChecksumBox.
+#[derive(Default)]
+enum CsCompute {
+    #[default]
+    Idle,
+    Running,
+    /// Digest hex on success, or a short error string.
+    Done(Result<String, String>),
 }
 
 impl State {
@@ -219,6 +257,8 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                     .unwrap_or_default(),
                 on_completion,
                 cs_paste: String::new(),
+                cs_compute: CsCompute::Idle,
+                reduce_motion: settings.reduce_motion,
                 shot: Shot::from_env(),
                 client,
                 entry,
@@ -458,6 +498,38 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             st.cs_paste = v;
             Task::none()
         }
+        Msg::CsCompute => {
+            // Hash with the saved checksum's algorithm so the digest is
+            // directly comparable. Run the streaming hasher on a blocking
+            // thread (N3: never on the iced UI executor).
+            let Some(cs) = st.entry.job.checksums.first() else {
+                return Task::none();
+            };
+            let Some(path) = st.entry.job.status.final_path.clone() else {
+                return Task::none();
+            };
+            if matches!(st.cs_compute, CsCompute::Running) {
+                return Task::none();
+            }
+            let algo = cs.algo;
+            st.cs_compute = CsCompute::Running;
+            Task::perform(
+                async move {
+                    tokio::task::spawn_blocking(move || {
+                        crate::domain::checksum::compute_file(&path, algo)
+                            .map_err(|e| e.to_string())
+                    })
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|r| r)
+                },
+                Msg::CsComputed,
+            )
+        }
+        Msg::CsComputed(res) => {
+            st.cs_compute = CsCompute::Done(res);
+            Task::none()
+        }
         Msg::Connected(_) | Msg::Window(_) | Msg::Noop => Task::none(),
     }
 }
@@ -486,10 +558,19 @@ pub fn subscription(app: &App) -> Subscription<Msg> {
         subs.push(Shot::frames().map(|_| Msg::ShotTick));
     }
     if st.phase().is_running() {
-        subs.push(iced::time::every(Duration::from_millis(33)).map(|_| Msg::AnimTick));
+        // The 30fps tick only drives motion (barber-pole stripes,
+        // reconnect pulse); skip it under reduce_motion (W6). Rate
+        // sampling is data, not motion, so it stays.
+        if !st.reduce_motion {
+            subs.push(iced::time::every(Duration::from_millis(33)).map(|_| Msg::AnimTick));
+        }
         if st.rate_open {
             subs.push(iced::time::every(Duration::from_millis(500)).map(|_| Msg::SampleTick));
         }
+    } else if st.phase() == Phase::Completed && !st.reduce_motion {
+        // Drive the completion-burst pulse; the running branch's tick is
+        // gone once terminal, so the burst needs its own (W6-gated) tick.
+        subs.push(iced::time::every(Duration::from_millis(33)).map(|_| Msg::AnimTick));
     }
     Subscription::batch(subs)
 }
@@ -616,9 +697,17 @@ fn header_card(st: &State) -> Element<'_, Msg> {
 fn running_view(st: &State) -> Element<'_, Msg> {
     let t = &st.tokens;
     let phase = st.phase();
-    let striped = phase.is_running();
+    // Barber-pole stripes are motion → off under reduce_motion (W6).
+    let striped = phase.is_running() && !st.reduce_motion;
     let (track, fill, gradient) = match phase {
         Phase::Failed => (t.status_danger_bg, t.status_danger, None),
+        // Reconnecting reads ochre (design `is-reconnecting`), pairing
+        // with the banner above; still striped (it's a running phase).
+        Phase::Reconnecting => (
+            t.progress_track,
+            t.status_warning,
+            Some((color::ochre::O400, color::ochre::O300)),
+        ),
         p if p.is_running() => (
             t.progress_track,
             t.progress_fill,
@@ -691,14 +780,11 @@ fn running_view(st: &State) -> Element<'_, Msg> {
         .into()
     };
 
-    let footer_el = footer(
-        t,
-        Btn::new("Minimize to tray")
-            .toolbar()
-            .icon("minimize-2")
-            .on_press(Msg::MinimizeTray)
-            .view(t),
-        row![
+    // Footer morphs on error kind (design §3.3 "context-dependent on
+    // error kind"); the normal transfer footer is pause/resume + cancel.
+    let footer_right: Element<'_, Msg> = match &error {
+        Some(err) => error_footer(t, err),
+        None => row![
             Btn::new(if phase.is_running() {
                 "Pause"
             } else {
@@ -716,37 +802,49 @@ fn running_view(st: &State) -> Element<'_, Msg> {
         ]
         .spacing(theme::space::S2)
         .into(),
+    };
+    let footer_el = footer(
+        t,
+        Btn::new("Minimize to tray")
+            .toolbar()
+            .icon("minimize-2")
+            .on_press(Msg::MinimizeTray)
+            .view(t),
+        footer_right,
     );
+
+    // Reconnect banner sits above the progress bar (design §3.3),
+    // ochre, only while the whole transfer is mid-retry.
+    let mut hero = column![sibling(header_card(st))].spacing(theme::space::S3);
+    if phase == Phase::Reconnecting {
+        hero = hero.push(reconnect_banner(st));
+    }
+    hero = hero
+        .push(sibling(striped_progress(
+            st.frac(),
+            Length::Fill,
+            10.0,
+            track,
+            fill,
+            gradient,
+            striped,
+            st.anim_t,
+        )))
+        .push(lower);
 
     page(
         t,
         column![
             titlebar::titlebar(t, &name, false, Msg::Window),
             hairline(t.border_subtle),
-            container(
-                column![
-                    sibling(header_card(st)),
-                    sibling(striped_progress(
-                        st.frac(),
-                        Length::Fill,
-                        10.0,
-                        track,
-                        fill,
-                        gradient,
-                        striped,
-                        st.anim_t,
-                    )),
-                    lower,
-                ]
-                .spacing(theme::space::S3)
-            )
-            .padding(iced::Padding {
-                top: theme::space::S4,
-                bottom: theme::space::S4,
-                left: theme::space::S4,
-                right: theme::space::S4 - crate::gui::widget::SCROLL_GUTTER,
-            })
-            .height(Length::Fill),
+            container(hero)
+                .padding(iced::Padding {
+                    top: theme::space::S4,
+                    bottom: theme::space::S4,
+                    left: theme::space::S4,
+                    right: theme::space::S4 - crate::gui::widget::SCROLL_GUTTER,
+                })
+                .height(Length::Fill),
             hairline(t.border_subtle),
             footer_el,
         ]
@@ -910,6 +1008,52 @@ fn error_block<'a>(st: &'a State, err: &JobError) -> Element<'a, Msg> {
         ..Default::default()
     })
     .into()
+}
+
+/// Error-state footer button group (right side). Maps the `JobError`
+/// kind to the actions that make sense, wiring ONLY to messages that
+/// already exist (Resume = retry a failed job, OpenFolder, CloseWin =
+/// keep). Cancel stays the danger action in every variant. Buttons
+/// whose backend action doesn't exist in this window (e.g. delete the
+/// tampered file on disk) are intentionally omitted, not invented.
+fn error_footer<'a>(t: &Tokens, err: &JobError) -> Element<'a, Msg> {
+    let cancel = Btn::new("Cancel")
+        .danger()
+        .icon("x")
+        .on_press(Msg::Cancel)
+        .view(t);
+    let retry = || {
+        Btn::new("Retry")
+            .primary()
+            .icon("rotate-cw")
+            .on_press(Msg::PauseResume)
+            .view(t)
+    };
+    let group = match err {
+        // Write / disk problems: offer the folder so the user can free
+        // space or fix permissions, then cancel.
+        JobError::Io(_) | JobError::SaveConflict(_) => row![
+            Btn::new("Open folder")
+                .toolbar()
+                .icon("folder")
+                .on_press(Msg::OpenFolder)
+                .view(t),
+            cancel,
+        ],
+        // Integrity failure: "Keep" closes (file stays on disk); the
+        // on-disk "Delete" action has no message in this window → omit.
+        JobError::ChecksumMismatch { .. } => row![
+            Btn::new("Keep")
+                .toolbar()
+                .icon("check")
+                .on_press(Msg::CloseWin)
+                .view(t),
+            cancel,
+        ],
+        // Transient network/DNS + everything else: retry then cancel.
+        _ => row![retry(), cancel],
+    };
+    group.spacing(theme::space::S2).into()
 }
 
 fn stat<'a>(t: &Tokens, label: &'a str, value: String, accent: bool) -> Element<'a, Msg> {
@@ -1437,35 +1581,44 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
         .extension()
         .map(|e| e.to_string_lossy().to_uppercase())
         .unwrap_or_else(|| "FILE".into());
-    let tile_bg = color::mix(t.bg_surface, color::clay::C400, 0.20);
+    // Tampered = saved or computed checksum mismatch → escalate the
+    // whole completed view (rust accent, "don't open" warning) per
+    // design §3.3 tampered variant.
+    let tampered = is_tampered(st);
+    let accent = if tampered {
+        color::rust::R300
+    } else {
+        color::clay::C400
+    };
+    let tile_bg = color::mix(t.bg_surface, accent, 0.20);
     let t2 = *t;
-    let tile = container(
-        text(ext)
-            .font(theme::MONO_BOLD)
-            .size(12.0)
-            .color(color::clay::C400),
-    )
-    .width(Length::Fixed(56.0))
-    .height(Length::Fixed(56.0))
-    .align_x(Alignment::Center)
-    .align_y(Alignment::Center)
-    .style(move |_| container::Style {
-        background: Some(tile_bg.into()),
-        border: iced::Border {
-            radius: theme::radius::SM.into(),
+    let tile = container(text(ext).font(theme::MONO_BOLD).size(12.0).color(accent))
+        .width(Length::Fixed(56.0))
+        .height(Length::Fixed(56.0))
+        .align_x(Alignment::Center)
+        .align_y(Alignment::Center)
+        .style(move |_| container::Style {
+            background: Some(tile_bg.into()),
+            border: iced::Border {
+                radius: theme::radius::SM.into(),
+                ..Default::default()
+            },
             ..Default::default()
-        },
-        ..Default::default()
-    });
+        });
 
+    let (title_text, title_color) = if tampered {
+        ("Integrity check failed", t.status_danger)
+    } else {
+        ("Download complete", t.fg_1)
+    };
     let header = container(
         row![
             tile,
             column![
-                text("Download complete")
+                text(title_text)
                     .font(theme::DISPLAY)
                     .size(20.0)
-                    .color(t.fg_1),
+                    .color(title_color),
                 text(format!(
                     "Downloaded {} ({} bytes)",
                     format_bytes_2(total),
@@ -1552,7 +1705,27 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
     ]
     .spacing(6.0);
 
-    let mut body = column![header, from_row, saved_row].spacing(theme::space::S3);
+    // Burst stage, centered above the header (`cb-pop`).
+    let burst = container(completion_burst(st, tampered))
+        .width(Length::Fill)
+        .align_x(Alignment::Center);
+
+    let mut body = column![burst, header].spacing(theme::space::S3);
+    // Tampered files get a heavy "don't open" warning right under the
+    // header (design `.tamper-banner`).
+    if tampered {
+        body = body.push(banner(
+            t,
+            t.status_danger,
+            t.status_danger_bg,
+            "shield-alert",
+            "Don't open this file — it may be corrupted, compromised, or intercepted.".to_owned(),
+        ));
+    }
+    if let Some(stats) = completion_stats(st) {
+        body = body.push(stats);
+    }
+    body = body.push(from_row).push(saved_row);
     if let Some(cs_box) = checksum_box(st) {
         body = body.push(cs_box);
     }
@@ -1620,13 +1793,59 @@ fn mid_truncate(s: &str, max: usize) -> String {
     format!("{head_s}…{tail_s}")
 }
 
+/// Rust stacked Expected/Got mismatch panel (design §3.4). Shared by
+/// the paste-verify and local-compute paths so they read identically.
+fn hash_mismatch<'a>(t: &Tokens, algo_label: &str, expected: &str, got: &str) -> Element<'a, Msg> {
+    let t2 = *t;
+    container(
+        column![
+            row![
+                icons::icon("shield-alert", 17.0, t.status_danger),
+                text(format!("Doesn't match the saved {algo_label} hash."))
+                    .font(theme::BODY_BOLD)
+                    .size(12.0)
+                    .color(t.status_danger),
+            ]
+            .spacing(theme::space::S2)
+            .align_y(Alignment::Center),
+            text(format!(
+                "Expected  {}",
+                mid_truncate(expected, HASH_TRUNCATE_CHARS)
+            ))
+            .font(theme::MONO)
+            .size(11.0)
+            .color(t.fg_2),
+            text(format!(
+                "Got       {}",
+                mid_truncate(got, HASH_TRUNCATE_CHARS)
+            ))
+            .font(theme::MONO)
+            .size(11.0)
+            .color(t.status_danger),
+        ]
+        .spacing(theme::space::S1),
+    )
+    .width(Length::Fill)
+    .padding(theme::space::S3)
+    .style(move |_| container::Style {
+        background: Some(t2.status_danger_bg.into()),
+        border: iced::Border {
+            color: t2.status_danger,
+            width: 1.0,
+            radius: theme::radius::XS.into(),
+        },
+        ..Default::default()
+    })
+    .into()
+}
+
 /// Completed-view ChecksumBox (design §3.4): shows the job's saved
-/// checksum + status, and a paste field to verify against the
-/// publisher's hash. Algorithm is auto-detected from hex length. Local
-/// compute is not available in the GUI → paste + match only (DEFERRED).
+/// checksum + status, a paste field to verify against the publisher's
+/// hash, AND a local "Compute from file" action that hashes the saved
+/// file (off the UI executor) and compares. Algorithm is auto-detected
+/// from hex length for paste; compute uses the saved checksum's algo.
 fn checksum_box(st: &State) -> Option<Element<'_, Msg>> {
     let t = &st.tokens;
-    let t2 = *t;
     let cs = st.entry.job.checksums.first()?;
 
     let (status_color, status_label) = match cs.status {
@@ -1705,49 +1924,9 @@ fn checksum_box(st: &State) -> Option<Element<'_, Msg>> {
                 format!("Matches the saved {} hash.", algo.label()),
             )
         } else {
-            container(
-                column![
-                    row![
-                        icons::icon("shield-alert", 17.0, t.status_danger),
-                        // Saved algo (cs.algo), NOT the pasted-length
-                        // auto-detected `algo` — they differ when the
-                        // pasted hash is the wrong length.
-                        text(format!("Doesn't match the saved {} hash.", cs.algo.label()))
-                            .font(theme::BODY_BOLD)
-                            .size(12.0)
-                            .color(t.status_danger),
-                    ]
-                    .spacing(theme::space::S2)
-                    .align_y(Alignment::Center),
-                    text(format!(
-                        "Expected  {}",
-                        mid_truncate(&saved_hash, HASH_TRUNCATE_CHARS)
-                    ))
-                    .font(theme::MONO)
-                    .size(11.0)
-                    .color(t.fg_2),
-                    text(format!(
-                        "Got       {}",
-                        mid_truncate(&normalized, HASH_TRUNCATE_CHARS)
-                    ))
-                    .font(theme::MONO)
-                    .size(11.0)
-                    .color(t.status_danger),
-                ]
-                .spacing(theme::space::S1),
-            )
-            .width(Length::Fill)
-            .padding(theme::space::S3)
-            .style(move |_| container::Style {
-                background: Some(t2.status_danger_bg.into()),
-                border: iced::Border {
-                    color: t2.status_danger,
-                    width: 1.0,
-                    radius: theme::radius::XS.into(),
-                },
-                ..Default::default()
-            })
-            .into()
+            // Saved algo (cs.algo), NOT the pasted-length auto-detected
+            // `algo` — they differ when the pasted hash is wrong-length.
+            hash_mismatch(t, cs.algo.label(), &saved_hash, &normalized)
         }
     } else {
         text(format!(
@@ -1760,13 +1939,69 @@ fn checksum_box(st: &State) -> Option<Element<'_, Msg>> {
         .into()
     };
 
-    Some(card(
-        t,
-        theme::space::S3,
-        column![intro, saved_row, paste_field, result]
+    // Local "Compute from file" — only when the file exists on disk.
+    // Hashes with the saved checksum's algorithm so the digest compares
+    // directly; the heavy work runs off the UI executor (see update).
+    let compute_section: Option<Element<'_, Msg>> =
+        st.entry.job.status.final_path.as_ref().map(|_| {
+            let action: Element<'_, Msg> = match &st.cs_compute {
+                CsCompute::Running => Btn::new("Computing…")
+                    .secondary()
+                    .size(BtnSize::Sm)
+                    .icon("refresh-cw")
+                    .enabled(false)
+                    .view(t),
+                _ => Btn::new("Compute from file")
+                    .secondary()
+                    .size(BtnSize::Sm)
+                    .icon("shield-check")
+                    .on_press(Msg::CsCompute)
+                    .view(t),
+            };
+            let row_el = row![
+                action,
+                text("Hash the saved file and compare to the saved checksum.")
+                    .font(theme::BODY)
+                    .size(11.0)
+                    .color(t.fg_3),
+            ]
             .spacing(theme::space::S2)
-            .into(),
-    ))
+            .align_y(Alignment::Center);
+
+            match &st.cs_compute {
+                CsCompute::Done(Ok(digest)) => {
+                    let got = digest.to_lowercase();
+                    let result: Element<'_, Msg> = if got == saved_hash {
+                        banner(
+                            t,
+                            t.status_success,
+                            t.status_success_bg,
+                            "circle-check",
+                            format!("File hash matches the saved {} hash.", cs.algo.label()),
+                        )
+                    } else {
+                        hash_mismatch(t, cs.algo.label(), &saved_hash, &got)
+                    };
+                    column![row_el, result].spacing(theme::space::S2).into()
+                }
+                CsCompute::Done(Err(e)) => column![
+                    row_el,
+                    text(format!("Couldn't read the file: {e}"))
+                        .font(theme::BODY)
+                        .size(11.0)
+                        .color(t.status_warning),
+                ]
+                .spacing(theme::space::S2)
+                .into(),
+                _ => row_el.into(),
+            }
+        });
+
+    let mut content = column![intro, saved_row, paste_field, result].spacing(theme::space::S2);
+    if let Some(section) = compute_section {
+        content = content.push(hairline(t.border_subtle)).push(section);
+    }
+    Some(card(t, theme::space::S3, content.into()))
 }
 
 /// Small tinted callout: icon + message on a `*-bg` surface.
@@ -1797,6 +2032,214 @@ fn banner<'a>(
         ..Default::default()
     })
     .into()
+}
+
+/// Ochre "Reconnecting…" banner shown above the progress bar while the
+/// whole transfer is mid-retry (`Phase::Reconnecting`). Appends the
+/// live attempt count from `job.retries` when known, and gently pulses
+/// its tint unless `reduce_motion` (W6).
+fn reconnect_banner(st: &State) -> Element<'_, Msg> {
+    let t = &st.tokens;
+    let fg = t.status_warning;
+    // Map a sine of the running anim clock to the configured alpha band.
+    let pulse = if st.reduce_motion {
+        RECONNECT_PULSE_MAX
+    } else {
+        let s = (st.anim_t * PULSE_RATE).sin() * 0.5 + 0.5;
+        RECONNECT_PULSE_MIN + (RECONNECT_PULSE_MAX - RECONNECT_PULSE_MIN) * s
+    };
+    let bg = color::with_alpha(t.status_warning_bg, pulse);
+
+    let retries = st.entry.job.retries;
+    let label = if retries > 0 {
+        format!("Reconnecting… · attempt {retries}")
+    } else {
+        "Reconnecting…".to_owned()
+    };
+
+    container(
+        row![
+            icons::icon("rotate-cw", 17.0, fg),
+            text(label).font(theme::BODY_MEDIUM).size(12.0).color(fg),
+        ]
+        .spacing(theme::space::S2)
+        .align_y(Alignment::Center),
+    )
+    .width(Length::Fill)
+    .padding(theme::space::S3)
+    .style(move |_| container::Style {
+        background: Some(bg.into()),
+        border: iced::Border {
+            color: fg,
+            width: 1.0,
+            radius: theme::radius::XS.into(),
+        },
+        ..Default::default()
+    })
+    .into()
+}
+
+/// Whether this completed download is *tampered*: a saved checksum
+/// reports `Mismatch`, or a locally-computed digest disagrees with the
+/// saved hash. Drives the rust burst + "don't open" warning.
+fn is_tampered(st: &State) -> bool {
+    let saved_mismatch = st
+        .entry
+        .job
+        .checksums
+        .iter()
+        .any(|c| c.status == CsStatus::Mismatch);
+    let computed_mismatch = match (&st.cs_compute, st.entry.job.checksums.first()) {
+        (CsCompute::Done(Ok(digest)), Some(cs)) => digest.to_lowercase() != cs.hash.to_lowercase(),
+        _ => false,
+    };
+    saved_mismatch || computed_mismatch
+}
+
+/// Completion burst (design `.complete-burst`, anim `cb-pop`): an 88px
+/// stage with two pulsing rings around a gradient circle + a centered
+/// glyph. Clay/check when healthy; rust/`shield-alert` when tampered.
+/// Pulse is frozen (rings at rest) when `reduce_motion`.
+fn completion_burst(st: &State, tampered: bool) -> Element<'_, Msg> {
+    let phase_t = if st.reduce_motion { 0.0 } else { st.anim_t };
+    let (ring, circle) = if tampered {
+        (color::rust::R300, color::rust::R400)
+    } else {
+        (color::clay::C400, color::clay::C300)
+    };
+    let rings = canvas(Burst {
+        t: phase_t,
+        ring,
+        circle,
+    })
+    .width(Length::Fixed(BURST_STAGE))
+    .height(Length::Fixed(BURST_STAGE));
+
+    let glyph = container(icons::icon(
+        if tampered { "shield-alert" } else { "check" },
+        BURST_ICON,
+        iced::Color::WHITE,
+    ))
+    .width(Length::Fixed(BURST_STAGE))
+    .height(Length::Fixed(BURST_STAGE))
+    .align_x(Alignment::Center)
+    .align_y(Alignment::Center);
+
+    stack![rings, glyph]
+        .width(Length::Fixed(BURST_STAGE))
+        .height(Length::Fixed(BURST_STAGE))
+        .into()
+}
+
+/// Canvas program for the burst: gradient circle + two breathing rings.
+struct Burst {
+    t: f32,
+    ring: iced::Color,
+    circle: iced::Color,
+}
+
+impl<M> canvas::Program<M> for Burst {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &iced::Renderer,
+        _theme: &iced::Theme,
+        bounds: Rectangle,
+        _cursor: iced::mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let center = Point::new(bounds.width / 2.0, bounds.height / 2.0);
+        let half = bounds.width.min(bounds.height) / 2.0;
+        let circle_r = BURST_CIRCLE / 2.0;
+
+        // Two rings, phase-offset, breathing from the circle edge out to
+        // `BURST_RING_MAX`; alpha fades as they expand (pulse-out feel).
+        for i in 0..2 {
+            let phase = (self.t * PULSE_RATE + i as f32 * std::f32::consts::PI).sin() * 0.5 + 0.5;
+            let r = circle_r + (half * BURST_RING_MAX - circle_r) * phase;
+            let alpha = (1.0 - phase) * 0.5;
+            let path = canvas::Path::circle(center, r);
+            frame.stroke(
+                &path,
+                canvas::Stroke::default()
+                    .with_width(2.0)
+                    .with_color(color::with_alpha(self.ring, alpha)),
+            );
+        }
+
+        // Solid gradient-ish circle (vertical mix from `circle`→`ring`).
+        let body = canvas::Path::circle(center, circle_r);
+        frame.fill(&body, color::mix(self.circle, self.ring, 0.5));
+
+        vec![frame.into_geometry()]
+    }
+}
+
+/// Completion stat grid (design `.complete-stats`): Avg speed · Time
+/// taken · Finished at, computed from `started_at`/`finished_at`. W3:
+/// any cell whose source timestamp is `None` is HIDDEN (no `created_at`
+/// fallback); never divides by zero. A "retried N times" sub-line shows
+/// only when `job.retries > 0`. Returns `None` when nothing is showable.
+fn completion_stats(st: &State) -> Option<Element<'_, Msg>> {
+    let t = &st.tokens;
+    let t2 = *t;
+    let job = &st.entry.job;
+    let downloaded = st.entry.counters.downloaded;
+
+    let mut cells: Vec<Element<'_, Msg>> = Vec::new();
+
+    // Avg speed + Time taken both need a [started, finished] interval.
+    if let (Some(started), Some(finished)) = (job.started_at, job.finished_at) {
+        let secs = (finished - started).num_seconds().max(0) as u64;
+        if secs > 0 {
+            let avg = downloaded as f64 / secs as f64;
+            cells.push(stat(t, "avg speed", format_speed(avg), true));
+        }
+        cells.push(stat(t, "time taken", format_eta(secs), false));
+    }
+    if let Some(finished) = job.finished_at {
+        let local = finished
+            .with_timezone(&chrono::Local)
+            .format("%H:%M")
+            .to_string();
+        cells.push(stat(t, "finished at", local, false));
+    }
+
+    if cells.is_empty() {
+        return None;
+    }
+
+    let mut grid = row![].spacing(theme::space::S2);
+    for c in cells {
+        grid = grid.push(c);
+    }
+
+    let mut col = column![
+        container(grid)
+            .width(Length::Fill)
+            .padding(theme::space::S3)
+            .style(move |_| container::Style {
+                background: Some(t2.bg_sunken.into()),
+                border: iced::Border {
+                    radius: theme::surface::RADIUS.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+    ]
+    .spacing(theme::space::S1);
+
+    if job.retries > 0 {
+        col = col.push(
+            text(format!("Retried {} times", job.retries))
+                .font(theme::BODY)
+                .size(11.0)
+                .color(t.fg_3),
+        );
+    }
+    Some(col.into())
 }
 
 pub fn launch_download(_id: JobId) {

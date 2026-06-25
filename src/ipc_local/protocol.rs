@@ -392,6 +392,10 @@ pub struct JobCounters {
     /// 0 = unknown, 1 = yes, -1 = no.
     pub is_resumable: i8,
     pub running: bool,
+    /// Live count of `PartRetrying` events this run. Lets an in-progress
+    /// download show the running retry tally; completion reads the
+    /// persisted `Job::retries` instead.
+    pub retries: u32,
     pub parts: Vec<PartView>,
 }
 
