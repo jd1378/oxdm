@@ -1,5 +1,5 @@
 //! Text-entry primitives: text input, search field, password input,
-//! file input. All sized to `control::H_MD` (32) with `radius::XS`.
+//! file input. All sized to `control::H_MD` (28) with `control::RADIUS`.
 
 use iced::widget::{container, mouse_area, row, text_input};
 use iced::{Alignment, Border, Color, Element, Length};
@@ -20,7 +20,7 @@ fn base_style(
             color: border_override.unwrap_or(if focused {
                 t.border_brand
             } else {
-                t.border_subtle
+                t.border_default
             }),
             width: t.border_width,
             radius: theme::control::RADIUS.into(),
@@ -55,7 +55,8 @@ impl<'a, M: Clone + 'a> TextInput<'a, M> {
             value,
             hint: String::new(),
             width: Length::Fill,
-            font: theme::BODY,
+            // Design `.input` value text is 500-weight (medium).
+            font: theme::BODY_MEDIUM,
             font_size: 13.0,
             secure: false,
             enabled: true,
@@ -228,7 +229,7 @@ impl<'a, M: Clone + 'a> PasswordInput<'a, M> {
     pub fn view(self, t: &Tokens) -> Element<'a, M> {
         let t = *t;
         let mut input = text_input(&self.hint, self.value)
-            .font(theme::BODY)
+            .font(theme::BODY_MEDIUM)
             .size(13.0)
             .secure(!self.revealed)
             .width(Length::Fill)
@@ -284,7 +285,8 @@ impl<'a, M: Clone + 'a> FileInput<'a, M> {
             value,
             hint: String::new(),
             width: Length::Fill,
-            font: theme::BODY,
+            // Design `.input` value text is 500-weight (medium).
+            font: theme::BODY_MEDIUM,
             font_size: 13.0,
             icon: "folder",
             enabled: true,

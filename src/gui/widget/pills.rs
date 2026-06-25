@@ -7,27 +7,22 @@ use iced::{Alignment, Border, Color, Element, Length, Point, Rectangle, Size};
 use crate::gui::color::with_alpha;
 use crate::gui::theme::{self, Tokens};
 
-/// Count badge: 16px pill, body_bold(11), 6px x-pad, min width 16.
+/// Count badge: 16px pill, mono(10), 6px x-pad, min width 16.
 pub fn pill_count<'a, M: 'a>(n: u64, fg: Color, bg: Color) -> Element<'a, M> {
-    container(
-        text(n.to_string())
-            .font(theme::BODY_BOLD)
-            .size(11.0)
-            .color(fg),
-    )
-    .height(Length::Fixed(16.0))
-    .padding([0.0, 6.0])
-    .align_y(Alignment::Center)
-    .align_x(Alignment::Center)
-    .style(move |_| container::Style {
-        background: Some(bg.into()),
-        border: Border {
-            radius: 8.0.into(),
+    container(text(n.to_string()).font(theme::MONO).size(10.0).color(fg))
+        .height(Length::Fixed(16.0))
+        .padding([0.0, 6.0])
+        .align_y(Alignment::Center)
+        .align_x(Alignment::Center)
+        .style(move |_| container::Style {
+            background: Some(bg.into()),
+            border: Border {
+                radius: 8.0.into(),
+                ..Default::default()
+            },
             ..Default::default()
-        },
-        ..Default::default()
-    })
-    .into()
+        })
+        .into()
 }
 
 /// 8px colored dot + bold label in the same color. 6px gap.

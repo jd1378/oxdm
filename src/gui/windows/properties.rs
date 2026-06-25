@@ -17,7 +17,7 @@ use crate::gui::ipc::DaemonSignal;
 use crate::gui::shot::Shot;
 use crate::gui::theme::{self, Tokens};
 use crate::gui::widget::{
-    Btn, BtnSize, TabBtn, TextInput, combo, eyebrow, hairline, number_stepper, toggle,
+    Btn, BtnSize, TabBtn, TextInput, combo, eyebrow, hairline, number_stepper, status_dot, toggle,
 };
 use crate::gui::windows::add::footer;
 use crate::gui::{color, icons};
@@ -672,17 +672,24 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
             .icon("folder")
             .on_press(Msg::OpenFolder)
             .view(t),
-        row![
-            Btn::new("Close").ghost().on_press(Msg::CloseWin).view(t),
-            Btn::new("Apply")
-                .primary()
-                .icon("check")
-                .enabled(st.dirty && !st.locked())
-                .on_press(Msg::Apply)
-                .view(t),
-        ]
-        .spacing(theme::space::S2)
-        .into(),
+        {
+            let mut right = row![].spacing(theme::space::S2).align_y(Alignment::Center);
+            if st.dirty {
+                // clay "● unsaved" dirty-dot — staged edits await Apply.
+                right = right.push(status_dot(t.action_primary, "unsaved", 11.0));
+            }
+            right
+                .push(Btn::new("Close").ghost().on_press(Msg::CloseWin).view(t))
+                .push(
+                    Btn::new("Apply")
+                        .primary()
+                        .icon("check")
+                        .enabled(st.dirty && !st.locked())
+                        .on_press(Msg::Apply)
+                        .view(t),
+                )
+                .into()
+        },
     );
 
     let t2 = *t;

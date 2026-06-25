@@ -70,6 +70,10 @@ pub struct Btn<'a, M> {
     enabled: bool,
     selected: bool,
     accent: bool,
+    /// Ghost/Toolbar button that escalates to the danger tone (rust
+    /// text + rust-50 bg) on hover only — borderless/neutral at idle.
+    /// Mirrors design `.tb-btn.danger`. Ignored by other variants.
+    danger_hover: bool,
     min_width: Option<f32>,
     fill_width: bool,
     font_size: Option<f32>,
@@ -88,6 +92,7 @@ impl<'a, M: Clone + 'a> Btn<'a, M> {
             enabled: true,
             selected: false,
             accent: false,
+            danger_hover: false,
             min_width: None,
             fill_width: false,
             font_size: None,
@@ -145,6 +150,12 @@ impl<'a, M: Clone + 'a> Btn<'a, M> {
         self.accent = accent;
         self
     }
+    /// Borderless ghost/toolbar button that turns rust on hover only
+    /// (design `.tb-btn.danger`). Apply on a `.toolbar()`/`.ghost()` button.
+    pub fn danger_hover(mut self) -> Self {
+        self.danger_hover = true;
+        self
+    }
     pub fn min_width(mut self, w: f32) -> Self {
         self.min_width = Some(w);
         self
@@ -189,6 +200,11 @@ impl<'a, M: Clone + 'a> Btn<'a, M> {
             BtnVariant::Toolbar | BtnVariant::Ghost => {
                 if self.selected {
                     t.action_primary
+                } else if self.danger_hover {
+                    match status {
+                        Hovered | Pressed => t.status_danger,
+                        _ => t.fg_2,
+                    }
                 } else if self.accent {
                     match status {
                         Pressed => darken(t.action_primary, 0.10),
@@ -233,6 +249,14 @@ impl<'a, M: Clone + 'a> Btn<'a, M> {
             BtnVariant::Toolbar => {
                 if self.selected {
                     (Some(t.bg_sunken), Some(t.border_brand))
+                } else if self.danger_hover {
+                    // Borderless idle; rust-50 tint on hover (design `.tb-btn.danger`).
+                    let bg = match status {
+                        Hovered => Some(t.status_danger_bg),
+                        Pressed => Some(mix(t.status_danger_bg, t.bg_page, 0.4)),
+                        _ => None,
+                    };
+                    (bg, None)
                 } else {
                     let bg = match status {
                         Hovered => Some(mix(t.bg_page, t.bg_sunken, 0.55)),
@@ -328,6 +352,7 @@ impl<'a, M: Clone + 'a> Btn<'a, M> {
         let enabled = self.enabled;
         let selected = self.selected;
         let accent = self.accent;
+        let danger_hover = self.danger_hover;
         let style_proto = Btn::<M> {
             label: String::new(),
             variant,
@@ -337,6 +362,7 @@ impl<'a, M: Clone + 'a> Btn<'a, M> {
             enabled,
             selected,
             accent,
+            danger_hover,
             min_width: None,
             fill_width: false,
             font_size: None,

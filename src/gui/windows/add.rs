@@ -23,6 +23,13 @@ use crate::ipc_local::protocol::AddJobReq;
 
 const DEBOUNCE_MS: u64 = 400;
 
+/// Add-dialog window width (design `.dialog-add` = 580px).
+const DIALOG_W: f32 = 580.0;
+/// Big detection ext-tile edge (design `ext-big` = 44px).
+const EXT_TILE: f32 = 44.0;
+/// Segments option shown (and enforced) when the download can't be resumed.
+const FORCED_SINGLE_SEGMENT: &str = "1 connection (forced)";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdvTab {
     Proxy,
@@ -182,6 +189,13 @@ impl AddState {
                 headers.insert(k.trim().to_owned(), v.clone());
             }
         }
+        // Non-resumable downloads are forced to a single connection (the
+        // Segments combo is locked to "1 connection (forced)" in that state).
+        let segments = if self.detected().is_some_and(|p| !p.is_resumable) {
+            1
+        } else {
+            self.segments
+        };
         let cookies_text = self.cookies.text();
         let opt = |s: &str| {
             let s = s.trim();
@@ -193,7 +207,7 @@ impl AddState {
             filename,
             referrer: None,
             headers,
-            max_connections: Some(self.segments),
+            max_connections: Some(segments),
             proxy,
             auth_user: opt(&self.auth_user),
             auth_password: opt(&self.auth_pass),
@@ -413,7 +427,7 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
                     ));
                 }
                 let resize = iced::window::latest()
-                    .and_then(|id| iced::window::resize(id, iced::Size::new(520.0, 417.0)));
+                    .and_then(|id| iced::window::resize(id, iced::Size::new(DIALOG_W, 417.0)));
                 st.probed = Some(res);
                 return resize;
             }
@@ -476,7 +490,7 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
                 268.0
             };
             iced::window::latest()
-                .and_then(move |id| iced::window::resize(id, iced::Size::new(520.0, h)))
+                .and_then(move |id| iced::window::resize(id, iced::Size::new(DIALOG_W, h)))
         }
         Msg::SetAdvTab(tab) => {
             st.adv_tab = tab;
@@ -588,7 +602,7 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
         }
         Msg::Cancel => iced::exit(),
         Msg::WinResized(w, h) => {
-            chrome::enforce_min_size(iced::Size::new(w, h), iced::Size::new(520.0, 268.0))
+            chrome::enforce_min_size(iced::Size::new(w, h), iced::Size::new(DIALOG_W, 268.0))
         }
         Msg::ShotTick => {
             if let Some(shot) = &mut st.shot
@@ -697,20 +711,7 @@ fn ready_view(st: &AddState) -> Element<'_, Msg> {
                             Length::Fill,
                         )
                     ),
-                    labeled(
-                        t,
-                        "segments",
-                        combo(
-                            t,
-                            [1u64, 2, 4, 8, 16, 32]
-                                .iter()
-                                .map(|n| format!("{n} connections"))
-                                .collect(),
-                            Some(format!("{} connections", st.segments)),
-                            Msg::SetSegments,
-                            Length::Fill,
-                        )
-                    ),
+                    labeled(t, "segments", segments_combo(st)),
                 ]
                 .spacing(theme::space::S3),
             )
@@ -791,6 +792,30 @@ fn ready_view(st: &AddState) -> Element<'_, Msg> {
     chrome::resize::resizable(t, content.into(), true, Msg::Window)
 }
 
+/// Segments select. When the detected download is non-resumable it is locked
+/// to a single forced "1 connection (forced)" option (design `.dialog-add`
+/// non-resumable variant); the value is forced to 1 in `build_req`. Message
+/// wiring is unchanged — `SetSegments` still parses the leading integer.
+fn segments_combo(st: &AddState) -> Element<'_, Msg> {
+    let t = &st.tokens;
+    let non_resumable = st.detected().is_some_and(|p| !p.is_resumable);
+    let (options, selected) = if non_resumable {
+        (
+            vec![FORCED_SINGLE_SEGMENT.to_owned()],
+            Some(FORCED_SINGLE_SEGMENT.to_owned()),
+        )
+    } else {
+        (
+            [1u64, 2, 4, 8, 16, 32]
+                .iter()
+                .map(|n| format!("{n} connections"))
+                .collect(),
+            Some(format!("{} connections", st.segments)),
+        )
+    };
+    combo(t, options, selected, Msg::SetSegments, Length::Fill)
+}
+
 fn labeled<'a>(t: &Tokens, label: &str, body: Element<'a, Msg>) -> Element<'a, Msg> {
     column![field_label(t, label), body]
         .spacing(theme::space::S1)
@@ -855,7 +880,7 @@ fn detect_card(st: &AddState) -> Element<'_, Msg> {
     let detected = st.detected();
     let non_resumable = detected.is_some_and(|p| !p.is_resumable);
 
-    // 56px icon tile.
+    // EXT_TILE (44px) icon tile.
     let (tile_bg, tile_fg) = if non_resumable {
         (color::ochre::O100, color::ochre::O500)
     } else {
@@ -868,8 +893,8 @@ fn detect_card(st: &AddState) -> Element<'_, Msg> {
                 .map(|e| e.to_string_lossy().to_uppercase())
                 .unwrap_or_else(|| "FILE".into());
             container(text(ext).font(theme::MONO_BOLD).size(12.0).color(tile_fg))
-                .width(Length::Fixed(56.0))
-                .height(Length::Fixed(56.0))
+                .width(Length::Fixed(EXT_TILE))
+                .height(Length::Fixed(EXT_TILE))
                 .align_x(Alignment::Center)
                 .align_y(Alignment::Center)
                 .style(move |_| container::Style {
@@ -888,8 +913,8 @@ fn detect_card(st: &AddState) -> Element<'_, Msg> {
             22.0,
             t.fg_2,
         ))
-        .width(Length::Fixed(56.0))
-        .height(Length::Fixed(56.0))
+        .width(Length::Fixed(EXT_TILE))
+        .height(Length::Fixed(EXT_TILE))
         .align_x(Alignment::Center)
         .align_y(Alignment::Center)
         .style(move |_| container::Style {
@@ -1241,8 +1266,8 @@ pub fn launch_add(_edit_id: Option<JobId>, _prefill: Option<String>) {
         .default_font(theme::BODY)
         .antialiasing(true)
         .window(chrome::window_settings(
-            iced::Size::new(520.0, 268.0),
-            iced::Size::new(520.0, 268.0),
+            iced::Size::new(DIALOG_W, 268.0),
+            iced::Size::new(DIALOG_W, 268.0),
         ));
     for f in theme::fonts::ALL {
         app = app.font(*f);

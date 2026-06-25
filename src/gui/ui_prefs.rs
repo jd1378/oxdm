@@ -20,12 +20,16 @@ pub struct ColumnsState {
     pub hidden: [bool; 6],
 }
 
-pub const COL_MIN_W: f32 = 50.0;
+/// Minimum table column width (design `ResizableHeader` min 60px).
+pub const COL_MIN_W: f32 = 60.0;
 
 impl Default for ColumnsState {
     fn default() -> Self {
+        // Order = SortColumn (Name, Size, Status, Speed, Eta, Date).
+        // Design defaults: name 420, size 90, status 280, speed 100,
+        // eta 90, date 130.
         Self {
-            widths: [380.0, 92.0, 280.0, 100.0, 90.0, 130.0],
+            widths: [420.0, 92.0, 280.0, 100.0, 90.0, 130.0],
             hidden: [false; 6],
         }
     }

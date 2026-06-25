@@ -439,6 +439,9 @@ pub mod space {
 
 pub mod radius {
     pub const XS: f32 = 6.0;
+    /// Corner radius for form controls (design `.input`/`.btn` = 5px).
+    /// Distinct from the global `XS` token so controls can diverge.
+    pub const CTRL: f32 = 5.0;
     pub const SM: f32 = 10.0;
     pub const MD: f32 = 12.0;
     pub const LG: f32 = 16.0;
@@ -529,16 +532,16 @@ pub mod opacity {
 pub mod control {
     use super::radius;
     /// Compact control (e.g. table-row inline buttons, status-bar buttons).
-    pub const H_SM: f32 = 26.0;
+    pub const H_SM: f32 = 22.0;
     /// Default control height for buttons, inputs, dropdowns.
-    pub const H_MD: f32 = 32.0;
+    pub const H_MD: f32 = 28.0;
     /// Hero / primary CTAs.
-    pub const H_LG: f32 = 40.0;
+    pub const H_LG: f32 = 32.0;
     /// Corner radius for form controls (buttons, inputs, dropdowns).
-    pub const RADIUS: f32 = radius::XS;
+    pub const RADIUS: f32 = radius::CTRL;
     /// Horizontal inner padding for inputs (text input, file input, text
-    /// area). Matches `space::S2`.
-    pub const INPUT_PAD_X: f32 = 8.0;
+    /// area). Design `.input` pad-x = 10px.
+    pub const INPUT_PAD_X: f32 = 10.0;
     /// Vertical inner padding for multi-line inputs (text area).
     pub const INPUT_PAD_Y: f32 = 7.0;
 }

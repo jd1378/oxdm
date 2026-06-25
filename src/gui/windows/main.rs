@@ -23,10 +23,24 @@ use crate::gui::{color, icons};
 use crate::ipc_local::Client;
 use crate::ipc_local::protocol::{Event, JobCounters, SnapshotData};
 
-const SIDEBAR_W: f32 = 220.0;
+const SIDEBAR_W: f32 = 232.0; // design `.main-grid` sidebar column = 232px
 const RESIZE_HANDLE_W: f32 = 6.0;
 const ROW_H: f32 = 48.0;
 const HEADER_H: f32 = 22.0;
+
+// Resize grip (design `ResizableHeader`): 1px quiet idle grip, 3px
+// clay grip at ~70% height on hover, 3px clay-500 while dragging.
+const GRIP_W_IDLE: f32 = 1.0;
+const GRIP_W_ACTIVE: f32 = 3.0;
+const GRIP_ACTIVE_RATIO: f32 = 0.7;
+
+// Name-cell ext pill (design `.fname` ext tag): 28×22, radius 4, mono
+// 700 ~9px, category-tinted; 10px gap to the title stack.
+const EXT_PILL_W: f32 = 28.0;
+const EXT_PILL_H: f32 = 22.0;
+const EXT_PILL_RADIUS: f32 = 4.0;
+const EXT_PILL_FONT: f32 = 9.0;
+const NAME_PILL_GAP: f32 = 10.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarFilter {
@@ -1264,54 +1278,101 @@ fn sidebar_row<'a>(
                 .color(count_fg),
         );
     }
-    mouse_area(
+    // Nav rows get hover feedback (design: hover -> bg_sunken).
+    // Selected (`active`) rows keep the clay fill. A `button` gives us
+    // the per-status hover the plain container couldn't.
+    iced::widget::button(
         container(r)
             .width(Length::Fill)
-            .height(Length::Fixed(26.0))
-            .align_y(Alignment::Center)
-            .padding(iced::Padding {
-                left: 12.0,
-                right: 10.0,
-                ..Default::default()
-            })
-            .style(move |_| container::Style {
-                background: active.then(|| t2.action_primary.into()),
-                border: iced::Border {
-                    radius: theme::control::RADIUS.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            }),
+            .height(Length::Fill)
+            .align_y(Alignment::Center),
     )
+    .width(Length::Fill)
+    .height(Length::Fixed(26.0))
+    .padding(iced::Padding {
+        left: 12.0,
+        right: 10.0,
+        ..Default::default()
+    })
     .on_press(msg)
-    .interaction(iced::mouse::Interaction::Pointer)
+    .style(move |_, status| {
+        use iced::widget::button::Status;
+        let background = if active {
+            Some(t2.action_primary.into())
+        } else if matches!(status, Status::Hovered | Status::Pressed) {
+            Some(t2.bg_sunken.into())
+        } else {
+            None
+        };
+        iced::widget::button::Style {
+            background,
+            text_color: fg,
+            border: iced::Border {
+                radius: theme::control::RADIUS.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    })
     .into()
 }
 
-fn section_header<'a>(t: &Tokens, label: &'a str, idx: u8, open: bool) -> Element<'a, Msg> {
+fn section_header<'a>(
+    t: &Tokens,
+    label: &'a str,
+    idx: u8,
+    open: bool,
+    add: Option<Msg>,
+) -> Element<'a, Msg> {
     let chev = if open {
         "chevron-down"
     } else {
         "chevron-right"
     };
+    let t2 = *t;
+    let mut head = row![
+        icons::icon(chev, 14.0, color::with_alpha(t.fg_3, 0.85)),
+        text(label.to_uppercase())
+            .font(theme::BODY_BOLD)
+            .size(10.0)
+            .color(t.fg_3),
+    ]
+    .spacing(6.0)
+    .align_y(Alignment::Center);
+    // Section "+" add affordance (design: Queues header opens the
+    // Queue dialog). Nested button captures its own click so the
+    // surrounding toggle mouse_area doesn't also fire.
+    if let Some(add_msg) = add {
+        head = head
+            .push(iced::widget::Space::new().width(Length::Fill))
+            .push(
+                iced::widget::button(icons::icon("plus", 14.0, t.fg_3))
+                    .padding(2)
+                    .on_press(add_msg)
+                    .style(move |_, status| {
+                        use iced::widget::button::Status;
+                        iced::widget::button::Style {
+                            background: matches!(status, Status::Hovered | Status::Pressed)
+                                .then(|| t2.bg_sunken.into()),
+                            border: iced::Border {
+                                radius: theme::radius::XS.into(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }
+                    }),
+            );
+    }
     mouse_area(
-        container(
-            row![
-                icons::icon(chev, 14.0, color::with_alpha(t.fg_3, 0.85)),
-                text(label.to_uppercase())
-                    .font(theme::BODY_BOLD)
-                    .size(10.0)
-                    .color(t.fg_3),
-            ]
-            .spacing(6.0)
-            .align_y(Alignment::Center),
-        )
-        .height(Length::Fixed(28.0))
-        .align_y(Alignment::Center)
-        .padding(iced::Padding {
-            left: 10.0,
-            ..Default::default()
-        }),
+        container(head)
+            .width(Length::Fill)
+            .height(Length::Fixed(28.0))
+            .align_y(Alignment::Center)
+            .padding(iced::Padding {
+                left: 10.0,
+                right: 8.0,
+                ..Default::default()
+            }),
     )
     .on_press(Msg::ToggleSection(idx))
     .interaction(iced::mouse::Interaction::Pointer)
@@ -1347,7 +1408,7 @@ fn sidebar(m: &Main) -> Element<'_, Msg> {
 
     // CATEGORIES
     let cats_open = !m.collapsed_sections.contains(&0);
-    col = col.push(section_header(t, "Categories", 0, cats_open));
+    col = col.push(section_header(t, "Categories", 0, cats_open, None));
     if cats_open {
         let all_active = m.filter == SidebarFilter::All;
         col = col.push(sidebar_row(
@@ -1380,7 +1441,13 @@ fn sidebar(m: &Main) -> Element<'_, Msg> {
 
     // QUEUES
     let queues_open = !m.collapsed_sections.contains(&1);
-    col = col.push(section_header(t, "Queues", 1, queues_open));
+    col = col.push(section_header(
+        t,
+        "Queues",
+        1,
+        queues_open,
+        Some(Msg::Tool(ToolAction::Scheduler)),
+    ));
     if queues_open {
         for q in &m.snap.queues {
             let active = m.filter == SidebarFilter::Queue(q.id);
@@ -1398,7 +1465,7 @@ fn sidebar(m: &Main) -> Element<'_, Msg> {
 
     // TOOLS
     let tools_open = !m.collapsed_sections.contains(&2);
-    col = col.push(section_header(t, "Tools", 2, tools_open));
+    col = col.push(section_header(t, "Tools", 2, tools_open, None));
     if tools_open {
         for (action, icon, label) in [
             (ToolAction::Scheduler, "calendar", "Scheduler"),
@@ -1444,6 +1511,7 @@ fn toolbar(m: &Main) -> Element<'_, Msg> {
     let bar = row![
         Btn::new("Add URL")
             .primary()
+            .size(BtnSize::Lg) // design: hero CTA is the lg button
             .icon("plus")
             .on_press(Msg::Toolbar(ToolbarAction::AddUrl))
             .view(t),
@@ -1456,11 +1524,14 @@ fn toolbar(m: &Main) -> Element<'_, Msg> {
             .view(t),
         Btn::new("Stop all")
             .toolbar()
-            .icon("square")
+            // design `octagon-x`; not in the icon set, `circle-x` is the
+            // closest stop-with-X glyph available.
+            .icon("circle-x")
             .on_press(Msg::Toolbar(ToolbarAction::StopAll))
             .view(t),
         Btn::new("Clean")
             .toolbar()
+            .danger_hover() // design `.tb-btn.danger`: borderless, rust on hover only
             .icon("trash-2")
             .on_press(Msg::Toolbar(ToolbarAction::Clean))
             .view(t),
@@ -1471,7 +1542,13 @@ fn toolbar(m: &Main) -> Element<'_, Msg> {
             .on_press(Msg::Toolbar(ToolbarAction::Schedule))
             .view(t),
         iced::widget::Space::new().width(Length::Fill),
-        search_field(t, &m.search, "Search...", 200.0, Msg::SetSearch),
+        search_field(
+            t,
+            &m.search,
+            "Search downloads\u{2026}",
+            200.0,
+            Msg::SetSearch
+        ),
     ]
     .spacing(theme::space::S2)
     .align_y(Alignment::Center);
@@ -1494,7 +1571,7 @@ fn tab_strip(m: &Main) -> Element<'_, Msg> {
         .filter(|j| m.phase(j.id) == Phase::Completed)
         .count() as u64;
 
-    container(row![
+    let mut bar = row![
         TabBtn::new("All")
             .count(n_all)
             .active(m.tab == Tab::All)
@@ -1510,13 +1587,46 @@ fn tab_strip(m: &Main) -> Element<'_, Msg> {
             .active(m.tab == Tab::Finished)
             .on_press(Msg::SetTab(Tab::Finished))
             .view(t),
-    ])
-    .padding(iced::Padding {
-        left: theme::space::S4,
-        ..Default::default()
-    })
-    .width(Length::Fill)
-    .into()
+    ]
+    .align_y(Alignment::Center);
+
+    // Right-side live readout (design `.tab-meta`): "● N active · speed"
+    // in clay-500 mono, shown only while downloads are active.
+    if n_active > 0 {
+        let active_speed: f64 = base
+            .iter()
+            .filter(|j| m.phase(j.id) == Phase::Downloading)
+            .filter_map(|j| m.counters.get(&j.id))
+            .map(|c| c.speed_bps)
+            .sum();
+        let label = if active_speed > 1.0 {
+            format!("{n_active} active \u{00b7} {}", format_speed(active_speed))
+        } else {
+            format!("{n_active} active")
+        };
+        bar = bar
+            .push(iced::widget::Space::new().width(Length::Fill))
+            .push(
+                row![
+                    crate::gui::widget::dot(6.0, color::clay::C500),
+                    text(label)
+                        .font(theme::MONO)
+                        .size(11.0)
+                        .color(color::clay::C500),
+                ]
+                .spacing(6.0)
+                .align_y(Alignment::Center),
+            );
+    }
+
+    container(bar)
+        .padding(iced::Padding {
+            left: theme::space::S4,
+            right: theme::space::S4,
+            ..Default::default()
+        })
+        .width(Length::Fill)
+        .into()
 }
 
 // ---------------------------------------------------------------- table
@@ -1524,20 +1634,26 @@ fn tab_strip(m: &Main) -> Element<'_, Msg> {
 fn header_cell<'a>(m: &Main, label: &'a str, col: SortColumn, width: f32) -> Element<'a, Msg> {
     let (active_col, desc) = m.sort;
     let t2 = m.tokens;
-    // Always-visible separator line in the handle, like the egui
-    // header: 1px border_subtle idle, 2px fg_2 while hovered/dragging.
-    let active =
-        m.col_handle_hover == Some(col) || matches!(m.col_drag, Some((c, _, _)) if c == col);
-    let (line_w, line_color) = if active {
-        (2.0, t2.fg_2)
+    // Resize grip (design `ResizableHeader`): 1px quiet idle, 3px
+    // clay-400 at ~70% height on hover, 3px clay-500 while dragging.
+    let dragging = matches!(m.col_drag, Some((c, _, _)) if c == col);
+    let hovering = m.col_handle_hover == Some(col);
+    let (line_w, line_h, line_color) = if dragging {
+        (GRIP_W_ACTIVE, HEADER_H, color::clay::C500)
+    } else if hovering {
+        (
+            GRIP_W_ACTIVE,
+            HEADER_H * GRIP_ACTIVE_RATIO,
+            color::clay::C400,
+        )
     } else {
-        (1.0, t2.border_subtle)
+        (GRIP_W_IDLE, HEADER_H, t2.border_subtle)
     };
     let handle = mouse_area(
         container(
             container(iced::widget::Space::new())
                 .width(Length::Fixed(line_w))
-                .height(Length::Fixed(HEADER_H))
+                .height(Length::Fixed(line_h))
                 .style(move |_| container::Style {
                     background: Some(line_color.into()),
                     ..Default::default()
@@ -1545,7 +1661,8 @@ fn header_cell<'a>(m: &Main, label: &'a str, col: SortColumn, width: f32) -> Ele
         )
         .width(Length::Fixed(RESIZE_HANDLE_W))
         .height(Length::Fixed(HEADER_H))
-        .align_x(Alignment::Center),
+        .align_x(Alignment::Center)
+        .align_y(Alignment::Center),
     )
     .on_press(Msg::ColResizeStart(col))
     .on_enter(Msg::ColHandleHover(col, true))
@@ -1674,20 +1791,53 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
     let name = job.filename.clone().unwrap_or_else(|| job.url.to_string());
     let host = job.url.host_str().unwrap_or("").to_owned();
 
+    // Category-tinted ext pill (design `.fname` tag), before the title.
+    let ext = std::path::PathBuf::from(&name)
+        .extension()
+        .map(|e| e.to_string_lossy().to_uppercase())
+        .unwrap_or_else(|| "FILE".into());
+    let cat = cat_color(t, job.category);
+    let pill_bg = color::mix(t.bg_surface, cat, 0.20);
+    let ext_pill = container(
+        text(ext)
+            .font(theme::MONO_BOLD)
+            .size(EXT_PILL_FONT)
+            .color(cat)
+            .wrapping(iced::widget::text::Wrapping::None),
+    )
+    .width(Length::Fixed(EXT_PILL_W))
+    .height(Length::Fixed(EXT_PILL_H))
+    .clip(true)
+    .align_x(Alignment::Center)
+    .align_y(Alignment::Center)
+    .style(move |_| container::Style {
+        background: Some(pill_bg.into()),
+        border: iced::Border {
+            radius: EXT_PILL_RADIUS.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+
     let name_cell = container(
-        column![
-            text(name)
-                .font(theme::BODY_BOLD)
-                .size(13.0)
-                .color(t.fg_1)
-                .wrapping(iced::widget::text::Wrapping::None),
-            text(host)
-                .font(theme::MONO)
-                .size(10.0)
-                .color(t.fg_3)
-                .wrapping(iced::widget::text::Wrapping::None),
+        row![
+            ext_pill,
+            column![
+                text(name)
+                    .font(theme::BODY_BOLD)
+                    .size(13.0)
+                    .color(t.fg_1)
+                    .wrapping(iced::widget::text::Wrapping::None),
+                text(host)
+                    .font(theme::MONO)
+                    .size(10.0)
+                    .color(t.fg_3)
+                    .wrapping(iced::widget::text::Wrapping::None),
+            ]
+            .spacing(2.0),
         ]
-        .spacing(2.0),
+        .spacing(NAME_PILL_GAP)
+        .align_y(Alignment::Center),
     )
     .width(Length::Fixed(m.columns.width(SortColumn::Name as usize)))
     .clip(true)
@@ -1704,6 +1854,7 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
             .wrapping(iced::widget::text::Wrapping::None)
             .into(),
         Length::Fixed(m.columns.width(SortColumn::Size as usize)),
+        Alignment::End, // design: numeric columns right-align
     );
 
     let status_cell: Element<'_, Msg> = if phase.is_terminal()
@@ -1713,6 +1864,7 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
         cell(
             status_dot(color, label, 12.0),
             Length::Fixed(m.columns.width(SortColumn::Status as usize)),
+            Alignment::Start,
         )
     } else {
         let frac = match (c.map(|c| c.downloaded), total) {
@@ -1723,6 +1875,7 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
         cell(
             inline_progress(t, frac as f32, label, selected, Length::Fill, 22.0),
             Length::Fixed(m.columns.width(SortColumn::Status as usize)),
+            Alignment::Start,
         )
     };
 
@@ -1739,6 +1892,7 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
         .wrapping(iced::widget::text::Wrapping::None)
         .into(),
         Length::Fixed(m.columns.width(SortColumn::Speed as usize)),
+        Alignment::End,
     );
 
     let eta_cell = cell(
@@ -1749,6 +1903,7 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
             .wrapping(iced::widget::text::Wrapping::None)
             .into(),
         Length::Fixed(m.columns.width(SortColumn::Eta as usize)),
+        Alignment::End,
     );
 
     let date_cell = cell(
@@ -1759,6 +1914,7 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
             .wrapping(iced::widget::text::Wrapping::None)
             .into(),
         Length::Fixed(m.columns.width(SortColumn::Date as usize)),
+        Alignment::End,
     );
 
     let t2 = *t;
@@ -1804,20 +1960,52 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
         });
 
     let (ctrl, shift) = (m.modifiers.command(), m.modifiers.shift());
-    mouse_area(row_el)
+    let row_area = mouse_area(row_el)
         .on_press(Msg::RowClick(id, ctrl, shift))
         .on_double_click(Msg::RowDoubleClick(id))
-        .on_right_press(Msg::RowRightClick(id))
-        .into()
+        .on_right_press(Msg::RowRightClick(id));
+
+    // 1px bottom row separator (design `.tr` border-subtle hairline).
+    // Fixed width = sum of visible columns so it tracks the Shrink row
+    // (a Fill hairline would collapse in the unbounded scrollable).
+    let total_w: f32 = TABLE_COLS
+        .iter()
+        .filter(|(c, _)| m.columns.is_visible(*c as usize))
+        .map(|(c, _)| m.columns.width(*c as usize))
+        .sum();
+    let separator = container(iced::widget::Space::new())
+        .width(Length::Fixed(total_w))
+        .height(Length::Fixed(1.0))
+        .style(move |_| container::Style {
+            background: Some(t.border_subtle.into()),
+            ..Default::default()
+        });
+
+    column![row_area, separator].width(Length::Shrink).into()
 }
 
-fn cell(content: Element<'_, Msg>, width: Length) -> Element<'_, Msg> {
+fn cell(content: Element<'_, Msg>, width: Length, align: Alignment) -> Element<'_, Msg> {
     container(content)
         .width(width)
         .padding([0.0, theme::space::S2])
+        .align_x(align)
         .align_y(Alignment::Center)
         .height(Length::Fill)
         .into()
+}
+
+/// Category accent color for the Name-cell ext pill (mirrors the
+/// sidebar/category tints in `download.rs`).
+fn cat_color(t: &Tokens, cat: Category) -> iced::Color {
+    match cat {
+        Category::Compressed => t.cat_compressed,
+        Category::Programs => t.cat_programs,
+        Category::Videos => t.cat_videos,
+        Category::Music => t.cat_music,
+        Category::Pictures => t.cat_pictures,
+        Category::Documents => t.cat_documents,
+        Category::Other => t.fg_3,
+    }
 }
 
 fn phase_style(t: &Tokens, phase: Phase) -> (iced::Color, String) {
@@ -1874,7 +2062,8 @@ fn statusbar(m: &Main) -> Element<'_, Msg> {
     let (dot_color, label) = if n_downloading > 0 {
         (t.action_primary, format!("{n_downloading} downloading"))
     } else {
-        (t.fg_4, "Idle".to_owned())
+        // design: idle dot is moss (active stays action_primary).
+        (t.status_success, "Idle".to_owned())
     };
 
     let queue_name = match m.filter {
@@ -1909,22 +2098,28 @@ fn statusbar(m: &Main) -> Element<'_, Msg> {
             14.0,
             if total_speed > 1.0 { t.fg_2 } else { t.fg_4 }
         ),
+        // design: aggregate speed value is clay-500 mono.
         text(if total_speed > 1.0 {
             format_speed(total_speed)
         } else {
             "—".into()
         })
-        .font(theme::BODY_BOLD)
+        .font(theme::MONO_BOLD)
         .size(11.0)
-        .color(t.fg_2),
+        .color(if total_speed > 1.0 {
+            color::clay::C500
+        } else {
+            t.fg_4
+        }),
         sep(),
+        // design: "Queue:" / "max N×" set in mono.
         text(format!("Queue: {queue_name}"))
-            .font(theme::BODY)
+            .font(theme::MONO)
             .size(11.0)
             .color(t.fg_3),
         sep(),
         text(format!("max {max_x}\u{00d7}"))
-            .font(theme::BODY)
+            .font(theme::MONO)
             .size(11.0)
             .color(t.fg_3),
     ]

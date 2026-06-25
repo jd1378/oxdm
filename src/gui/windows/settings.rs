@@ -16,7 +16,8 @@ use crate::gui::ipc::DaemonSignal;
 use crate::gui::shot::Shot;
 use crate::gui::theme::{self, Tokens};
 use crate::gui::widget::{
-    Btn, BtnSize, FileInput, TextInput, checkbox, combo, hairline, section_card,
+    Btn, BtnSize, FileInput, TextInput, combo, hairline, number_stepper, section_card, segmented,
+    toggle,
 };
 use crate::ipc_local::Client;
 use crate::ipc_local::protocol::Event;
@@ -46,6 +47,20 @@ impl Section {
     ];
     fn label(self) -> &'static str {
         Self::ALL.iter().find(|(s, _, _)| *s == self).unwrap().2
+    }
+    /// Muted one-line description shown under the pane-head title
+    /// (design `.s-pane-head`).
+    fn desc(self) -> &'static str {
+        match self {
+            Section::General => "Appearance, storage locations, and startup behavior.",
+            Section::Downloads => "Retry behavior and removal confirmations.",
+            Section::Categories => "Map file extensions to download categories.",
+            Section::Network => "Connections, bandwidth, proxy, and request identity.",
+            Section::Browser => "Pair the browser extension and resolve capture conflicts.",
+            Section::Notifications => "What oxdm tells you when a download finishes.",
+            Section::Advanced => "Theme overrides and the update feed.",
+            Section::About => "Version and project information.",
+        }
     }
 }
 
@@ -697,6 +712,85 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
     chrome::resize::resizable(t, content.into(), true, Msg::Window)
 }
 
+// ---- design constants (no magic numbers) ----------------------------
+
+/// `.s-pane-head` title — Fraunces h2 (design h2; opsz 72 not exposed on
+/// tiny-skia, so the bundled SemiBold face stands in).
+const PANE_HEAD_TITLE_SIZE: f32 = 22.0;
+/// `.s-pane-head` muted description line (body, fg_3).
+const PANE_HEAD_DESC_SIZE: f32 = 13.0;
+
+/// `NumberStepper` clamps. Retry counts allow zero; the saved value still
+/// flows through the existing string mirror + `Save` parse.
+const RETRIES_MIN: i64 = 0;
+const RETRIES_MAX: i64 = 20;
+/// Concurrent downloads must stay ≥ 1 (zero would stall the queue).
+const CONCURRENT_MIN: i64 = 1;
+const CONCURRENT_MAX: i64 = 20;
+
+/// Per-pane head (`.s-pane-head`): Fraunces h2 title + muted description
+/// line + a 1px bottom rule.
+fn pane_head<'a>(t: &Tokens, title: &str, desc: &str) -> Element<'a, Msg> {
+    column![
+        text(title.to_owned())
+            .font(theme::DISPLAY)
+            .size(PANE_HEAD_TITLE_SIZE)
+            .color(t.fg_1),
+        text(desc.to_owned())
+            .font(theme::BODY)
+            .size(PANE_HEAD_DESC_SIZE)
+            .color(t.fg_3),
+        hairline(t.border_subtle),
+    ]
+    .spacing(theme::space::S2)
+    .into()
+}
+
+/// Wrap a section's body with its pane-head.
+fn pane<'a>(t: &Tokens, section: Section, body: Element<'a, Msg>) -> Element<'a, Msg> {
+    column![pane_head(t, section.label(), section.desc()), body]
+        .spacing(theme::space::S4)
+        .into()
+}
+
+/// Boolean `.set-row`: label left (fills), `controls::toggle` right.
+fn toggle_row<'a>(
+    t: &Tokens,
+    label: &'a str,
+    on: bool,
+    msg: impl Fn(bool) -> Msg + 'a,
+) -> Element<'a, Msg> {
+    row![
+        text(label)
+            .font(theme::BODY)
+            .size(13.0)
+            .color(t.fg_1)
+            .width(Length::Fill),
+        toggle(t, on, true, msg),
+    ]
+    .spacing(theme::space::S2)
+    .align_y(Alignment::Center)
+    .into()
+}
+
+/// Bounded numeric `.set-row` control: a `NumberStepper` whose value reads
+/// from / writes to the existing string mirror (message wiring preserved).
+fn stepper<'a>(
+    t: &Tokens,
+    value_str: &str,
+    default: i64,
+    min: i64,
+    max: i64,
+    msg: impl Fn(String) -> Msg + 'a,
+) -> Element<'a, Msg> {
+    let v = value_str
+        .trim()
+        .parse::<i64>()
+        .unwrap_or(default)
+        .clamp(min, max);
+    number_stepper(t, v, min, max, true, move |n| msg(n.to_string()))
+}
+
 fn label_input<'a>(t: &Tokens, label: &str, input: Element<'a, Msg>) -> Element<'a, Msg> {
     column![crate::gui::widget::field_label(t, label), input]
         .spacing(theme::space::S1 + 2.0)
@@ -715,164 +809,186 @@ fn inline_input<'a>(t: &Tokens, label: &'a str, input: Element<'a, Msg>) -> Elem
 
 fn general_section(st: &State) -> Element<'_, Msg> {
     let t = &st.tokens;
-    let theme_label = match st.s.theme {
-        AppTheme::Light => "light",
-        AppTheme::Dark => "dark",
-        AppTheme::Warm => "warm",
-        AppTheme::System => "system",
+    // Design `.s-seg` segments, extended with an Auto segment so every
+    // `AppTheme` stays reachable: Auto (System / follow-OS) / Utility
+    // (Light palette) / Warm / Dark. Wired through the unchanged
+    // `Msg::SetTheme(String)` parser (incl. its live `_ => System` arm).
+    let theme_idx = match st.s.theme {
+        AppTheme::System => 0,
+        AppTheme::Light => 1,
+        AppTheme::Warm => 2,
+        AppTheme::Dark => 3,
     };
-    column![
-        section_card(
-            t,
-            "moon",
-            "Appearance",
-            column![
-                label_input(
-                    t,
-                    "theme",
-                    combo(
+    pane(
+        t,
+        Section::General,
+        column![
+            section_card(
+                t,
+                "moon",
+                "Appearance",
+                column![
+                    label_input(
                         t,
-                        vec![
-                            "system".to_owned(),
-                            "light".to_owned(),
-                            "dark".to_owned(),
-                            "warm".to_owned()
-                        ],
-                        Some(theme_label.to_owned()),
-                        Msg::SetTheme,
-                        Length::Fill,
-                    )
-                ),
-                checkbox(
-                    t,
-                    "Reduce motion (skip animations)",
-                    st.s.reduce_motion,
-                    true,
-                    Msg::ReduceMotion
-                ),
-            ]
-            .spacing(theme::space::S3)
-            .into()
-        ),
-        section_card(
-            t,
-            "save",
-            "Storage",
-            column![
-                label_input(
-                    t,
-                    "default download folder",
-                    FileInput::new(&st.download_dir)
-                        .on_input(Msg::DownloadDir)
-                        .on_browse(Msg::BrowseDownloadDir)
-                        .view(t)
-                ),
-                label_input(
-                    t,
-                    "in-flight cache folder (per-job .part + metadata)",
-                    FileInput::new(&st.work_dir).on_input(Msg::WorkDir).view(t)
-                ),
-            ]
-            .spacing(theme::space::S3)
-            .into()
-        ),
-        section_card(
-            t,
-            "settings",
-            "Misc",
-            column![
-                checkbox(
-                    t,
-                    "Start oxdm on system login",
-                    st.s.start_at_login,
-                    true,
-                    Msg::StartAtLogin
-                ),
-                checkbox(
-                    t,
-                    "Start to tray (no main window on boot)",
-                    st.s.start_to_tray,
-                    true,
-                    Msg::StartToTray
-                ),
-            ]
-            .spacing(theme::space::S3)
-            .into()
-        ),
-    ]
-    .spacing(theme::space::S3)
-    .into()
+                        "theme",
+                        segmented(
+                            t,
+                            &[
+                                ("Auto", None),
+                                ("Utility", None),
+                                ("Warm", None),
+                                ("Dark", None)
+                            ],
+                            theme_idx,
+                            BtnSize::Md,
+                            |i| Msg::SetTheme(
+                                match i {
+                                    1 => "light",
+                                    2 => "warm",
+                                    3 => "dark",
+                                    _ => "system",
+                                }
+                                .to_owned()
+                            ),
+                        )
+                    ),
+                    toggle_row(
+                        t,
+                        "Reduce motion (skip animations)",
+                        st.s.reduce_motion,
+                        Msg::ReduceMotion
+                    ),
+                ]
+                .spacing(theme::space::S3)
+                .into()
+            ),
+            section_card(
+                t,
+                "save",
+                "Storage",
+                column![
+                    label_input(
+                        t,
+                        "default download folder",
+                        FileInput::new(&st.download_dir)
+                            .on_input(Msg::DownloadDir)
+                            .on_browse(Msg::BrowseDownloadDir)
+                            .view(t)
+                    ),
+                    label_input(
+                        t,
+                        "in-flight cache folder (per-job .part + metadata)",
+                        FileInput::new(&st.work_dir).on_input(Msg::WorkDir).view(t)
+                    ),
+                ]
+                .spacing(theme::space::S3)
+                .into()
+            ),
+            section_card(
+                t,
+                "settings",
+                "Misc",
+                column![
+                    toggle_row(
+                        t,
+                        "Start oxdm on system login",
+                        st.s.start_at_login,
+                        Msg::StartAtLogin
+                    ),
+                    toggle_row(
+                        t,
+                        "Start to tray (no main window on boot)",
+                        st.s.start_to_tray,
+                        Msg::StartToTray
+                    ),
+                ]
+                .spacing(theme::space::S3)
+                .into()
+            ),
+        ]
+        .spacing(theme::space::S3)
+        .into(),
+    )
 }
 
 fn downloads_section(st: &State) -> Element<'_, Msg> {
     let t = &st.tokens;
-    column![
-        section_card(
-            t,
-            "rotate-cw",
-            "Behavior",
-            column![
-                inline_input(
-                    t,
-                    "Max retries",
-                    TextInput::new(&st.max_retries)
-                        .width(Length::Fixed(80.0))
-                        .on_input(Msg::MaxRetries)
-                        .view(t)
-                ),
-                inline_input(
-                    t,
-                    "Fixed retries before backoff",
-                    TextInput::new(&st.fixed_retries)
-                        .width(Length::Fixed(80.0))
-                        .on_input(Msg::FixedRetries)
-                        .view(t)
-                ),
-                inline_input(
-                    t,
-                    "Wait between retries",
-                    TextInput::new(&st.retry_wait)
-                        .width(Length::Fixed(120.0))
-                        .on_input(Msg::RetryWait)
-                        .view(t)
-                ),
-                checkbox(
-                    t,
-                    "Use server-provided last-modified time",
-                    st.s.use_server_time,
-                    true,
-                    Msg::UseServerTime
-                ),
-            ]
-            .spacing(theme::space::S3)
-            .into()
-        ),
-        section_card(
-            t,
-            "trash-2",
-            "Remove behavior",
-            column![
-                checkbox(
-                    t,
-                    "Confirm before removing incomplete downloads",
-                    st.s.remove_confirm_incomplete,
-                    true,
-                    Msg::ConfirmIncomplete
-                ),
-                checkbox(
-                    t,
-                    "Confirm before removing completed downloads",
-                    st.s.remove_confirm_completed,
-                    true,
-                    Msg::ConfirmCompleted
-                ),
-            ]
-            .spacing(theme::space::S3)
-            .into()
-        ),
-    ]
-    .spacing(theme::space::S3)
-    .into()
+    pane(
+        t,
+        Section::Downloads,
+        column![
+            section_card(
+                t,
+                "rotate-cw",
+                "Behavior",
+                column![
+                    inline_input(
+                        t,
+                        "Max retries",
+                        stepper(
+                            t,
+                            &st.max_retries,
+                            3,
+                            RETRIES_MIN,
+                            RETRIES_MAX,
+                            Msg::MaxRetries
+                        )
+                    ),
+                    inline_input(
+                        t,
+                        "Fixed retries before backoff",
+                        stepper(
+                            t,
+                            &st.fixed_retries,
+                            3,
+                            RETRIES_MIN,
+                            RETRIES_MAX,
+                            Msg::FixedRetries
+                        )
+                    ),
+                    inline_input(
+                        t,
+                        "Wait between retries",
+                        TextInput::new(&st.retry_wait)
+                            .width(Length::Fixed(120.0))
+                            .on_input(Msg::RetryWait)
+                            .view(t)
+                    ),
+                    toggle_row(
+                        t,
+                        "Use server-provided last-modified time",
+                        st.s.use_server_time,
+                        Msg::UseServerTime
+                    ),
+                ]
+                .spacing(theme::space::S3)
+                .into()
+            ),
+            section_card(
+                t,
+                "trash-2",
+                "Remove behavior",
+                column![
+                    toggle_row(
+                        t,
+                        "Confirm before removing incomplete downloads",
+                        st.s.remove_confirm_incomplete,
+                        Msg::ConfirmIncomplete
+                    ),
+                    toggle_row(
+                        t,
+                        "Confirm before removing completed downloads",
+                        st.s.remove_confirm_completed,
+                        Msg::ConfirmCompleted
+                    ),
+                ]
+                .spacing(theme::space::S3)
+                .into()
+            ),
+        ]
+        .spacing(theme::space::S3)
+        .into(),
+    )
 }
 
 fn categories_section(st: &State) -> Element<'_, Msg> {
@@ -910,96 +1026,252 @@ fn categories_section(st: &State) -> Element<'_, Msg> {
             .align_y(Alignment::Center),
         );
     }
-    section_card(t, "folder", "Categories", rows.into())
+    pane(
+        t,
+        Section::Categories,
+        section_card(t, "folder", "Categories", rows.into()),
+    )
 }
 
 fn network_section(st: &State) -> Element<'_, Msg> {
     let t = &st.tokens;
     let t3 = *t;
-    column![
+    pane(
+        t,
+        Section::Network,
+        column![
+            section_card(
+                t,
+                "activity",
+                "Network",
+                column![
+                    toggle_row(
+                        t,
+                        "Determine connections per file automatically (by file size)",
+                        st.s.max_connections.is_none(),
+                        Msg::AutoConnections
+                    ),
+                    inline_input(
+                        t,
+                        "Concurrent downloads",
+                        stepper(
+                            t,
+                            &st.concurrent,
+                            3,
+                            CONCURRENT_MIN,
+                            CONCURRENT_MAX,
+                            Msg::Concurrent
+                        )
+                    ),
+                    inline_input(
+                        t,
+                        "Speed limit (B/s — blank for unlimited)",
+                        TextInput::new(&st.speed_limit)
+                            .width(Length::Fixed(140.0))
+                            .on_input(Msg::SpeedLimit)
+                            .view(t)
+                    ),
+                    inline_input(
+                        t,
+                        "Proxy URL",
+                        TextInput::new(&st.proxy)
+                            .width(Length::Fill)
+                            .on_input(Msg::Proxy)
+                            .view(t)
+                    ),
+                    inline_input(
+                        t,
+                        "Connect timeout",
+                        TextInput::new(&st.connect_timeout)
+                            .width(Length::Fixed(100.0))
+                            .on_input(Msg::ConnectTimeout)
+                            .view(t)
+                    ),
+                    toggle_row(
+                        t,
+                        "Accept invalid TLS certificates (dangerous)",
+                        st.s.accept_invalid_certs,
+                        Msg::InvalidCerts
+                    ),
+                ]
+                .spacing(theme::space::S3)
+                .into()
+            ),
+            section_card(
+                t,
+                "user",
+                "Identity",
+                column![
+                    inline_input(
+                        t,
+                        "Custom User-Agent",
+                        TextInput::new(&st.user_agent)
+                            .width(Length::Fill)
+                            .on_input(Msg::UserAgent)
+                            .view(t)
+                    ),
+                    toggle_row(
+                        t,
+                        "Randomize User-Agent per request",
+                        st.s.randomize_user_agent,
+                        Msg::RandomUa
+                    ),
+                    label_input(
+                        t,
+                        "custom headers",
+                        text_editor::TextEditor::new(&st.custom_headers)
+                            .font(theme::MONO)
+                            .size(12.0)
+                            .height(Length::Fixed(64.0))
+                            .on_action(Msg::CustomHeaders)
+                            .style(move |_th, _| text_editor::Style {
+                                background: t3.bg_raised.into(),
+                                border: iced::Border {
+                                    color: t3.border_subtle,
+                                    width: 1.0,
+                                    radius: theme::control::RADIUS.into(),
+                                },
+                                placeholder: t3.fg_4,
+                                value: t3.fg_1,
+                                selection: t3.selection_bg(),
+                            })
+                            .into()
+                    ),
+                ]
+                .spacing(theme::space::S3)
+                .into()
+            ),
+        ]
+        .spacing(theme::space::S3)
+        .into(),
+    )
+}
+
+fn browser_section(st: &State) -> Element<'_, Msg> {
+    let t = &st.tokens;
+    let t2 = *t;
+    let conflict = match st.s.conflict_while_hidden {
+        crate::domain::ConflictWhileHidden::AutoPopup => "auto_popup",
+        crate::domain::ConflictWhileHidden::NotifyAndPark => "notify_and_park",
+    };
+    pane(
+        t,
+        Section::Browser,
         section_card(
             t,
-            "activity",
-            "Network",
+            "puzzle",
+            "Browser integration",
             column![
-                checkbox(
-                    t,
-                    "Determine connections per file automatically (by file size)",
-                    st.s.max_connections.is_none(),
-                    true,
-                    Msg::AutoConnections
-                ),
                 inline_input(
                     t,
-                    "Concurrent downloads",
-                    TextInput::new(&st.concurrent)
-                        .width(Length::Fixed(80.0))
-                        .on_input(Msg::Concurrent)
-                        .view(t)
-                ),
-                inline_input(
-                    t,
-                    "Speed limit (B/s — blank for unlimited)",
-                    TextInput::new(&st.speed_limit)
-                        .width(Length::Fixed(140.0))
-                        .on_input(Msg::SpeedLimit)
-                        .view(t)
-                ),
-                inline_input(
-                    t,
-                    "Proxy URL",
-                    TextInput::new(&st.proxy)
-                        .width(Length::Fill)
-                        .on_input(Msg::Proxy)
-                        .view(t)
-                ),
-                inline_input(
-                    t,
-                    "Connect timeout",
-                    TextInput::new(&st.connect_timeout)
+                    "IPC port",
+                    TextInput::new(&st.ipc_port)
                         .width(Length::Fixed(100.0))
-                        .on_input(Msg::ConnectTimeout)
+                        .on_input(Msg::IpcPort)
                         .view(t)
-                ),
-                checkbox(
-                    t,
-                    "Accept invalid TLS certificates (dangerous)",
-                    st.s.accept_invalid_certs,
-                    true,
-                    Msg::InvalidCerts
-                ),
-            ]
-            .spacing(theme::space::S3)
-            .into()
-        ),
-        section_card(
-            t,
-            "user",
-            "Identity",
-            column![
-                inline_input(
-                    t,
-                    "Custom User-Agent",
-                    TextInput::new(&st.user_agent)
-                        .width(Length::Fill)
-                        .on_input(Msg::UserAgent)
-                        .view(t)
-                ),
-                checkbox(
-                    t,
-                    "Randomize User-Agent per request",
-                    st.s.randomize_user_agent,
-                    true,
-                    Msg::RandomUa
                 ),
                 label_input(
                     t,
-                    "custom headers",
-                    text_editor::TextEditor::new(&st.custom_headers)
+                    "pairing code",
+                    row![
+                        container(
+                            text(st.s.ext_token.clone())
+                                .font(theme::MONO)
+                                .size(11.0)
+                                .color(t.fg_2)
+                        )
+                        .width(Length::Fill)
+                        .height(Length::Fixed(theme::control::H_MD))
+                        .align_y(Alignment::Center)
+                        .padding([0.0, theme::control::INPUT_PAD_X])
+                        .style(move |_| container::Style {
+                            background: Some(t2.bg_sunken.into()),
+                            border: iced::Border {
+                                color: t2.border_subtle,
+                                width: 1.0,
+                                radius: theme::control::RADIUS.into(),
+                            },
+                            ..Default::default()
+                        }),
+                        Btn::new("Copy")
+                            .toolbar()
+                            .icon("copy")
+                            .on_press(Msg::CopyPairing)
+                            .view(t),
+                        Btn::new("Regenerate")
+                            .toolbar()
+                            .icon("rotate-cw")
+                            .on_press(Msg::Regenerate)
+                            .view(t),
+                    ]
+                    .spacing(theme::space::S2)
+                    .align_y(Alignment::Center)
+                    .into()
+                ),
+                label_input(
+                    t,
+                    "conflict while dialog hidden",
+                    combo(
+                        t,
+                        vec!["auto_popup".to_owned(), "notify_and_park".to_owned()],
+                        Some(conflict.to_owned()),
+                        Msg::ConflictHidden,
+                        Length::Fill,
+                    )
+                ),
+            ]
+            .spacing(theme::space::S3)
+            .into(),
+        ),
+    )
+}
+
+fn notifications_section(st: &State) -> Element<'_, Msg> {
+    let t = &st.tokens;
+    pane(
+        t,
+        Section::Notifications,
+        section_card(
+        t,
+        "bell",
+        "Notifications",
+        column![
+            toggle_row(
+                t,
+                "Show download-complete dialog when a download finishes",
+                st.s.show_complete_dialog,
+                Msg::ShowCompleteDialog
+            ),
+            text("System notifications follow your queue's on-finish hooks (see Queues & scheduling).")
+                .font(theme::BODY)
+                .size(11.0)
+                .color(t.fg_3),
+        ]
+        .spacing(theme::space::S2)
+        .into(),
+        ),
+    )
+}
+
+fn advanced_section(st: &State) -> Element<'_, Msg> {
+    let t = &st.tokens;
+    let t3 = *t;
+    pane(
+        t,
+        Section::Advanced,
+        column![
+            section_card(
+                t,
+                "palette",
+                "Theme overrides",
+                label_input(
+                    t,
+                    "overrides — accent / bg / text (one per line)",
+                    text_editor::TextEditor::new(&st.theme_overrides)
                         .font(theme::MONO)
                         .size(12.0)
                         .height(Length::Fixed(64.0))
-                        .on_action(Msg::CustomHeaders)
+                        .on_action(Msg::ThemeOverrides)
                         .style(move |_th, _| text_editor::Style {
                             background: t3.bg_raised.into(),
                             border: iced::Border {
@@ -1012,83 +1284,19 @@ fn network_section(st: &State) -> Element<'_, Msg> {
                             selection: t3.selection_bg(),
                         })
                         .into()
-                ),
-            ]
-            .spacing(theme::space::S3)
-            .into()
-        ),
-    ]
-    .spacing(theme::space::S3)
-    .into()
-}
-
-fn browser_section(st: &State) -> Element<'_, Msg> {
-    let t = &st.tokens;
-    let t2 = *t;
-    let conflict = match st.s.conflict_while_hidden {
-        crate::domain::ConflictWhileHidden::AutoPopup => "auto_popup",
-        crate::domain::ConflictWhileHidden::NotifyAndPark => "notify_and_park",
-    };
-    section_card(
-        t,
-        "puzzle",
-        "Browser integration",
-        column![
-            inline_input(
-                t,
-                "IPC port",
-                TextInput::new(&st.ipc_port)
-                    .width(Length::Fixed(100.0))
-                    .on_input(Msg::IpcPort)
-                    .view(t)
+                )
             ),
-            label_input(
+            section_card(
                 t,
-                "pairing code",
-                row![
-                    container(
-                        text(st.s.ext_token.clone())
-                            .font(theme::MONO)
-                            .size(11.0)
-                            .color(t.fg_2)
-                    )
-                    .width(Length::Fill)
-                    .height(Length::Fixed(theme::control::H_MD))
-                    .align_y(Alignment::Center)
-                    .padding([0.0, theme::control::INPUT_PAD_X])
-                    .style(move |_| container::Style {
-                        background: Some(t2.bg_sunken.into()),
-                        border: iced::Border {
-                            color: t2.border_subtle,
-                            width: 1.0,
-                            radius: theme::control::RADIUS.into(),
-                        },
-                        ..Default::default()
-                    }),
-                    Btn::new("Copy")
-                        .toolbar()
-                        .icon("copy")
-                        .on_press(Msg::CopyPairing)
-                        .view(t),
-                    Btn::new("Regenerate")
-                        .toolbar()
-                        .icon("rotate-cw")
-                        .on_press(Msg::Regenerate)
-                        .view(t),
-                ]
-                .spacing(theme::space::S2)
-                .align_y(Alignment::Center)
-                .into()
-            ),
-            label_input(
-                t,
-                "conflict while dialog hidden",
-                combo(
+                "cloud-upload",
+                "Updates",
+                inline_input(
                     t,
-                    vec!["auto_popup".to_owned(), "notify_and_park".to_owned()],
-                    Some(conflict.to_owned()),
-                    Msg::ConflictHidden,
-                    Length::Fill,
+                    "Update feed URL",
+                    TextInput::new(&st.update_feed)
+                        .width(Length::Fill)
+                        .on_input(Msg::UpdateFeed)
+                        .view(t)
                 )
             ),
         ]
@@ -1097,97 +1305,29 @@ fn browser_section(st: &State) -> Element<'_, Msg> {
     )
 }
 
-fn notifications_section(st: &State) -> Element<'_, Msg> {
-    let t = &st.tokens;
-    section_card(
-        t,
-        "bell",
-        "Notifications",
-        column![
-            checkbox(
-                t,
-                "Show download-complete dialog when a download finishes",
-                st.s.show_complete_dialog,
-                true,
-                Msg::ShowCompleteDialog
-            ),
-            text("System notifications follow your queue's on-finish hooks (see Queues & scheduling).")
-                .font(theme::BODY)
-                .size(11.0)
-                .color(t.fg_3),
-        ]
-        .spacing(theme::space::S2)
-        .into(),
-    )
-}
-
-fn advanced_section(st: &State) -> Element<'_, Msg> {
-    let t = &st.tokens;
-    let t3 = *t;
-    column![
-        section_card(
-            t,
-            "palette",
-            "Theme overrides",
-            label_input(
-                t,
-                "overrides — accent / bg / text (one per line)",
-                text_editor::TextEditor::new(&st.theme_overrides)
-                    .font(theme::MONO)
-                    .size(12.0)
-                    .height(Length::Fixed(64.0))
-                    .on_action(Msg::ThemeOverrides)
-                    .style(move |_th, _| text_editor::Style {
-                        background: t3.bg_raised.into(),
-                        border: iced::Border {
-                            color: t3.border_subtle,
-                            width: 1.0,
-                            radius: theme::control::RADIUS.into(),
-                        },
-                        placeholder: t3.fg_4,
-                        value: t3.fg_1,
-                        selection: t3.selection_bg(),
-                    })
-                    .into()
-            )
-        ),
-        section_card(
-            t,
-            "cloud-upload",
-            "Updates",
-            inline_input(
-                t,
-                "Update feed URL",
-                TextInput::new(&st.update_feed)
-                    .width(Length::Fill)
-                    .on_input(Msg::UpdateFeed)
-                    .view(t)
-            )
-        ),
-    ]
-    .spacing(theme::space::S3)
-    .into()
-}
-
 fn about_section(st: &State) -> Element<'_, Msg> {
     let t = &st.tokens;
-    section_card(
+    pane(
         t,
-        "info",
-        "About oxdm",
-        column![
-            text("oxdm").font(theme::DISPLAY).size(22.0).color(t.fg_1),
-            text(format!("Version {}", env!("CARGO_PKG_VERSION")))
-                .font(theme::MONO)
-                .size(11.0)
-                .color(t.fg_2),
-            text("A focused, native download manager.")
-                .font(theme::BODY)
-                .size(12.0)
-                .color(t.fg_3),
-        ]
-        .spacing(theme::space::S1)
-        .into(),
+        Section::About,
+        section_card(
+            t,
+            "info",
+            "About oxdm",
+            column![
+                text("oxdm").font(theme::DISPLAY).size(22.0).color(t.fg_1),
+                text(format!("Version {}", env!("CARGO_PKG_VERSION")))
+                    .font(theme::MONO)
+                    .size(11.0)
+                    .color(t.fg_2),
+                text("A focused, native download manager.")
+                    .font(theme::BODY)
+                    .size(12.0)
+                    .color(t.fg_3),
+            ]
+            .spacing(theme::space::S1)
+            .into(),
+        ),
     )
 }
 
@@ -1202,7 +1342,10 @@ pub fn launch_settings() {
         .default_font(theme::BODY)
         .antialiasing(true)
         .window(chrome::window_settings(
-            iced::Size::new(820.0, 660.0),
+            // Design `.dialog-settings` = 920×640; min stays 640×558 so
+            // 920 only sets the default size and never risks clipping the
+            // resizable window.
+            iced::Size::new(920.0, 660.0),
             iced::Size::new(640.0, 558.0),
         ));
     for f in theme::fonts::ALL {

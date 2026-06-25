@@ -10,22 +10,51 @@ use std::time::Duration;
 use iced::widget::{column, container, row, text};
 use iced::{Alignment, Element, Length, Subscription, Task};
 
-use crate::domain::{JobId, OnCompletion, Phase, ShutdownAction};
+use crate::domain::checksum::{Algo, CsStatus};
+use crate::domain::{JobError, JobId, OnCompletion, Phase, ShutdownAction};
 use crate::gui::chrome::{self, WindowControl, titlebar};
 use crate::gui::color;
 use crate::gui::format::{format_bytes, format_bytes_2, format_eta, format_speed};
+use crate::gui::icons;
 use crate::gui::ipc::DaemonSignal;
 use crate::gui::shot::Shot;
 use crate::gui::theme::{self, Tokens};
 use crate::gui::widget::{
-    Btn, RateChart, TabBtn, TextInput, checkbox, collapsible_card, combo, hairline, pill_progress,
-    rate_chart, sibling, striped_progress,
+    Btn, BtnSize, RateChart, TabBtn, TextInput, card, checkbox, collapsible_card, combo, eyebrow,
+    hairline, number_stepper, pill_progress, rate_chart, segmented, sibling, status_dot,
+    striped_progress, toggle,
 };
 use crate::gui::windows::add::footer;
 use crate::ipc_local::Client;
 use crate::ipc_local::protocol::{Event, JobEntryView};
 
 const CHART_SAMPLES: usize = 120;
+
+// --- Speed tab (design §3.3 "Speed" pane) ----------------------------
+/// Max parallel connections stepper bounds — mirrors the runner's
+/// per-job part cap (`ApplySpeed` filters to `1..=16`).
+const MAX_CONN_MIN: i64 = 1;
+const MAX_CONN_MAX: i64 = 16;
+/// Stepper seed when the job has no explicit `max_connections` (auto).
+const MAX_CONN_DEFAULT: i64 = 8;
+const BYTES_PER_KB: u64 = 1024;
+const KB_PER_MB: u64 = 1024;
+/// Width of the speed-limit value input (KB/s ‖ MB/s numeric field).
+const LIMIT_INPUT_W: f32 = 80.0;
+/// Dashed quick-preset pills (design `.qp`), values in KB/s.
+const SPEED_PRESETS_KBS: &[(&str, u64)] = &[
+    ("64 KB/s", 64),
+    ("256 KB/s", 256),
+    ("1 MB/s", 1024),
+    ("10 MB/s", 10240),
+];
+
+// --- Completed view (design §3.3 completed / §3.4 ChecksumBox) -------
+/// Middle-truncation budget (chars) for the saved-path / source-URL
+/// rows so long values stay on one line.
+const PATH_TRUNCATE_CHARS: usize = 52;
+/// Middle-truncation budget for displayed hashes.
+const HASH_TRUNCATE_CHARS: usize = 40;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -49,6 +78,8 @@ pub enum Msg {
     // Speed tab form
     UseLimiter(bool),
     LimitKbs(String),
+    LimitUnit(bool),  // false = KB/s, true = MB/s
+    SpeedPreset(u64), // quick-set value, in KB/s
     RememberLimit(bool),
     MaxConn(String),
     ApplySpeed,
@@ -67,6 +98,10 @@ pub enum Msg {
     CloseWin,
     MinimizeTray,
     DontShowAgain(bool),
+    // Completed view — copy / reveal / checksum verify
+    Copy(String),
+    Reveal(PathBuf),
+    CsPaste(String),
     WinResized(f32, f32),
     ShotTick,
     Shot(iced::window::Screenshot),
@@ -95,10 +130,15 @@ pub struct State {
 
     use_limiter: bool,
     limit_kbs: String,
+    limit_unit_mb: bool,
     remember_limit: bool,
     max_conn: String,
 
     on_completion: OnCompletion,
+
+    /// Hash the user pasted into the completed-view ChecksumBox to
+    /// compare against the job's saved checksum (verify, not compute).
+    cs_paste: String,
 
     shot: Option<Shot>,
 }
@@ -170,6 +210,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                     .or((entry.session_speed_override > 0).then_some(entry.session_speed_override))
                     .map(|b| (b / 1024).to_string())
                     .unwrap_or_else(|| "100".to_owned()),
+                limit_unit_mb: false,
                 remember_limit: limit.is_some(),
                 max_conn: entry
                     .job
@@ -177,6 +218,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                     .map(|n| n.to_string())
                     .unwrap_or_default(),
                 on_completion,
+                cs_paste: String::new(),
                 shot: Shot::from_env(),
                 client,
                 entry,
@@ -255,6 +297,22 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             st.limit_kbs = v;
             Task::none()
         }
+        Msg::LimitUnit(mb) => {
+            st.limit_unit_mb = mb;
+            Task::none()
+        }
+        Msg::SpeedPreset(kbs) => {
+            st.use_limiter = true;
+            // Render whole-MB presets in MB/s, sub-MB in KB/s.
+            if kbs >= KB_PER_MB && kbs % KB_PER_MB == 0 {
+                st.limit_unit_mb = true;
+                st.limit_kbs = (kbs / KB_PER_MB).to_string();
+            } else {
+                st.limit_unit_mb = false;
+                st.limit_kbs = kbs.to_string();
+            }
+            Task::none()
+        }
         Msg::RememberLimit(v) => {
             st.remember_limit = v;
             Task::none()
@@ -266,9 +324,16 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
         Msg::ApplySpeed => {
             let client = st.client.clone();
             let id = st.id;
+            // Value field is in the selected unit (KB/s or MB/s); convert
+            // to bytes/sec for the daemon. KB/s stays `* 1024` (unchanged).
+            let unit = if st.limit_unit_mb {
+                BYTES_PER_KB * KB_PER_MB
+            } else {
+                BYTES_PER_KB
+            };
             let bps = st
                 .use_limiter
-                .then(|| st.limit_kbs.trim().parse::<u64>().ok().map(|k| k * 1024))
+                .then(|| st.limit_kbs.trim().parse::<u64>().ok().map(|v| v * unit))
                 .flatten();
             let persist = st.remember_limit;
             let conns = st
@@ -384,6 +449,15 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             Some(shot) => shot.save_and_exit(s),
             None => Task::none(),
         },
+        Msg::Copy(s) => iced::clipboard::write(s),
+        Msg::Reveal(path) => {
+            crate::platform::reveal_in_folder(&path);
+            Task::none()
+        }
+        Msg::CsPaste(v) => {
+            st.cs_paste = v;
+            Task::none()
+        }
         Msg::Connected(_) | Msg::Window(_) | Msg::Noop => Task::none(),
     }
 }
@@ -560,41 +634,61 @@ fn running_view(st: &State) -> Element<'_, Msg> {
         .clone()
         .unwrap_or_else(|| "download".to_owned());
 
-    let tabs = row![
-        TabBtn::new("Info")
-            .icon("info")
-            .icon_size(13.0)
-            .height(28.0)
-            .bottom_gap(8.0)
-            .font_size(12.0)
-            .active(st.tab == Tab::Info)
-            .on_press(Msg::SetTab(Tab::Info))
-            .view(t),
-        TabBtn::new("Speed")
-            .icon("gauge")
-            .icon_size(13.0)
-            .height(28.0)
-            .bottom_gap(8.0)
-            .font_size(12.0)
-            .active(st.tab == Tab::Speed)
-            .on_press(Msg::SetTab(Tab::Speed))
-            .view(t),
-        TabBtn::new("On Completion")
-            .icon("circle-check-big")
-            .icon_size(13.0)
-            .height(28.0)
-            .bottom_gap(8.0)
-            .font_size(12.0)
-            .active(st.tab == Tab::OnCompletion)
-            .on_press(Msg::SetTab(Tab::OnCompletion))
-            .view(t),
-    ]
-    .spacing(theme::space::S2);
+    // A severe error replaces the tabs + pane entirely (design §3.3
+    // "Severe error"): friendly title → detail → what-to-check → quiet
+    // code footer, driven only by the real `JobStatus.error` field.
+    let error = st.entry.job.status.error.clone();
 
-    let tab_body: Element<'_, Msg> = match st.tab {
-        Tab::Info => info_tab(st),
-        Tab::Speed => speed_tab(st),
-        Tab::OnCompletion => completion_tab(st),
+    let lower: Element<'_, Msg> = if let Some(err) = &error {
+        crate::gui::widget::vscroll(error_block(st, err))
+            .height(Length::Fill)
+            .into()
+    } else {
+        let tabs = row![
+            TabBtn::new("Info")
+                .icon("info")
+                .icon_size(13.0)
+                .height(28.0)
+                .bottom_gap(8.0)
+                .font_size(12.0)
+                .active(st.tab == Tab::Info)
+                .on_press(Msg::SetTab(Tab::Info))
+                .view(t),
+            TabBtn::new("Speed")
+                .icon("gauge")
+                .icon_size(13.0)
+                .height(28.0)
+                .bottom_gap(8.0)
+                .font_size(12.0)
+                .active(st.tab == Tab::Speed)
+                .on_press(Msg::SetTab(Tab::Speed))
+                .view(t),
+            TabBtn::new("On Completion")
+                .icon("circle-check-big")
+                .icon_size(13.0)
+                .height(28.0)
+                .bottom_gap(8.0)
+                .font_size(12.0)
+                .active(st.tab == Tab::OnCompletion)
+                .on_press(Msg::SetTab(Tab::OnCompletion))
+                .view(t),
+        ]
+        .spacing(theme::space::S2);
+
+        let tab_body: Element<'_, Msg> = match st.tab {
+            Tab::Info => info_tab(st),
+            Tab::Speed => speed_tab(st),
+            Tab::OnCompletion => completion_tab(st),
+        };
+
+        column![
+            // Tabs + hairline as one unspaced group so the active
+            // underline sits on the hairline.
+            sibling(column![tabs, hairline(t.border_subtle)].into()),
+            crate::gui::widget::vscroll(tab_body).height(Length::Fill),
+        ]
+        .spacing(theme::space::S3)
+        .into()
     };
 
     let footer_el = footer(
@@ -615,7 +709,7 @@ fn running_view(st: &State) -> Element<'_, Msg> {
             .on_press(Msg::PauseResume)
             .view(t),
             Btn::new("Cancel")
-                .ghost()
+                .danger()
                 .icon("x")
                 .on_press(Msg::Cancel)
                 .view(t),
@@ -642,10 +736,7 @@ fn running_view(st: &State) -> Element<'_, Msg> {
                         striped,
                         st.anim_t,
                     )),
-                    // Tabs + hairline as one unspaced group so the
-                    // active underline sits on the hairline.
-                    sibling(column![tabs, hairline(t.border_subtle)].into()),
-                    crate::gui::widget::vscroll(tab_body).height(Length::Fill),
+                    lower,
                 ]
                 .spacing(theme::space::S3)
             )
@@ -661,6 +752,164 @@ fn running_view(st: &State) -> Element<'_, Msg> {
         ]
         .into(),
     )
+}
+
+/// Friendly title, leading icon, short code, and a static "things to
+/// check" hint for each `JobError` variant. The detail line uses the
+/// error's own `Display` text. (Design §3.3 severe-error grammar.)
+fn error_meta(err: &JobError) -> (&'static str, &'static str, &'static str, &'static str) {
+    match err {
+        JobError::Network(_) => (
+            "wifi",
+            "Connection problem",
+            "NETWORK",
+            "Check your internet connection, then resume. If it persists, the server may be down or rate-limiting.",
+        ),
+        JobError::Dns { .. } => (
+            "globe",
+            "Couldn't reach the server",
+            "DNS",
+            "The hostname couldn't be resolved. Verify the URL spelling and your DNS / VPN settings.",
+        ),
+        JobError::ServerConflict(_) => (
+            "triangle-alert",
+            "The file on the server changed",
+            "SERVER_CONFLICT",
+            "The remote file changed since this download began. Restart from zero to fetch the current version.",
+        ),
+        JobError::SaveConflict(_) => (
+            "hard-drive",
+            "Couldn't save the file",
+            "SAVE_CONFLICT",
+            "A naming conflict came up while writing. Free up the filename or pick a different folder.",
+        ),
+        JobError::DuplicateActive { .. } => (
+            "copy",
+            "Already downloading",
+            "DUPLICATE",
+            "A download with this name is already in progress in the same folder. Wait for it or rename this one.",
+        ),
+        JobError::ChecksumMismatch { .. } => (
+            "shield-alert",
+            "Integrity check failed",
+            "CHECKSUM_MISMATCH",
+            "The data doesn't match the expected hash. Don't open the file; re-download from a trusted source.",
+        ),
+        JobError::Cancelled => (
+            "circle-x",
+            "Download cancelled",
+            "CANCELLED",
+            "This download was cancelled. Start it again to retry.",
+        ),
+        JobError::Io(_) => (
+            "hard-drive",
+            "Disk write error",
+            "IO",
+            "Couldn't write to disk. Check free space and folder permissions, or save to a different folder.",
+        ),
+        JobError::ConflictPending(_) => (
+            "triangle-alert",
+            "Paused — needs your attention",
+            "CONFLICT_PENDING",
+            "A conflict came up while running in the background. Resume to retry the download.",
+        ),
+        JobError::Other(_) => (
+            "circle-alert",
+            "Something went wrong",
+            "ERROR",
+            "An unexpected error occurred. Try again; if it keeps failing, check the daemon logs.",
+        ),
+    }
+}
+
+/// Severe-error block: rust-tinted card with title + detail, a small
+/// "things to check" hint, and a quiet monospace code footer with copy.
+fn error_block<'a>(st: &'a State, err: &JobError) -> Element<'a, Msg> {
+    let t = &st.tokens;
+    let t2 = *t;
+    let (icon_name, title, code, hint) = error_meta(err);
+    let detail = err.to_string();
+
+    let head = row![
+        container(icons::icon(icon_name, 20.0, t.status_danger))
+            .width(Length::Fixed(36.0))
+            .height(Length::Fixed(36.0))
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center)
+            .style(move |_| container::Style {
+                background: Some(t2.status_danger_bg.into()),
+                border: iced::Border {
+                    radius: 8.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        column![
+            text(title)
+                .font(theme::BODY_BOLD)
+                .size(14.0)
+                .color(t.status_danger),
+            text(detail).font(theme::BODY).size(12.0).color(t.fg_2),
+        ]
+        .spacing(2.0),
+    ]
+    .spacing(theme::space::S3)
+    .align_y(Alignment::Center);
+
+    let checks = column![
+        eyebrow(t, "things to check"),
+        text(hint)
+            .font(theme::BODY)
+            .size(12.0)
+            .color(t.fg_2)
+            .line_height(iced::widget::text::LineHeight::Relative(1.4)),
+    ]
+    .spacing(theme::space::S1);
+
+    // Quiet monospace error-code footer (label + chip + copy).
+    let code_chip = container(text(code).font(theme::MONO).size(11.0).color(t2.fg_2))
+        .padding([2.0, 8.0])
+        .style(move |_| container::Style {
+            background: Some(t2.bg_sunken.into()),
+            border: iced::Border {
+                color: t2.border_subtle,
+                width: 1.0,
+                radius: theme::radius::XS.into(),
+            },
+            ..Default::default()
+        });
+    let code_footer = row![
+        text("Error code")
+            .font(theme::BODY)
+            .size(11.0)
+            .color(t.fg_3),
+        code_chip,
+        iced::widget::Space::new().width(Length::Fill),
+        Btn::new("Copy")
+            .toolbar()
+            .size(BtnSize::Sm)
+            .icon("copy")
+            .on_press(Msg::Copy(err.to_string()))
+            .view(t),
+    ]
+    .spacing(theme::space::S2)
+    .align_y(Alignment::Center);
+
+    container(
+        column![head, hairline(t.border_subtle), checks, code_footer].spacing(theme::space::S3),
+    )
+    .width(Length::Fill)
+    .padding(theme::space::S3)
+    .style(move |_| container::Style {
+        background: Some(t2.status_danger_bg.into()),
+        border: iced::Border {
+            color: t2.status_danger,
+            width: 1.0,
+            radius: theme::surface::RADIUS.into(),
+        },
+        ..Default::default()
+    })
+    .into()
 }
 
 fn stat<'a>(t: &Tokens, label: &'a str, value: String, accent: bool) -> Element<'a, Msg> {
@@ -877,59 +1126,157 @@ fn info_tab(st: &State) -> Element<'_, Msg> {
 
 fn speed_tab(st: &State) -> Element<'_, Msg> {
     let t = &st.tokens;
-    let body = column![
-        checkbox(
-            t,
-            "Use speed limiter",
-            st.use_limiter,
-            true,
-            Msg::UseLimiter
-        ),
-        row![
-            text("Maximum speed (KB/s)")
-                .font(theme::BODY)
-                .size(13.0)
-                .color(if st.use_limiter { t.fg_1 } else { t.fg_3 }),
-            TextInput::new(&st.limit_kbs)
-                .width(Length::Fixed(120.0))
-                .enabled(st.use_limiter)
-                .on_input(Msg::LimitKbs)
+    let limited = st.use_limiter;
+
+    // Chip-toggle Unlimited / Limit-to (design `.chip-toggle`).
+    let limiter_chips = segmented(
+        t,
+        &[("Unlimited", None), ("Limit to", None)],
+        if limited { 1 } else { 0 },
+        BtnSize::Sm,
+        |i| Msg::UseLimiter(i == 1),
+    );
+
+    // value field + KB/s ‖ MB/s unit-toggle.
+    let unit_toggle = segmented(
+        t,
+        &[("KB/s", None), ("MB/s", None)],
+        if st.limit_unit_mb { 1 } else { 0 },
+        BtnSize::Sm,
+        |i| Msg::LimitUnit(i == 1),
+    );
+    let value_row = row![
+        TextInput::new(&st.limit_kbs)
+            .width(Length::Fixed(LIMIT_INPUT_W))
+            .enabled(limited)
+            .on_input(Msg::LimitKbs)
+            .view(t),
+        unit_toggle,
+    ]
+    .spacing(theme::space::S2)
+    .align_y(Alignment::Center);
+
+    // Dashed quick-preset pills (design `.qp`). iced/tiny-skia can't
+    // dash a border, so these read as small outlined pills.
+    let mut presets = row![text("Quick set").font(theme::BODY).size(12.0).color(t.fg_3)]
+        .spacing(theme::space::S2)
+        .align_y(Alignment::Center);
+    for (label, kbs) in SPEED_PRESETS_KBS {
+        presets = presets.push(
+            Btn::new(*label)
+                .secondary()
+                .size(BtnSize::Sm)
+                .on_press(Msg::SpeedPreset(*kbs))
                 .view(t),
-        ]
-        .spacing(theme::space::S3)
-        .align_y(Alignment::Center),
-        checkbox(
+        );
+    }
+
+    let limit_row = row![
+        text("Speed limit")
+            .font(theme::BODY)
+            .size(13.0)
+            .color(t.fg_1)
+            .width(Length::Fill),
+        limiter_chips,
+    ]
+    .spacing(theme::space::S3)
+    .align_y(Alignment::Center);
+
+    let mut body = column![limit_row].spacing(theme::space::S3);
+    if limited {
+        body = body.push(value_row).push(presets).push(toggle_row(
             t,
             "Remember for this file",
             st.remember_limit,
-            st.use_limiter,
-            Msg::RememberLimit
-        ),
-        hairline(t.border_subtle),
-        row![
+            true,
+            Msg::RememberLimit,
+        ));
+    }
+
+    // Blank `max_conn` = auto (daemon picks); a non-empty value is an
+    // explicit 1–16 override. The Auto/Custom chip-toggle makes the
+    // auto state visible and re-selectable; ApplySpeed wiring (blank ⇒
+    // `conns = None` ⇒ auto) is unchanged.
+    let conn_auto = st.max_conn.trim().is_empty();
+    let conn_val = st
+        .max_conn
+        .trim()
+        .parse::<i64>()
+        .unwrap_or(MAX_CONN_DEFAULT)
+        .clamp(MAX_CONN_MIN, MAX_CONN_MAX);
+    let conn_mode = segmented(
+        t,
+        &[("Auto", None), ("Custom", None)],
+        if conn_auto { 0 } else { 1 },
+        BtnSize::Sm,
+        |i| {
+            if i == 0 {
+                Msg::MaxConn(String::new())
+            } else {
+                Msg::MaxConn(MAX_CONN_DEFAULT.to_string())
+            }
+        },
+    );
+    let mut conn_controls = row![conn_mode]
+        .spacing(theme::space::S2)
+        .align_y(Alignment::Center);
+    if !conn_auto {
+        conn_controls = conn_controls.push(number_stepper(
+            t,
+            conn_val,
+            MAX_CONN_MIN,
+            MAX_CONN_MAX,
+            true,
+            |n| Msg::MaxConn(n.to_string()),
+        ));
+    }
+    let conn_row = row![
+        column![
             text("Max parallel connections")
                 .font(theme::BODY)
                 .size(13.0)
                 .color(t.fg_1),
-            TextInput::new(&st.max_conn)
-                .width(Length::Fixed(60.0))
-                .on_input(Msg::MaxConn)
-                .view(t),
-            text("(1–16, blank = auto)")
+            text("Auto lets oxdm choose; applying reconnects active segments.")
                 .font(theme::BODY)
-                .size(12.0)
+                .size(11.0)
                 .color(t.fg_3),
         ]
-        .spacing(theme::space::S3)
-        .align_y(Alignment::Center),
+        .spacing(2.0)
+        .width(Length::Fill),
+        conn_controls,
+    ]
+    .spacing(theme::space::S3)
+    .align_y(Alignment::Center);
+
+    let body = body.push(hairline(t.border_subtle)).push(conn_row).push(
         Btn::new("Apply")
             .primary()
-            .size(crate::gui::widget::BtnSize::Sm)
+            .size(BtnSize::Sm)
             .on_press(Msg::ApplySpeed)
             .view(t),
+    );
+    card(t, theme::space::S3, body.into())
+}
+
+/// Settings-style toggle row: label (+optional hint) left, switch right.
+fn toggle_row<'a>(
+    t: &Tokens,
+    label: &'a str,
+    on: bool,
+    enabled: bool,
+    msg: impl Fn(bool) -> Msg + 'a,
+) -> Element<'a, Msg> {
+    row![
+        text(label)
+            .font(theme::BODY)
+            .size(13.0)
+            .color(if enabled { t.fg_1 } else { t.fg_3 })
+            .width(Length::Fill),
+        toggle(t, on, enabled, msg),
     ]
-    .spacing(theme::space::S3);
-    crate::gui::widget::card(t, theme::space::S3, body.into())
+    .spacing(theme::space::S3)
+    .align_y(Alignment::Center)
+    .into()
 }
 
 fn completion_tab(st: &State) -> Element<'_, Msg> {
@@ -941,46 +1288,133 @@ fn completion_tab(st: &State) -> Element<'_, Msg> {
         Some(ShutdownAction::Sleep) => "Sleep",
         _ => "Shut down",
     };
-    let body = column![
-        checkbox(
+
+    let power_row = row![
+        text("Power action")
+            .font(theme::BODY)
+            .size(13.0)
+            .color(t.fg_1)
+            .width(Length::Fill),
+        combo(
+            t,
+            vec![
+                "Shut down".to_owned(),
+                "Restart".to_owned(),
+                "Sleep".to_owned()
+            ],
+            power_on.then(|| power_label.to_owned()),
+            Msg::PowerAction,
+            Length::Fixed(140.0),
+        ),
+        toggle(t, power_on, true, Msg::PowerEnabled),
+    ]
+    .spacing(theme::space::S3)
+    .align_y(Alignment::Center);
+
+    let mut body = column![
+        toggle_row(
             t,
             "Show notification when done",
             oc.show_dialog,
             true,
             Msg::NotifyDone
         ),
-        checkbox(t, "Exit oxdm when done", oc.exit_app, true, Msg::ExitDone),
-        row![
-            checkbox(t, "Power action", power_on, true, Msg::PowerEnabled),
-            combo(
-                t,
-                vec![
-                    "Shut down".to_owned(),
-                    "Restart".to_owned(),
-                    "Sleep".to_owned()
-                ],
-                power_on.then(|| power_label.to_owned()),
-                Msg::PowerAction,
-                Length::Fixed(140.0),
-            ),
-        ]
-        .spacing(theme::space::S3)
-        .align_y(Alignment::Center),
-        checkbox(
+        toggle_row(t, "Exit oxdm when done", oc.exit_app, true, Msg::ExitDone),
+        power_row,
+        toggle_row(
             t,
-            "Force terminate",
+            "Force terminate other transfers",
             oc.force_terminate,
             true,
             Msg::ForceTerminate
         ),
-        Btn::new("Apply")
-            .primary()
-            .size(crate::gui::widget::BtnSize::Sm)
-            .on_press(Msg::ApplyCompletion)
-            .view(t),
     ]
     .spacing(theme::space::S3);
-    crate::gui::widget::card(t, theme::space::S3, body.into())
+
+    if let Some(warn) = completion_warn(st) {
+        body = body.push(warn);
+    }
+    body = body.push(
+        Btn::new("Apply")
+            .primary()
+            .size(BtnSize::Sm)
+            .on_press(Msg::ApplyCompletion)
+            .view(t),
+    );
+    card(t, theme::space::S3, body.into())
+}
+
+/// Destructive-action warning panel (design `.pane-warn`, rust). Lists
+/// exactly what will happen and promises a 30-second cancel prompt.
+/// Built from the real `OnCompletion` / `ShutdownAction` values.
+fn completion_warn(st: &State) -> Option<Element<'_, Msg>> {
+    let t = &st.tokens;
+    let t2 = *t;
+    let oc = &st.on_completion;
+
+    let mut items: Vec<&'static str> = Vec::new();
+    match oc.shutdown {
+        Some(ShutdownAction::ShutDown) => items.push("Your computer will shut down."),
+        Some(ShutdownAction::Restart) => items.push("Your computer will restart."),
+        Some(ShutdownAction::Sleep) => items.push("Your computer will go to sleep."),
+        None => {}
+    }
+    if oc.exit_app {
+        items.push("oxdm will quit.");
+    }
+    if oc.force_terminate {
+        items.push("Other running transfers will be terminated without finishing.");
+    }
+    if items.is_empty() {
+        return None;
+    }
+
+    let mut list = column![
+        row![
+            icons::icon("triangle-alert", 17.0, t.status_danger),
+            text("This will run destructive actions when the download finishes")
+                .font(theme::BODY_BOLD)
+                .size(12.0)
+                .color(t.status_danger),
+        ]
+        .spacing(theme::space::S2)
+        .align_y(Alignment::Center)
+    ]
+    .spacing(theme::space::S2);
+    for it in items {
+        list = list.push(
+            row![
+                text("•")
+                    .font(theme::BODY)
+                    .size(12.0)
+                    .color(t.status_danger),
+                text(it).font(theme::BODY).size(12.0).color(t.fg_2),
+            ]
+            .spacing(theme::space::S2),
+        );
+    }
+    list = list.push(
+        text("You'll get a 30-second prompt to cancel before any of this happens.")
+            .font(theme::BODY)
+            .size(11.0)
+            .color(t.fg_3),
+    );
+
+    Some(
+        container(list)
+            .width(Length::Fill)
+            .padding(theme::space::S3)
+            .style(move |_| container::Style {
+                background: Some(t2.status_danger_bg.into()),
+                border: iced::Border {
+                    color: t2.status_danger,
+                    width: 1.0,
+                    radius: theme::surface::RADIUS.into(),
+                },
+                ..Default::default()
+            })
+            .into(),
+    )
 }
 
 fn complete_view(st: &State) -> Element<'_, Msg> {
@@ -1078,53 +1512,291 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
             })
     };
 
+    // "From" (source URL) row — copy only (design `FromUrlRow`).
+    let from_row = column![
+        label("Address"),
+        row![
+            ro_field(mid_truncate(&address, PATH_TRUNCATE_CHARS)),
+            Btn::new("")
+                .secondary()
+                .icon_only("copy")
+                .size(BtnSize::Md)
+                .on_press(Msg::Copy(address.clone()))
+                .view(t),
+        ]
+        .spacing(6.0)
+        .align_y(Alignment::Center),
+    ]
+    .spacing(6.0);
+
+    // "Saved to" row — copy + reveal-in-folder (design `SavedToRow`).
+    let saved_row = column![
+        label("The file saved as"),
+        row![
+            ro_field(mid_truncate(&path, PATH_TRUNCATE_CHARS)),
+            Btn::new("")
+                .secondary()
+                .icon_only("copy")
+                .size(BtnSize::Md)
+                .on_press(Msg::Copy(path.clone()))
+                .view(t),
+            Btn::new("")
+                .secondary()
+                .icon_only("folder-open")
+                .size(BtnSize::Md)
+                .on_press(Msg::Reveal(final_path(&st.entry)))
+                .view(t),
+        ]
+        .spacing(6.0)
+        .align_y(Alignment::Center),
+    ]
+    .spacing(6.0);
+
+    let mut body = column![header, from_row, saved_row].spacing(theme::space::S3);
+    if let Some(cs_box) = checksum_box(st) {
+        body = body.push(cs_box);
+    }
+    body = body
+        .push(
+            row![
+                Btn::new("Open")
+                    .primary()
+                    .icon("play")
+                    .on_press(Msg::Open)
+                    .view(t),
+                Btn::new("Open Containing Folder")
+                    .toolbar()
+                    .icon("folder")
+                    .on_press(Msg::OpenFolder)
+                    .view(t),
+                iced::widget::Space::new().width(Length::Fill),
+                Btn::new("Close")
+                    .toolbar()
+                    .icon("x")
+                    .on_press(Msg::CloseWin)
+                    .view(t),
+            ]
+            .spacing(theme::space::S2)
+            .align_y(Alignment::Center),
+        )
+        .push(checkbox(
+            t,
+            "Don't show this dialog again",
+            !st.show_complete_dialog,
+            true,
+            Msg::DontShowAgain,
+        ));
+
     page(
         t,
         column![
             titlebar::titlebar(t, &name, false, Msg::Window),
             hairline(t.border_subtle),
-            container(
-                column![
-                    header,
-                    label("Address"),
-                    ro_field(address),
-                    label("The file saved as"),
-                    ro_field(path),
-                    row![
-                        Btn::new("Open")
-                            .primary()
-                            .icon("play")
-                            .on_press(Msg::Open)
-                            .view(t),
-                        Btn::new("Open Containing Folder")
-                            .toolbar()
-                            .icon("folder")
-                            .on_press(Msg::OpenFolder)
-                            .view(t),
-                        iced::widget::Space::new().width(Length::Fill),
-                        Btn::new("Close")
-                            .toolbar()
-                            .icon("x")
-                            .on_press(Msg::CloseWin)
-                            .view(t),
-                    ]
-                    .spacing(theme::space::S2)
-                    .align_y(Alignment::Center),
-                    checkbox(
-                        t,
-                        "Don't show this dialog again",
-                        !st.show_complete_dialog,
-                        true,
-                        Msg::DontShowAgain
-                    ),
-                ]
-                .spacing(theme::space::S3)
-            )
-            .padding(theme::space::S4)
-            .height(Length::Fill),
+            container(crate::gui::widget::vscroll(body).height(Length::Fill))
+                .padding(iced::Padding {
+                    top: theme::space::S4,
+                    bottom: theme::space::S4,
+                    left: theme::space::S4,
+                    right: theme::space::S4 - crate::gui::widget::SCROLL_GUTTER,
+                })
+                .height(Length::Fill),
         ]
         .into(),
     )
+}
+
+/// Middle-truncate a string to roughly `max` chars, keeping head + tail
+/// (paths/URLs/hashes stay legible on one line). Counts by `char`.
+fn mid_truncate(s: &str, max: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        return s.to_owned();
+    }
+    let keep = max.saturating_sub(1);
+    let head = keep.div_ceil(2);
+    let tail = keep - head;
+    let head_s: String = chars[..head].iter().collect();
+    let tail_s: String = chars[chars.len() - tail..].iter().collect();
+    format!("{head_s}…{tail_s}")
+}
+
+/// Completed-view ChecksumBox (design §3.4): shows the job's saved
+/// checksum + status, and a paste field to verify against the
+/// publisher's hash. Algorithm is auto-detected from hex length. Local
+/// compute is not available in the GUI → paste + match only (DEFERRED).
+fn checksum_box(st: &State) -> Option<Element<'_, Msg>> {
+    let t = &st.tokens;
+    let t2 = *t;
+    let cs = st.entry.job.checksums.first()?;
+
+    let (status_color, status_label) = match cs.status {
+        CsStatus::Verified => (t.status_success, "verified"),
+        CsStatus::Mismatch => (t.status_danger, "mismatch"),
+        CsStatus::Unverified => (t.fg_3, "unverified"),
+    };
+
+    let saved_hash = cs.hash.to_lowercase();
+    let intro = row![
+        icons::icon("shield-check", 17.0, t.action_primary),
+        text("File integrity")
+            .font(theme::BODY_BOLD)
+            .size(13.0)
+            .color(t.fg_1),
+        iced::widget::Space::new().width(Length::Fill),
+        status_dot(status_color, status_label, 11.0),
+    ]
+    .spacing(theme::space::S2)
+    .align_y(Alignment::Center);
+
+    let saved_row = row![
+        container(
+            text(cs.algo.label())
+                .font(theme::MONO)
+                .size(11.0)
+                .color(t.fg_2)
+        )
+        .width(Length::Fixed(72.0)),
+        text(mid_truncate(&saved_hash, HASH_TRUNCATE_CHARS))
+            .font(theme::MONO)
+            .size(11.0)
+            .color(t.fg_2)
+            .width(Length::Fill),
+        Btn::new("")
+            .toolbar()
+            .icon_only("copy")
+            .size(BtnSize::Sm)
+            .on_press(Msg::Copy(cs.hash.clone()))
+            .view(t),
+    ]
+    .spacing(theme::space::S2)
+    .align_y(Alignment::Center);
+
+    let paste_field = TextInput::new(&st.cs_paste)
+        .hint("Paste the publisher's hash to compare…")
+        .mono()
+        .on_input(Msg::CsPaste)
+        .view(t);
+
+    // Normalize: drop whitespace + a leading "filename:" prefix, lower.
+    let normalized: String = st
+        .cs_paste
+        .rsplit(':')
+        .next()
+        .unwrap_or(&st.cs_paste)
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_lowercase();
+    let detected = Algo::ALL.iter().find(|a| a.hex_len() == normalized.len());
+
+    let result: Element<'_, Msg> = if normalized.is_empty() {
+        text("The algorithm is detected automatically from the hash length.")
+            .font(theme::BODY)
+            .size(11.0)
+            .color(t.fg_3)
+            .into()
+    } else if let Some(algo) = detected {
+        if normalized == saved_hash {
+            banner(
+                t,
+                t.status_success,
+                t.status_success_bg,
+                "circle-check",
+                format!("Matches the saved {} hash.", algo.label()),
+            )
+        } else {
+            container(
+                column![
+                    row![
+                        icons::icon("shield-alert", 17.0, t.status_danger),
+                        // Saved algo (cs.algo), NOT the pasted-length
+                        // auto-detected `algo` — they differ when the
+                        // pasted hash is the wrong length.
+                        text(format!("Doesn't match the saved {} hash.", cs.algo.label()))
+                            .font(theme::BODY_BOLD)
+                            .size(12.0)
+                            .color(t.status_danger),
+                    ]
+                    .spacing(theme::space::S2)
+                    .align_y(Alignment::Center),
+                    text(format!(
+                        "Expected  {}",
+                        mid_truncate(&saved_hash, HASH_TRUNCATE_CHARS)
+                    ))
+                    .font(theme::MONO)
+                    .size(11.0)
+                    .color(t.fg_2),
+                    text(format!(
+                        "Got       {}",
+                        mid_truncate(&normalized, HASH_TRUNCATE_CHARS)
+                    ))
+                    .font(theme::MONO)
+                    .size(11.0)
+                    .color(t.status_danger),
+                ]
+                .spacing(theme::space::S1),
+            )
+            .width(Length::Fill)
+            .padding(theme::space::S3)
+            .style(move |_| container::Style {
+                background: Some(t2.status_danger_bg.into()),
+                border: iced::Border {
+                    color: t2.status_danger,
+                    width: 1.0,
+                    radius: theme::radius::XS.into(),
+                },
+                ..Default::default()
+            })
+            .into()
+        }
+    } else {
+        text(format!(
+            "Doesn't look like a known hash ({} hex chars).",
+            normalized.len()
+        ))
+        .font(theme::BODY)
+        .size(11.0)
+        .color(t.status_warning)
+        .into()
+    };
+
+    Some(card(
+        t,
+        theme::space::S3,
+        column![intro, saved_row, paste_field, result]
+            .spacing(theme::space::S2)
+            .into(),
+    ))
+}
+
+/// Small tinted callout: icon + message on a `*-bg` surface.
+fn banner<'a>(
+    _t: &Tokens,
+    fg: iced::Color,
+    bg: iced::Color,
+    icon_name: &'a str,
+    msg: String,
+) -> Element<'a, Msg> {
+    container(
+        row![
+            icons::icon(icon_name, 17.0, fg),
+            text(msg).font(theme::BODY_MEDIUM).size(12.0).color(fg),
+        ]
+        .spacing(theme::space::S2)
+        .align_y(Alignment::Center),
+    )
+    .width(Length::Fill)
+    .padding(theme::space::S3)
+    .style(move |_| container::Style {
+        background: Some(bg.into()),
+        border: iced::Border {
+            color: fg,
+            width: 1.0,
+            radius: theme::radius::XS.into(),
+        },
+        ..Default::default()
+    })
+    .into()
 }
 
 pub fn launch_download(_id: JobId) {

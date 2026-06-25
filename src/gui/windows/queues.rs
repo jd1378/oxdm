@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use iced::widget::{column, container, mouse_area, row, scrollable, text};
+use iced::widget::{button, column, container, mouse_area, row, scrollable, text};
 use iced::{Alignment, Element, Length, Subscription, Task};
 
 use crate::domain::{Queue, QueueHook, QueueId, QueueSchedule, ShutdownAction, WeekDayMask};
@@ -15,9 +15,25 @@ use crate::gui::color;
 use crate::gui::ipc::DaemonSignal;
 use crate::gui::shot::Shot;
 use crate::gui::theme::{self, Tokens};
-use crate::gui::widget::{Btn, TextInput, checkbox, hairline, section_card};
+use crate::gui::widget::{Btn, TextInput, hairline, number_stepper, section_card};
 use crate::ipc_local::Client;
 use crate::ipc_local::protocol::Event;
+
+/// Left queue-list column width (design Queues grid `[220px list] [1fr]`).
+const LIST_W: f32 = 220.0;
+/// Day-grid toggle square (design `.day-grid .d` ~28px square).
+const DAY_SQUARE: f32 = 28.0;
+/// Concurrency preset pill text + x-padding — matches a secondary
+/// `Md` button so the pills sit flush with the custom stepper.
+const CONC_PILL_FONT: f32 = 13.0;
+const CONC_PILL_PAD_X: f32 = 14.0;
+/// Custom-concurrency stepper bounds. Min 1 keeps at least one active
+/// download; no design max, so cap at a sane parallelism ceiling.
+const CONC_MIN: i64 = 1;
+const CONC_MAX: i64 = 16;
+/// Value the custom stepper shows before an explicit count is set
+/// (non-preset, so it reads as a distinct "custom" choice).
+const CONC_DEFAULT: i64 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SchedKind {
@@ -430,6 +446,106 @@ fn seg_btn<'a>(
     b.view(t)
 }
 
+/// Concurrency preset pill. Idle/hover mirror a `secondary` button so
+/// it reads identically to the other preset rows, but the *selected*
+/// state uses the design's `.radio-pill .on` clay tint (clay-50 bg /
+/// clay-700 text / clay-200 border) instead of the generic
+/// secondary-selected (sunken + brand border). See T1-QUEUES.
+fn conc_pill<'a>(t: &Tokens, label: &'a str, selected: bool, msg: Msg) -> Element<'a, Msg> {
+    let t2 = *t;
+    // tokens.css remaps clay-50/200/700 to dark warm tints under the
+    // dark theme so the active pill doesn't punch a bright hole.
+    let (on_bg, on_fg, on_border) = match t.theme {
+        theme::ResolvedTheme::Dark => (
+            color::clay::DARK_C50,
+            color::clay::DARK_C700,
+            color::clay::DARK_C200,
+        ),
+        _ => (color::clay::C50, color::clay::C700, color::clay::C200),
+    };
+    let content = container(text(label).font(theme::BODY_BOLD).size(CONC_PILL_FONT))
+        .center_x(Length::Fill)
+        .center_y(Length::Fill);
+    button(content)
+        .height(Length::Fixed(theme::control::H_MD))
+        .padding([0.0, CONC_PILL_PAD_X])
+        .on_press(msg)
+        .style(move |_th, status| {
+            use iced::widget::button::Status::*;
+            if selected {
+                return iced::widget::button::Style {
+                    background: Some(on_bg.into()),
+                    text_color: on_fg,
+                    border: iced::Border {
+                        color: on_border,
+                        width: 1.0,
+                        radius: theme::control::RADIUS.into(),
+                    },
+                    shadow: iced::Shadow::default(),
+                    snap: true,
+                };
+            }
+            let bg = match status {
+                Hovered => color::mix(t2.bg_raised, t2.bg_sunken, 0.5),
+                Pressed => t2.bg_sunken,
+                _ => t2.bg_raised,
+            };
+            iced::widget::button::Style {
+                background: Some(bg.into()),
+                text_color: t2.fg_1,
+                border: iced::Border {
+                    color: t2.border_default,
+                    width: 1.0,
+                    radius: theme::control::RADIUS.into(),
+                },
+                shadow: iced::Shadow::default(),
+                snap: true,
+            }
+        })
+        .into()
+}
+
+/// One square of the recurring-schedule day grid: a ~28px toggle
+/// button bearing the day initial. On → theme clay-400 accent fill /
+/// inverse text (design `.day-grid .d.on`); off → sunken square.
+/// Preserves the per-day `Msg::SchedDay(bit, _)` toggle. See T2-QUEUES.
+fn day_square<'a>(t: &Tokens, label: &str, on: bool, msg: Msg) -> Element<'a, Msg> {
+    let t2 = *t;
+    let initial = label.chars().next().unwrap_or(' ').to_string();
+    let content = container(text(initial).font(theme::BODY_BOLD).size(CONC_PILL_FONT))
+        .center_x(Length::Fill)
+        .center_y(Length::Fill);
+    button(content)
+        .width(Length::Fixed(DAY_SQUARE))
+        .height(Length::Fixed(DAY_SQUARE))
+        .padding(0.0)
+        .on_press(msg)
+        .style(move |_th, status| {
+            use iced::widget::button::Status::*;
+            let (bg, fg, border) = if on {
+                (t2.action_primary, t2.action_primary_fg, t2.action_primary)
+            } else {
+                let bg = match status {
+                    Hovered | Pressed => t2.bg_sunken_hover,
+                    _ => t2.bg_sunken,
+                };
+                (bg, t2.fg_2, t2.border_default)
+            };
+            iced::widget::button::Style {
+                background: Some(bg.into()),
+                text_color: fg,
+                border: iced::Border {
+                    color: border,
+                    width: 1.0,
+                    radius: theme::radius::XS.into(),
+                },
+                shadow: iced::Shadow::default(),
+                snap: true,
+            }
+        })
+        .into()
+}
+
 fn ready_view(st: &State) -> Element<'_, Msg> {
     let t = &st.tokens;
     let t2 = *t;
@@ -489,7 +605,7 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
             .view(t),
     );
     let sidebar = container(scrollable(list).height(Length::Fill))
-        .width(Length::Fixed(240.0))
+        .width(Length::Fixed(LIST_W))
         .height(Length::Fill)
         .style(move |_| container::Style {
             background: Some(t2.bg_sidebar.into()),
@@ -541,15 +657,27 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
                 .size(12.0)
                 .color(t.fg_3),
             row![
-                seg_btn(t, "1x", None, conc == Some(1), Msg::Concurrency(Some(1))),
-                seg_btn(t, "2x", None, conc == Some(2), Msg::Concurrency(Some(2))),
-                seg_btn(t, "3x", None, conc == Some(3), Msg::Concurrency(Some(3))),
-                seg_btn(t, "5x", None, conc == Some(5), Msg::Concurrency(Some(5))),
-                seg_btn(t, "8x", None, conc == Some(8), Msg::Concurrency(Some(8))),
-                Btn::new("Custom")
-                    .ghost()
-                    .on_press(Msg::Concurrency(None))
-                    .view(t),
+                // "Auto" = inherit the global concurrency (value `None`);
+                // kept explicitly selectable so a queue can be set back
+                // to inherit after a concrete count was chosen.
+                conc_pill(t, "Auto", conc.is_none(), Msg::Concurrency(None)),
+                conc_pill(t, "1x", conc == Some(1), Msg::Concurrency(Some(1))),
+                conc_pill(t, "2x", conc == Some(2), Msg::Concurrency(Some(2))),
+                conc_pill(t, "3x", conc == Some(3), Msg::Concurrency(Some(3))),
+                conc_pill(t, "5x", conc == Some(5), Msg::Concurrency(Some(5))),
+                conc_pill(t, "8x", conc == Some(8), Msg::Concurrency(Some(8))),
+                // "Custom" pill → inline stepper, reusing the existing
+                // `Concurrency(Some(_))` message for an arbitrary count.
+                // Disabled (neutral) while Auto is active so it never
+                // implies a concrete value for an inheriting queue.
+                number_stepper(
+                    t,
+                    conc.map(|c| c as i64).unwrap_or(CONC_DEFAULT),
+                    CONC_MIN,
+                    CONC_MAX,
+                    conc.is_some(),
+                    |n| Msg::Concurrency(Some(n as usize)),
+                ),
             ]
             .spacing(4.0)
             .align_y(Alignment::Center),
@@ -594,7 +722,7 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
     .spacing(theme::space::S3);
     match st.sched {
         SchedKind::Recurring => {
-            let mut days = row![].spacing(theme::space::S2);
+            let mut days = row![].spacing(theme::space::S1);
             for (bit, label) in [
                 (0u8, "Mon"),
                 (1, "Tue"),
@@ -605,7 +733,7 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
                 (6, "Sun"),
             ] {
                 let on = st.sched_days.0 & (1 << bit) != 0;
-                days = days.push(checkbox(t, label, on, true, move |v| Msg::SchedDay(bit, v)));
+                days = days.push(day_square(t, label, on, Msg::SchedDay(bit, !on)));
             }
             sched_col = sched_col
                 .push(
