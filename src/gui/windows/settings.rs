@@ -11,6 +11,7 @@ use iced::{Alignment, Element, Length, Subscription, Task};
 
 use crate::domain::{Category, Density, Settings, Theme as AppTheme};
 use crate::gui::chrome::{self, WindowControl, titlebar};
+use crate::gui::color;
 use crate::gui::icons;
 use crate::gui::ipc::DaemonSignal;
 use crate::gui::shot::Shot;
@@ -615,12 +616,20 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
     for (sec, icon, label) in Section::ALL {
         let active = st.section == sec;
         let fg = if active { t.fg_1 } else { t.fg_2 };
+        // Design `.settings-nav .s-item.on`: font-weight 600 label +
+        // clay-500 icon (clay-500 is theme-invariant in tokens.css).
+        let label_font = if active {
+            theme::BODY_BOLD
+        } else {
+            theme::BODY_MEDIUM
+        };
+        let icon_color = if active { color::clay::C500 } else { t.fg_3 };
         list = list.push(
             mouse_area(
                 container(
                     row![
-                        icons::icon(icon, 15.0, if active { t.action_primary } else { t.fg_3 }),
-                        text(label).font(theme::BODY_MEDIUM).size(13.0).color(fg),
+                        icons::icon(icon, 15.0, icon_color),
+                        text(label).font(label_font).size(13.0).color(fg),
                     ]
                     .spacing(theme::space::S2)
                     .align_y(Alignment::Center),

@@ -504,9 +504,7 @@ pub mod size {
     pub const TOOLBAR_H: f32 = 44.0;
     pub const STATUSBAR_H: f32 = 28.0;
     pub const TAB_H: f32 = 36.0;
-    pub const ROW_ACTIVE_H: f32 = 60.0;
-    pub const ROW_DONE_H: f32 = 48.0;
-    pub const SIDEBAR_W: f32 = 220.0;
+    pub const SIDEBAR_W: f32 = 232.0;
     pub const SCROLLBAR_W: f32 = 10.0;
     pub const TRAFFIC_DOT: f32 = 12.0;
     pub const DIALOG_MIN_W: f32 = 360.0;

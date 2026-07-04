@@ -23,7 +23,6 @@ use crate::gui::{color, icons};
 use crate::ipc_local::Client;
 use crate::ipc_local::protocol::{Event, JobCounters, SnapshotData};
 
-const SIDEBAR_W: f32 = 232.0; // design `.main-grid` sidebar column = 232px
 const RESIZE_HANDLE_W: f32 = 6.0;
 const HEADER_H: f32 = 22.0;
 
@@ -1227,6 +1226,12 @@ fn handle_key(
             // destructive escalation lives on the context menu.
             request_remove(m, RemoveKind::Entry)
         }
+        // Confirm-dialog keys (design `confirm-dialog.jsx`): Enter
+        // confirms, Escape cancels. `listen_with` ignores capture
+        // status, so Enter is gated on the confirm overlay being open.
+        Key::Named(Named::Enter) if m.overlay == Overlay::Remove => {
+            update_main(m, Msg::RemoveConfirm)
+        }
         Key::Named(Named::Escape) => update_main(m, Msg::CloseOverlay),
         _ => Task::none(),
     }
@@ -1902,7 +1907,7 @@ fn sidebar(m: &Main) -> Element<'_, Msg> {
 
     let t2 = *t;
     container(scrollable(col).height(Length::Fill))
-        .width(Length::Fixed(SIDEBAR_W))
+        .width(Length::Fixed(theme::size::SIDEBAR_W))
         .height(Length::Fill)
         .style(move |_| container::Style {
             background: Some(t2.bg_sidebar.into()),
@@ -2336,14 +2341,16 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
         Alignment::End,
     );
 
+    // Design `.dl-table tbody tr`: selected → clay-50, selected+hover →
+    // clay-100, hover → bg-sunken (per-theme values live on `Tokens`).
     let t2 = *t;
     let bg = move |hovered: bool| {
         if selected && hovered {
-            Some(color::mix(t2.bg_surface, t2.action_primary, 0.32))
+            Some(t2.row_selhover_bg)
         } else if selected {
-            Some(color::mix(t2.bg_surface, t2.action_primary, 0.14))
+            Some(t2.row_selected_bg)
         } else if hovered {
-            Some(t2.bg_sunken)
+            Some(t2.row_hover_bg)
         } else {
             None
         }

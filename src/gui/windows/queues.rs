@@ -71,6 +71,7 @@ pub enum Msg {
     DeleteAsk,
     DeleteConfirm,
     DeleteCancel,
+    KeyPressed(iced::keyboard::Key),
     Save,
     Saved(Result<(), String>),
     Cancel,
@@ -337,6 +338,24 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             let client = st.client.clone();
             Task::perform(async move { client.delete_queue(id).await }, |_| Msg::Noop)
         }
+        // Confirm-dialog keys (design `confirm-dialog.jsx`): Enter
+        // confirms, Escape cancels. `listen_with` ignores capture
+        // status, so both are gated on the confirm overlay being open.
+        Msg::KeyPressed(key) => {
+            use iced::keyboard::key::Named;
+            if st.confirm_delete {
+                match key.as_ref() {
+                    iced::keyboard::Key::Named(Named::Enter) => {
+                        return update_ready(st, Msg::DeleteConfirm);
+                    }
+                    iced::keyboard::Key::Named(Named::Escape) => {
+                        return update_ready(st, Msg::DeleteCancel);
+                    }
+                    _ => {}
+                }
+            }
+            Task::none()
+        }
         Msg::Save => {
             let Some(q) = st.build_queue() else {
                 return Task::none();
@@ -373,6 +392,9 @@ pub fn subscription(app: &App) -> Subscription<Msg> {
         iced::event::listen_with(|event, _status, _id| match event {
             iced::Event::Window(iced::window::Event::Resized(size)) => {
                 Some(Msg::WinResized(size.width, size.height))
+            }
+            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) => {
+                Some(Msg::KeyPressed(key))
             }
             _ => None,
         }),

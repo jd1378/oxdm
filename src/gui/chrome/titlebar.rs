@@ -1,6 +1,7 @@
 //! Custom client-side titlebar: drag region, centered title, window
-//! controls (minimize / maximize / close). Heights per design:
-//! 36px on Linux/Windows, 28px on macOS (native bar there).
+//! controls (minimize / maximize / close). Heights per design
+//! (`.win-titlebar` height: 32px) on Linux/Windows, 28px on macOS
+//! (native bar there).
 
 use iced::widget::{container, mouse_area, row, text};
 use iced::{Alignment, Color, Element, Length};
@@ -12,7 +13,7 @@ use crate::gui::theme::{self, Tokens};
 #[cfg(target_os = "macos")]
 pub const HEIGHT: f32 = 28.0;
 #[cfg(not(target_os = "macos"))]
-pub const HEIGHT: f32 = 36.0;
+pub const HEIGHT: f32 = theme::size::TITLEBAR_H;
 
 const BTN_SIDE: f32 = 24.0;
 

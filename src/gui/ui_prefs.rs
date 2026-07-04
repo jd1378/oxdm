@@ -29,7 +29,7 @@ impl Default for ColumnsState {
         // Design defaults: name 420, size 90, status 280, speed 100,
         // eta 90, date 130.
         Self {
-            widths: [420.0, 92.0, 280.0, 100.0, 90.0, 130.0],
+            widths: [420.0, 90.0, 280.0, 100.0, 90.0, 130.0],
             hidden: [false; 6],
         }
     }
