@@ -31,12 +31,27 @@ pub fn spawn(state: Arc<AppState>) {
                     crate::daemon::tray::spawn_download_gui(id);
                     continue;
                 }
-                if let Some(action) = prefs.shutdown
-                    && let Err(e) = run_shutdown(action, prefs.force_terminate)
-                {
-                    tracing::warn!(error = %e, "shutdown command failed");
+                // Destructive power actions go through the shared
+                // grace timer (feature #9) instead of firing
+                // immediately — the GUI shows a cancellable countdown.
+                let mut power_armed = false;
+                if let Some(action) = prefs.shutdown {
+                    let force = prefs.force_terminate;
+                    power_armed = state.arm_power_action(action.into(), move || {
+                        run_shutdown(action, force).map_err(|e| e.to_string())
+                    });
                 }
                 if prefs.exit_app {
+                    if power_armed || state.pending_shutdown().is_some() {
+                        // Exiting now would kill the daemon-side grace
+                        // task and silently drop the promised power
+                        // action; the action takes the whole system
+                        // down anyway.
+                        tracing::warn!(
+                            "skipping exit-app completion action while a power action is pending"
+                        );
+                        continue;
+                    }
                     // Give pending notifications + IO a beat.
                     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                     std::process::exit(0);

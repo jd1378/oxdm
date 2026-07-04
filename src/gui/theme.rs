@@ -524,6 +524,84 @@ pub mod opacity {
     pub const OVERLAY_STRONG: f32 = 0.18;
 }
 
+/// Scrollbar thumb metrics (design §4 "Scrollbars": 10px rail — see
+/// [`size::SCROLLBAR_W`] — transparent track, `rgba(0,0,0,.18)` thumb
+/// with a 3px transparent inset border so it reads as a thin rounded
+/// bar; darkens to `rgba(0,0,0,.32)` on hover).
+pub mod scroll {
+    /// Thumb alpha at rest (design `rgba(0,0,0,.18)`).
+    pub const THUMB_ALPHA: f32 = 0.18;
+    /// Thumb alpha while hovered/dragged (design hover `rgba(0,0,0,.32)`).
+    pub const THUMB_HOVER_ALPHA: f32 = 0.32;
+    /// Visible thumb width: 10px rail − 2 × 3px transparent inset
+    /// (CSS `border: 3px solid transparent` + `background-clip:
+    /// padding-box`).
+    pub const THUMB_W: f32 = 4.0;
+}
+
+/// Scrollable style per the design scrollbar spec (see [`scroll`]):
+/// transparent track, thin rounded thumb, darker on hover/drag.
+///
+/// PER-THEME thumb: the design only specifies the light value
+/// (`rgba(0,0,0,.18)`), which is invisible on dark surfaces — dark
+/// themes use the light-alpha equivalent `rgba(255,255,255,.18)`
+/// (hover `.32`), the same alphas over white instead of black.
+/// Applied via `widget::cards::vscroll()` and the main jobs-table
+/// body scrollable.
+pub fn scrollbar_style(
+    theme: &iced::Theme,
+    status: iced::widget::scrollable::Status,
+) -> iced::widget::scrollable::Style {
+    use iced::widget::scrollable::{Rail, Scroller, Status, Style};
+    // Dark detection: perceived-light background ⇒ black thumb, else
+    // the white equivalent (our custom palettes carry no theme tag).
+    let bg = theme.palette().background;
+    let is_dark = (bg.r + bg.g + bg.b) / 3.0 < 0.5;
+    let base = if is_dark { Color::WHITE } else { Color::BLACK };
+    let (v_hot, h_hot) = match status {
+        Status::Hovered {
+            is_vertical_scrollbar_hovered,
+            is_horizontal_scrollbar_hovered,
+            ..
+        } => (
+            is_vertical_scrollbar_hovered,
+            is_horizontal_scrollbar_hovered,
+        ),
+        Status::Dragged {
+            is_vertical_scrollbar_dragged,
+            is_horizontal_scrollbar_dragged,
+            ..
+        } => (
+            is_vertical_scrollbar_dragged,
+            is_horizontal_scrollbar_dragged,
+        ),
+        Status::Active { .. } => (false, false),
+    };
+    let rail = |hot: bool| Rail {
+        background: None, // transparent track
+        border: iced::Border::default(),
+        scroller: Scroller {
+            background: crate::gui::color::with_alpha(
+                base,
+                if hot {
+                    scroll::THUMB_HOVER_ALPHA
+                } else {
+                    scroll::THUMB_ALPHA
+                },
+            )
+            .into(),
+            border: iced::border::rounded(radius::PILL),
+        },
+    };
+    Style {
+        container: iced::widget::container::Style::default(),
+        vertical_rail: rail(v_hot),
+        horizontal_rail: rail(h_hot),
+        gap: None,
+        auto_scroll: iced::widget::scrollable::default(theme, status).auto_scroll,
+    }
+}
+
 /// Shared sizing for form controls (buttons, inputs, dropdowns, search
 /// fields, etc). Every control reads from here so changing one value
 /// updates the whole UI in lockstep.

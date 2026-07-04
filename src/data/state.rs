@@ -248,6 +248,9 @@ pub struct AppState {
     /// against an in-memory fallback. The GUI surfaces this via the
     /// `DbStatus` IPC + a recovery modal that offers Exit / Reset.
     db_error: RwLock<Option<String>>,
+    /// Single-slot grace timer for destructive power actions (queue
+    /// hooks + per-job completion actions both go through it).
+    power: Arc<crate::data::power::PowerGuard>,
 }
 
 impl AppState {
@@ -330,6 +333,7 @@ impl AppState {
 
         let (tx, _rx) = broadcast::channel(1024);
         let token = settings.ext_token.clone();
+        let power = Arc::new(crate::data::power::PowerGuard::new(tx.clone()));
 
         Arc::new(Self {
             store,
@@ -349,6 +353,7 @@ impl AppState {
             conflict_queue: RwLock::new(std::collections::VecDeque::new()),
             master_key: RwLock::new(master_key),
             db_error: RwLock::new(db_error),
+            power,
         })
     }
 
@@ -767,17 +772,92 @@ impl AppState {
     /// Persist the per-job Advanced bundle (Properties dialog →
     /// Advanced / Connection / Cookies / Headers tabs). Stores the
     /// blob as JSON on the `jobs` row and updates the in-memory entry.
+    ///
+    /// Secrets never land in `advanced_json` (guardian F1): the
+    /// proxy password, Basic password and Bearer token are stripped
+    /// from the blob and re-routed onto the encrypted columns — same
+    /// rails as `add_from_capture`'s Authorization extraction. The
+    /// Basic username rides the legacy `Job.auth_user` field, which
+    /// stays the single source of truth the runner reads (F2);
+    /// `advanced.auth` keeps only the scheme selection. Empty incoming
+    /// secret fields leave the stored ciphertext untouched, so an
+    /// Apply with untouched (blank) password boxes cannot silently
+    /// wipe stored secrets.
     pub async fn set_job_advanced(
         &self,
         id: JobId,
-        advanced: crate::domain::Advanced,
+        mut advanced: crate::domain::Advanced,
     ) -> Result<(), JobError> {
+        use crate::domain::AuthScheme;
+        let proxy_password = std::mem::take(&mut advanced.proxy.password);
+        let auth_username = std::mem::take(&mut advanced.auth.username);
+        let auth_password = std::mem::take(&mut advanced.auth.password);
+        let auth_token = std::mem::take(&mut advanced.auth.token);
+        // Cookie text is a secret too — never persisted in the blob;
+        // routed onto `enc_cookies` like the passwords above.
+        let cookie_jar = std::mem::take(&mut advanced.cookie_jar);
+
+        // Encrypt before taking the jobs lock — `encrypt_field` awaits
+        // on the master key and must not run under the registry lock.
+        let enc_proxy_password = if proxy_password.is_empty() {
+            None
+        } else {
+            self.encrypt_field(
+                id,
+                crate::data::crypto::Field::ProxyPassword,
+                Some(&proxy_password),
+            )
+            .await?
+        };
+        let auth_secret = match advanced.auth.scheme {
+            AuthScheme::Basic => auth_password,
+            AuthScheme::Bearer => auth_token,
+            AuthScheme::None | AuthScheme::Digest => String::new(),
+        };
+        let enc_auth_secret = if auth_secret.is_empty() {
+            None
+        } else {
+            self.encrypt_field(
+                id,
+                crate::data::crypto::Field::AuthPassword,
+                Some(&auth_secret),
+            )
+            .await?
+        };
+        let enc_cookie_jar = if cookie_jar.trim().is_empty() {
+            None
+        } else {
+            self.encrypt_field(id, crate::data::crypto::Field::Cookies, Some(&cookie_jar))
+                .await?
+        };
+
         let mut jobs = self.jobs.write().await;
         let Some(old) = jobs.get(&id).cloned() else {
             return Err(JobError::Other("job not found".into()));
         };
         let mut new_job = old.job.clone();
         new_job.advanced = advanced;
+        if let Some(enc) = enc_proxy_password {
+            new_job.enc_proxy_password = Some(enc);
+        }
+        if let Some(enc) = enc_auth_secret {
+            new_job.enc_auth_password = Some(enc);
+        }
+        if let Some(enc) = enc_cookie_jar {
+            new_job.enc_cookies = Some(enc);
+        }
+        match new_job.advanced.auth.scheme {
+            AuthScheme::Basic if !auth_username.is_empty() => {
+                new_job.auth_user = Some(auth_username);
+            }
+            // Scheme "None" must actually stop Basic credentials from
+            // being sent: the runner builds them off `auth_user`, so
+            // clearing it is what makes the selection honest (F2/F4).
+            AuthScheme::None => {
+                new_job.auth_user = None;
+            }
+            _ => {}
+        }
         let new_entry = clone_entry_with_job(&old, new_job.clone()).await;
         jobs.insert(id, new_entry);
         drop(jobs);
@@ -916,6 +996,31 @@ impl AppState {
 
     pub fn subscribe(&self) -> broadcast::Receiver<DomainEvent> {
         self.events.subscribe()
+    }
+
+    // ── destructive power actions (shutdown grace) ──────────────────
+
+    /// Arm a destructive power action behind the shared grace timer.
+    /// `execute` is the platform command, supplied by the call site
+    /// (queue hooks / completion actions keep their own platform
+    /// integrations). Returns `false` when another action is already
+    /// pending — the first countdown keeps running.
+    pub fn arm_power_action<F>(&self, action: crate::domain::PowerAction, execute: F) -> bool
+    where
+        F: FnOnce() -> Result<(), String> + Send + 'static,
+    {
+        self.power.arm(action, execute)
+    }
+
+    /// Cancel the pending power action, if any. Idempotent.
+    pub fn cancel_pending_shutdown(&self) {
+        self.power.cancel();
+    }
+
+    /// `(action, deadline_ms)` of the pending power action, for
+    /// snapshots to late-connecting GUIs.
+    pub fn pending_shutdown(&self) -> Option<(crate::domain::PowerAction, i64)> {
+        self.power.pending()
     }
 
     pub async fn settings(&self) -> Settings {
@@ -1248,27 +1353,26 @@ impl AppState {
         new_job.max_connections = edit.max_connections;
         new_job.proxy = edit.proxy;
         new_job.auth_user = edit.auth_user;
-        new_job.enc_auth_password = self
-            .encrypt_field(
-                id,
-                crate::data::crypto::Field::AuthPassword,
-                edit.auth_password.as_deref(),
-            )
-            .await?;
-        new_job.enc_proxy_password = self
-            .encrypt_field(
-                id,
-                crate::data::crypto::Field::ProxyPassword,
-                edit.proxy_password.as_deref(),
-            )
-            .await?;
-        new_job.enc_cookies = self
-            .encrypt_field(
-                id,
-                crate::data::crypto::Field::Cookies,
-                edit.cookies.as_deref(),
-            )
-            .await?;
+        // Absent/empty secrets keep the stored ciphertext (same rule as
+        // `set_job_advanced`): a header/cookie-only Apply from a client
+        // that never round-trips secrets must not wipe them. Explicit
+        // clearing is not expressible through this path (documented in
+        // features-impl-plan F1/F2).
+        if let Some(pw) = edit.auth_password.as_deref().filter(|s| !s.is_empty()) {
+            new_job.enc_auth_password = self
+                .encrypt_field(id, crate::data::crypto::Field::AuthPassword, Some(pw))
+                .await?;
+        }
+        if let Some(pw) = edit.proxy_password.as_deref().filter(|s| !s.is_empty()) {
+            new_job.enc_proxy_password = self
+                .encrypt_field(id, crate::data::crypto::Field::ProxyPassword, Some(pw))
+                .await?;
+        }
+        if let Some(ck) = edit.cookies.as_deref().filter(|s| !s.is_empty()) {
+            new_job.enc_cookies = self
+                .encrypt_field(id, crate::data::crypto::Field::Cookies, Some(ck))
+                .await?;
+        }
 
         // Rebuild the JobEntry; it holds runtime atomics behind shared
         // refs, so spawning a fresh one keeps things consistent.
@@ -1346,21 +1450,47 @@ impl AppState {
         // overlay; deferring the decision to the user matches the
         // manual Add dialog behaviour.
         let filename = req.filename;
-        self.add_job(
-            req.url,
-            settings.download_dir,
-            filename,
-            req.referrer,
-            headers,
-            None,
-            None,
-            None,
-            None,
-            None,
-            cookies,
-            None,
-        )
-        .await
+        // Per-category routing (feature #10) applies only on this
+        // non-interactive path (guardian F5) — the Add dialog prefills
+        // client-side instead, so an explicit user choice always wins.
+        // Known caveat: classification here uses the captured filename;
+        // a later FilenameResolved may land in a different category —
+        // no re-routing this pass.
+        let category = classify(
+            filename.as_deref().unwrap_or(""),
+            &settings.category_extensions,
+        );
+        let save_dir = settings
+            .category_folders
+            .get(&category)
+            .filter(|p| !p.as_os_str().is_empty())
+            .cloned()
+            .unwrap_or(settings.download_dir);
+        let id = self
+            .add_job(
+                req.url,
+                save_dir,
+                filename,
+                req.referrer,
+                headers,
+                None,
+                None,
+                None,
+                None,
+                None,
+                cookies,
+                Some(category),
+            )
+            .await?;
+        if let Some(qid) = settings.category_queues.get(&category).copied()
+            && qid != self.main_queue_id
+            && let Err(e) = self.set_job_queue(id, qid).await
+        {
+            // Stale id (queue deleted since the mapping was saved) —
+            // the job stays in Main rather than failing the capture.
+            tracing::warn!(job = %id, queue = %qid, error = %e, "category default queue not applied");
+        }
+        Ok(id)
     }
 
     /// Spawn a runner for a queued / paused job. Idempotent on a
@@ -1492,13 +1622,18 @@ impl AppState {
                 entry.job.enc_proxy_password.as_deref(),
             )
             .await;
-        let cookies = self
-            .decrypt_field(
+        // "Send cookies" toggle is honored here — stored cookies stay
+        // encrypted at rest but are only injected when enabled.
+        let cookies = if entry.job.advanced.cookies_enabled {
+            self.decrypt_field(
                 id,
                 crate::data::crypto::Field::Cookies,
                 entry.job.enc_cookies.as_deref(),
             )
-            .await;
+            .await
+        } else {
+            None
+        };
 
         let runner = JobRunner {
             job_id: id,

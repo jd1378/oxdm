@@ -892,9 +892,35 @@ const BROWSER_STORES: [(&str, &str, &str); 7] = [
     ("Safari", "Mac App Store", "https://apps.apple.com/"),
 ];
 
+/// Browser-extensions dialog, "manage" mode (opened from Tools).
 pub fn browser_extensions<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg> {
+    extensions_dialog(m, base, false)
+}
+
+/// First-run welcome overlay (design §3.8 / `first-run-dialog.jsx`
+/// `welcome` mode): same honest body, plus the "Welcome to oxdm"
+/// heading and the "Maybe later" / "Done" footer. Every dismissal
+/// routes through `Msg::WelcomeDismiss` so `first_run_seen` persists.
+pub fn welcome<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg> {
+    extensions_dialog(m, base, true)
+}
+
+fn extensions_dialog<'a>(
+    m: &'a Main,
+    base: Element<'a, Msg>,
+    welcome_mode: bool,
+) -> Element<'a, Msg> {
     let t = &m.tokens;
     let t2 = *t;
+
+    // Sub-copy: welcome uses the jsx `.fr-sub` wording; manage keeps
+    // the shorter helper line.
+    let sub = if welcome_mode {
+        "Install the oxdm extension and every download started in your browser \
+         comes here automatically — segmented, resumable, and queued."
+    } else {
+        "Install the oxdm helper extension to send links straight to oxdm."
+    };
 
     // Hero band (design `.fr-hero`): clay-tinted glow + flow title.
     let glow = color::mix(t.bg_surface, t.action_primary, 0.12);
@@ -918,10 +944,7 @@ pub fn browser_extensions<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a
                 .font(theme::DISPLAY)
                 .size(20.0)
                 .color(t.fg_1),
-            text("Install the oxdm helper extension to send links straight to oxdm.")
-                .font(theme::BODY)
-                .size(13.0)
-                .color(t.fg_2),
+            text(sub).font(theme::BODY).size(13.0).color(t.fg_2),
         ]
         .spacing(theme::space::S2)
         .align_x(Alignment::Center),
@@ -1001,10 +1024,25 @@ pub fn browser_extensions<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a
     .spacing(6.0)
     .align_y(Alignment::Center);
 
-    let card = column![
-        hero,
-        scrollable(list).height(Length::Fixed(264.0)),
-        privacy,
+    // Footer adapts per §3.8: welcome → "Maybe later" / "Done"
+    // (both persist `first_run_seen`); manage → just "Close". No fake
+    // "Installed" state — installs can't be detected.
+    let footer: Element<'a, Msg> = if welcome_mode {
+        row![
+            Btn::new("Maybe later")
+                .ghost()
+                .on_press(Msg::WelcomeDismiss)
+                .view(t),
+            iced::widget::Space::new().width(Length::Fill),
+            Btn::new("Done")
+                .primary()
+                .icon("check")
+                .on_press(Msg::WelcomeDismiss)
+                .view(t),
+        ]
+        .align_y(Alignment::Center)
+        .into()
+    } else {
         row![
             iced::widget::Space::new().width(Length::Fill),
             Btn::new("Close")
@@ -1012,11 +1050,26 @@ pub fn browser_extensions<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a
                 .on_press(Msg::CloseOverlay)
                 .view(t),
         ]
-        .align_y(Alignment::Center),
-    ]
-    .spacing(theme::space::S3);
+        .align_y(Alignment::Center)
+        .into()
+    };
 
-    modal(t, base, card.into(), 560.0, Some(Msg::CloseOverlay))
+    let mut card = column![].spacing(theme::space::S3);
+    if welcome_mode {
+        card = card.push(title_row(t, "Welcome to oxdm"));
+    }
+    let card = card
+        .push(hero)
+        .push(scrollable(list).height(Length::Fixed(264.0)))
+        .push(privacy)
+        .push(footer);
+
+    let dismiss = if welcome_mode {
+        Msg::WelcomeDismiss
+    } else {
+        Msg::CloseOverlay
+    };
+    modal(t, base, card.into(), 560.0, Some(dismiss))
 }
 
 pub fn secrets_locked<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg> {

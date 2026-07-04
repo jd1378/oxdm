@@ -327,6 +327,14 @@ fn map_domain_event(filter: SubFilter, ev: DomainEvent) -> Option<Event> {
         }
         DomainEvent::QueuesChanged => Some(Event::QueuesChanged),
         DomainEvent::HostSettingsChanged => Some(Event::HostListChanged),
+        DomainEvent::ShutdownPending {
+            action,
+            deadline_ms,
+        } => Some(Event::ShutdownPending {
+            action,
+            deadline_ms,
+        }),
+        DomainEvent::ShutdownCancelled => Some(Event::ShutdownCancelled),
     }
 }
 
@@ -416,6 +424,7 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
                 conflict_head: state.peek_conflict().await,
                 conflict_len: state.conflict_len().await,
                 counters,
+                pending_shutdown: state.pending_shutdown(),
             };
             Reply::Snapshot(snap)
         }
@@ -543,7 +552,7 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
             Ok(()) => Reply::Ok,
             Err(e) => Reply::Err(e),
         },
-        Request::UpdateSettings(s) => match state.update_settings(s).await {
+        Request::UpdateSettings(s) => match state.update_settings(*s).await {
             Ok(()) => Reply::Ok,
             Err(e) => Reply::Err(e),
         },
@@ -696,10 +705,11 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
                 Err(e) => Reply::Err(e),
             }
         }
-        Request::Probe(url) => {
-            let r = state.probe(url).await.map_err(|e| e.to_string());
-            Reply::ProbeResult(r)
+        Request::CancelPendingShutdown => {
+            state.cancel_pending_shutdown();
+            Reply::Ok
         }
+        Request::Probe(url) => Reply::ProbeResult(state.probe(url).await),
         Request::OpenDownloadWindow(id) => {
             crate::daemon::tray::spawn_download_gui(id);
             Reply::Ok

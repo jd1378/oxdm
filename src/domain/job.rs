@@ -260,6 +260,34 @@ pub enum ShutdownAction {
     Sleep,
 }
 
+/// Grace period before a destructive power action (shut down / restart /
+/// sleep / hibernate) actually fires, so the user gets a cancellable
+/// countdown instead of an instant power-off. 60 s per the queue-hook
+/// copy in the design handoff (§3.6 — wins over the §3.3 mock's 30 s).
+/// Debug/test override: `OXDM_SHUTDOWN_GRACE_SECS` env var (data layer).
+pub const SHUTDOWN_GRACE_SECS: u64 = 60;
+
+/// A destructive power action waiting out the shutdown grace timer.
+/// Superset of [`ShutdownAction`]: queue hooks can also hibernate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PowerAction {
+    ShutDown,
+    Restart,
+    Sleep,
+    Hibernate,
+}
+
+impl From<ShutdownAction> for PowerAction {
+    fn from(a: ShutdownAction) -> Self {
+        match a {
+            ShutdownAction::ShutDown => PowerAction::ShutDown,
+            ShutdownAction::Restart => PowerAction::Restart,
+            ShutdownAction::Sleep => PowerAction::Sleep,
+        }
+    }
+}
+
 /// Cheap immutable view of `(Job, JobStatus)` used by the UI layer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobSnapshot {
@@ -336,4 +364,140 @@ impl LiveCounters {
     pub fn speed_bps(&self) -> f64 {
         f64::from_bits(self.speed_bps_bits.load(Ordering::Relaxed))
     }
+}
+
+// ---------------------------------------------------------------- will-send headers
+
+/// One row of the read-only "Request headers (will send)" table
+/// (Properties → Headers, feature #7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WillSendHeader {
+    pub name: String,
+    /// Display value. For `masked` rows this is a placeholder — the
+    /// encrypted store is never decrypted for display.
+    pub value: String,
+    /// Row comes from this job (custom header / cookie jar / auth)
+    /// rather than the global settings; the UI accents these.
+    pub custom: bool,
+    /// The real value lives on an encrypted column; `value` is a
+    /// `"(stored)"`-style placeholder.
+    pub masked: bool,
+}
+
+/// Placeholder value for secret-backed rows.
+const STORED_PLACEHOLDER: &str = "(stored)";
+
+/// Header keys the per-run overlay injects from encrypted columns.
+/// Exact-case strings — they mirror the literals in
+/// `data::mapping::job_overlay_options`.
+const COOKIE_KEY: &str = "Cookie";
+const AUTHORIZATION_KEY: &str = "Authorization";
+
+/// Compute the request headers oxdm will send for `job`, for display.
+///
+/// KEEP IN SYNC with the real merge in `data::mapping` (this fn cannot
+/// import it: `domain` must stay engine-agnostic, and `mapping` is the
+/// data layer):
+/// - base headers = `Settings::headers`
+///   (`mapping::settings_to_download_options`);
+/// - per-job `Job::headers` override base keys (exact-key insert,
+///   `mapping::job_overlay_options`);
+/// - the decrypted cookie jar is injected as `Cookie` at run time when
+///   `enc_cookies` is stored — shown masked here;
+/// - Bearer auth travels as `Authorization: Bearer <token>`
+///   (`mapping::bearer_header`) — shown masked;
+/// - Basic auth rides `odl::Credentials` (`runner::build_credentials`,
+///   legacy `Job::auth_user` + `enc_auth_password`) and reaches the
+///   wire as an `Authorization: Basic …` header — shown masked;
+/// - the User-Agent is an odl *option*, not a headers-map entry:
+///   `Settings::user_agent` wins; with no explicit UA and
+///   `randomize_user_agent` on, odl picks a random UA per request; the
+///   per-job `Advanced::user_agent` field is dead and NEVER shown.
+pub fn will_send_headers(settings: &super::Settings, job: &Job) -> Vec<WillSendHeader> {
+    let mut rows = Vec::new();
+
+    let ua = match (&settings.user_agent, settings.randomize_user_agent) {
+        (Some(ua), _) => ua.clone(),
+        (None, true) => "randomized per request".to_owned(),
+        (None, false) => "(not set)".to_owned(),
+    };
+    rows.push(WillSendHeader {
+        name: "User-Agent".to_owned(),
+        value: ua,
+        custom: false,
+        masked: false,
+    });
+
+    // Stored cookies are only injected while "Send cookies" is on
+    // (`start_job` gates the decryption on `cookies_enabled`).
+    let cookie_stored = job.enc_cookies.is_some() && job.advanced.cookies_enabled;
+    let bearer_stored = matches!(job.advanced.auth.scheme, super::AuthScheme::Bearer)
+        && job.enc_auth_password.is_some();
+    // Basic credentials reach the wire as Authorization too (reqwest
+    // `basic_auth` overrides a same-name custom header) — suppress the
+    // duplicate custom row when they will be sent.
+    let basic_sent = matches!(
+        job.advanced.auth.scheme,
+        super::AuthScheme::None | super::AuthScheme::Basic
+    ) && job.auth_user.is_some();
+    let auth_sent = bearer_stored || basic_sent;
+
+    // Base (global) headers, skipping keys the job overrides.
+    for (k, v) in settings.headers.iter() {
+        if job.headers.contains_key(k) {
+            continue;
+        }
+        if (k == COOKIE_KEY && cookie_stored) || (k == AUTHORIZATION_KEY && auth_sent) {
+            continue; // replaced by the stored-secret row below
+        }
+        rows.push(WillSendHeader {
+            name: k.clone(),
+            value: v.clone(),
+            custom: false,
+            masked: false,
+        });
+    }
+    // Per-job custom headers (win over base, mirror of the overlay
+    // merge). A stored cookie jar / bearer token / Basic credentials
+    // replace same-name entries at run time, exactly like
+    // `job_overlay_options` + `Credentials` do.
+    for (k, v) in job.headers.iter() {
+        if (k == COOKIE_KEY && cookie_stored) || (k == AUTHORIZATION_KEY && auth_sent) {
+            continue;
+        }
+        rows.push(WillSendHeader {
+            name: k.clone(),
+            value: v.clone(),
+            custom: true,
+            masked: false,
+        });
+    }
+
+    if cookie_stored {
+        rows.push(WillSendHeader {
+            name: COOKIE_KEY.to_owned(),
+            value: STORED_PLACEHOLDER.to_owned(),
+            custom: true,
+            masked: true,
+        });
+    }
+    if bearer_stored {
+        rows.push(WillSendHeader {
+            name: AUTHORIZATION_KEY.to_owned(),
+            value: format!("Bearer {STORED_PLACEHOLDER}"),
+            custom: true,
+            masked: true,
+        });
+    } else if basic_sent {
+        // Legacy/Basic credentials become an Authorization header on
+        // the wire via odl::Credentials.
+        rows.push(WillSendHeader {
+            name: AUTHORIZATION_KEY.to_owned(),
+            value: format!("Basic {STORED_PLACEHOLDER}"),
+            custom: true,
+            masked: true,
+        });
+    }
+
+    rows
 }

@@ -21,7 +21,7 @@ use super::protocol::{
 };
 use crate::data::{ProbeResult, RemoveOpts, UpdateInfo};
 use crate::domain::{
-    Advanced, Checksum, HostSetting, JobId, OnCompletion, Queue, QueueId, Settings,
+    Advanced, Checksum, HostSetting, JobError, JobId, OnCompletion, Queue, QueueId, Settings,
 };
 
 type Pending = std::collections::HashMap<u64, oneshot::Sender<Reply>>;
@@ -269,7 +269,7 @@ impl Client {
     }
 
     pub async fn update_settings(&self, s: Settings) -> Result<(), String> {
-        self.expect_ok(Request::UpdateSettings(s)).await
+        self.expect_ok(Request::UpdateSettings(Box::new(s))).await
     }
     pub async fn regenerate_ext_token(&self) -> Result<(), String> {
         self.expect_ok(Request::RegenerateExtToken).await
@@ -430,7 +430,9 @@ impl Client {
         }
     }
 
-    pub async fn probe(&self, url: url::Url) -> Result<Result<ProbeResult, String>, String> {
+    /// Outer `Err` = transport failure; inner `Err` = structured probe
+    /// error from the daemon (`JobError`).
+    pub async fn probe(&self, url: url::Url) -> Result<Result<ProbeResult, JobError>, String> {
         match self
             .request(Request::Probe(url))
             .await
@@ -440,6 +442,10 @@ impl Client {
             Reply::Err(e) => Err(e),
             _ => unreachable!("probe reply"),
         }
+    }
+
+    pub async fn cancel_pending_shutdown(&self) -> Result<(), String> {
+        self.expect_ok(Request::CancelPendingShutdown).await
     }
 
     pub async fn daemon_quit(&self) -> Result<(), String> {

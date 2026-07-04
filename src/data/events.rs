@@ -1,4 +1,4 @@
-use crate::domain::{JobError, JobId, Phase, QueueId};
+use crate::domain::{JobError, JobId, Phase, PowerAction, QueueId};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -71,6 +71,17 @@ pub enum DomainEvent {
     /// Queue mutation (created / renamed / schedule edit / deleted).
     /// UI re-snapshots the queue list.
     QueuesChanged,
+    /// A destructive power action (shutdown / restart / sleep /
+    /// hibernate) was armed and will execute at `deadline_ms` (epoch
+    /// milliseconds) unless cancelled. UI shows a countdown banner and
+    /// derives the remaining time from the deadline — no timer state
+    /// travels on the wire.
+    ShutdownPending {
+        action: PowerAction,
+        deadline_ms: i64,
+    },
+    /// The pending power action was cancelled before its deadline.
+    ShutdownCancelled,
     /// Host overrides mutated. UI re-snapshots the per-host list.
     HostSettingsChanged,
 }

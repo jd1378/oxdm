@@ -10,19 +10,57 @@ use std::time::Duration;
 use iced::widget::{column, container, row, text, text_editor};
 use iced::{Alignment, Element, Length, Subscription, Task};
 
-use crate::domain::{Checksum, JobId, Phase};
+use crate::domain::checksum::{Algo, CsSource, CsStatus};
+use crate::domain::{AuthScheme, Checksum, JobId, Phase, ProxyMode};
 use crate::gui::chrome::{self, WindowControl, titlebar};
 use crate::gui::format::{format_bytes_2, format_int_grouped};
 use crate::gui::ipc::DaemonSignal;
 use crate::gui::shot::Shot;
 use crate::gui::theme::{self, Tokens};
+use crate::gui::widget::error_panel::hash_mismatch;
 use crate::gui::widget::{
-    Btn, BtnSize, TabBtn, TextInput, combo, eyebrow, hairline, number_stepper, status_dot, toggle,
+    Btn, BtnSize, TabBtn, TextInput, checkbox, eyebrow, hairline, pill_progress, status_dot, toggle,
 };
 use crate::gui::windows::add::footer;
 use crate::gui::{color, icons};
 use crate::ipc_local::Client;
 use crate::ipc_local::protocol::{Event, JobEntryView};
+
+// --- Connection tab (#6, honesty matrix) ------------------------------
+/// Proxy-mode segmented options. Values and labels stay index-aligned.
+/// odl can express: Inherit (no per-job override; a legacy `Job.proxy`
+/// URL still applies under Inherit), System (clear the global proxy so
+/// reqwest falls back to proxy environment variables) and explicit
+/// HTTP / HTTPS / SOCKS5. "None (force direct)" is inexpressible in
+/// odl and deliberately absent; a legacy persisted `ProxyMode::None`
+/// is displayed as Inherit (guardian F6 — the runner logs the WARN).
+const PROXY_MODE_VALUES: &[ProxyMode] = &[
+    ProxyMode::Inherit,
+    ProxyMode::System,
+    ProxyMode::Http,
+    ProxyMode::Https,
+    ProxyMode::Socks5,
+];
+const PROXY_MODE_LABELS: &[(&str, Option<&str>)] = &[
+    ("Inherit", None),
+    ("System", None),
+    ("HTTP", None),
+    ("HTTPS", None),
+    ("SOCKS5", None),
+];
+/// Site-auth schemes. Digest is deliberately absent (no odl/reqwest
+/// implementation); a legacy persisted `Digest` is displayed as None
+/// (guardian F6).
+const AUTH_SCHEME_VALUES: &[AuthScheme] =
+    &[AuthScheme::None, AuthScheme::Basic, AuthScheme::Bearer];
+const AUTH_SCHEME_LABELS: &[(&str, Option<&str>)] =
+    &[("None", None), ("HTTP Basic", None), ("Bearer token", None)];
+/// Width of the proxy port field (design `.prop-proxy-port` ≈ 90px).
+const PORT_INPUT_W: f32 = 90.0;
+
+// --- Checksums tab (#5) -----------------------------------------------
+/// Char-count meter under the hash input (design `.pac-meter` = 4px).
+const PAC_METER_H: f32 = 4.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -47,12 +85,18 @@ pub enum Msg {
     BrowseSave,
     BrowsedSave(Option<PathBuf>),
     CopyUrl,
-    // Connection
-    ProxyEnabled(bool),
-    ProxyUrl(String),
-    AuthScheme(String),
+    // Connection (#6)
+    ProxyModeSel(usize),
+    ProxyHost(String),
+    ProxyPort(String),
+    ProxyAuth(bool),
+    ProxyUser(String),
+    ProxyPass(String),
+    RemoteDns(bool),
+    AuthSchemeSel(usize),
     AuthUser(String),
     AuthPass(String),
+    AuthToken(String),
     // Cookies
     CookiesEnabled(bool),
     CookiesEdit(text_editor::Action),
@@ -63,18 +107,22 @@ pub enum Msg {
     HeaderRemove(usize),
     HeaderAdd,
     // Advanced
-    AdvUserAgent(String),
-    AdvReferer(String),
-    AdvSegments(i64),
-    AdvTimeout(i64),
-    AdvRetries(i64),
     AdvAutoVerify(bool),
-    AdvOpenDone(bool),
-    // Checksums
-    AddChecksum(&'static str),
+    // Checksums (#5)
+    CsAddOpen,
+    CsAddCancel,
+    CsAlgoPick(usize),
+    CsAuto(bool),
     ChecksumHash(String),
     ChecksumSave,
     ChecksumRemove(usize),
+    CsVerify(usize),
+    /// Verify finished for the row identified by (algo, saved hash) —
+    /// identity, not index, so a concurrent remove can't misfile it.
+    CsVerified(Algo, String, Result<String, String>),
+    CsCopy(String),
+    // Settings refresh (theme + will-send headers stay current)
+    SettingsRefreshed(Box<crate::domain::Settings>),
     // Footer
     OpenFolder,
     CloseWin,
@@ -97,24 +145,49 @@ pub struct State {
     tokens: Tokens,
     id: JobId,
     entry: JobEntryView,
+    settings: crate::domain::Settings,
     tab: Tab,
 
     url: String,
     save_path: String,
-    proxy_enabled: bool,
-    proxy_url: String,
-    auth_scheme: String,
+    // Connection (#6). Secret inputs are scratch buffers: they start
+    // empty, never mirror stored ciphertext, and an empty value on
+    // Apply means "keep the stored secret" (guardian F1).
+    proxy_mode: ProxyMode,
+    proxy_host: String,
+    proxy_port: String,
+    proxy_auth: bool,
+    proxy_user: String,
+    proxy_pass: String,
+    remote_dns: bool,
+    auth_scheme: AuthScheme,
     auth_user: String,
     auth_pass: String,
+    auth_token: String,
     cookies_enabled: bool,
     cookies: text_editor::Content,
+    /// Encrypted cookies exist on the job (shown as "(stored)" — the
+    /// plaintext never round-trips back into the editor).
+    has_stored_cookies: bool,
     headers: Vec<(String, String)>,
     adv: crate::domain::Advanced,
     checksums: Vec<Checksum>,
-    adding_checksum: Option<&'static str>,
+    // Checksums add-form (#5, design §3.4 AddChecksumForm)
+    cs_adding: bool,
+    cs_algo: Algo,
+    cs_auto: bool,
     checksum_hash: String,
+    /// Row currently hashing on a blocking thread, identified by
+    /// (algo, saved hash).
+    cs_verifying: Option<(Algo, String)>,
+    cs_verify_error: Option<String>,
 
     dirty: bool,
+    /// URL / save-path changed → `SetJobSource` on Apply.
+    dirty_source: bool,
+    /// Custom headers / cookies changed → `UpdateJobLocation` on Apply
+    /// (the only IPC that persists `Job.headers` + `enc_cookies`).
+    dirty_overlay: bool,
     error: Option<String>,
     shot: Option<Shot>,
 }
@@ -122,6 +195,16 @@ pub struct State {
 impl State {
     fn locked(&self) -> bool {
         self.entry.counters.phase.is_running()
+    }
+
+    /// Explicit proxy mode with a non-empty, out-of-range port typed
+    /// (inline validation, design §3.5: 1–65535). Blocks Apply.
+    fn port_invalid(&self) -> bool {
+        matches!(
+            self.proxy_mode,
+            ProxyMode::Http | ProxyMode::Https | ProxyMode::Socks5
+        ) && !self.proxy_port.trim().is_empty()
+            && !self.proxy_port.trim().parse::<u16>().is_ok_and(|p| p >= 1)
     }
 }
 
@@ -160,14 +243,33 @@ fn hydrate(st: &mut State) {
         .join(job.filename.as_deref().unwrap_or(""))
         .display()
         .to_string();
-    st.proxy_enabled = job.proxy.is_some();
-    st.proxy_url = job.proxy.clone().unwrap_or_default();
-    st.auth_scheme = if job.auth_user.is_some() {
-        "Basic".to_owned()
-    } else {
-        "None".to_owned()
+    let p = &job.advanced.proxy;
+    // Display-side legacy coercions (guardian F6); the runner logs the
+    // WARN when it applies the same coercion for real.
+    st.proxy_mode = match p.mode {
+        ProxyMode::None => ProxyMode::Inherit,
+        m => m,
     };
+    st.proxy_host = p.host.clone();
+    st.proxy_port = p.port.clone();
+    st.proxy_auth = p.auth_enabled;
+    st.proxy_user = p.username.clone();
+    st.proxy_pass.clear();
+    st.remote_dns = p.remote_dns;
+    st.auth_scheme = match job.advanced.auth.scheme {
+        AuthScheme::Digest => AuthScheme::None,
+        // Legacy Basic jobs (Add-dialog path) carry credentials on
+        // `auth_user`/`enc_auth_password` with the advanced scheme
+        // still at its None default — the runner sends Basic for
+        // them, so the tab must say Basic (guardian F4 coherence).
+        AuthScheme::None if job.auth_user.is_some() => AuthScheme::Basic,
+        s => s,
+    };
+    // Basic username lives on the legacy `Job.auth_user` field — the
+    // single source of truth the runner reads (guardian F2).
     st.auth_user = job.auth_user.clone().unwrap_or_default();
+    st.auth_pass.clear();
+    st.auth_token.clear();
     st.headers = job
         .headers
         .iter()
@@ -175,7 +277,11 @@ fn hydrate(st: &mut State) {
         .collect();
     st.adv = job.advanced.clone();
     st.cookies_enabled = job.advanced.cookies_enabled;
+    // `cookie_jar` is only non-empty on legacy blobs written before
+    // cookies moved to the encrypted rail; fresh saves land on
+    // `enc_cookies` and never round-trip plaintext back here.
     st.cookies = text_editor::Content::with_text(&job.advanced.cookie_jar);
+    st.has_stored_cookies = job.enc_cookies.is_some();
     st.checksums = job.checksums.clone();
 }
 
@@ -189,23 +295,37 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 tab: Tab::General,
                 url: String::new(),
                 save_path: String::new(),
-                proxy_enabled: false,
-                proxy_url: String::new(),
-                auth_scheme: "None".to_owned(),
+                proxy_mode: ProxyMode::Inherit,
+                proxy_host: String::new(),
+                proxy_port: String::new(),
+                proxy_auth: false,
+                proxy_user: String::new(),
+                proxy_pass: String::new(),
+                remote_dns: true,
+                auth_scheme: AuthScheme::None,
                 auth_user: String::new(),
                 auth_pass: String::new(),
+                auth_token: String::new(),
                 cookies_enabled: false,
                 cookies: text_editor::Content::new(),
+                has_stored_cookies: false,
                 headers: Vec::new(),
                 adv: Default::default(),
                 checksums: Vec::new(),
-                adding_checksum: None,
+                cs_adding: false,
+                cs_algo: Algo::Sha256,
+                cs_auto: true,
                 checksum_hash: String::new(),
+                cs_verifying: None,
+                cs_verify_error: None,
                 dirty: false,
+                dirty_source: false,
+                dirty_overlay: false,
                 error: None,
                 shot: Shot::from_env(),
                 client,
                 entry,
+                settings,
             };
             hydrate(&mut st);
             *app = App::Ready(Box::new(st));
@@ -251,21 +371,35 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                     _ => Msg::Noop,
                 })
             }
+            Event::SettingsChanged => {
+                let client = st.client.clone();
+                Task::perform(async move { client.snapshot().await }, |r| match r {
+                    Ok(snap) => Msg::SettingsRefreshed(Box::new(snap.settings)),
+                    Err(_) => Msg::Noop,
+                })
+            }
             Event::Close => iced::exit(),
             Event::Focus => iced::window::latest().and_then(iced::window::gain_focus),
             _ => Task::none(),
         },
+        Msg::SettingsRefreshed(s) => {
+            st.tokens = Tokens::from_settings(&s);
+            st.settings = *s;
+            Task::none()
+        }
         Msg::SetTab(tab) => {
             st.tab = tab;
             Task::none()
         }
         Msg::Url(v) => {
             st.url = v;
+            st.dirty_source = true;
             mark(st);
             Task::none()
         }
         Msg::SavePath(v) => {
             st.save_path = v;
+            st.dirty_source = true;
             mark(st);
             Task::none()
         }
@@ -289,24 +423,54 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
             st.save_path = dir.join(name).display().to_string();
+            st.dirty_source = true;
             mark(st);
             Task::none()
         }
         Msg::BrowsedSave(None) => Task::none(),
         Msg::CopyUrl => iced::clipboard::write(st.url.clone()),
-        Msg::ProxyEnabled(v) => {
-            st.proxy_enabled = v;
+        Msg::ProxyModeSel(i) => {
+            if let Some(mode) = PROXY_MODE_VALUES.get(i) {
+                st.proxy_mode = *mode;
+                mark(st);
+            }
+            Task::none()
+        }
+        Msg::ProxyHost(v) => {
+            st.proxy_host = v;
             mark(st);
             Task::none()
         }
-        Msg::ProxyUrl(v) => {
-            st.proxy_url = v;
+        Msg::ProxyPort(v) => {
+            st.proxy_port = v;
             mark(st);
             Task::none()
         }
-        Msg::AuthScheme(v) => {
-            st.auth_scheme = v;
+        Msg::ProxyAuth(v) => {
+            st.proxy_auth = v;
             mark(st);
+            Task::none()
+        }
+        Msg::ProxyUser(v) => {
+            st.proxy_user = v;
+            mark(st);
+            Task::none()
+        }
+        Msg::ProxyPass(v) => {
+            st.proxy_pass = v;
+            mark(st);
+            Task::none()
+        }
+        Msg::RemoteDns(v) => {
+            st.remote_dns = v;
+            mark(st);
+            Task::none()
+        }
+        Msg::AuthSchemeSel(i) => {
+            if let Some(scheme) = AUTH_SCHEME_VALUES.get(i) {
+                st.auth_scheme = *scheme;
+                mark(st);
+            }
             Task::none()
         }
         Msg::AuthUser(v) => {
@@ -319,8 +483,14 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             mark(st);
             Task::none()
         }
+        Msg::AuthToken(v) => {
+            st.auth_token = v;
+            mark(st);
+            Task::none()
+        }
         Msg::CookiesEnabled(v) => {
             st.cookies_enabled = v;
+            st.dirty_overlay = true;
             mark(st);
             Task::none()
         }
@@ -328,18 +498,21 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             let edit = a.is_edit();
             st.cookies.perform(a);
             if edit {
+                st.dirty_overlay = true;
                 mark(st);
             }
             Task::none()
         }
         Msg::CookiesClear => {
             st.cookies = text_editor::Content::new();
+            st.dirty_overlay = true;
             mark(st);
             Task::none()
         }
         Msg::HeaderName(i, v) => {
             if let Some(h) = st.headers.get_mut(i) {
                 h.0 = v;
+                st.dirty_overlay = true;
                 mark(st);
             }
             Task::none()
@@ -347,6 +520,7 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
         Msg::HeaderValue(i, v) => {
             if let Some(h) = st.headers.get_mut(i) {
                 h.1 = v;
+                st.dirty_overlay = true;
                 mark(st);
             }
             Task::none()
@@ -354,37 +528,14 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
         Msg::HeaderRemove(i) => {
             if i < st.headers.len() {
                 st.headers.remove(i);
+                st.dirty_overlay = true;
                 mark(st);
             }
             Task::none()
         }
         Msg::HeaderAdd => {
             st.headers.push((String::new(), String::new()));
-            mark(st);
-            Task::none()
-        }
-        Msg::AdvUserAgent(v) => {
-            st.adv.user_agent = v;
-            mark(st);
-            Task::none()
-        }
-        Msg::AdvReferer(v) => {
-            st.adv.referer = v;
-            mark(st);
-            Task::none()
-        }
-        Msg::AdvSegments(v) => {
-            st.adv.segments = v;
-            mark(st);
-            Task::none()
-        }
-        Msg::AdvTimeout(v) => {
-            st.adv.timeout = v;
-            mark(st);
-            Task::none()
-        }
-        Msg::AdvRetries(v) => {
-            st.adv.retries = v;
+            st.dirty_overlay = true;
             mark(st);
             Task::none()
         }
@@ -393,14 +544,35 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             mark(st);
             Task::none()
         }
-        Msg::AdvOpenDone(v) => {
-            st.adv.open_when_done = v;
-            mark(st);
+        Msg::CsAddOpen => {
+            st.cs_adding = true;
+            st.checksum_hash.clear();
+            st.cs_auto = true;
+            // Auto-pick the first algorithm not already in the list
+            // (mock AddChecksumForm behavior).
+            st.cs_algo = Algo::ALL
+                .iter()
+                .copied()
+                .find(|a| !st.checksums.iter().any(|c| c.algo == *a))
+                .unwrap_or(Algo::Sha256);
             Task::none()
         }
-        Msg::AddChecksum(algo) => {
-            st.adding_checksum = Some(algo);
+        Msg::CsAddCancel => {
+            st.cs_adding = false;
             st.checksum_hash.clear();
+            Task::none()
+        }
+        Msg::CsAlgoPick(i) => {
+            if let Some(a) = Algo::ALL.get(i) {
+                st.cs_algo = *a;
+                // A manual pick overrides auto-detection (mock: picker
+                // click clears the autoDetect flag).
+                st.cs_auto = false;
+            }
+            Task::none()
+        }
+        Msg::CsAuto(v) => {
+            st.cs_auto = v;
             Task::none()
         }
         Msg::ChecksumHash(v) => {
@@ -408,55 +580,105 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             Task::none()
         }
         Msg::ChecksumSave => {
-            use crate::domain::checksum::{Algo, CsSource, CsStatus};
-            let Some(algo_name) = st.adding_checksum.take() else {
-                return Task::none();
-            };
-            let algo = match algo_name {
-                "MD5" => Algo::Md5,
-                "SHA-1" => Algo::Sha1,
-                "SHA-384" => Algo::Sha384,
-                "SHA-512" => Algo::Sha512,
-                _ => Algo::Sha256,
-            };
-            let hash = st.checksum_hash.trim().to_lowercase();
-            if hash.is_empty() {
+            let form = cs_form(st);
+            if !form.valid {
                 return Task::none();
             }
             st.checksums.push(Checksum {
-                algo,
-                hash: hash.clone(),
+                algo: form.algo,
+                hash: form.canon,
                 source: CsSource::User,
                 status: CsStatus::Unverified,
                 expected: None,
             });
-            let client = st.client.clone();
-            let id = st.id;
-            let cs = st.checksums.clone();
-            Task::perform(
-                async move { client.set_job_checksums(id, cs).await },
-                |_| Msg::Noop,
-            )
+            st.cs_adding = false;
+            st.checksum_hash.clear();
+            persist_checksums(st)
         }
         Msg::ChecksumRemove(i) => {
-            if i < st.checksums.len() {
-                st.checksums.remove(i);
-                let client = st.client.clone();
-                let id = st.id;
-                let cs = st.checksums.clone();
-                return Task::perform(
-                    async move { client.set_job_checksums(id, cs).await },
-                    |_| Msg::Noop,
-                );
+            // Guards mirror the disabled button: no removal while the
+            // download runs, and server-verified hashes are permanent
+            // (design §3.5 lock rules).
+            if let Some(cs) = st.checksums.get(i) {
+                let protected = cs.source == CsSource::Server && cs.status == CsStatus::Verified;
+                if !st.locked() && !protected {
+                    st.checksums.remove(i);
+                    return persist_checksums(st);
+                }
             }
             Task::none()
         }
+        Msg::CsVerify(i) => {
+            if st.cs_verifying.is_some() {
+                return Task::none();
+            }
+            let Some(cs) = st.checksums.get(i) else {
+                return Task::none();
+            };
+            // Verification hashes the finished file on disk — only
+            // possible once the job has a final path.
+            let Some(path) = st.entry.job.status.final_path.clone() else {
+                return Task::none();
+            };
+            let algo = cs.algo;
+            let saved = cs.hash.clone();
+            st.cs_verifying = Some((algo, saved.clone()));
+            st.cs_verify_error = None;
+            // Streaming hasher on a blocking thread — never on the
+            // iced executor (precedent: download.rs CsCompute).
+            Task::perform(
+                async move {
+                    tokio::task::spawn_blocking(move || {
+                        crate::domain::checksum::compute_file(&path, algo)
+                            .map_err(|e| e.to_string())
+                    })
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|r| r)
+                },
+                move |r| Msg::CsVerified(algo, saved.clone(), r),
+            )
+        }
+        Msg::CsVerified(algo, saved, res) => {
+            st.cs_verifying = None;
+            match res {
+                Ok(digest) => {
+                    let Some(cs) = st
+                        .checksums
+                        .iter_mut()
+                        .find(|c| c.algo == algo && c.hash == saved)
+                    else {
+                        return Task::none();
+                    };
+                    if digest.eq_ignore_ascii_case(saved.trim()) {
+                        cs.status = CsStatus::Verified;
+                        cs.expected = None;
+                    } else {
+                        // `expected` carries the digest computed from
+                        // the file on disk — the "Got" side of the
+                        // Expected/Got diff (the saved hash stays the
+                        // "Expected" side).
+                        cs.status = CsStatus::Mismatch;
+                        cs.expected = Some(digest);
+                    }
+                    persist_checksums(st)
+                }
+                Err(e) => {
+                    st.cs_verify_error = Some(e);
+                    Task::none()
+                }
+            }
+        }
+        Msg::CsCopy(s) => iced::clipboard::write(s),
         Msg::OpenFolder => {
             crate::platform::open_path(&st.entry.job.save_dir);
             Task::none()
         }
         Msg::CloseWin => iced::exit(),
         Msg::Apply => {
+            if st.locked() || st.port_invalid() {
+                return Task::none();
+            }
             let client = st.client.clone();
             let id = st.id;
             let Ok(url) = st.url.trim().parse::<url::Url>() else {
@@ -470,44 +692,87 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                     .unwrap_or_else(|| st.entry.job.save_dir.clone()),
                 p.file_name().map(|n| n.to_string_lossy().into_owned()),
             );
-            let mut headers = indexmap::IndexMap::new();
-            for (k, v) in &st.headers {
-                if !k.trim().is_empty() {
-                    headers.insert(k.trim().to_owned(), v.clone());
-                }
-            }
+
+            // Advanced bundle. The daemon strips the secret fields into
+            // the encrypted columns (guardian F1) and moves a non-empty
+            // Basic username onto legacy `Job.auth_user` (F2). Empty
+            // secret inputs mean "keep the stored secret".
+            let mut adv = st.adv.clone();
+            adv.proxy.mode = st.proxy_mode;
+            adv.proxy.host = st.proxy_host.trim().to_owned();
+            adv.proxy.port = st.proxy_port.trim().to_owned();
+            adv.proxy.auth_enabled = st.proxy_auth;
+            adv.proxy.username = st.proxy_user.trim().to_owned();
+            adv.proxy.password = st.proxy_pass.clone();
+            adv.proxy.remote_dns = st.remote_dns;
+            adv.auth.scheme = st.auth_scheme;
+            adv.auth.username = st.auth_user.trim().to_owned();
+            adv.auth.password = st.auth_pass.clone();
+            adv.auth.token = st.auth_token.clone();
+            adv.cookies_enabled = st.cookies_enabled;
+            adv.cookie_jar = st.cookies.text();
+
+            // Header/cookie edits need `UpdateJobLocation` — the only
+            // IPC that persists `Job.headers` + `enc_cookies`. It
+            // re-encrypts secrets from its payload, so it carries any
+            // freshly-typed ones too. Pure URL/save edits take the
+            // narrower `SetJobSource`, which cannot disturb stored
+            // secrets or headers.
             let opt = |s: &str| {
                 let s = s.trim();
                 (!s.is_empty()).then(|| s.to_owned())
             };
-            let edit = crate::ipc_local::protocol::JobEdit {
-                url: url.clone(),
-                save_dir,
-                filename,
-                referrer: st.adv.referer.trim().parse().ok(),
-                headers,
-                max_connections: (st.adv.segments > 0).then_some(st.adv.segments as u64),
-                proxy: st.proxy_enabled.then(|| st.proxy_url.trim().to_owned()),
-                auth_user: (st.auth_scheme != "None")
-                    .then(|| opt(&st.auth_user))
-                    .flatten(),
-                auth_password: (st.auth_scheme != "None")
-                    .then(|| opt(&st.auth_pass))
-                    .flatten(),
-                proxy_password: None,
-                cookies: st.cookies_enabled.then(|| st.cookies.text()),
-            };
-            let adv = st.adv.clone();
+            let job = &st.entry.job;
+            let edit = st.dirty_overlay.then(|| {
+                let mut headers = indexmap::IndexMap::new();
+                for (k, v) in &st.headers {
+                    if !k.trim().is_empty() {
+                        headers.insert(k.trim().to_owned(), v.clone());
+                    }
+                }
+                crate::ipc_local::protocol::JobEdit {
+                    url: url.clone(),
+                    save_dir: save_dir.clone(),
+                    filename: filename.clone(),
+                    // No UI for these any more (dead-fields inventory);
+                    // pass the job's current values through unchanged.
+                    referrer: job.referrer.clone(),
+                    max_connections: job.max_connections,
+                    // Legacy per-job proxy URL: preserved as-is — the
+                    // Connection tab edits `advanced.proxy` instead.
+                    proxy: job.proxy.clone(),
+                    auth_user: job.auth_user.clone(),
+                    auth_password: opt(match st.auth_scheme {
+                        AuthScheme::Basic => &st.auth_pass,
+                        AuthScheme::Bearer => &st.auth_token,
+                        _ => "",
+                    }),
+                    proxy_password: opt(&st.proxy_pass),
+                    headers,
+                    cookies: st.cookies_enabled.then(|| st.cookies.text()),
+                }
+            });
+            let source_dirty = st.dirty_source;
+            // Optimistic: `dirty` re-arms on Applied(Err); the
+            // sub-flags only clear once the daemon confirmed.
             st.dirty = false;
             Task::perform(
                 async move {
-                    client.update_job_location(id, edit).await?;
+                    if let Some(edit) = edit {
+                        client.update_job_location(id, edit).await?;
+                    } else if source_dirty {
+                        client.set_job_source(id, url, save_dir, filename).await?;
+                    }
                     client.set_job_advanced(id, adv).await
                 },
                 Msg::Applied,
             )
         }
-        Msg::Applied(Ok(())) => Task::none(),
+        Msg::Applied(Ok(())) => {
+            st.dirty_source = false;
+            st.dirty_overlay = false;
+            Task::none()
+        }
         Msg::Applied(Err(e)) => {
             st.error = Some(e);
             st.dirty = true;
@@ -529,6 +794,83 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             None => Task::none(),
         },
         Msg::Connected(_) | Msg::Window(_) | Msg::Noop => Task::none(),
+    }
+}
+
+/// Persist the staged checksum list (checksum edits apply immediately,
+/// independent of the footer Apply).
+fn persist_checksums(st: &State) -> Task<Msg> {
+    let client = st.client.clone();
+    let id = st.id;
+    let cs = st.checksums.clone();
+    Task::perform(
+        async move { client.set_job_checksums(id, cs).await },
+        |_| Msg::Noop,
+    )
+}
+
+/// Canonical hex form of a pasted hash (design §3.4 Properties
+/// AddChecksumForm): whitespace-separated tokens are scanned for a hex
+/// run of a supported length — this strips `sha256sum`-style
+/// "hash  filename" companions, "filename: hash" prefixes and
+/// "SHA256:hex" tags. Falls back to whitespace-stripping. Lowercased.
+fn canonical_hash(input: &str) -> String {
+    for tok in input.split_whitespace() {
+        let t = tok.rsplit(':').next().unwrap_or(tok).to_ascii_lowercase();
+        if !t.is_empty() && t.bytes().all(|b| b.is_ascii_hexdigit()) && detect_algo(&t).is_some() {
+            return t;
+        }
+    }
+    input
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
+/// Algorithm whose canonical hex length (`Algo::hex_len`) matches the
+/// pasted hash exactly.
+fn detect_algo(canon: &str) -> Option<Algo> {
+    if canon.is_empty() || !canon.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    Algo::ALL
+        .iter()
+        .copied()
+        .find(|a| a.hex_len() == canon.len())
+}
+
+/// Live validation state of the add-checksum form.
+struct CsForm {
+    canon: String,
+    /// Effective algorithm: auto-detected from hex length when the
+    /// auto toggle is on, else the picker's choice.
+    algo: Algo,
+    /// Auto-detection is currently driving the algorithm.
+    detected: bool,
+    hex_ok: bool,
+    duplicate: bool,
+    valid: bool,
+}
+
+fn cs_form(st: &State) -> CsForm {
+    let canon = canonical_hash(&st.checksum_hash);
+    let hex_ok = canon.is_empty() || canon.bytes().all(|b| b.is_ascii_hexdigit());
+    let det = detect_algo(&canon);
+    let algo = if st.cs_auto {
+        det.unwrap_or(st.cs_algo)
+    } else {
+        st.cs_algo
+    };
+    let duplicate = st.checksums.iter().any(|c| c.algo == algo);
+    let valid = !canon.is_empty() && hex_ok && canon.len() == algo.hex_len() && !duplicate;
+    CsForm {
+        detected: st.cs_auto && det.is_some(),
+        canon,
+        algo,
+        hex_ok,
+        duplicate,
+        valid,
     }
 }
 
@@ -656,13 +998,24 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
         ..Default::default()
     });
 
-    let body: Element<'_, Msg> = match st.tab {
+    let tab_body: Element<'_, Msg> = match st.tab {
         Tab::General => general_tab(st),
         Tab::Checksums => checksums_tab(st),
         Tab::Connection => connection_tab(st),
         Tab::Cookies => cookies_tab(st),
         Tab::Headers => headers_tab(st),
         Tab::Advanced => advanced_tab(st),
+    };
+    // Lock banner tops every editable pane while the download runs;
+    // skipped on General (read-only display) and Checksums (its
+    // carve-out is explained inline) — design §3.5 lock rules.
+    let show_lock_banner = st.locked() && !matches!(st.tab, Tab::General | Tab::Checksums);
+    let body: Element<'_, Msg> = if show_lock_banner {
+        column![lock_banner(t), tab_body]
+            .spacing(theme::space::S3)
+            .into()
+    } else {
+        tab_body
     };
 
     let footer_el = footer(
@@ -684,7 +1037,7 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
                     Btn::new("Apply")
                         .primary()
                         .icon("check")
-                        .enabled(st.dirty && !st.locked())
+                        .enabled(st.dirty && !st.locked() && !st.port_invalid())
                         .on_press(Msg::Apply)
                         .view(t),
                 )
@@ -692,9 +1045,31 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
         },
     );
 
+    // Titlebar with a lock chip while the transfer runs (design
+    // `.prop-titlebar-lock`). The chip is stacked over the (centered)
+    // title's left gutter; a plain container passes pointer events
+    // through to the drag region below.
+    let bar: Element<'_, Msg> =
+        titlebar::titlebar(t, &format!("Properties — {name}"), false, Msg::Window);
+    let bar: Element<'_, Msg> = if st.locked() {
+        iced::widget::stack![
+            bar,
+            container(titlebar_lock_chip(t))
+                .height(Length::Fixed(titlebar::HEIGHT))
+                .align_y(Alignment::Center)
+                .padding(iced::Padding {
+                    left: theme::space::S3,
+                    ..Default::default()
+                }),
+        ]
+        .into()
+    } else {
+        bar
+    };
+
     let t2 = *t;
     let page = column![
-        titlebar::titlebar(t, &format!("Properties — {name}"), false, Msg::Window),
+        bar,
         hairline(t.border_subtle),
         tabs,
         hairline(t.border_subtle),
@@ -721,6 +1096,75 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
             ..Default::default()
         });
     chrome::resize::resizable(t, content.into(), true, Msg::Window)
+}
+
+/// Titlebar lock chip (design `.prop-titlebar-lock`: uppercase 9.5px,
+/// 2×6 padding, 4px radius, low-alpha fill).
+fn titlebar_lock_chip(t: &Tokens) -> Element<'_, Msg> {
+    let t2 = *t;
+    container(
+        row![
+            icons::icon("lock", 10.0, t.fg_3),
+            text("DOWNLOADING")
+                .font(theme::BODY_BOLD)
+                .size(9.5)
+                .color(t.fg_3),
+        ]
+        .spacing(3.0)
+        .align_y(Alignment::Center),
+    )
+    .padding([2.0, 6.0])
+    .style(move |_| container::Style {
+        // rgba(0,0,0,.06) in the mock — derived from fg so it reads on
+        // both themes.
+        background: Some(color::with_alpha(t2.fg_1, 0.06).into()),
+        border: iced::Border {
+            radius: 4.0.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .into()
+}
+
+/// Read-only banner above editable panes while the download runs
+/// (design `.prop-lock-banner`: sunken card, lock icon, bold lead).
+fn lock_banner(t: &Tokens) -> Element<'_, Msg> {
+    let t2 = *t;
+    container(
+        row![
+            icons::icon("lock", 13.0, t.fg_3),
+            column![
+                text("Settings are read-only while this download is running.")
+                    .font(theme::BODY_BOLD)
+                    .size(11.5)
+                    .color(t.fg_1),
+                text(
+                    "Pause it to edit connection, cookie, or transfer settings — your \
+                     changes will take effect when you resume. Checksums can still be \
+                     added at any time."
+                )
+                .font(theme::BODY)
+                .size(11.5)
+                .color(t.fg_2)
+                .line_height(iced::widget::text::LineHeight::Relative(1.5)),
+            ]
+            .spacing(2.0),
+        ]
+        .spacing(theme::space::S2),
+    )
+    .width(Length::Fill)
+    .padding([10.0, theme::space::S3])
+    .style(move |_| container::Style {
+        background: Some(t2.bg_sunken.into()),
+        border: iced::Border {
+            color: t2.border_subtle,
+            width: 1.0,
+            radius: 8.0.into(),
+        },
+        ..Default::default()
+    })
+    .into()
 }
 
 fn general_tab(st: &State) -> Element<'_, Msg> {
@@ -995,45 +1439,109 @@ fn checksums_tab(st: &State) -> Element<'_, Msg> {
                 ..Default::default()
             }),
         );
-    } else {
+    }
+
+    // Sage carve-out hint while locked (design `.prop-cs-lockhint`):
+    // the ONE thing that stays editable, so positive tone, not warning.
+    if st.locked() {
+        col = col.push(cs_lockhint(t));
+    }
+
+    if !st.checksums.is_empty() {
+        let can_verify = st.entry.job.status.final_path.is_some();
         let mut list = column![];
         for (i, cs) in st.checksums.iter().enumerate() {
-            use crate::domain::checksum::CsStatus;
-            let (status_color, status_label) = match cs.status {
-                CsStatus::Verified => (t.status_success, "verified"),
-                CsStatus::Mismatch => (t.status_danger, "mismatch"),
-                CsStatus::Unverified => (t.fg_3, "unverified"),
+            let verifying = st
+                .cs_verifying
+                .as_ref()
+                .is_some_and(|(a, h)| *a == cs.algo && *h == cs.hash);
+            let (status_color, status_label) = if verifying {
+                // Indeterminate row state — compute_file is one-shot,
+                // no live progress exists (honesty decision #5).
+                (t.fg_3, "Verifying…")
+            } else {
+                match cs.status {
+                    CsStatus::Verified => (t.status_success, "verified"),
+                    CsStatus::Mismatch => (t.status_danger, "mismatch"),
+                    CsStatus::Unverified => (t.fg_3, "unverified"),
+                }
+            };
+            let source_label = match cs.source {
+                CsSource::Server => "server",
+                CsSource::Computed => "local hash",
+                CsSource::User => "you",
             };
             let hash_short = if cs.hash.len() > 24 {
                 format!("{}…{}", &cs.hash[..10], &cs.hash[cs.hash.len() - 10..])
             } else {
                 cs.hash.clone()
             };
-            list = list.push(
-                container(
-                    row![
-                        container(
-                            text(cs.algo.label().to_owned())
-                                .font(theme::MONO)
-                                .size(11.0)
-                                .color(t.fg_1)
-                        )
-                        .width(Length::Fixed(80.0)),
-                        crate::gui::widget::status_dot(status_color, status_label, 11.0),
-                        container(text(hash_short).font(theme::MONO).size(11.0).color(t.fg_2))
-                            .width(Length::Fill),
-                        Btn::new("")
-                            .toolbar()
-                            .icon_only("trash-2")
-                            .size(BtnSize::Sm)
-                            .on_press(Msg::ChecksumRemove(i))
-                            .view(t),
-                    ]
-                    .spacing(theme::space::S3)
-                    .align_y(Alignment::Center),
+            // Server-verified hashes can never be removed; everything
+            // is removable only while not running (design §3.5).
+            let protected = cs.source == CsSource::Server && cs.status == CsStatus::Verified;
+            let removable = !st.locked() && !verifying && !protected;
+            let mut actions = row![].spacing(theme::space::S1).align_y(Alignment::Center);
+            if cs.status != CsStatus::Verified {
+                actions = actions.push(
+                    Btn::new("Verify")
+                        .toolbar()
+                        .icon("shield-check")
+                        .size(BtnSize::Sm)
+                        .font_size(10.0)
+                        .enabled(can_verify && !verifying && st.cs_verifying.is_none())
+                        .on_press(Msg::CsVerify(i))
+                        .view(t),
+                );
+            }
+            actions = actions
+                .push(
+                    Btn::new("")
+                        .toolbar()
+                        .icon_only("copy")
+                        .size(BtnSize::Sm)
+                        .on_press(Msg::CsCopy(cs.hash.clone()))
+                        .view(t),
                 )
-                .padding([8.0, theme::space::S3]),
-            );
+                .push(
+                    Btn::new("")
+                        .toolbar()
+                        .icon_only("trash-2")
+                        .size(BtnSize::Sm)
+                        .enabled(removable)
+                        .on_press(Msg::ChecksumRemove(i))
+                        .view(t),
+                );
+            let mut row_col = column![
+                row![
+                    container(
+                        text(cs.algo.label().to_owned())
+                            .font(theme::MONO)
+                            .size(11.0)
+                            .color(t.fg_1)
+                    )
+                    .width(Length::Fixed(80.0)),
+                    crate::gui::widget::status_dot(status_color, status_label, 11.0),
+                    container(text(hash_short).font(theme::MONO).size(11.0).color(t.fg_2))
+                        .width(Length::Fill),
+                    text(source_label)
+                        .font(theme::MONO)
+                        .size(10.0)
+                        .color(t.fg_3),
+                    actions,
+                ]
+                .spacing(theme::space::S3)
+                .align_y(Alignment::Center),
+            ]
+            .spacing(theme::space::S2);
+            // Stacked Expected/Got diff on mismatch (design §3.4):
+            // Expected = the saved (publisher) hash, Got = the digest
+            // computed from the file on disk (stored in `expected`).
+            if cs.status == CsStatus::Mismatch
+                && let Some(got) = &cs.expected
+            {
+                row_col = row_col.push(hash_mismatch(t, cs.algo.label(), &cs.hash, got));
+            }
+            list = list.push(container(row_col).padding([8.0, theme::space::S3]));
             if i + 1 < st.checksums.len() {
                 list = list.push(row_sep(t));
             }
@@ -1041,63 +1549,255 @@ fn checksums_tab(st: &State) -> Element<'_, Msg> {
         col = col.push(section(t, "checksums", list.into()));
     }
 
-    if let Some(algo) = st.adding_checksum {
-        col = col.push(crate::gui::widget::card(
-            t,
-            theme::space::S3,
-            column![
-                text(format!("Add {algo} checksum"))
-                    .font(theme::BODY_BOLD)
-                    .size(13.0)
-                    .color(t.fg_1),
-                row![
-                    TextInput::new(&st.checksum_hash)
-                        .hint("paste hash…")
-                        .mono()
-                        .on_input(Msg::ChecksumHash)
-                        .view(t),
-                    Btn::new("Save")
-                        .primary()
-                        .size(BtnSize::Sm)
-                        .on_press(Msg::ChecksumSave)
-                        .view(t),
-                ]
-                .spacing(theme::space::S2)
-                .align_y(Alignment::Center),
-            ]
-            .spacing(theme::space::S2)
-            .into(),
-        ));
+    if let Some(e) = &st.cs_verify_error {
+        col = col.push(
+            text(format!("Couldn't verify: {e}"))
+                .font(theme::BODY)
+                .size(11.0)
+                .color(t.status_danger),
+        );
     }
 
-    let mut chips = row![
-        Btn::new("Add checksum manually")
-            .secondary()
-            .icon("plus")
-            .on_press(Msg::AddChecksum("SHA-256"))
-            .view(t),
+    if st.cs_adding {
+        col = col.push(add_checksum_form(st));
+    } else {
+        // Add affordance + supported-algo chip list (design
+        // `.prop-cs-addrow`). Deliberately live while locked — the
+        // Checksums carve-out.
+        let all_taken = Algo::ALL
+            .iter()
+            .all(|a| st.checksums.iter().any(|c| c.algo == *a));
+        let mut addrow = row![
+            Btn::new("Add checksum manually")
+                .secondary()
+                .icon("plus")
+                .enabled(!all_taken)
+                .on_press(Msg::CsAddOpen)
+                .view(t),
+            iced::widget::Space::new().width(Length::Fill),
+        ]
+        .spacing(theme::space::S1)
+        .align_y(Alignment::Center);
+        for algo in Algo::ALL {
+            addrow = addrow.push(
+                container(
+                    text(algo.label())
+                        .font(theme::MONO)
+                        .size(10.0)
+                        .color(t.fg_3),
+                )
+                .padding([2.0, 6.0])
+                .style(move |_| container::Style {
+                    background: Some(t2.bg_sunken.into()),
+                    border: iced::Border {
+                        color: t2.border_subtle,
+                        width: 1.0,
+                        radius: theme::radius::XS.into(),
+                    },
+                    ..Default::default()
+                }),
+            );
+        }
+        col = col.push(addrow);
+    }
+    col.into()
+}
+
+/// Sage "still editable" hint (design `.prop-cs-lockhint`: dashed sage
+/// border, low-alpha sage fill; iced borders can't dash → solid 1px).
+fn cs_lockhint(t: &Tokens) -> Element<'_, Msg> {
+    let t2 = *t;
+    container(
+        row![
+            icons::icon("shield-check", 11.0, t.status_success),
+            text(
+                "Adding checksums is allowed even while the download is running — \
+                 verification doesn't touch the transfer."
+            )
+            .font(theme::BODY_MEDIUM)
+            .size(11.0)
+            .color(t.status_success),
+        ]
+        .spacing(6.0)
+        .align_y(Alignment::Center),
+    )
+    .width(Length::Fill)
+    .padding([6.0, 10.0])
+    .style(move |_| container::Style {
+        background: Some(color::with_alpha(t2.status_success, 0.06).into()),
+        border: iced::Border {
+            color: color::with_alpha(t2.status_success, 0.30),
+            width: 1.0,
+            radius: theme::radius::XS.into(),
+        },
+        ..Default::default()
+    })
+    .into()
+}
+
+/// Inline add-checksum form (design §3.4 Properties `AddChecksumForm`:
+/// algo seg-radio with "taken" lockout, hash input with live char-count
+/// meter + validity message, auto-detect toggle).
+fn add_checksum_form(st: &State) -> Element<'_, Msg> {
+    let t = &st.tokens;
+    let form = cs_form(st);
+
+    let head = row![
+        icons::icon("plus", 13.0, t.fg_2),
+        text("Add checksum manually")
+            .font(theme::BODY_BOLD)
+            .size(12.0)
+            .color(t.fg_1),
         iced::widget::Space::new().width(Length::Fill),
+        Btn::new("")
+            .toolbar()
+            .icon_only("x")
+            .size(BtnSize::Sm)
+            .on_press(Msg::CsAddCancel)
+            .view(t),
     ]
-    .spacing(theme::space::S1)
+    .spacing(theme::space::S2)
     .align_y(Alignment::Center);
-    for algo in ["MD5", "SHA-1", "SHA-256", "SHA-384", "SHA-512"] {
-        chips = chips.push(
-            Btn::new(algo)
-                .toolbar()
+
+    // Algorithm seg-radio; algorithms already in the list are locked
+    // out ("taken") unless currently selected.
+    let mut algos = row![].spacing(theme::space::S1).align_y(Alignment::Center);
+    for (i, algo) in Algo::ALL.iter().enumerate() {
+        let taken = st.checksums.iter().any(|c| c.algo == *algo);
+        let on = form.algo == *algo;
+        algos = algos.push(
+            Btn::new(algo.label())
+                .secondary()
                 .size(BtnSize::Sm)
                 .font_size(10.0)
-                .on_press(Msg::AddChecksum(match algo {
-                    "MD5" => "MD5",
-                    "SHA-1" => "SHA-1",
-                    "SHA-384" => "SHA-384",
-                    "SHA-512" => "SHA-512",
-                    _ => "SHA-256",
-                }))
+                .selected(on)
+                .enabled(!taken || on)
+                .on_press(Msg::CsAlgoPick(i))
                 .view(t),
         );
     }
-    col = col.push(chips);
-    col.into()
+    if form.detected && !form.canon.is_empty() {
+        algos = algos.push(
+            text("auto-detected")
+                .font(theme::BODY_MEDIUM)
+                .size(10.0)
+                .color(t.action_primary),
+        );
+    }
+
+    let target = form.algo.hex_len();
+    let count = form.canon.chars().count();
+    let count_color = if !form.hex_ok || count > target {
+        t.status_danger
+    } else if count == target {
+        t.status_success
+    } else {
+        t.fg_2
+    };
+    let fill = if !form.hex_ok || count > target {
+        t.status_danger
+    } else if count == target {
+        t.status_success
+    } else {
+        t.fg_4
+    };
+    // Live validation copy (design §3.4 — precise and friendly).
+    let (msg_color, msg_text) = if count == 0 {
+        (
+            t.fg_3,
+            "Paste a hex hash. Whitespace and a leading filename are removed automatically."
+                .to_owned(),
+        )
+    } else if !form.hex_ok {
+        (t.status_danger, "Contains non-hex characters.".to_owned())
+    } else if count < target {
+        (t.fg_3, format!("{} more characters needed", target - count))
+    } else if count > target {
+        (
+            t.status_danger,
+            format!(
+                "{} too many — this is too long for {}.",
+                count - target,
+                form.algo.label()
+            ),
+        )
+    } else if form.duplicate {
+        (
+            t.status_danger,
+            format!(
+                "{} is already in the list. Remove it first to replace.",
+                form.algo.label()
+            ),
+        )
+    } else {
+        (
+            t.status_success,
+            format!("Looks like a valid {} hash.", form.algo.label()),
+        )
+    };
+
+    let meter = row![
+        text(format!("{count}/{target}"))
+            .font(theme::MONO)
+            .size(11.0)
+            .color(count_color),
+        // `.pac-meter`: 4px pill track with a proportional fill.
+        pill_progress(
+            (count as f32 / target as f32).min(1.0),
+            Length::Fill,
+            PAC_METER_H,
+            t.bg_sunken,
+            fill,
+        ),
+    ]
+    .spacing(theme::space::S2)
+    .align_y(Alignment::Center);
+
+    let body = column![
+        head,
+        crate::gui::widget::field_label(t, "algorithm"),
+        algos,
+        crate::gui::widget::field_label(t, &format!("hash — expects {target} hex characters")),
+        TextInput::new(&st.checksum_hash)
+            .hint(format!(
+                "Paste the {} hash from the publisher's website…",
+                form.algo.label()
+            ))
+            .mono()
+            .on_input(Msg::ChecksumHash)
+            .view(t),
+        meter,
+        text(msg_text)
+            .font(theme::BODY_MEDIUM)
+            .size(10.5)
+            .color(msg_color),
+        checkbox(
+            t,
+            "Auto-detect algorithm from hash length",
+            st.cs_auto,
+            true,
+            Msg::CsAuto,
+        ),
+        row![
+            Btn::new("Cancel")
+                .ghost()
+                .size(BtnSize::Sm)
+                .on_press(Msg::CsAddCancel)
+                .view(t),
+            iced::widget::Space::new().width(Length::Fill),
+            Btn::new(format!("Save {}", form.algo.label()))
+                .primary()
+                .size(BtnSize::Sm)
+                .icon("check")
+                .enabled(form.valid)
+                .on_press(Msg::ChecksumSave)
+                .view(t),
+        ]
+        .align_y(Alignment::Center),
+    ]
+    .spacing(theme::space::S2);
+
+    crate::gui::widget::card(t, theme::space::S3, body.into())
 }
 
 fn toggle_row<'a>(
@@ -1131,88 +1831,271 @@ fn toggle_row<'a>(
 fn connection_tab(st: &State) -> Element<'_, Msg> {
     let t = &st.tokens;
     let editable = !st.locked();
-    let proxy = section(
-        t,
-        "proxy",
-        column![
-            toggle_row(
-                t,
-                "Use proxy",
-                "Route this download's traffic through a proxy server. Overrides the global \
-                 setting in Preferences → Network.",
-                st.proxy_enabled,
-                editable,
-                Msg::ProxyEnabled,
-            ),
-            row_sep(t),
-            container(
-                TextInput::new(&st.proxy_url)
-                    .hint("http://127.0.0.1:8080")
-                    .mono()
-                    .enabled(editable && st.proxy_enabled)
-                    .on_input(Msg::ProxyUrl)
-                    .view(t)
-            )
-            .padding([10.0, theme::space::S3]),
-        ]
-        .into(),
+    let explicit = matches!(
+        st.proxy_mode,
+        ProxyMode::Http | ProxyMode::Https | ProxyMode::Socks5
     );
 
-    let auth_body = column![
-        container(
+    // --- Proxy section (feature #6 honesty matrix) --------------------
+    let mode_idx = PROXY_MODE_VALUES
+        .iter()
+        .position(|m| *m == st.proxy_mode)
+        .unwrap_or(0);
+    let mode_row = column![
+        text("Use proxy")
+            .font(theme::BODY_MEDIUM)
+            .size(12.0)
+            .color(t.fg_1),
+        text(
+            "Route this download's traffic through a proxy server. Overrides the \
+             global setting in Settings → Network."
+        )
+        .font(theme::BODY)
+        .size(11.0)
+        .color(t.fg_3),
+        if editable {
+            crate::gui::widget::segmented(
+                t,
+                PROXY_MODE_LABELS,
+                mode_idx,
+                BtnSize::Sm,
+                Msg::ProxyModeSel,
+            )
+        } else {
+            // Locked: render the selection read-only.
+            text(PROXY_MODE_LABELS[mode_idx].0)
+                .font(theme::BODY_MEDIUM)
+                .size(12.0)
+                .color(t.fg_2)
+                .into()
+        },
+    ]
+    .spacing(6.0);
+
+    // Honest per-mode explanation (guardian System-mode gate: odl CAN
+    // express "clear the global proxy" via `builder.proxy(None)`).
+    let mode_hint: Option<String> = match st.proxy_mode {
+        ProxyMode::Inherit => {
+            let mut hint = "Inherit (global / environment) — uses the proxy from \
+                            Settings → Network, or your proxy environment variables."
+                .to_owned();
+            if let Some(legacy) = &st.entry.job.proxy {
+                // Legacy explicit Job.proxy URL wins under Inherit
+                // (mapping.rs precedence) — surface it, don't hide it.
+                hint.push_str(&format!("\nThis job carries a proxy URL: {legacy}"));
+            }
+            Some(hint)
+        }
+        ProxyMode::System => Some(
+            "System (environment variables) — ignores the global oxdm proxy for this \
+             job; the standard proxy environment variables still apply."
+                .to_owned(),
+        ),
+        _ => None,
+    };
+
+    let mut proxy_body = column![container(mode_row).padding([10.0, theme::space::S3])];
+    if let Some(hint) = mode_hint {
+        proxy_body = proxy_body.push(
+            container(
+                text(hint)
+                    .font(theme::BODY)
+                    .size(11.0)
+                    .color(t.fg_3)
+                    .line_height(iced::widget::text::LineHeight::Relative(1.5)),
+            )
+            .padding(iced::Padding {
+                left: theme::space::S3,
+                right: theme::space::S3,
+                bottom: 10.0,
+                ..Default::default()
+            }),
+        );
+    }
+    if explicit {
+        let socks5 = st.proxy_mode == ProxyMode::Socks5;
+        let mut server = column![
+            text("Server")
+                .font(theme::BODY_MEDIUM)
+                .size(12.0)
+                .color(t.fg_1),
             row![
-                column![
-                    text("Scheme")
+                TextInput::new(&st.proxy_host)
+                    .hint("proxy.example.com")
+                    .mono()
+                    .enabled(editable)
+                    .on_input(Msg::ProxyHost)
+                    .view(t),
+                text(":").font(theme::MONO).size(12.0).color(t.fg_3),
+                TextInput::new(&st.proxy_port)
+                    .hint(if socks5 { "1080" } else { "8080" })
+                    .mono()
+                    .width(Length::Fixed(PORT_INPUT_W))
+                    .enabled(editable)
+                    .on_input(Msg::ProxyPort)
+                    .view(t),
+            ]
+            .spacing(6.0)
+            .align_y(Alignment::Center),
+        ]
+        .spacing(6.0);
+        if st.port_invalid() {
+            // Inline validation (design §3.5: 1–65535).
+            server = server.push(
+                row![
+                    icons::icon("triangle-alert", 10.0, t.status_danger),
+                    text("Port must be between 1 and 65535.")
+                        .font(theme::BODY_MEDIUM)
+                        .size(10.5)
+                        .color(t.status_danger),
+                ]
+                .spacing(4.0)
+                .align_y(Alignment::Center),
+            );
+        }
+        proxy_body = proxy_body
+            .push(row_sep(t))
+            .push(container(server).padding([10.0, theme::space::S3]))
+            .push(row_sep(t))
+            .push(toggle_row(
+                t,
+                "Proxy authentication",
+                "Username and password sent to the proxy itself (not the destination).",
+                st.proxy_auth,
+                editable,
+                Msg::ProxyAuth,
+            ));
+        if st.proxy_auth {
+            proxy_body = proxy_body.push(
+                container(
+                    row![
+                        TextInput::new(&st.proxy_user)
+                            .hint("username")
+                            .enabled(editable)
+                            .on_input(Msg::ProxyUser)
+                            .view(t),
+                        // Stored secret never round-trips into the form;
+                        // empty input on Apply keeps it (guardian F1).
+                        TextInput::new(&st.proxy_pass)
+                            .hint(if st.entry.job.enc_proxy_password.is_some() {
+                                "(unchanged)"
+                            } else {
+                                "password"
+                            })
+                            .secure(true)
+                            .enabled(editable)
+                            .on_input(Msg::ProxyPass)
+                            .view(t),
+                    ]
+                    .spacing(theme::space::S2),
+                )
+                .padding([10.0, theme::space::S3]),
+            );
+        }
+        if socks5 {
+            proxy_body = proxy_body.push(row_sep(t)).push(toggle_row(
+                t,
+                "Resolve DNS through proxy",
+                "Send hostname lookups through the SOCKS5 server. Hides DNS queries \
+                 from your local resolver.",
+                st.remote_dns,
+                editable,
+                Msg::RemoteDns,
+            ));
+        }
+    }
+    let proxy = section(t, "proxy", proxy_body.into());
+
+    // --- Site authentication (None / Basic / Bearer — no Digest) ------
+    let scheme_idx = AUTH_SCHEME_VALUES
+        .iter()
+        .position(|s| *s == st.auth_scheme)
+        .unwrap_or(0);
+    let stored_secret = st.entry.job.enc_auth_password.is_some();
+    let mut auth_body = column![
+        container(
+            column![
+                text("Scheme")
+                    .font(theme::BODY_MEDIUM)
+                    .size(12.0)
+                    .color(t.fg_1),
+                text("Sent to the destination server, not the proxy.")
+                    .font(theme::BODY)
+                    .size(11.0)
+                    .color(t.fg_3),
+                if editable {
+                    crate::gui::widget::segmented(
+                        t,
+                        AUTH_SCHEME_LABELS,
+                        scheme_idx,
+                        BtnSize::Sm,
+                        Msg::AuthSchemeSel,
+                    )
+                } else {
+                    text(AUTH_SCHEME_LABELS[scheme_idx].0)
                         .font(theme::BODY_MEDIUM)
                         .size(12.0)
-                        .color(t.fg_1),
-                    text("Sent to the destination server, not the proxy.")
-                        .font(theme::BODY)
-                        .size(11.0)
-                        .color(t.fg_3),
-                ]
-                .spacing(2.0)
-                .width(Length::Fill),
-                combo(
-                    t,
-                    vec!["None".to_owned(), "Basic".to_owned()],
-                    Some(st.auth_scheme.clone()),
-                    Msg::AuthScheme,
-                    Length::Fixed(135.0),
-                ),
+                        .color(t.fg_2)
+                        .into()
+                },
             ]
-            .spacing(theme::space::S2)
-            .align_y(Alignment::Center)
+            .spacing(6.0)
         )
         .padding([10.0, theme::space::S3]),
     ];
-    let auth_body = if st.auth_scheme != "None" {
-        auth_body.push(row_sep(t)).push(
-            container(
-                row![
-                    TextInput::new(&st.auth_user)
-                        .hint("username")
-                        .enabled(editable)
-                        .on_input(Msg::AuthUser)
-                        .view(t),
-                    TextInput::new(&st.auth_pass)
-                        .hint(if st.entry.job.enc_auth_password.is_some() {
-                            "(stored)"
-                        } else {
-                            "password"
-                        })
-                        .secure(true)
-                        .enabled(editable)
-                        .on_input(Msg::AuthPass)
-                        .view(t),
-                ]
-                .spacing(theme::space::S2),
-            )
-            .padding([10.0, theme::space::S3]),
-        )
-    } else {
-        auth_body
-    };
+    match st.auth_scheme {
+        AuthScheme::Basic => {
+            auth_body = auth_body.push(row_sep(t)).push(
+                container(
+                    row![
+                        TextInput::new(&st.auth_user)
+                            .hint("username")
+                            .enabled(editable)
+                            .on_input(Msg::AuthUser)
+                            .view(t),
+                        TextInput::new(&st.auth_pass)
+                            .hint(if stored_secret {
+                                "(unchanged)"
+                            } else {
+                                "password"
+                            })
+                            .secure(true)
+                            .enabled(editable)
+                            .on_input(Msg::AuthPass)
+                            .view(t),
+                    ]
+                    .spacing(theme::space::S2),
+                )
+                .padding([10.0, theme::space::S3]),
+            );
+        }
+        AuthScheme::Bearer => {
+            auth_body = auth_body.push(row_sep(t)).push(
+                container(
+                    column![
+                        text("Token")
+                            .font(theme::BODY_MEDIUM)
+                            .size(12.0)
+                            .color(t.fg_1),
+                        TextInput::new(&st.auth_token)
+                            .hint(if stored_secret {
+                                "(unchanged)"
+                            } else {
+                                "eyJhbGciOi…"
+                            })
+                            .mono()
+                            .secure(true)
+                            .enabled(editable)
+                            .on_input(Msg::AuthToken)
+                            .view(t),
+                    ]
+                    .spacing(6.0),
+                )
+                .padding([10.0, theme::space::S3]),
+            );
+        }
+        _ => {}
+    }
 
     column![proxy, section(t, "site authentication", auth_body.into())]
         .spacing(theme::space::S3)
@@ -1268,15 +2151,26 @@ fn cookies_tab(st: &State) -> Element<'_, Msg> {
                             .on_press(Msg::CookiesClear)
                             .view(t),
                     ],
-                    text_editor::TextEditor::new(&st.cookies)
-                        .placeholder(
-                            "Paste cookies for this host.\nAccepts Netscape format (one cookie \
-                             per line)\nor a raw \"name=value; name2=value2\" string."
-                        )
-                        .font(theme::MONO)
-                        .size(12.0)
-                        .height(Length::Fixed(110.0))
-                        .on_action(Msg::CookiesEdit)
+                    {
+                        // Stored (encrypted) cookies never round-trip
+                        // back as plaintext; the placeholder says so.
+                        let mut ed = text_editor::TextEditor::new(&st.cookies)
+                            .placeholder(if st.has_stored_cookies {
+                                "Cookies stored (encrypted). Type to replace them."
+                            } else {
+                                "Paste cookies for this host.\nAccepts Netscape format (one \
+                                 cookie per line)\nor a raw \"name=value; name2=value2\" string."
+                            })
+                            .font(theme::MONO)
+                            .size(12.0)
+                            .height(Length::Fixed(110.0));
+                        // Editing gated while the job runs (lock rules;
+                        // guardian G2a-2) — no on_action, no edit path.
+                        if editable {
+                            ed = ed.on_action(Msg::CookiesEdit);
+                        }
+                        ed
+                    }
                         .style(move |_th, _| text_editor::Style {
                             background: t3.bg_raised.into(),
                             border: iced::Border {
@@ -1300,7 +2194,74 @@ fn cookies_tab(st: &State) -> Element<'_, Msg> {
 
 fn headers_tab(st: &State) -> Element<'_, Msg> {
     let t = &st.tokens;
+    let t2 = *t;
     let editable = !st.locked();
+
+    // --- Read-only "Request headers (will send)" table (#7) -----------
+    // Derived by the pure domain mirror of the run-time merge; custom
+    // (job-level) rows get the clay accent (design `.prop-hdr-row-custom`),
+    // secret-backed rows stay masked.
+    let mut will_send = column![];
+    let rows = crate::domain::will_send_headers(&st.settings, &st.entry.job);
+    let n = rows.len();
+    for (i, h) in rows.into_iter().enumerate() {
+        let name_color = if h.custom { t.action_primary } else { t.fg_2 };
+        let value_color = if h.masked { t.fg_3 } else { t.fg_1 };
+        let accent = h.custom;
+        let row_el = container(
+            row![
+                container(
+                    text(h.name)
+                        .font(theme::MONO_BOLD)
+                        .size(11.0)
+                        .color(name_color)
+                )
+                .width(Length::Fixed(140.0)),
+                text(h.value)
+                    .font(theme::MONO)
+                    .size(11.0)
+                    .color(value_color),
+            ]
+            .spacing(theme::space::S3)
+            .align_y(Alignment::Center),
+        )
+        .width(Length::Fill)
+        .padding([6.0, theme::space::S3])
+        .style(move |_| {
+            if accent {
+                // Faint clay wash; the clay key color carries the
+                // "custom" signal (iced has no per-side border, so the
+                // mock's 2px left rule is folded into these two cues).
+                container::Style {
+                    background: Some(color::with_alpha(t2.action_primary, 0.04).into()),
+                    ..Default::default()
+                }
+            } else {
+                container::Style::default()
+            }
+        });
+        will_send = will_send.push(row_el);
+        if i + 1 < n {
+            will_send = will_send.push(row_sep(t));
+        }
+    }
+    let will_send_section = column![
+        section(t, "request headers (will send)", will_send.into()),
+        row![
+            icons::icon("info", 12.0, t.fg_3),
+            text(
+                "Merged from your global settings and this download's overrides — \
+                 what oxdm sends on the next request. Stored cookies and credentials \
+                 are never displayed."
+            )
+            .font(theme::BODY_MEDIUM)
+            .size(11.0)
+            .color(t.fg_3)
+            .line_height(iced::widget::text::LineHeight::Relative(1.4)),
+        ]
+        .spacing(6.0),
+    ]
+    .spacing(theme::space::S2);
 
     let mut custom = column![
         container(
@@ -1362,147 +2323,40 @@ fn headers_tab(st: &State) -> Element<'_, Msg> {
         .padding([6.0, theme::space::S3]),
     );
 
-    column![section(t, "custom request headers", custom.into())]
-        .spacing(theme::space::S3)
-        .into()
+    column![
+        will_send_section,
+        section(t, "custom request headers", custom.into())
+    ]
+    .spacing(theme::space::S3)
+    .into()
 }
 
+/// Advanced pane. Dead-fields inventory (guardian amendment): every
+/// editable-but-dead `Advanced` field was REMOVED from the UI —
+/// `user_agent`, `referer`, `segments` (duplicates
+/// `Job.max_connections`), `speed_kbps`, `timeout`, `retries`,
+/// `run_command`, `open_when_done` — none is wired through
+/// `data/mapping.rs::job_overlay_options` to a real odl option, so
+/// showing an editor would fake behavior. Only `auto_verify` remains:
+/// the runner gates `add_checksums` on it (guardian F3).
 fn advanced_tab(st: &State) -> Element<'_, Msg> {
     let t = &st.tokens;
     let editable = !st.locked();
-    let stepper_row = |title: &'static str,
-                       desc: &'static str,
-                       value: i64,
-                       min: i64,
-                       max: i64,
-                       msg: fn(i64) -> Msg,
-                       suffix: Option<&'static str>| {
-        let mut r = row![
-            column![
-                text(title)
-                    .font(theme::BODY_MEDIUM)
-                    .size(12.0)
-                    .color(t.fg_1),
-                text(desc).font(theme::BODY).size(11.0).color(t.fg_3),
-            ]
-            .spacing(2.0)
-            .width(Length::Fill),
-            number_stepper(t, value, min, max, editable, msg),
-        ]
-        .spacing(theme::space::S2)
-        .align_y(Alignment::Center);
-        if let Some(sfx) = suffix {
-            r = r.push(text(sfx).font(theme::BODY).size(12.0).color(t.fg_3));
-        }
-        container(r).padding([10.0, theme::space::S3])
-    };
-
-    let identification = section(
-        t,
-        "identification",
-        column![
-            container(
-                column![
-                    text("User-Agent")
-                        .font(theme::BODY_MEDIUM)
-                        .size(12.0)
-                        .color(t.fg_1),
-                    text("Override the default UA for this download only.")
-                        .font(theme::BODY)
-                        .size(11.0)
-                        .color(t.fg_3),
-                    TextInput::new(&st.adv.user_agent)
-                        .mono()
-                        .enabled(editable)
-                        .on_input(Msg::AdvUserAgent)
-                        .view(t),
-                ]
-                .spacing(6.0)
-            )
-            .padding([10.0, theme::space::S3]),
-            row_sep(t),
-            container(
-                column![
-                    text("Referer")
-                        .font(theme::BODY_MEDIUM)
-                        .size(12.0)
-                        .color(t.fg_1),
-                    TextInput::new(&st.adv.referer)
-                        .hint("https://example.com/source-page")
-                        .mono()
-                        .enabled(editable)
-                        .on_input(Msg::AdvReferer)
-                        .view(t),
-                ]
-                .spacing(6.0)
-            )
-            .padding([10.0, theme::space::S3]),
-        ]
-        .into(),
-    );
 
     let transfer = section(
         t,
         "transfer",
-        column![
-            stepper_row(
-                "Max segments",
-                "Parallel connections. Lower this for fragile servers.",
-                st.adv.segments,
-                1,
-                16,
-                Msg::AdvSegments,
-                None
-            ),
-            row_sep(t),
-            stepper_row(
-                "Connection timeout",
-                "How long to wait for the server before giving up on a connection attempt.",
-                st.adv.timeout,
-                1,
-                300,
-                Msg::AdvTimeout,
-                Some("seconds")
-            ),
-            row_sep(t),
-            stepper_row(
-                "Auto-retry on failure",
-                "Retries are exponential — 1s, 2s, 4s, 8s, capped at 60s.",
-                st.adv.retries,
-                0,
-                20,
-                Msg::AdvRetries,
-                None
-            ),
-            row_sep(t),
-            toggle_row(
-                t,
-                "Auto-verify checksums",
-                "Compute & compare every saved hash when the download completes.",
-                st.adv.auto_verify,
-                editable,
-                Msg::AdvAutoVerify,
-            ),
-        ]
-        .into(),
-    );
-
-    let after = section(
-        t,
-        "after completion",
         toggle_row(
             t,
-            "Open file when done",
-            "",
-            st.adv.open_when_done,
+            "Auto-verify checksums",
+            "Compute & compare every saved hash when the download completes.",
+            st.adv.auto_verify,
             editable,
-            Msg::AdvOpenDone,
+            Msg::AdvAutoVerify,
         ),
     );
 
-    column![identification, transfer, after]
-        .spacing(theme::space::S3)
-        .into()
+    column![transfer].spacing(theme::space::S3).into()
 }
 
 pub fn launch_properties(_id: JobId) {

@@ -29,6 +29,7 @@ pub struct PartCounters {
 }
 
 /// Output of running a job to completion (or failure).
+#[derive(Debug)]
 pub struct RunOutcome {
     pub final_path: Option<std::path::PathBuf>,
     pub already_complete: bool,
@@ -118,6 +119,7 @@ impl JobRunner {
             &job,
             self.proxy_password.as_deref(),
             self.cookies.as_deref(),
+            self.auth_password.as_deref(),
         )
         .map_err(JobError::Other)?;
 
@@ -135,6 +137,16 @@ impl JobRunner {
 
         self.bridge
             .on_evaluated(self.job_id, instruction.is_resumable());
+
+        // Feature #14: hand the job's expected checksums to odl so the
+        // Verifying phase actually compares — a mismatch surfaces as
+        // `JobError::ChecksumMismatch` through the existing error path.
+        // Gating (auto_verify) + source filtering (Server/User only)
+        // live in `mapping::job_expected_digests`.
+        let digests = crate::data::mapping::job_expected_digests(&job);
+        if !digests.is_empty() {
+            instruction.add_checksums(digests);
+        }
 
         // Per-job working directory inside the configured download_dir.
         // Keeps `metadata.pb` / `.part` files isolated so Remove can
@@ -160,14 +172,19 @@ impl JobRunner {
 }
 
 /// Build HTTP Basic credentials from the job's structured fields:
-/// `auth_user` from `Job` (persisted), `auth_password` from the OS
-/// keyring (loaded by `state::start_job`). Returns `None` when no per-
-/// job Basic auth is configured. Other `Authorization` schemes (Bearer,
-/// captured tokens, …) flow through `Job.headers` unchanged.
+/// `auth_user` from `Job` (persisted), `auth_password` decrypted from
+/// the store (loaded by `state::start_job`). Returns `None` when no
+/// per-job Basic auth is configured. When the job's advanced scheme is
+/// Bearer, the same decrypted secret is a token and travels as an
+/// `Authorization` header via `job_overlay_options` instead (F2) —
+/// never as Basic credentials.
 fn build_credentials(
     job: &Job,
     auth_password: Option<&str>,
 ) -> Option<odl::credentials::Credentials> {
+    if job.advanced.auth.scheme == crate::domain::AuthScheme::Bearer {
+        return None;
+    }
     let user = job.auth_user.as_deref()?;
     Some(odl::credentials::Credentials::new(user, auth_password))
 }
@@ -241,5 +258,157 @@ impl ProgressReporter for BridgeReporter {
                 // Hot path / UI pulls these from LiveCounters.
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{Algo, Checksum, CsSource, CsStatus, JobStatus};
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    const BODY: &[u8] = b"hello world";
+    /// SHA-256 of `BODY`.
+    const GOOD_SHA256: &str = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
+    /// Same length/charset, wrong value.
+    const BAD_SHA256: &str = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde0";
+
+    /// Minimal HTTP/1.1 server on an ephemeral loopback port. Serves
+    /// `BODY` for every GET (headers only for HEAD), one request per
+    /// connection. No Range support → odl treats it as non-resumable
+    /// and downloads in a single part.
+    async fn spawn_http_server() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 1024];
+                    loop {
+                        match sock.read(&mut chunk).await {
+                            Ok(0) => return,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                            Err(_) => return,
+                        }
+                        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    let head_only = buf.starts_with(b"HEAD ");
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: \
+                         application/octet-stream\r\nConnection: close\r\n\r\n",
+                        BODY.len()
+                    );
+                    let _ = sock.write_all(header.as_bytes()).await;
+                    if !head_only {
+                        let _ = sock.write_all(BODY).await;
+                    }
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        format!("http://{addr}/file.bin")
+    }
+
+    struct NoopBridge;
+    impl LiveBridge for NoopBridge {
+        fn on_event(&self, _id: JobId, _event: &OdlProgressEvent) {}
+    }
+
+    fn test_job(url: &str, save_dir: std::path::PathBuf, sha256: &str) -> Job {
+        Job {
+            id: JobId::new(),
+            url: url::Url::parse(url).unwrap(),
+            save_dir,
+            filename: Some("file.bin".into()),
+            referrer: None,
+            headers: indexmap::IndexMap::new(),
+            max_connections: None,
+            proxy: None,
+            auth_user: None,
+            enc_auth_password: None,
+            enc_proxy_password: None,
+            enc_cookies: None,
+            speed_limit_override: None,
+            queue_id: crate::domain::QueueId::new(),
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            finished_at: None,
+            retries: 0,
+            status: JobStatus::default(),
+            // `auto_verify` defaults to true — the gate under test.
+            advanced: crate::domain::Advanced::default(),
+            checksums: vec![Checksum {
+                algo: Algo::Sha256,
+                hash: sha256.into(),
+                source: CsSource::User,
+                status: CsStatus::Unverified,
+                expected: None,
+            }],
+            category: crate::domain::Category::Other,
+        }
+    }
+
+    /// Mirrors the real layout: `save_dir` = final destination,
+    /// `work_dir` = metadata + `.part` files, per-job subdir under it.
+    async fn run_job(job: Job, work_dir: &std::path::Path) -> Result<RunOutcome, JobError> {
+        let per_job = crate::data::state::per_job_dir(work_dir, job.id);
+        tokio::fs::create_dir_all(&per_job).await.expect("mkdir");
+        let cfg = odl::config::ConfigBuilder::default()
+            .download_dir(work_dir.to_path_buf())
+            .build()
+            .expect("odl config");
+        let manager = Arc::new(DownloadManager::new(cfg));
+        let (events, _rx) = broadcast::channel(64);
+        let runner = JobRunner {
+            job_id: job.id,
+            manager,
+            events,
+            cancel: CancellationToken::new(),
+            bridge: Arc::new(NoopBridge),
+            interactive: false,
+            per_job_dir: Some(per_job),
+            live_controls: odl::progress::LiveControls::new(),
+            auth_password: None,
+            proxy_password: None,
+            cookies: None,
+        };
+        tokio::time::timeout(Duration::from_secs(60), runner.run(job))
+            .await
+            .expect("runner timed out")
+    }
+
+    #[tokio::test]
+    async fn user_checksum_mismatch_fails_the_job() {
+        let url = spawn_http_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let job = test_job(&url, dir.path().join("save"), BAD_SHA256);
+        let err = run_job(job, &dir.path().join("work"))
+            .await
+            .expect_err("mismatch must fail");
+        assert!(
+            matches!(&err, JobError::ChecksumMismatch { expected, .. }
+                if expected.contains(BAD_SHA256)),
+            "expected ChecksumMismatch, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn user_checksum_match_completes() {
+        let url = spawn_http_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let job = test_job(&url, dir.path().join("save"), GOOD_SHA256);
+        let outcome = run_job(job, &dir.path().join("work"))
+            .await
+            .expect("download should verify");
+        let path = outcome.final_path.expect("final path");
+        assert_eq!(std::fs::read(path).unwrap(), BODY);
     }
 }

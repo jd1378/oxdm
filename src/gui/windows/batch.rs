@@ -149,7 +149,9 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 probes.push(Task::perform(
                     async move {
                         match client.probe(url).await {
-                            Ok(inner) => inner.map(Box::new),
+                            // Batch rows render a flat message; flatten
+                            // the structured `JobError` here.
+                            Ok(inner) => inner.map(Box::new).map_err(|e| e.to_string()),
                             Err(e) => Err(e),
                         }
                     },

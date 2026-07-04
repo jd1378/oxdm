@@ -1038,6 +1038,14 @@ mod tests {
         s.headers
             .insert("Authorization".into(), "Bearer xyz".into());
         s.proxy = Some("http://localhost:8080".into());
+        let videos_queue = crate::domain::QueueId::new();
+        s.category_folders.insert(
+            crate::domain::Category::Videos,
+            PathBuf::from("/tmp/oxdm-videos"),
+        );
+        s.category_queues
+            .insert(crate::domain::Category::Videos, videos_queue);
+        s.first_run_seen = true;
         store.save_settings(&s).await.unwrap();
 
         // Drop and reopen — full restart simulation.
@@ -1054,6 +1062,19 @@ mod tests {
             Some("Bearer xyz")
         );
         assert_eq!(reloaded.proxy.as_deref(), Some("http://localhost:8080"));
+        assert_eq!(
+            reloaded
+                .category_folders
+                .get(&crate::domain::Category::Videos),
+            Some(&PathBuf::from("/tmp/oxdm-videos"))
+        );
+        assert_eq!(
+            reloaded
+                .category_queues
+                .get(&crate::domain::Category::Videos),
+            Some(&videos_queue)
+        );
+        assert!(reloaded.first_run_seen);
     }
 
     #[tokio::test]

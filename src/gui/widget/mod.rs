@@ -3,6 +3,7 @@
 pub mod button;
 pub mod cards;
 pub mod controls;
+pub mod error_panel;
 pub mod inputs;
 pub mod pills;
 pub mod striped;

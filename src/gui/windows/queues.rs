@@ -34,6 +34,42 @@ const CONC_MAX: i64 = 16;
 /// Value the custom stepper shows before an explicit count is set
 /// (non-preset, so it reads as a distinct "custom" choice).
 const CONC_DEFAULT: i64 = 4;
+/// Queue color button (design `.q-color-btn`: 24px square, 6px radius,
+/// 2px border; hover border brightens to fg-3).
+const COLOR_BTN: f32 = 24.0;
+const COLOR_BTN_RADIUS: f32 = 6.0;
+const COLOR_BTN_BORDER: f32 = 2.0;
+/// Color-pop geometry (design `.q-color-pop`: 22px swatches with 2px
+/// selection ring, 6px gap, 8px padding, 2px border).
+const POP_SWATCH: f32 = 22.0;
+const POP_GAP: f32 = 6.0;
+const POP_PAD: f32 = 8.0;
+const POP_BORDER: f32 = 2.0;
+/// Queue-name input renders in the display serif at 16px (design
+/// `queue-dialog.jsx` name input: `--font-display`, 16px, weight 500 —
+/// the bundled Fraunces SemiBold stands in for 500).
+const NAME_FONT_SIZE: f32 = 16.0;
+/// Default window size; also the overlay clamp fallback before the
+/// first resize event arrives.
+const WIN_DEFAULT_W: f32 = 820.0;
+const WIN_DEFAULT_H: f32 = 620.0;
+
+/// Preset queue swatches (design `queue-dialog.jsx` `QUEUE_COLORS`).
+/// Persisted `Queue.color` *data* values, not theme styling tokens:
+/// clay/rust/ochre/moss/slate coincide with `color.rs` ramp stops
+/// (clay-400 / clay-500 / ochre-300 / moss-400 / slate-300); olive,
+/// forest, wine and sand exist only in the mock's preset list.
+const QUEUE_PRESETS: [[u8; 3]; 9] = [
+    [0xC9, 0x70, 0x3F], // clay (clay-400)
+    [0xB2, 0x5A, 0x2A], // rust (clay-500)
+    [0xDD, 0xAA, 0x38], // ochre (ochre-300)
+    [0xA3, 0x91, 0x42], // olive
+    [0x7A, 0x8B, 0x4A], // moss (moss-400)
+    [0x4D, 0x6B, 0x4A], // forest
+    [0x5E, 0x68, 0x77], // slate (slate-300)
+    [0x8E, 0x4B, 0x5A], // wine
+    [0xBE, 0xA4, 0x7A], // sand
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SchedKind {
@@ -43,13 +79,15 @@ pub enum SchedKind {
     Condition,
 }
 
+/// On-finish choices. The mock's "Disconnect" pill is omitted: no
+/// disconnect hook exists in the domain (it round-tripped to a silent
+/// no-op — dishonest UI per the features-pass rubric).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FinishKind {
     Nothing,
     Notify,
     Sleep,
     Shutdown,
-    Disconnect,
     RunCommand,
 }
 
@@ -62,6 +100,10 @@ pub enum Msg {
     Select(QueueId),
     AddQueue,
     Name(String),
+    ColorToggle,
+    ColorClose,
+    ColorPick([u8; 3]),
+    ColorHex(String),
     Concurrency(Option<usize>),
     Sched(SchedKind),
     SchedStart(String),
@@ -101,8 +143,30 @@ pub struct State {
     finish: FinishKind,
     finish_cmd: String,
 
+    /// Staged swatch (rides `upsert_queue` on Save like other edits).
+    color: Option<[u8; 3]>,
+    /// Free-form hex mirror of `color` for the popup's custom input.
+    color_hex: String,
+    color_open: bool,
+    win_size: (f32, f32),
+
     confirm_delete: bool,
     shot: Option<Shot>,
+}
+
+/// `#RRGGBB` for the hex mirror.
+fn hex_string([r, g, b]: [u8; 3]) -> String {
+    format!("#{r:02X}{g:02X}{b:02X}")
+}
+
+/// Parse `#RRGGBB` / `RRGGBB`; anything else is not (yet) a color.
+fn parse_hex_color(s: &str) -> Option<[u8; 3]> {
+    let s = s.trim().trim_start_matches('#');
+    if s.len() != 6 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let v = u32::from_str_radix(s, 16).ok()?;
+    Some([(v >> 16) as u8, (v >> 8) as u8, v as u8])
 }
 
 impl State {
@@ -115,6 +179,9 @@ impl State {
             return;
         };
         self.name = q.name;
+        self.color = q.color;
+        self.color_hex = q.color.map(hex_string).unwrap_or_default();
+        self.color_open = false;
         self.max_concurrent = q.max_concurrent;
         self.sched = match q.schedule {
             QueueSchedule::Manual => SchedKind::Manual,
@@ -154,6 +221,7 @@ impl State {
     fn build_queue(&self) -> Option<Queue> {
         let mut q = self.selected_queue()?.clone();
         q.name = self.name.trim().to_owned();
+        q.color = self.color;
         q.max_concurrent = self.max_concurrent;
         q.schedule = match self.sched {
             SchedKind::Manual | SchedKind::Condition => QueueSchedule::Manual,
@@ -175,7 +243,7 @@ impl State {
             },
         };
         q.on_finish = match self.finish {
-            FinishKind::Nothing | FinishKind::Disconnect => vec![],
+            FinishKind::Nothing => vec![],
             FinishKind::Notify => vec![QueueHook::Notify {
                 title: "Queue finished".to_owned(),
                 body: q.name.clone(),
@@ -225,6 +293,10 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 sched_days: WeekDayMask(0x7F),
                 finish: FinishKind::Nothing,
                 finish_cmd: String::new(),
+                color: None,
+                color_hex: String::new(),
+                color_open: false,
+                win_size: (0.0, 0.0),
                 confirm_delete: false,
                 shot: Shot::from_env(),
                 client,
@@ -294,6 +366,27 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             st.name = v;
             Task::none()
         }
+        Msg::ColorToggle => {
+            st.color_open = !st.color_open;
+            Task::none()
+        }
+        Msg::ColorClose => {
+            st.color_open = false;
+            Task::none()
+        }
+        Msg::ColorPick(c) => {
+            st.color = Some(c);
+            st.color_hex = hex_string(c);
+            st.color_open = false;
+            Task::none()
+        }
+        Msg::ColorHex(v) => {
+            if let Some(c) = parse_hex_color(&v) {
+                st.color = Some(c);
+            }
+            st.color_hex = v;
+            Task::none()
+        }
         Msg::Concurrency(v) => {
             st.max_concurrent = v;
             Task::none()
@@ -341,6 +434,7 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
         // Confirm-dialog keys (design `confirm-dialog.jsx`): Enter
         // confirms, Escape cancels. `listen_with` ignores capture
         // status, so both are gated on the confirm overlay being open.
+        // Escape also dismisses the color popup when it is open.
         Msg::KeyPressed(key) => {
             use iced::keyboard::key::Named;
             if st.confirm_delete {
@@ -353,6 +447,10 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                     }
                     _ => {}
                 }
+            } else if st.color_open
+                && matches!(key.as_ref(), iced::keyboard::Key::Named(Named::Escape))
+            {
+                return update_ready(st, Msg::ColorClose);
             }
             Task::none()
         }
@@ -366,6 +464,7 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
         Msg::Saved(_) => iced::exit(),
         Msg::Cancel => iced::exit(),
         Msg::WinResized(w, h) => {
+            st.win_size = (w, h);
             chrome::enforce_min_size(iced::Size::new(w, h), iced::Size::new(640.0, 518.0))
         }
         Msg::ShotTick => {
@@ -636,28 +735,39 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
 
     // Right: editor.
     let is_main = st.selected_queue().is_some_and(|q| q.builtin);
-    let head = row![
-        container(crate::gui::widget::swatch(
-            18.0,
-            6.0,
-            st.selected_queue()
-                .map(|q| queue_color(t, q))
-                .unwrap_or(t.action_primary)
-        ))
-        .width(Length::Fixed(32.0))
-        .height(Length::Fixed(32.0))
-        .align_x(Alignment::Center)
-        .align_y(Alignment::Center)
-        .style(move |_| container::Style {
-            background: Some(t2.bg_raised.into()),
+    // Effective swatch: staged pick wins, else the queue's stored /
+    // name-derived color (same fallback as the list dots).
+    let eff_color = st
+        .color
+        .map(|[r, g, b]| iced::Color::from_rgb8(r, g, b))
+        .or_else(|| st.selected_queue().map(|q| queue_color(t, q)))
+        .unwrap_or(t.action_primary);
+    let color_btn = button(iced::widget::Space::new())
+        .width(Length::Fixed(COLOR_BTN))
+        .height(Length::Fixed(COLOR_BTN))
+        .padding(0.0)
+        .on_press(Msg::ColorToggle)
+        .style(move |_th, status| iced::widget::button::Style {
+            background: Some(eff_color.into()),
+            text_color: t2.fg_1,
             border: iced::Border {
-                color: t2.border_subtle,
-                width: 1.0,
-                radius: theme::control::RADIUS.into(),
+                color: if matches!(status, iced::widget::button::Status::Hovered) {
+                    t2.fg_3
+                } else {
+                    t2.border_default
+                },
+                width: COLOR_BTN_BORDER,
+                radius: COLOR_BTN_RADIUS.into(),
             },
-            ..Default::default()
-        }),
-        TextInput::new(&st.name).on_input(Msg::Name).view(t),
+            shadow: iced::Shadow::default(),
+            snap: true,
+        });
+    let head = row![
+        color_btn,
+        TextInput::new(&st.name)
+            .font(theme::DISPLAY, NAME_FONT_SIZE)
+            .on_input(Msg::Name)
+            .view(t),
         Btn::new("Delete")
             .danger_filled()
             .icon("trash-2")
@@ -822,7 +932,7 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
             seg_btn(
                 t,
                 "Sleep",
-                Some("clock"),
+                Some("moon"),
                 st.finish == FinishKind::Sleep,
                 Msg::Finish(FinishKind::Sleep)
             ),
@@ -835,22 +945,13 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
             ),
         ]
         .spacing(4.0),
-        row![
-            seg_btn(
-                t,
-                "Disconnect",
-                Some("unplug"),
-                st.finish == FinishKind::Disconnect,
-                Msg::Finish(FinishKind::Disconnect)
-            ),
-            seg_btn(
-                t,
-                "Run command",
-                Some("terminal"),
-                st.finish == FinishKind::RunCommand,
-                Msg::Finish(FinishKind::RunCommand)
-            ),
-        ]
+        row![seg_btn(
+            t,
+            "Run command",
+            Some("terminal"),
+            st.finish == FinishKind::RunCommand,
+            Msg::Finish(FinishKind::RunCommand)
+        ),]
         .spacing(4.0),
     ]
     .spacing(theme::space::S2);
@@ -862,6 +963,9 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
                 .on_input(Msg::FinishCommand)
                 .view(t),
         );
+    }
+    if let Some(warn) = finish_warn(t, st.finish) {
+        finish_col = finish_col.push(warn);
     }
     let on_finish = section_card(t, "clock", "When the queue finishes", finish_col.into());
 
@@ -896,6 +1000,8 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
 
     let overlaid: Element<'_, Msg> = if st.confirm_delete {
         delete_overlay(st, body)
+    } else if st.color_open {
+        color_pop_overlay(st, body)
     } else {
         body
     };
@@ -913,6 +1019,153 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
         ..Default::default()
     });
     chrome::resize::resizable(t, content.into(), true, Msg::Window)
+}
+
+/// Rust warning panel under the on-finish pills for destructive power
+/// actions (design §3.6 shutdown warning; tokens follow the
+/// download-window completion warning: `status_danger_bg` panel with a
+/// 1px `status_danger` border). Copy is queue-scoped (guardian G2b-2)
+/// and quotes the real grace from `SHUTDOWN_GRACE_SECS` — true since
+/// the Wave B grace + countdown-banner event landed. Sleep is included
+/// because the grace covers every destructive power action.
+fn finish_warn<'a>(t: &Tokens, finish: FinishKind) -> Option<Element<'a, Msg>> {
+    let verb = match finish {
+        FinishKind::Shutdown => "shut down",
+        FinishKind::Sleep => "go to sleep",
+        _ => return None,
+    };
+    let t2 = *t;
+    Some(
+        container(
+            row![
+                crate::gui::icons::icon("triangle-alert", 13.0, t.status_danger),
+                text(format!(
+                    "System will {verb} {} seconds after this queue finishes. \
+                     A countdown banner with Cancel will appear.",
+                    crate::domain::SHUTDOWN_GRACE_SECS
+                ))
+                .font(theme::BODY)
+                .size(12.0)
+                .color(t.status_danger),
+            ]
+            .spacing(theme::space::S2)
+            .align_y(Alignment::Center),
+        )
+        .width(Length::Fill)
+        .padding(theme::space::S2)
+        .style(move |_| container::Style {
+            background: Some(t2.status_danger_bg.into()),
+            border: iced::Border {
+                color: t2.status_danger,
+                width: 1.0,
+                radius: theme::surface::RADIUS.into(),
+            },
+            ..Default::default()
+        })
+        .into(),
+    )
+}
+
+/// Anchored color popup (design `.q-color-pop`): preset swatch row +
+/// a hex input for custom colors (stands in for the mock's native
+/// color input — no such control exists in iced). Anchored at the
+/// opening click position and clamped inside the window, following
+/// the main-window context-menu stack pattern.
+fn color_pop_overlay<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a, Msg> {
+    let t = &st.tokens;
+    let t2 = *t;
+
+    let mut swatches = row![].spacing(POP_GAP);
+    for c in QUEUE_PRESETS {
+        let col = iced::Color::from_rgb8(c[0], c[1], c[2]);
+        let on = st.color == Some(c);
+        swatches = swatches.push(
+            button(iced::widget::Space::new())
+                .width(Length::Fixed(POP_SWATCH))
+                .height(Length::Fixed(POP_SWATCH))
+                .padding(0.0)
+                .on_press(Msg::ColorPick(c))
+                .style(move |_th, status| iced::widget::button::Style {
+                    background: Some(col.into()),
+                    text_color: t2.fg_1,
+                    border: iced::Border {
+                        // `.q-swatch.on` ring is fg-1; hover previews it.
+                        color: if on || matches!(status, iced::widget::button::Status::Hovered) {
+                            t2.fg_1
+                        } else {
+                            iced::Color::TRANSPARENT
+                        },
+                        width: POP_BORDER,
+                        radius: theme::control::RADIUS.into(),
+                    },
+                    shadow: iced::Shadow::default(),
+                    snap: true,
+                }),
+        );
+    }
+
+    let pop = container(
+        column![
+            swatches,
+            TextInput::new(&st.color_hex)
+                .hint("#C9703F")
+                .mono()
+                .on_input(Msg::ColorHex)
+                .view(t),
+        ]
+        .spacing(POP_GAP),
+    )
+    .padding(POP_PAD)
+    .style(move |_| container::Style {
+        background: Some(t2.bg_surface.into()),
+        border: iced::Border {
+            color: t2.border_default,
+            width: POP_BORDER,
+            radius: theme::radius::SM.into(),
+        },
+        shadow: iced::Shadow {
+            color: color::with_alpha(iced::Color::BLACK, 80.0 / 255.0),
+            offset: iced::Vector::new(0.0, 4.0),
+            blur_radius: 16.0,
+        },
+        ..Default::default()
+    });
+
+    let scrim = mouse_area(
+        container(iced::widget::Space::new())
+            .width(Length::Fill)
+            .height(Length::Fill),
+    )
+    .on_press(Msg::ColorClose)
+    .on_right_press(Msg::ColorClose);
+
+    // Content-derived popup extent for the window-edge clamp.
+    let mw = 9.0 * POP_SWATCH + 8.0 * POP_GAP + 2.0 * (POP_PAD + POP_BORDER);
+    let mh = POP_SWATCH + POP_GAP + theme::control::H_MD + 2.0 * (POP_PAD + POP_BORDER);
+    // Anchor just below the swatch button. Its position is fixed by
+    // layout (editor column starts after the list at LIST_W, padded by
+    // S4; the swatch is the first element of the head row), so the
+    // anchor is derived from those constants rather than the cursor —
+    // pointer-position capture races synthetic/fast clicks.
+    let cx = LIST_W + theme::space::S4;
+    let cy = theme::space::S4 + COLOR_BTN + POP_GAP;
+    let (ww, wh) = if st.win_size.0 > 0.0 {
+        (st.win_size.0, st.win_size.1 - titlebar::HEIGHT - 1.0)
+    } else {
+        (WIN_DEFAULT_W, WIN_DEFAULT_H - titlebar::HEIGHT - 1.0)
+    };
+    let left = cx.min(ww - mw).max(0.0);
+    let top = cy.min(wh - mh).max(0.0);
+    iced::widget::stack![
+        base,
+        scrim,
+        container(iced::widget::opaque(pop)).padding(iced::Padding {
+            left,
+            top,
+            ..Default::default()
+        }),
+    ]
+    .into()
 }
 
 fn delete_overlay<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a, Msg> {
@@ -1005,7 +1258,7 @@ pub fn launch_queues() {
         .default_font(theme::BODY)
         .antialiasing(true)
         .window(chrome::window_settings(
-            iced::Size::new(820.0, 620.0),
+            iced::Size::new(WIN_DEFAULT_W, WIN_DEFAULT_H),
             iced::Size::new(640.0, 518.0),
         ));
     for f in theme::fonts::ALL {

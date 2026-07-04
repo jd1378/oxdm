@@ -33,12 +33,13 @@ pub struct ProxyAdv {
     pub port: String,
     pub auth_enabled: bool,
     pub username: String,
-    /// Plaintext password as edited in the dialog. Encryption-at-rest
-    /// for per-job proxy passwords already exists via
-    /// `Job::enc_proxy_password`; this field is the UI-side scratch
-    /// buffer and will be wired through to that column in a later pass.
+    /// Plaintext password as edited in the dialog — UI-side scratch
+    /// only. `set_job_advanced` strips it from the blob and routes it
+    /// onto the encrypted `Job::enc_proxy_password` column.
     pub password: String,
     pub remote_dns: bool,
+    /// Unused: odl exposes no `no_proxy`/bypass API. Kept for serde
+    /// compat with persisted blobs; never surfaced in the UI.
     pub bypass: String,
 }
 
@@ -52,7 +53,7 @@ impl Default for ProxyAdv {
             username: String::new(),
             password: String::new(),
             remote_dns: true,
-            bypass: "localhost, 127.0.0.1, *.lan".into(),
+            bypass: String::new(),
         }
     }
 }

@@ -9,7 +9,7 @@ use iced::widget::{column, container, mouse_area, row, scrollable, text};
 use iced::{Alignment, Element, Length, Subscription, Task};
 
 use super::main_dialogs::{self, AboutState, HostState, RemoveState, UpdateUi};
-use crate::domain::{Category, Density, JobId, Phase, QueueId};
+use crate::domain::{Category, Density, JobId, Phase, PowerAction, QueueId};
 use crate::gui::chrome::{self, WindowControl, titlebar};
 use crate::gui::format::{format_bytes, format_eta, format_speed};
 use crate::gui::ipc::DaemonSignal;
@@ -69,6 +69,17 @@ const EXT_PILL_H: f32 = 22.0;
 const EXT_PILL_RADIUS: f32 = 4.0;
 const EXT_PILL_FONT: f32 = 9.0;
 const NAME_PILL_GAP: f32 = 10.0;
+
+// Column-resize guideline (design §4 `ResizableHeader`: "dragging →
+// clay-500 grip + a full-height clay-300 guideline"): a 1px clay-300
+// vertical rule over the table body at the dragged boundary.
+const GUIDELINE_W: f32 = 1.0;
+
+// Shutdown countdown banner refresh rate. Remaining time is DERIVED
+// from `deadline_ms` on every render — this tick only forces the
+// redraw (it carries no timer state and runs only while the banner
+// is visible; W6 reduce_motion doesn't apply: it's data, not motion).
+const SHUTDOWN_TICK_MS: u64 = 250;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarFilter {
@@ -158,6 +169,12 @@ pub enum Msg {
     AnimTick,
     // Browser-extensions overlay store link
     OpenStore(&'static str),
+    // First-run welcome overlay: either dismissal persists
+    // `first_run_seen` (design §3.8 welcome mode)
+    WelcomeDismiss,
+    // Shutdown countdown banner (B4/G1d)
+    ShutdownTick,
+    CancelShutdown,
     // Conflict / recovery
     Conflict(JobId, u64, crate::data::ConflictKind, ConflictChoice),
     DbExit,
@@ -172,7 +189,10 @@ pub enum Msg {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolbarAction {
     AddUrl,
-    PauseQueue,
+    /// Start/Stop toggle (design §3.1): queue scope starts/stops the
+    /// queue by `active_queues` membership; other scopes pause/resume
+    /// everything. The handler re-derives the direction from state.
+    ToggleRun,
     StopAll,
     Clean,
     Schedule,
@@ -245,6 +265,9 @@ pub enum Overlay {
     Host,
     Remove,
     BrowserExtensions,
+    /// First-run welcome variant of the browser-extensions dialog
+    /// (design §3.8 `welcome` mode).
+    Welcome,
     DbError,
     SecretsLocked,
 }
@@ -285,6 +308,9 @@ pub struct Main {
     /// Active header drag: (column, cursor x at start, width at start).
     pub col_drag: Option<(SortColumn, f32, f32)>,
     pub col_handle_hover: Option<SortColumn>,
+    /// Horizontal scroll offset of the table body (mirrored on every
+    /// `TableScrolled`); corrects the resize guideline x.
+    pub table_scroll_x: f32,
     pub columns_menu: bool,
     pub shot: Option<Shot>,
     /// Active toasts, newest last (rendered bottom-right).
@@ -296,6 +322,13 @@ pub struct Main {
     pub anim_t: f32,
     /// Job count at the last snapshot — used to toast genuine adds.
     pub prev_job_count: usize,
+    /// Pending destructive power action `(action, deadline_ms)` — the
+    /// countdown banner. Remaining seconds derive from the deadline;
+    /// no timer state (B4).
+    pub shutdown: Option<(PowerAction, i64)>,
+    /// First-run welcome overlay already shown this session — never
+    /// re-show even if the settings flag hasn't round-tripped yet.
+    pub welcome_shown: bool,
 }
 
 impl Main {
@@ -336,6 +369,7 @@ impl Main {
             columns: crate::gui::ui_prefs::load().columns.unwrap_or_default(),
             col_drag: None,
             col_handle_hover: None,
+            table_scroll_x: 0.0,
             columns_menu: false,
             shot: Shot::from_env(),
             toasts: Vec::new(),
@@ -343,6 +377,9 @@ impl Main {
             drag_hover: false,
             anim_t: 0.0,
             prev_job_count: snap.jobs.len(),
+            // Late-connecting GUI: a countdown may already be armed.
+            shutdown: snap.pending_shutdown,
+            welcome_shown: false,
             snap,
         }
     }
@@ -372,6 +409,37 @@ impl Main {
             .filter(|j| self.phase(j.id).is_running())
             .map(|j| j.queue_id)
             .collect()
+    }
+
+    /// Any job currently running (Pause all / Resume all direction).
+    fn any_running(&self) -> bool {
+        self.snap.jobs.iter().any(|j| self.phase(j.id).is_running())
+    }
+
+    /// Whether the toolbar Start/Stop toggle has anything to act on
+    /// (design §3.1: "Start disabled when nothing resumable").
+    /// Queue scope: pausing an active queue is always actionable;
+    /// starting needs ≥1 non-terminal job in the queue. Other scopes:
+    /// pausing needs something running; resuming needs ≥1 job that is
+    /// neither running nor terminal (Queued/Paused/Cancelled).
+    fn toggle_actionable(&self) -> bool {
+        match self.filter {
+            SidebarFilter::Queue(q) => {
+                self.snap.active_queues.contains(&q)
+                    || self
+                        .snap
+                        .jobs
+                        .iter()
+                        .any(|j| j.queue_id == q && !self.phase(j.id).is_terminal())
+            }
+            _ => {
+                self.any_running()
+                    || self.snap.jobs.iter().any(|j| {
+                        let p = self.phase(j.id);
+                        !p.is_running() && !p.is_terminal()
+                    })
+            }
+        }
     }
 
     fn push_toast(&mut self, severity: ToastSeverity, message: String) -> u64 {
@@ -547,6 +615,11 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 m.overlay = Overlay::DbError;
             } else if secrets_locked {
                 m.overlay = Overlay::SecretsLocked;
+            } else if !m.snap.settings.first_run_seen {
+                // First launch: welcome variant of the extensions
+                // dialog (design §3.8). Recovery overlays win.
+                m.overlay = Overlay::Welcome;
+                m.welcome_shown = true;
             }
             *app = App::Ready(Box::new(m));
             Task::none()
@@ -581,9 +654,19 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             // the confirm path, so only surface increases here.
             let added = new_count.saturating_sub(m.prev_job_count);
             m.prev_job_count = new_count;
+            // Adopt a pending power action the snapshot knows about
+            // (late connect / armed before this refetch). A `None`
+            // snapshot does NOT clear an armed banner: clearing is
+            // owned by `ShutdownCancelled` + the deadline tick, so a
+            // refetch racing the arm event can't hide the countdown.
+            m.shutdown = snap.pending_shutdown.or(m.shutdown);
             m.snap = snap;
             m.selection
                 .retain(|id| m.snap.jobs.iter().any(|j| j.id == *id));
+            if !m.welcome_shown && !m.snap.settings.first_run_seen && m.overlay == Overlay::None {
+                m.overlay = Overlay::Welcome;
+                m.welcome_shown = true;
+            }
             if added > 0 {
                 let msg = if added == 1 {
                     "Download added".to_owned()
@@ -607,6 +690,17 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             | Event::SettingsChanged
             | Event::ActiveQueuesChanged
             | Event::ConflictChanged => refresh(m.client.clone()),
+            Event::ShutdownPending {
+                action,
+                deadline_ms,
+            } => {
+                m.shutdown = Some((action, deadline_ms));
+                Task::none()
+            }
+            Event::ShutdownCancelled => {
+                m.shutdown = None;
+                Task::none()
+            }
             Event::Close => iced::exit(),
             Event::Focus | Event::ShowMainWindow => iced::window::latest().and_then(|id| {
                 Task::batch([
@@ -694,10 +788,43 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
         Msg::CloseOverlay => {
             m.context_menu = None;
             m.columns_menu = false;
+            // Escape/backdrop on the welcome overlay is a dismissal
+            // too — it must persist `first_run_seen` like the buttons.
+            if m.overlay == Overlay::Welcome {
+                return update_main(m, Msg::WelcomeDismiss);
+            }
             if !matches!(m.overlay, Overlay::DbError | Overlay::SecretsLocked) {
                 m.overlay = Overlay::None;
             }
             Task::none()
+        }
+        Msg::WelcomeDismiss => {
+            m.overlay = Overlay::None;
+            if m.snap.settings.first_run_seen {
+                return Task::none();
+            }
+            // Optimistic local flip; the daemon echoes SettingsChanged.
+            m.snap.settings.first_run_seen = true;
+            let settings = m.snap.settings.clone();
+            let client = m.client.clone();
+            act(async move { client.update_settings(settings).await })
+        }
+        Msg::ShutdownTick => {
+            // Banner clears itself when the deadline passes (the action
+            // fires daemon-side; nothing left to cancel).
+            if let Some((_, deadline_ms)) = m.shutdown
+                && chrono::Utc::now().timestamp_millis() >= deadline_ms
+            {
+                m.shutdown = None;
+            }
+            Task::none()
+        }
+        Msg::CancelShutdown => {
+            // Clear optimistically; `CancelPendingShutdown` is
+            // idempotent daemon-side (Ok even when already fired).
+            m.shutdown = None;
+            let client = m.client.clone();
+            act(async move { client.cancel_pending_shutdown().await })
         }
         Msg::KeyPressed(key, mods) => handle_key(m, key, mods),
         Msg::Modifiers(mods) => {
@@ -721,13 +848,16 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             m.col_drag = Some((col, m.cursor.0, m.columns.width(col as usize)));
             Task::none()
         }
-        Msg::TableScrolled(x) => iced::widget::operation::scroll_to(
-            iced::widget::Id::new("tbl-header"),
-            iced::widget::scrollable::AbsoluteOffset {
-                x: Some(x),
-                y: None,
-            },
-        ),
+        Msg::TableScrolled(x) => {
+            m.table_scroll_x = x;
+            iced::widget::operation::scroll_to(
+                iced::widget::Id::new("tbl-header"),
+                iced::widget::scrollable::AbsoluteOffset {
+                    x: Some(x),
+                    y: None,
+                },
+            )
+        }
         Msg::ColHandleHover(col, on) => {
             if on {
                 m.col_handle_hover = Some(col);
@@ -1130,16 +1260,26 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                 ToolbarAction::AddUrl => {
                     act(async move { client.open_add_window(None, None).await })
                 }
-                ToolbarAction::PauseQueue => {
-                    let q = match m.filter {
-                        SidebarFilter::Queue(q) => Some(q),
-                        _ => None,
-                    };
-                    match q {
-                        Some(q) => act(async move { client.stop_queue(q).await }),
-                        None => Task::none(),
+                ToolbarAction::ToggleRun => match m.filter {
+                    // Queue scope: direction keyed on `active_queues`
+                    // membership (design §3.1 Start/Stop queue).
+                    SidebarFilter::Queue(q) => {
+                        if m.snap.active_queues.contains(&q) {
+                            act(async move { client.stop_queue(q).await })
+                        } else {
+                            act(async move { client.start_queue(q).await })
+                        }
                     }
-                }
+                    // Other scopes: pause/resume everything, keyed on
+                    // whether anything is running.
+                    _ => {
+                        if m.any_running() {
+                            act(async move { client.pause_all().await })
+                        } else {
+                            act(async move { client.resume_all().await })
+                        }
+                    }
+                },
                 ToolbarAction::StopAll => act(async move { client.pause_all().await }),
                 ToolbarAction::Clean => {
                     let done: Vec<JobId> = m
@@ -1386,6 +1526,14 @@ pub fn subscription(app: &App) -> Subscription<Msg> {
                     .map(|_| Msg::AnimTick),
             );
         }
+        // Countdown-banner redraw clock — only while a shutdown is
+        // pending. Not motion: the remaining seconds are data.
+        if m.shutdown.is_some() {
+            subs.push(
+                iced::time::every(std::time::Duration::from_millis(SHUTDOWN_TICK_MS))
+                    .map(|_| Msg::ShutdownTick),
+            );
+        }
     }
     Subscription::batch(subs)
 }
@@ -1447,24 +1595,36 @@ fn main_view(m: &Main) -> Element<'_, Msg> {
 
     // Overlays/modals cover the body only — the titlebar stays above
     // them (matches the egui app, whose scrim started below the bar).
-    let body = column![
-        row![
-            sidebar(m),
-            vdivider(t.border_subtle, f32::MAX),
-            column![
-                toolbar(m),
-                hairline(t.border_subtle),
-                tab_strip(m),
-                hairline(t.border_subtle),
-                table(m),
+    let mut body = column![];
+    // Shutdown countdown strip (G1d): pinned at the top of the body.
+    // Inside the overlay-stack region so the context-menu anchor math
+    // (cursor − titlebar) stays exact while the banner is up.
+    if let Some((action, deadline_ms)) = m.shutdown {
+        body = body
+            .push(shutdown_banner(m, action, deadline_ms))
+            .push(hairline(t.border_subtle));
+    }
+    let body = body.push(
+        column![
+            row![
+                sidebar(m),
+                vdivider(t.border_subtle, f32::MAX),
+                column![
+                    toolbar(m),
+                    hairline(t.border_subtle),
+                    tab_strip(m),
+                    hairline(t.border_subtle),
+                    table(m),
+                ]
+                .width(Length::Fill)
+                .height(Length::Fill),
             ]
-            .width(Length::Fill)
             .height(Length::Fill),
+            hairline(t.border_subtle),
+            statusbar(m),
         ]
         .height(Length::Fill),
-        hairline(t.border_subtle),
-        statusbar(m),
-    ];
+    );
 
     let base: Element<'_, Msg> = container(body)
         .width(Length::Fill)
@@ -1485,6 +1645,7 @@ fn main_view(m: &Main) -> Element<'_, Msg> {
             Overlay::Host => main_dialogs::host_settings(m, base),
             Overlay::Remove => main_dialogs::remove_confirm(m, base),
             Overlay::BrowserExtensions => main_dialogs::browser_extensions(m, base),
+            Overlay::Welcome => main_dialogs::welcome(m, base),
             Overlay::DbError => {
                 let err = m.db_error.clone().unwrap_or_default();
                 main_dialogs::db_error(m, base, &err)
@@ -1637,6 +1798,54 @@ fn toast_layer<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg> {
         .align_y(Alignment::End)
         .padding(TOAST_MARGIN);
     iced::widget::stack![base, anchored].into()
+}
+
+// ------------------------------------------------------- shutdown banner
+
+/// Rust-tinted countdown strip (B4/G1d), pinned at the top of the
+/// body while a destructive power action is pending. Reuses the
+/// tinted callout grammar of the download-window reconnect banner
+/// (status fg over its `*_bg` tint, icon 17 + 12px medium body) but
+/// square-cornered/full-width as a strip; the body adds the hairline
+/// below. Remaining seconds are DERIVED from `deadline_ms` on every
+/// redraw — no local timer state (B4).
+fn shutdown_banner(m: &Main, action: PowerAction, deadline_ms: i64) -> Element<'_, Msg> {
+    let t = &m.tokens;
+    let fg = t.status_danger;
+    let bg = t.status_danger_bg;
+    let verb = match action {
+        PowerAction::ShutDown => "shut down",
+        PowerAction::Restart => "restart",
+        PowerAction::Sleep => "sleep",
+        PowerAction::Hibernate => "hibernate",
+    };
+    // Ceil so the banner never shows "0s" while the action is pending.
+    let remaining_s = ((deadline_ms - chrono::Utc::now().timestamp_millis()).max(0) + 999) / 1000;
+    container(
+        row![
+            icons::icon("power", 17.0, fg),
+            text(format!("System will {verb} in {remaining_s}s"))
+                .font(theme::BODY_MEDIUM)
+                .size(12.0)
+                .color(fg),
+            iced::widget::Space::new().width(Length::Fill),
+            Btn::new("Cancel shutdown")
+                .secondary()
+                .size(BtnSize::Sm)
+                .icon("x")
+                .on_press(Msg::CancelShutdown)
+                .view(t),
+        ]
+        .spacing(theme::space::S2)
+        .align_y(Alignment::Center),
+    )
+    .width(Length::Fill)
+    .padding([theme::space::S1, theme::space::S3])
+    .style(move |_| container::Style {
+        background: Some(bg.into()),
+        ..Default::default()
+    })
+    .into()
 }
 
 // ---------------------------------------------------------------- sidebar
@@ -1924,9 +2133,14 @@ fn leader_fg(t: &Tokens, active: bool) -> iced::Color {
 
 fn toolbar(m: &Main) -> Element<'_, Msg> {
     let t = &m.tokens;
-    let queue_active = match m.filter {
-        SidebarFilter::Queue(q) => m.snap.active_queues.contains(&q),
-        _ => !m.snap.active_queues.is_empty(),
+    // Start/Stop toggle (design §3.1): label/icon follow the action the
+    // press would take — queue scope keys off `active_queues`
+    // membership, other scopes off "anything running".
+    let (toggle_label, toggle_icon) = match m.filter {
+        SidebarFilter::Queue(q) if m.snap.active_queues.contains(&q) => ("Pause queue", "pause"),
+        SidebarFilter::Queue(_) => ("Start queue", "play"),
+        _ if m.any_running() => ("Pause all", "pause"),
+        _ => ("Resume all", "play"),
     };
     let bar = row![
         Btn::new("Add URL")
@@ -1936,11 +2150,11 @@ fn toolbar(m: &Main) -> Element<'_, Msg> {
             .on_press(Msg::Toolbar(ToolbarAction::AddUrl))
             .view(t),
         container(vdivider(t.border_subtle, 24.0)).padding([0.0, theme::space::S1]),
-        Btn::new("Pause queue")
+        Btn::new(toggle_label)
             .toolbar()
-            .icon("pause")
-            .enabled(queue_active)
-            .on_press(Msg::Toolbar(ToolbarAction::PauseQueue))
+            .icon(toggle_icon)
+            .enabled(m.toggle_actionable())
+            .on_press(Msg::Toolbar(ToolbarAction::ToggleRun))
             .view(t),
         Btn::new("Stop all")
             .toolbar()
@@ -2158,21 +2372,78 @@ fn table(m: &Main) -> Element<'_, Msg> {
         for job in &jobs {
             rows = rows.push(job_row(m, job));
         }
+        // Design-spec scrollbars (§4): 10px rail, thin rounded thumb.
+        let bar = || {
+            scrollable::Scrollbar::new()
+                .width(theme::size::SCROLLBAR_W)
+                .scroller_width(theme::scroll::THUMB_W)
+                .margin(0.0)
+        };
         scrollable(rows)
             .direction(scrollable::Direction::Both {
-                vertical: scrollable::Scrollbar::new(),
-                horizontal: scrollable::Scrollbar::new(),
+                vertical: bar(),
+                horizontal: bar(),
             })
+            .style(theme::scrollbar_style)
             .on_scroll(|vp| Msg::TableScrolled(vp.absolute_offset().x))
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
     };
 
+    // Column-resize guideline (design §4 ResizableHeader): while a
+    // header grip is dragged, a full-height 1px clay-300 rule over the
+    // body marks the dragged boundary.
+    let body: Element<'_, Msg> = match m.col_drag {
+        Some((col, _, _)) => match drag_guideline_x(m, col) {
+            Some(x) => {
+                let rule = container(iced::widget::Space::new())
+                    .width(Length::Fixed(GUIDELINE_W))
+                    .height(Length::Fill)
+                    .style(|_| container::Style {
+                        background: Some(color::clay::C300.into()),
+                        ..Default::default()
+                    });
+                iced::widget::stack![
+                    body,
+                    container(rule)
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .padding(iced::Padding {
+                            left: x,
+                            ..Default::default()
+                        }),
+                ]
+                .into()
+            }
+            None => body,
+        },
+        None => body,
+    };
+
     column![header, hairline(t.border_subtle), body,]
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
+}
+
+/// X of the dragged column's right boundary in table-body coordinates:
+/// the visible-column widths up to and including the dragged column,
+/// corrected by the horizontal scroll offset. `None` when the boundary
+/// is scrolled out of view to the left (or the column is hidden).
+fn drag_guideline_x(m: &Main, dragged: SortColumn) -> Option<f32> {
+    let mut x = 0.0;
+    for (col, _) in TABLE_COLS {
+        if !m.columns.is_visible(col as usize) {
+            continue;
+        }
+        x += m.columns.width(col as usize);
+        if col == dragged {
+            let x = x - m.table_scroll_x;
+            return (x >= 0.0).then_some(x);
+        }
+    }
+    None
 }
 
 fn empty_state(m: &Main) -> Element<'_, Msg> {

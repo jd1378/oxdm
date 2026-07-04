@@ -12,6 +12,7 @@ mod hooks;
 pub mod keyring;
 mod mapping;
 mod pause;
+mod power;
 mod queue_scheduler;
 mod resolvers;
 mod runner;

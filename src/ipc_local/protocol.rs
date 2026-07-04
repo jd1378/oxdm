@@ -13,8 +13,8 @@ use crate::data::RemoveOpts;
 use crate::data::UpdateInfo;
 use crate::data::UpdaterEvent;
 use crate::domain::{
-    Advanced, Category, Checksum, HostSetting, Job, JobError, JobId, OnCompletion, Phase, Queue,
-    QueueId, Settings,
+    Advanced, Category, Checksum, HostSetting, Job, JobError, JobId, OnCompletion, Phase,
+    PowerAction, Queue, QueueId, Settings,
 };
 
 /// Top-level frame on the wire. Each frame is one length-prefixed
@@ -122,7 +122,10 @@ pub enum Request {
     DeleteQueue(QueueId),
 
     // ── settings / hosts ───────────────────────────────────────────
-    UpdateSettings(Settings),
+    /// Boxed: `Settings` is by far the largest payload and would bloat
+    /// every stack-passed `Request` (clippy `large_enum_variant`).
+    /// `Box<T>` serializes identically to `T` — wire shape unchanged.
+    UpdateSettings(Box<Settings>),
     RegenerateExtToken,
     UpsertHost(HostSetting),
     DeleteHost(String),
@@ -178,6 +181,12 @@ pub enum Request {
     ResolveNotResumable(JobId, u64, NotResumableRes),
     ResolveSameDownload(JobId, u64, SameDownloadRes),
     ResolveFinalFile(JobId, u64, FinalFileRes),
+
+    // ── power actions ──────────────────────────────────────────────
+    /// Cancel the pending destructive power action (countdown banner's
+    /// Cancel button). Idempotent: replies `Ok` even when nothing is
+    /// pending (e.g. the timer fired a beat earlier).
+    CancelPendingShutdown,
 
     // ── update channel ─────────────────────────────────────────────
     UpdateCheck,
@@ -318,7 +327,10 @@ pub enum Reply {
     JobIdOpt(Option<JobId>),
     HostList(Vec<HostSetting>),
     HostPassword(Option<String>),
-    ProbeResult(Result<ProbeResult, String>),
+    /// Structured probe outcome: the error side carries the full
+    /// `JobError` so the Add dialog can render a typed error panel
+    /// instead of a flattened string.
+    ProbeResult(Result<ProbeResult, JobError>),
     UpdateInfo(Option<UpdateInfo>),
     ConflictHead(Option<(JobId, ConflictKind, u64)>),
     ConflictLen(usize),
@@ -355,6 +367,16 @@ pub enum Event {
         error: JobError,
     },
     Updater(UpdaterEvent),
+    /// A destructive power action was armed; it executes at
+    /// `deadline_ms` (epoch milliseconds) unless cancelled via
+    /// `Request::CancelPendingShutdown`. GUIs derive the remaining
+    /// seconds from the deadline — no timer state on the wire.
+    ShutdownPending {
+        action: PowerAction,
+        deadline_ms: i64,
+    },
+    /// The pending power action was cancelled before its deadline.
+    ShutdownCancelled,
     /// Daemon asks the GUI process to spawn a per-download window for
     /// the given job (e.g. when capture flow opens one). The main
     /// window owns the spawn decision.
@@ -380,6 +402,10 @@ pub struct SnapshotData {
     pub conflict_head: Option<(JobId, ConflictKind, u64)>,
     pub conflict_len: usize,
     pub counters: Vec<JobCounters>,
+    /// Pending destructive power action `(action, deadline_ms)`, so a
+    /// GUI connecting mid-countdown still shows the banner.
+    #[serde(default)]
+    pub pending_shutdown: Option<(PowerAction, i64)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

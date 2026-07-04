@@ -29,6 +29,18 @@ const DIALOG_W: f32 = 580.0;
 const EXT_TILE: f32 = 44.0;
 /// Segments option shown (and enforced) when the download can't be resumed.
 const FORCED_SINGLE_SEGMENT: &str = "1 connection (forced)";
+/// Window height while the probe-error block is shown (titlebar 28 +
+/// body padding 2×16 + url row ≈60 + gap 14 + error block ≈300 +
+/// footer ≈46; design §3.2 `.error-block` replaces the detected card).
+const ERROR_H: f32 = 484.0;
+/// Static "a few things to check" bullets for the probe-error panel
+/// (design §3.2, `add-dialog.jsx` `.eb-checklist` copy).
+const PROBE_CHECKLIST: &[&str] = &[
+    "The link is still valid and hasn't expired.",
+    "You're signed in if the file requires authentication — add credentials under Advanced → Auth.",
+    "A proxy or VPN isn't blocking the host — review Advanced → Proxy.",
+    "Try a different user agent if the server filters by browser.",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdvTab {
@@ -64,7 +76,7 @@ pub enum Msg {
     Paste,
     Pasted(Option<String>),
     DebounceFired(u64),
-    Probed(u64, Result<ProbeResult, String>),
+    Probed(u64, Result<ProbeResult, crate::domain::JobError>),
     SavePathChanged(String),
     BrowseSave,
     BrowsedSave(Option<PathBuf>),
@@ -85,6 +97,8 @@ pub enum Msg {
     HeaderValue(usize, String),
     HeaderRemove(usize),
     HeaderAdd,
+    RetryProbe,
+    CopyText(String),
     Submit { start_now: bool },
     Submitted(Result<(), String>),
     Cancel,
@@ -120,12 +134,19 @@ pub struct AddState {
     url: String,
     probe_gen: u64,
     probing: bool,
-    probed: Option<Result<ProbeResult, String>>,
+    /// Probe outcome; the error side keeps the structured `JobError`
+    /// so the GUI wave can render a typed error panel (B2).
+    probed: Option<Result<ProbeResult, crate::domain::JobError>>,
 
     save_path: String,
     category: Option<Category>,
     queue: QueueId,
     segments: u64,
+    /// User touched the save-path field — category routing (F5) must
+    /// not overwrite an explicit choice.
+    save_dirty: bool,
+    /// User picked a queue — same rule.
+    queue_dirty: bool,
 
     advanced_open: bool,
     adv_tab: AdvTab,
@@ -296,6 +317,8 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 category: None,
                 queue: boot.main_queue,
                 segments: 8,
+                save_dirty: false,
+                queue_dirty: false,
                 advanced_open: false,
                 adv_tab: AdvTab::Proxy,
                 proxy_kind: ProxyKind::None,
@@ -313,6 +336,10 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
             };
             let mut task = Task::none();
             if let Some(job) = boot.edit {
+                // Editing an existing job: its folder/queue are settled
+                // choices — category routing must never move them (F5).
+                st.save_dirty = true;
+                st.queue_dirty = true;
                 st.url = job.url.to_string();
                 st.queue = job.queue_id;
                 st.category = Some(job.category);
@@ -365,12 +392,43 @@ fn start_probe(st: &AddState) -> Task<Msg> {
                 .await
             {
                 Ok(Ok(inner)) => inner,
-                Ok(Err(e)) => Err(e),
-                Err(_) => Err("probe timed out".to_owned()),
+                Ok(Err(e)) => Err(crate::domain::JobError::Other(e)),
+                Err(_) => Err(crate::domain::JobError::Other("probe timed out".to_owned())),
             }
         },
         move |res| Msg::Probed(generation, res),
     )
+}
+
+/// Per-category routing prefill (feature #10 / guardian F5): when the
+/// category changes, seed the save folder from
+/// `Settings::category_folders` and the queue from
+/// `Settings::category_queues` — but never overwrite a field the user
+/// already touched (`save_dirty` / `queue_dirty`). Client-side only;
+/// the daemon applies the same routing solely on the non-interactive
+/// capture path.
+fn apply_category_prefill(st: &mut AddState) {
+    let Some(cat) = st.category else {
+        return;
+    };
+    if !st.save_dirty
+        && let Some(folder) = st.settings.category_folders.get(&cat)
+    {
+        // Keep the detected filename; before detection the path is a
+        // bare directory (a trailing separator marks it as such for
+        // `build_req`).
+        let name = st
+            .detected()
+            .map(|p| p.filename.clone())
+            .unwrap_or_default();
+        st.save_path = folder.join(name).display().to_string();
+    }
+    if !st.queue_dirty
+        && let Some(qid) = st.settings.category_queues.get(&cat)
+        && st.queues.iter().any(|(id, _)| id == qid)
+    {
+        st.queue = *qid;
+    }
 }
 
 fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
@@ -409,6 +467,7 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
                 return Task::none();
             }
             st.probing = false;
+            let mut classified = false;
             if let Ok(p) = &res {
                 // derive save path: dir + detected filename
                 let dir = PathBuf::from(st.save_path.trim());
@@ -425,17 +484,24 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
                         &p.filename,
                         &st.settings.category_extensions,
                     ));
+                    classified = true;
                 }
-                let resize = iced::window::latest()
-                    .and_then(|id| iced::window::resize(id, iced::Size::new(DIALOG_W, 417.0)));
-                st.probed = Some(res);
-                return resize;
             }
+            let ok = res.is_ok();
             st.probed = Some(res);
-            Task::none()
+            if classified {
+                // Freshly classified → apply per-category routing (F5).
+                apply_category_prefill(st);
+            }
+            // Grow the window for the detected card, or for the error
+            // block (design §3.2: `.error-block` replaces the card).
+            let h = if ok { 417.0 } else { ERROR_H };
+            iced::window::latest()
+                .and_then(move |id| iced::window::resize(id, iced::Size::new(DIALOG_W, h)))
         }
         Msg::SavePathChanged(p) => {
             st.save_path = p;
+            st.save_dirty = true;
             Task::none()
         }
         Msg::BrowseSave => {
@@ -458,19 +524,25 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
             st.save_path = dir.join(name).display().to_string();
+            st.save_dirty = true;
             Task::none()
         }
         Msg::BrowsedSave(None) => Task::none(),
         Msg::SetCategory(label) => {
+            let prev = st.category;
             st.category = Category::ALL_ASSIGNABLE
                 .iter()
                 .copied()
                 .find(|c| c.label() == label);
+            if st.category != prev {
+                apply_category_prefill(st);
+            }
             Task::none()
         }
         Msg::SetQueue(name) => {
             if let Some((id, _)) = st.queues.iter().find(|(_, n)| *n == name) {
                 st.queue = *id;
+                st.queue_dirty = true;
             }
             Task::none()
         }
@@ -550,6 +622,14 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
             st.headers.push((String::new(), String::new()));
             Task::none()
         }
+        Msg::RetryProbe => {
+            st.probed = None;
+            st.error = None;
+            st.probe_gen += 1;
+            st.probing = true;
+            start_probe(st)
+        }
+        Msg::CopyText(s) => iced::clipboard::write(s),
         Msg::Submit { start_now } => {
             let Some(req) = st.build_req() else {
                 st.error = Some("Enter a valid http(s) URL.".to_owned());
@@ -652,7 +732,18 @@ fn ready_view(st: &AddState) -> Element<'_, Msg> {
         "Download File Info"
     };
 
-    let mut body = column![url_row(st), detect_card(st)].spacing(theme::space::S3);
+    // Eval error replaces the detected-card entirely (design §3.2).
+    let card: Element<'_, Msg> = match &st.probed {
+        Some(Err(e)) => crate::gui::widget::error_panel::error_checklist_block(
+            t,
+            e,
+            PROBE_CHECKLIST,
+            Some(Msg::RetryProbe),
+            Msg::CopyText(crate::gui::widget::error_panel::error_meta(e).2.to_owned()),
+        ),
+        _ => detect_card(st),
+    };
+    let mut body = column![url_row(st), card].spacing(theme::space::S3);
 
     if let Some(p) = st.detected()
         && !p.is_resumable
@@ -929,8 +1020,11 @@ fn detect_card(st: &AddState) -> Element<'_, Msg> {
         .into(),
     };
 
-    let text_col: Element<'_, Msg> = match (&st.probed, st.probing) {
-        (Some(Ok(p)), _) => column![
+    // The probe-error state never reaches this card (the shared error
+    // panel replaces it in `ready_view`), so only detected / probing /
+    // empty remain.
+    let text_col: Element<'_, Msg> = match (detected, st.probing) {
+        (Some(p), _) => column![
             text(p.filename.clone())
                 .font(theme::BODY_BOLD)
                 .size(14.0)
@@ -944,15 +1038,6 @@ fn detect_card(st: &AddState) -> Element<'_, Msg> {
             .font(theme::MONO)
             .size(11.0)
             .color(t.fg_3),
-        ]
-        .spacing(2.0)
-        .into(),
-        (Some(Err(e)), _) => column![
-            text("Could not detect file")
-                .font(theme::BODY_BOLD)
-                .size(13.0)
-                .color(t.status_danger),
-            text(e.clone()).font(theme::BODY).size(12.0).color(t.fg_3),
         ]
         .spacing(2.0)
         .into(),

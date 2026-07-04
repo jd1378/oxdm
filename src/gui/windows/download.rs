@@ -19,10 +19,13 @@ use crate::gui::icons;
 use crate::gui::ipc::DaemonSignal;
 use crate::gui::shot::Shot;
 use crate::gui::theme::{self, Tokens};
+use crate::gui::widget::error_panel::{
+    HASH_TRUNCATE_CHARS, error_block, hash_mismatch, mid_truncate,
+};
 use crate::gui::widget::{
-    Btn, BtnSize, RateChart, TabBtn, TextInput, card, checkbox, collapsible_card, combo, eyebrow,
-    hairline, number_stepper, pill_progress, rate_chart, segmented, sibling, status_dot,
-    striped_progress, toggle,
+    Btn, BtnSize, RateChart, TabBtn, TextInput, card, checkbox, collapsible_card, combo, hairline,
+    number_stepper, pill_progress, rate_chart, segmented, sibling, status_dot, striped_progress,
+    toggle,
 };
 use crate::gui::windows::add::footer;
 use crate::ipc_local::Client;
@@ -51,10 +54,9 @@ const SPEED_PRESETS_KBS: &[(&str, u64)] = &[
 
 // --- Completed view (design §3.3 completed / §3.4 ChecksumBox) -------
 /// Middle-truncation budget (chars) for the saved-path / source-URL
-/// rows so long values stay on one line.
+/// rows so long values stay on one line. (Hash truncation lives in
+/// `widget::error_panel::HASH_TRUNCATE_CHARS`.)
 const PATH_TRUNCATE_CHARS: usize = 52;
-/// Middle-truncation budget for displayed hashes.
-const HASH_TRUNCATE_CHARS: usize = 40;
 
 // --- Completion burst (design §3.3 `.complete-burst`, anim `cb-pop`) -
 /// 88px burst stage — two pulsing rings around a gradient check circle.
@@ -729,7 +731,7 @@ fn running_view(st: &State) -> Element<'_, Msg> {
     let error = st.entry.job.status.error.clone();
 
     let lower: Element<'_, Msg> = if let Some(err) = &error {
-        crate::gui::widget::vscroll(error_block(st, err))
+        crate::gui::widget::vscroll(error_block(&st.tokens, err, Msg::Copy(err.to_string())))
             .height(Length::Fill)
             .into()
     } else {
@@ -850,164 +852,6 @@ fn running_view(st: &State) -> Element<'_, Msg> {
         ]
         .into(),
     )
-}
-
-/// Friendly title, leading icon, short code, and a static "things to
-/// check" hint for each `JobError` variant. The detail line uses the
-/// error's own `Display` text. (Design §3.3 severe-error grammar.)
-fn error_meta(err: &JobError) -> (&'static str, &'static str, &'static str, &'static str) {
-    match err {
-        JobError::Network(_) => (
-            "wifi",
-            "Connection problem",
-            "NETWORK",
-            "Check your internet connection, then resume. If it persists, the server may be down or rate-limiting.",
-        ),
-        JobError::Dns { .. } => (
-            "globe",
-            "Couldn't reach the server",
-            "DNS",
-            "The hostname couldn't be resolved. Verify the URL spelling and your DNS / VPN settings.",
-        ),
-        JobError::ServerConflict(_) => (
-            "triangle-alert",
-            "The file on the server changed",
-            "SERVER_CONFLICT",
-            "The remote file changed since this download began. Restart from zero to fetch the current version.",
-        ),
-        JobError::SaveConflict(_) => (
-            "hard-drive",
-            "Couldn't save the file",
-            "SAVE_CONFLICT",
-            "A naming conflict came up while writing. Free up the filename or pick a different folder.",
-        ),
-        JobError::DuplicateActive { .. } => (
-            "copy",
-            "Already downloading",
-            "DUPLICATE",
-            "A download with this name is already in progress in the same folder. Wait for it or rename this one.",
-        ),
-        JobError::ChecksumMismatch { .. } => (
-            "shield-alert",
-            "Integrity check failed",
-            "CHECKSUM_MISMATCH",
-            "The data doesn't match the expected hash. Don't open the file; re-download from a trusted source.",
-        ),
-        JobError::Cancelled => (
-            "circle-x",
-            "Download cancelled",
-            "CANCELLED",
-            "This download was cancelled. Start it again to retry.",
-        ),
-        JobError::Io(_) => (
-            "hard-drive",
-            "Disk write error",
-            "IO",
-            "Couldn't write to disk. Check free space and folder permissions, or save to a different folder.",
-        ),
-        JobError::ConflictPending(_) => (
-            "triangle-alert",
-            "Paused — needs your attention",
-            "CONFLICT_PENDING",
-            "A conflict came up while running in the background. Resume to retry the download.",
-        ),
-        JobError::Other(_) => (
-            "circle-alert",
-            "Something went wrong",
-            "ERROR",
-            "An unexpected error occurred. Try again; if it keeps failing, check the daemon logs.",
-        ),
-    }
-}
-
-/// Severe-error block: rust-tinted card with title + detail, a small
-/// "things to check" hint, and a quiet monospace code footer with copy.
-fn error_block<'a>(st: &'a State, err: &JobError) -> Element<'a, Msg> {
-    let t = &st.tokens;
-    let t2 = *t;
-    let (icon_name, title, code, hint) = error_meta(err);
-    let detail = err.to_string();
-
-    let head = row![
-        container(icons::icon(icon_name, 20.0, t.status_danger))
-            .width(Length::Fixed(36.0))
-            .height(Length::Fixed(36.0))
-            .align_x(Alignment::Center)
-            .align_y(Alignment::Center)
-            .style(move |_| container::Style {
-                background: Some(t2.status_danger_bg.into()),
-                border: iced::Border {
-                    radius: 8.0.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            }),
-        column![
-            text(title)
-                .font(theme::BODY_BOLD)
-                .size(14.0)
-                .color(t.status_danger),
-            text(detail).font(theme::BODY).size(12.0).color(t.fg_2),
-        ]
-        .spacing(2.0),
-    ]
-    .spacing(theme::space::S3)
-    .align_y(Alignment::Center);
-
-    let checks = column![
-        eyebrow(t, "things to check"),
-        text(hint)
-            .font(theme::BODY)
-            .size(12.0)
-            .color(t.fg_2)
-            .line_height(iced::widget::text::LineHeight::Relative(1.4)),
-    ]
-    .spacing(theme::space::S1);
-
-    // Quiet monospace error-code footer (label + chip + copy).
-    let code_chip = container(text(code).font(theme::MONO).size(11.0).color(t2.fg_2))
-        .padding([2.0, 8.0])
-        .style(move |_| container::Style {
-            background: Some(t2.bg_sunken.into()),
-            border: iced::Border {
-                color: t2.border_subtle,
-                width: 1.0,
-                radius: theme::radius::XS.into(),
-            },
-            ..Default::default()
-        });
-    let code_footer = row![
-        text("Error code")
-            .font(theme::BODY)
-            .size(11.0)
-            .color(t.fg_3),
-        code_chip,
-        iced::widget::Space::new().width(Length::Fill),
-        Btn::new("Copy")
-            .toolbar()
-            .size(BtnSize::Sm)
-            .icon("copy")
-            .on_press(Msg::Copy(err.to_string()))
-            .view(t),
-    ]
-    .spacing(theme::space::S2)
-    .align_y(Alignment::Center);
-
-    container(
-        column![head, hairline(t.border_subtle), checks, code_footer].spacing(theme::space::S3),
-    )
-    .width(Length::Fill)
-    .padding(theme::space::S3)
-    .style(move |_| container::Style {
-        background: Some(t2.status_danger_bg.into()),
-        border: iced::Border {
-            color: t2.status_danger,
-            width: 1.0,
-            radius: theme::surface::RADIUS.into(),
-        },
-        ..Default::default()
-    })
-    .into()
 }
 
 /// Error-state footer button group (right side). Maps the `JobError`
@@ -1489,7 +1333,9 @@ fn completion_tab(st: &State) -> Element<'_, Msg> {
 }
 
 /// Destructive-action warning panel (design `.pane-warn`, rust). Lists
-/// exactly what will happen and promises a 30-second cancel prompt.
+/// exactly what will happen and promises the shutdown-grace cancel
+/// prompt (`SHUTDOWN_GRACE_SECS` = 60 s; F4 reconciliation of the
+/// mock's 30 s vs 60 s contradiction).
 /// Built from the real `OnCompletion` / `ShutdownAction` values.
 fn completion_warn(st: &State) -> Option<Element<'_, Msg>> {
     let t = &st.tokens;
@@ -1538,10 +1384,13 @@ fn completion_warn(st: &State) -> Option<Element<'_, Msg>> {
         );
     }
     list = list.push(
-        text("You'll get a 30-second prompt to cancel before any of this happens.")
-            .font(theme::BODY)
-            .size(11.0)
-            .color(t.fg_3),
+        text(format!(
+            "You'll get a {}-second prompt to cancel before any of this happens.",
+            crate::domain::SHUTDOWN_GRACE_SECS
+        ))
+        .font(theme::BODY)
+        .size(11.0)
+        .color(t.fg_3),
     );
 
     Some(
@@ -1776,67 +1625,6 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
         ]
         .into(),
     )
-}
-
-/// Middle-truncate a string to roughly `max` chars, keeping head + tail
-/// (paths/URLs/hashes stay legible on one line). Counts by `char`.
-fn mid_truncate(s: &str, max: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max {
-        return s.to_owned();
-    }
-    let keep = max.saturating_sub(1);
-    let head = keep.div_ceil(2);
-    let tail = keep - head;
-    let head_s: String = chars[..head].iter().collect();
-    let tail_s: String = chars[chars.len() - tail..].iter().collect();
-    format!("{head_s}…{tail_s}")
-}
-
-/// Rust stacked Expected/Got mismatch panel (design §3.4). Shared by
-/// the paste-verify and local-compute paths so they read identically.
-fn hash_mismatch<'a>(t: &Tokens, algo_label: &str, expected: &str, got: &str) -> Element<'a, Msg> {
-    let t2 = *t;
-    container(
-        column![
-            row![
-                icons::icon("shield-alert", 17.0, t.status_danger),
-                text(format!("Doesn't match the saved {algo_label} hash."))
-                    .font(theme::BODY_BOLD)
-                    .size(12.0)
-                    .color(t.status_danger),
-            ]
-            .spacing(theme::space::S2)
-            .align_y(Alignment::Center),
-            text(format!(
-                "Expected  {}",
-                mid_truncate(expected, HASH_TRUNCATE_CHARS)
-            ))
-            .font(theme::MONO)
-            .size(11.0)
-            .color(t.fg_2),
-            text(format!(
-                "Got       {}",
-                mid_truncate(got, HASH_TRUNCATE_CHARS)
-            ))
-            .font(theme::MONO)
-            .size(11.0)
-            .color(t.status_danger),
-        ]
-        .spacing(theme::space::S1),
-    )
-    .width(Length::Fill)
-    .padding(theme::space::S3)
-    .style(move |_| container::Style {
-        background: Some(t2.status_danger_bg.into()),
-        border: iced::Border {
-            color: t2.status_danger,
-            width: 1.0,
-            radius: theme::radius::XS.into(),
-        },
-        ..Default::default()
-    })
-    .into()
 }
 
 /// Completed-view ChecksumBox (design §3.4): shows the job's saved

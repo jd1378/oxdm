@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::domain::Category;
+use crate::domain::{Category, QueueId};
 
 /// oxdm-level settings. Wraps every `odl::config::Config` field plus
 /// UI-only preferences. The data layer translates this into an
@@ -111,6 +111,23 @@ pub struct Settings {
     /// at write time rather than enforced at read time.
     #[serde(default)]
     pub category_extensions: IndexMap<Category, Vec<String>>,
+    /// Per-category save-folder override. A capture classified into a
+    /// `Category` present here lands in that folder instead of
+    /// `download_dir`. Applied only on the non-interactive capture
+    /// path (`add_from_capture`); the Add dialog prefills client-side
+    /// so an explicit user choice always wins.
+    #[serde(default)]
+    pub category_folders: IndexMap<Category, PathBuf>,
+    /// Per-category default queue. Same application rules as
+    /// `category_folders`. A stale id (queue since deleted) is ignored
+    /// at apply time — the job stays in the Main queue.
+    #[serde(default)]
+    pub category_queues: IndexMap<Category, QueueId>,
+    /// True once the first-run welcome overlay has been shown and
+    /// dismissed. The GUI sets it via `UpdateSettings` on either
+    /// dismissal path.
+    #[serde(default)]
+    pub first_run_seen: bool,
 
     // ── browser-extension capture rules ─────────────────────────────
     // Single source of truth for which downloads the extension hands
@@ -292,6 +309,9 @@ impl Default for Settings {
             reduce_motion: false,
             theme_overrides: IndexMap::new(),
             category_extensions: IndexMap::new(),
+            category_folders: IndexMap::new(),
+            category_queues: IndexMap::new(),
+            first_run_seen: false,
             capture_min_size: 0,
             capture_skip_domains: Vec::new(),
             capture_skip_extensions: default_skip_extensions(),

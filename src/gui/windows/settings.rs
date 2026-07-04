@@ -9,7 +9,7 @@ use std::time::Duration;
 use iced::widget::{column, container, mouse_area, row, text, text_editor};
 use iced::{Alignment, Element, Length, Subscription, Task};
 
-use crate::domain::{Category, Density, Settings, Theme as AppTheme};
+use crate::domain::{Category, Density, Queue, QueueId, Settings, Theme as AppTheme};
 use crate::gui::chrome::{self, WindowControl, titlebar};
 use crate::gui::color;
 use crate::gui::icons;
@@ -55,21 +55,79 @@ impl Section {
         match self {
             Section::General => "Appearance, storage locations, and startup behavior.",
             Section::Downloads => "Retry behavior and removal confirmations.",
-            Section::Categories => "Map file extensions to download categories.",
+            Section::Categories => {
+                "Categories auto-sort downloads by file extension. \
+                 Edit save folders and detected types."
+            }
             Section::Network => "Connections, bandwidth, proxy, and request identity.",
             Section::Browser => "Pair the browser extension and resolve capture conflicts.",
             Section::Notifications => "What oxdm tells you when a download finishes.",
-            Section::Advanced => "Theme overrides and the update feed.",
+            Section::Advanced => "Theme overrides, the update feed, and reset.",
             Section::About => "Version and project information.",
         }
     }
 }
 
+/// Default-queue option for a category `combo`. Equality is id-only so
+/// duplicate queue names still select correctly.
+#[derive(Debug, Clone)]
+pub struct QueueChoice {
+    id: Option<QueueId>,
+    name: String,
+}
+
+impl PartialEq for QueueChoice {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl std::fmt::Display for QueueChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.name)
+    }
+}
+
+impl State {
+    /// Options for a category's default-queue combo: "Default" (daemon
+    /// picks) plus every known queue.
+    fn queue_choices(&self) -> Vec<QueueChoice> {
+        let mut v = vec![QueueChoice {
+            id: None,
+            name: "Default".to_owned(),
+        }];
+        v.extend(self.queues.iter().map(|q| QueueChoice {
+            id: Some(q.id),
+            name: q.name.clone(),
+        }));
+        v
+    }
+
+    /// The current selection for a category (falls back to "Default"
+    /// when the stored queue no longer exists).
+    fn queue_choice_for(&self, sel: Option<QueueId>) -> QueueChoice {
+        sel.and_then(|id| self.queues.iter().find(|q| q.id == id))
+            .map(|q| QueueChoice {
+                id: Some(q.id),
+                name: q.name.clone(),
+            })
+            .unwrap_or(QueueChoice {
+                id: None,
+                name: "Default".to_owned(),
+            })
+    }
+}
+
+/// Boot payload: client + settings snapshot + queue list (for the
+/// category default-queue pickers).
+type BootPayload = Box<(Arc<Client>, Settings, Vec<Queue>)>;
+
 #[derive(Clone)]
 pub enum Msg {
-    Connected(Result<Box<(Arc<Client>, Settings)>, String>),
+    Connected(Result<BootPayload, String>),
     Daemon(DaemonSignal),
     Window(WindowControl),
+    QueuesLoaded(Vec<Queue>),
     SetSection(Section),
     // General
     SetTheme(String),
@@ -89,8 +147,13 @@ pub enum Msg {
     ConfirmIncomplete(bool),
     ConfirmCompleted(bool),
     // Categories
+    CategoryToggle(Category),
     CategoryExts(Category, String),
     CategoryReset(Category),
+    CategoryFolder(Category, String),
+    BrowseCategoryFolder(Category),
+    BrowsedCategoryFolder(Category, Option<std::path::PathBuf>),
+    CategoryQueue(Category, QueueChoice),
     // Network
     AutoConnections(bool),
     Concurrent(String),
@@ -111,6 +174,10 @@ pub enum Msg {
     // Advanced
     ThemeOverrides(text_editor::Action),
     UpdateFeed(String),
+    ResetDbAsk,
+    ResetDbCancel,
+    ResetDbConfirm,
+    KeyPressed(iced::keyboard::Key),
     // Footer
     ResetSection,
     Save,
@@ -148,6 +215,19 @@ pub struct State {
     ipc_port: String,
     update_feed: String,
     cat_exts: Vec<(Category, String)>,
+    /// Per-category save folder mirror (blank = inherit the default
+    /// download folder; `Settings.category_folders`).
+    cat_folders: Vec<(Category, String)>,
+    /// Per-category default queue (`None` = daemon default;
+    /// `Settings.category_queues`).
+    cat_queues: Vec<(Category, Option<QueueId>)>,
+    /// Which category accordion is expanded (one at a time, design
+    /// `CategoryCard`).
+    cat_open: Option<Category>,
+    /// Queue snapshot for the default-queue pickers.
+    queues: Vec<Queue>,
+    /// Reset-oxdm confirm overlay (Advanced danger section).
+    confirm_reset: bool,
     custom_headers: text_editor::Content,
     theme_overrides: text_editor::Content,
     shot: Option<Shot>,
@@ -180,6 +260,21 @@ fn mirror(st: &mut State) {
                 .unwrap_or_else(|| c.default_extensions().join(", "));
             (*c, exts)
         })
+        .collect();
+    st.cat_folders = Category::ALL_ASSIGNABLE
+        .iter()
+        .map(|c| {
+            let dir = s
+                .category_folders
+                .get(c)
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            (*c, dir)
+        })
+        .collect();
+    st.cat_queues = Category::ALL_ASSIGNABLE
+        .iter()
+        .map(|c| (*c, s.category_queues.get(c).copied()))
         .collect();
     let headers = s
         .headers
@@ -228,7 +323,7 @@ pub fn boot() -> (App, Task<Msg>) {
                     .hello(crate::ipc_local::protocol::GuiKind::Settings)
                     .await?;
                 let snap = client.snapshot().await?;
-                Ok(Box::new((client, snap.settings)))
+                Ok(Box::new((client, snap.settings, snap.queues)))
             },
             Msg::Connected,
         ),
@@ -238,7 +333,7 @@ pub fn boot() -> (App, Task<Msg>) {
 pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
     match msg {
         Msg::Connected(Ok(boxed)) => {
-            let (client, settings) = *boxed;
+            let (client, settings, queues) = *boxed;
             let mut st = State {
                 tokens: Tokens::from_settings(&settings),
                 section: section_arg(),
@@ -257,6 +352,11 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 ipc_port: String::new(),
                 update_feed: String::new(),
                 cat_exts: Vec::new(),
+                cat_folders: Vec::new(),
+                cat_queues: Vec::new(),
+                cat_open: None,
+                queues,
+                confirm_reset: false,
                 custom_headers: text_editor::Content::new(),
                 theme_overrides: text_editor::Content::new(),
                 shot: Shot::from_env(),
@@ -284,7 +384,25 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
     match msg {
         Msg::Daemon(DaemonSignal::Lost) => iced::exit(),
         Msg::Daemon(DaemonSignal::Event(Event::Close)) => iced::exit(),
+        Msg::Daemon(DaemonSignal::Event(Event::QueuesChanged)) => {
+            let client = st.client.clone();
+            Task::perform(async move { client.snapshot().await }, |r| match r {
+                Ok(s) => Msg::QueuesLoaded(s.queues),
+                Err(_) => Msg::Noop,
+            })
+        }
         Msg::Daemon(_) => Task::none(),
+        Msg::QueuesLoaded(qs) => {
+            // Drop stale default-queue picks (queue deleted meanwhile);
+            // the daemon ignores stale ids anyway — mirror that honestly.
+            for (_, sel) in &mut st.cat_queues {
+                if sel.is_some_and(|id| !qs.iter().any(|q| q.id == id)) {
+                    *sel = None;
+                }
+            }
+            st.queues = qs;
+            Task::none()
+        }
         Msg::SetSection(sec) => {
             st.section = sec;
             Task::none()
@@ -361,6 +479,10 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             st.s.remove_confirm_completed = v;
             Task::none()
         }
+        Msg::CategoryToggle(cat) => {
+            st.cat_open = (st.cat_open != Some(cat)).then_some(cat);
+            Task::none()
+        }
         Msg::CategoryExts(cat, v) => {
             if let Some(e) = st.cat_exts.iter_mut().find(|(c, _)| *c == cat) {
                 e.1 = v;
@@ -370,6 +492,34 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
         Msg::CategoryReset(cat) => {
             if let Some(e) = st.cat_exts.iter_mut().find(|(c, _)| *c == cat) {
                 e.1 = cat.default_extensions().join(", ");
+            }
+            Task::none()
+        }
+        Msg::CategoryFolder(cat, v) => {
+            if let Some(e) = st.cat_folders.iter_mut().find(|(c, _)| *c == cat) {
+                e.1 = v;
+            }
+            Task::none()
+        }
+        Msg::BrowseCategoryFolder(cat) => Task::perform(
+            async {
+                rfd::AsyncFileDialog::new()
+                    .pick_folder()
+                    .await
+                    .map(|h| h.path().to_path_buf())
+            },
+            move |p| Msg::BrowsedCategoryFolder(cat, p),
+        ),
+        Msg::BrowsedCategoryFolder(cat, Some(d)) => {
+            if let Some(e) = st.cat_folders.iter_mut().find(|(c, _)| *c == cat) {
+                e.1 = d.display().to_string();
+            }
+            Task::none()
+        }
+        Msg::BrowsedCategoryFolder(_, None) => Task::none(),
+        Msg::CategoryQueue(cat, choice) => {
+            if let Some(e) = st.cat_queues.iter_mut().find(|(c, _)| *c == cat) {
+                e.1 = choice.id;
             }
             Task::none()
         }
@@ -440,6 +590,40 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             st.update_feed = v;
             Task::none()
         }
+        Msg::ResetDbAsk => {
+            st.confirm_reset = true;
+            Task::none()
+        }
+        Msg::ResetDbCancel => {
+            st.confirm_reset = false;
+            Task::none()
+        }
+        Msg::ResetDbConfirm => {
+            st.confirm_reset = false;
+            let client = st.client.clone();
+            // The daemon backs up the DB, spawns its replacement and
+            // exits; this window then closes via the DaemonSignal::Lost
+            // path. The reply (or a dropped connection) needs no
+            // handling beyond not crashing.
+            Task::perform(async move { client.reset_database().await }, |_| Msg::Noop)
+        }
+        // Confirm-dialog keys (design `confirm-dialog.jsx`): Enter
+        // confirms, Escape cancels — gated on the overlay being open.
+        Msg::KeyPressed(key) => {
+            use iced::keyboard::key::Named;
+            if st.confirm_reset {
+                match key.as_ref() {
+                    iced::keyboard::Key::Named(Named::Enter) => {
+                        return update_ready(st, Msg::ResetDbConfirm);
+                    }
+                    iced::keyboard::Key::Named(Named::Escape) => {
+                        return update_ready(st, Msg::ResetDbCancel);
+                    }
+                    _ => {}
+                }
+            }
+            Task::none()
+        }
         Msg::ResetSection => {
             let orig = st.original.clone();
             match st.section {
@@ -460,7 +644,11 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                     st.s.remove_confirm_incomplete = orig.remove_confirm_incomplete;
                     st.s.remove_confirm_completed = orig.remove_confirm_completed;
                 }
-                Section::Categories => st.s.category_extensions = orig.category_extensions,
+                Section::Categories => {
+                    st.s.category_extensions = orig.category_extensions;
+                    st.s.category_folders = orig.category_folders;
+                    st.s.category_queues = orig.category_queues;
+                }
                 Section::Network => {
                     st.s.max_connections = orig.max_connections;
                     st.s.max_concurrent_downloads = orig.max_concurrent_downloads;
@@ -521,6 +709,17 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                     )
                 })
                 .collect();
+            s.category_folders = st
+                .cat_folders
+                .iter()
+                .filter(|(_, dir)| !dir.trim().is_empty())
+                .map(|(c, dir)| (*c, std::path::PathBuf::from(dir.trim())))
+                .collect();
+            s.category_queues = st
+                .cat_queues
+                .iter()
+                .filter_map(|(c, q)| q.map(|q| (*c, q)))
+                .collect();
             s.headers = st
                 .custom_headers
                 .text()
@@ -572,6 +771,9 @@ pub fn subscription(app: &App) -> Subscription<Msg> {
         iced::event::listen_with(|event, _status, _id| match event {
             iced::Event::Window(iced::window::Event::Resized(size)) => {
                 Some(Msg::WinResized(size.width, size.height))
+            }
+            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) => {
+                Some(Msg::KeyPressed(key))
             }
             _ => None,
         }),
@@ -716,7 +918,13 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
         footer_el,
     ];
 
-    let content = container(page)
+    let overlaid: Element<'_, Msg> = if st.confirm_reset {
+        reset_overlay(st, page.into())
+    } else {
+        page.into()
+    };
+
+    let content = container(overlaid)
         .width(Length::Fill)
         .height(Length::Fill)
         .style(move |_| container::Style {
@@ -1034,45 +1242,202 @@ fn downloads_section(st: &State) -> Element<'_, Msg> {
     )
 }
 
+/// Icon tile size of the accordion header (design `CategoryCard` icon
+/// tile, settings-dialog.jsx).
+const CAT_ICON_TILE: f32 = 28.0;
+
+/// Sidebar icon per category (same glyphs as the main-window sidebar).
+fn cat_icon_name(cat: Category) -> &'static str {
+    match cat {
+        Category::Compressed => "archive",
+        Category::Programs => "package",
+        Category::Videos => "film",
+        Category::Music => "music",
+        Category::Pictures => "image",
+        Category::Documents => "file-text",
+        Category::Other => "file",
+    }
+}
+
+/// Category tint (mirrors the main-window ext-pill/sidebar tints; the
+/// mock's `CATEGORIES` lack tint fields — design-intent §3.7 correction
+/// says to source them from the ext-pill map).
+fn cat_tint(t: &Tokens, cat: Category) -> iced::Color {
+    match cat {
+        Category::Compressed => t.cat_compressed,
+        Category::Programs => t.cat_programs,
+        Category::Videos => t.cat_videos,
+        Category::Music => t.cat_music,
+        Category::Pictures => t.cat_pictures,
+        Category::Documents => t.cat_documents,
+        Category::Other => t.fg_3,
+    }
+}
+
+/// Accordion `CategoryCard`s (design §3.7): header = tinted icon tile +
+/// name + summary, one card expanded at a time; body = extensions
+/// editor, save folder, default queue. No "Add custom category" tile
+/// (Category is a fixed enum — documented BLOCKED) and no auto-extract
+/// (no extraction engine).
 fn categories_section(st: &State) -> Element<'_, Msg> {
     let t = &st.tokens;
-    let mut rows = column![
-        text("Override file extensions per category. Comma-separated, no dots.")
+    let mut cards = column![
+        text("Categories auto-sort by extension. Expand a card to edit extensions, save folder and default queue.")
             .font(theme::BODY)
             .size(12.0)
             .color(t.fg_3),
     ]
-    .spacing(theme::space::S3);
+    .spacing(theme::space::S2);
+
     for (cat, exts) in &st.cat_exts {
         let cat = *cat;
-        rows = rows.push(
+        let open = st.cat_open == Some(cat);
+        let tint = cat_tint(t, cat);
+        let t2 = *t;
+        let folder: &str = st
+            .cat_folders
+            .iter()
+            .find(|(c, _)| *c == cat)
+            .map(|(_, d)| d.as_str())
+            .unwrap_or("");
+        let queue_sel = st
+            .cat_queues
+            .iter()
+            .find(|(c, _)| *c == cat)
+            .and_then(|(_, q)| *q);
+
+        let n_exts = exts.split(',').filter(|e| !e.trim().is_empty()).count();
+        let summary = {
+            let dest = if folder.trim().is_empty() {
+                "Default folder".to_owned()
+            } else {
+                folder.to_owned()
+            };
+            format!("{n_exts} extensions · {dest}")
+        };
+
+        let icon_tile = container(icons::icon(cat_icon_name(cat), 14.0, tint))
+            .width(Length::Fixed(CAT_ICON_TILE))
+            .height(Length::Fixed(CAT_ICON_TILE))
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center)
+            .style(move |_| container::Style {
+                background: Some(color::with_alpha(tint, 0.12).into()),
+                border: iced::Border {
+                    radius: theme::control::RADIUS.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+
+        let header = iced::widget::button(
             row![
-                container(
-                    text(format!("{}:", cat.label()))
-                        .font(theme::BODY)
+                icon_tile,
+                column![
+                    text(cat.label())
+                        .font(theme::BODY_MEDIUM)
                         .size(13.0)
-                        .color(t.fg_1)
-                )
-                .width(Length::Fixed(110.0)),
-                TextInput::new(exts)
-                    .mono()
-                    .on_input(move |v| Msg::CategoryExts(cat, v))
-                    .view(t),
-                Btn::new("Reset")
-                    .ghost()
-                    .accent(true)
-                    .size(BtnSize::Sm)
-                    .on_press(Msg::CategoryReset(cat))
-                    .view(t),
+                        .color(t.fg_1),
+                    text(summary).font(theme::BODY).size(11.0).color(t.fg_3),
+                ]
+                .spacing(1.0),
+                iced::widget::Space::new().width(Length::Fill),
+                icons::icon(
+                    if open { "chevron-up" } else { "chevron-down" },
+                    14.0,
+                    t.fg_3
+                ),
             ]
-            .spacing(theme::space::S2)
+            .spacing(theme::space::S3)
             .align_y(Alignment::Center),
+        )
+        .width(Length::Fill)
+        .padding(theme::space::S3)
+        .on_press(Msg::CategoryToggle(cat))
+        .style(move |_th, status| iced::widget::button::Style {
+            background: Some(
+                if matches!(status, iced::widget::button::Status::Hovered) && !open {
+                    t2.bg_sunken.into()
+                } else {
+                    iced::Color::TRANSPARENT.into()
+                },
+            ),
+            text_color: t2.fg_1,
+            ..Default::default()
+        });
+
+        let mut card = column![header];
+        if open {
+            let body = column![
+                label_input(
+                    t,
+                    "extensions — comma-separated, no dots",
+                    TextInput::new(exts)
+                        .mono()
+                        .on_input(move |v| Msg::CategoryExts(cat, v))
+                        .view(t)
+                ),
+                label_input(
+                    t,
+                    "save folder — blank inherits the default download folder",
+                    FileInput::new(folder)
+                        .on_input(move |v| Msg::CategoryFolder(cat, v))
+                        .on_browse(Msg::BrowseCategoryFolder(cat))
+                        .view(t)
+                ),
+                label_input(
+                    t,
+                    "default queue",
+                    combo(
+                        t,
+                        st.queue_choices(),
+                        Some(st.queue_choice_for(queue_sel)),
+                        move |c| Msg::CategoryQueue(cat, c),
+                        Length::Fill,
+                    )
+                ),
+                row![
+                    iced::widget::Space::new().width(Length::Fill),
+                    Btn::new("Reset extensions")
+                        .ghost()
+                        .accent(true)
+                        .size(BtnSize::Sm)
+                        .on_press(Msg::CategoryReset(cat))
+                        .view(t),
+                ],
+            ]
+            .spacing(theme::space::S3);
+            card = card.push(container(body).width(Length::Fill).padding(iced::Padding {
+                top: 0.0,
+                right: theme::space::S3,
+                bottom: theme::space::S3,
+                left: theme::space::S3,
+            }));
+        }
+
+        cards = cards.push(
+            container(card)
+                .width(Length::Fill)
+                .style(move |_| container::Style {
+                    background: Some(t2.bg_raised.into()),
+                    border: iced::Border {
+                        color: if open {
+                            t2.border_default
+                        } else {
+                            t2.border_subtle
+                        },
+                        width: 1.0,
+                        radius: theme::surface::RADIUS.into(),
+                    },
+                    ..Default::default()
+                }),
         );
     }
+
     pane(
         t,
         Section::Categories,
-        section_card(t, "folder", "Categories", rows.into()),
+        section_card(t, "folder", "Categories", cards.into()),
     )
 }
 
@@ -1342,10 +1707,138 @@ fn advanced_section(st: &State) -> Element<'_, Msg> {
                         .view(t)
                 )
             ),
+            danger_section(st),
         ]
         .spacing(theme::space::S3)
         .into(),
     )
+}
+
+/// Rust-headed danger block (design §3.7 Advanced: own Reset section;
+/// tokens follow the download-window completion warning).
+fn danger_section(st: &State) -> Element<'_, Msg> {
+    let t = &st.tokens;
+    let t2 = *t;
+    container(
+        column![
+            row![
+                icons::icon("triangle-alert", 14.0, t.status_danger),
+                text("Danger zone")
+                    .font(theme::BODY_BOLD)
+                    .size(13.0)
+                    .color(t.status_danger),
+            ]
+            .spacing(theme::space::S2)
+            .align_y(Alignment::Center),
+            text(
+                "Reset oxdm backs up and clears the database — all jobs, queues and \
+                 settings. Downloaded files stay on disk. The daemon exits and must be \
+                 relaunched.",
+            )
+            .font(theme::BODY)
+            .size(12.0)
+            .color(t.fg_2),
+            row![
+                iced::widget::Space::new().width(Length::Fill),
+                Btn::new("Reset oxdm…")
+                    .danger_filled()
+                    .icon("rotate-cw")
+                    .on_press(Msg::ResetDbAsk)
+                    .view(t),
+            ],
+        ]
+        .spacing(theme::space::S3),
+    )
+    .width(Length::Fill)
+    .padding(theme::space::S4)
+    .style(move |_| container::Style {
+        background: Some(t2.status_danger_bg.into()),
+        border: iced::Border {
+            color: t2.status_danger,
+            width: 1.0,
+            radius: theme::surface::RADIUS.into(),
+        },
+        ..Default::default()
+    })
+    .into()
+}
+
+/// Confirm overlay for the danger Reset (pattern: queues delete_overlay;
+/// Enter/Escape handled in `Msg::KeyPressed`).
+fn reset_overlay<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a, Msg> {
+    let t = &st.tokens;
+    let t2 = *t;
+    let card = container(
+        column![
+            text("Reset oxdm?")
+                .font(theme::BODY_BOLD)
+                .size(14.0)
+                .color(t.fg_1),
+            text(
+                "The database is backed up, then all jobs, queues and settings are \
+                 erased. Downloaded files are not touched. The daemon exits — relaunch \
+                 oxdm to start fresh.",
+            )
+            .font(theme::BODY)
+            .size(12.0)
+            .color(t.fg_2),
+            row![
+                iced::widget::Space::new().width(Length::Fill),
+                Btn::new("Cancel")
+                    .ghost()
+                    .on_press(Msg::ResetDbCancel)
+                    .view(t),
+                Btn::new("Reset oxdm")
+                    .danger_filled()
+                    .icon("rotate-cw")
+                    .on_press(Msg::ResetDbConfirm)
+                    .view(t),
+            ]
+            .spacing(theme::space::S2)
+            .align_y(Alignment::Center),
+        ]
+        .spacing(theme::space::S3),
+    )
+    .width(Length::Fixed(400.0))
+    .padding(theme::space::S4)
+    .style(move |_| container::Style {
+        background: Some(t2.bg_surface.into()),
+        border: iced::Border {
+            color: t2.border_default,
+            width: 1.0,
+            radius: theme::surface::RADIUS.into(),
+        },
+        shadow: iced::Shadow {
+            color: color::with_alpha(iced::Color::BLACK, 80.0 / 255.0),
+            offset: iced::Vector::new(0.0, 4.0),
+            blur_radius: 16.0,
+        },
+        ..Default::default()
+    });
+
+    let scrim = iced::widget::opaque(
+        mouse_area(
+            container(iced::widget::Space::new())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(|_| container::Style {
+                    background: Some(color::with_alpha(iced::Color::BLACK, 120.0 / 255.0).into()),
+                    ..Default::default()
+                }),
+        )
+        .on_press(Msg::ResetDbCancel),
+    );
+
+    iced::widget::stack![
+        base,
+        scrim,
+        container(iced::widget::opaque(card))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center),
+    ]
+    .into()
 }
 
 fn about_section(st: &State) -> Element<'_, Msg> {

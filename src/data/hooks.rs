@@ -1,15 +1,16 @@
 //! Queue hook executor.
 //!
 //! Subscribes to `DomainEvent::QueueStarted` / `QueueFinished` and runs
-//! the corresponding `QueueHook` actions. Real platform integrations
-//! (shutdown, sleep, hibernate) are stubbed for now and just log; they
-//! land in step 7 of PLAN §10.12.
+//! the corresponding `QueueHook` actions. Destructive power actions
+//! (shutdown / restart / sleep / hibernate) don't fire immediately —
+//! they arm the shared `AppState` grace timer (feature #9), giving the
+//! user a cancellable countdown.
 
 use std::sync::Arc;
 
 use crate::data::events::DomainEvent;
 use crate::data::state::AppState;
-use crate::domain::{QueueHook, QueueId};
+use crate::domain::{PowerAction, QueueHook, QueueId};
 
 pub fn spawn(state: Arc<AppState>) {
     let mut rx = state.subscribe();
@@ -40,13 +41,13 @@ async fn run_hooks(state: &AppState, id: QueueId, when: HookPhase) {
         HookPhase::Finish => &queue.on_finish,
     };
     for hook in hooks {
-        if let Err(e) = execute(hook).await {
+        if let Err(e) = execute(state, hook).await {
             tracing::warn!(queue = %queue.name, error = %e, "queue hook failed");
         }
     }
 }
 
-async fn execute(hook: &QueueHook) -> Result<(), String> {
+async fn execute(state: &AppState, hook: &QueueHook) -> Result<(), String> {
     match hook {
         QueueHook::Notify { title, body } => {
             #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -66,10 +67,27 @@ async fn execute(hook: &QueueHook) -> Result<(), String> {
                 .map_err(|e| e.to_string())?;
             Ok(())
         }
-        QueueHook::Shutdown(action) => power_action(*action),
-        QueueHook::Sleep => sleep_action(),
-        QueueHook::Hibernate => hibernate_action(),
+        QueueHook::Shutdown(action) => {
+            let action = *action;
+            state.arm_power_action(action.into(), move || power_action(action));
+            Ok(())
+        }
+        QueueHook::Sleep => {
+            state.arm_power_action(PowerAction::Sleep, sleep_action);
+            Ok(())
+        }
+        QueueHook::Hibernate => {
+            state.arm_power_action(PowerAction::Hibernate, hibernate_action);
+            Ok(())
+        }
         QueueHook::ExitOxdm => {
+            // Exiting would kill the daemon-side grace task and
+            // silently drop a promised power action — skip, like the
+            // per-job completion path does.
+            if state.pending_shutdown().is_some() {
+                tracing::warn!("skipping exit-oxdm hook while a power action is pending");
+                return Ok(());
+            }
             // Best-effort: signal the process to terminate. Tray Quit
             // path triggers the orderly cleanup; here we just exit
             // since hooks fire from a tokio task without main-window

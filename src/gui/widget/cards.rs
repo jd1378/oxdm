@@ -277,6 +277,8 @@ pub fn sibling<'a, M: 'a>(el: Element<'a, M>) -> Element<'a, M> {
 
 /// Vertical scrollable with a reserved right gutter so the scrollbar
 /// rail never covers content (egui reserved `bar_width` the same way).
+/// Rail + thumb follow the design scrollbar spec (10px rail, thin
+/// rounded thumb — `theme::scrollbar_style`).
 pub fn vscroll<'a, M: 'a>(content: impl Into<Element<'a, M>>) -> iced::widget::Scrollable<'a, M> {
     iced::widget::scrollable(
         container(content)
@@ -286,6 +288,13 @@ pub fn vscroll<'a, M: 'a>(content: impl Into<Element<'a, M>>) -> iced::widget::S
                 ..Default::default()
             }),
     )
+    .direction(iced::widget::scrollable::Direction::Vertical(
+        iced::widget::scrollable::Scrollbar::new()
+            .width(theme::size::SCROLLBAR_W)
+            .scroller_width(theme::scroll::THUMB_W)
+            .margin(0.0),
+    ))
+    .style(theme::scrollbar_style)
 }
 
 /// 1px hairline.
