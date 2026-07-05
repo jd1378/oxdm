@@ -885,7 +885,8 @@ pub fn subscription(app: &App) -> Subscription<Msg> {
             }
             _ => None,
         }),
-        crate::gui::ipc::all_events().map(Msg::Daemon),
+        crate::gui::ipc::all_events(crate::ipc_local::protocol::GuiKind::Properties(st.id))
+            .map(Msg::Daemon),
     ];
     if st.shot.is_some() {
         subs.push(Shot::frames().map(|_| Msg::ShotTick));

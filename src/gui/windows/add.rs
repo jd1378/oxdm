@@ -72,6 +72,7 @@ impl std::fmt::Display for ProxyKind {
 pub enum Msg {
     Connected(Result<Boot, String>),
     Window(WindowControl),
+    Daemon(crate::gui::ipc::DaemonSignal),
     UrlChanged(String),
     Paste,
     Pasted(Option<String>),
@@ -681,6 +682,14 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
             Task::none()
         }
         Msg::Cancel => iced::exit(),
+        Msg::Daemon(crate::gui::ipc::DaemonSignal::Lost) => iced::exit(),
+        Msg::Daemon(crate::gui::ipc::DaemonSignal::Event(ev)) => match ev {
+            crate::ipc_local::protocol::Event::Close => iced::exit(),
+            crate::ipc_local::protocol::Event::Focus => {
+                iced::window::latest().and_then(iced::window::gain_focus)
+            }
+            _ => Task::none(),
+        },
         Msg::WinResized(w, h) => {
             chrome::enforce_min_size(iced::Size::new(w, h), iced::Size::new(DIALOG_W, 268.0))
         }
@@ -1328,11 +1337,13 @@ pub fn subscription(app: &App) -> Subscription<Msg> {
         }
         _ => None,
     });
+    let events = crate::gui::ipc::lifecycle_events(crate::ipc_local::protocol::GuiKind::Add)
+        .map(Msg::Daemon);
     match app {
         App::Ready(st) if st.shot.is_some() => {
-            Subscription::batch([resize, Shot::frames().map(|_| Msg::ShotTick)])
+            Subscription::batch([resize, events, Shot::frames().map(|_| Msg::ShotTick)])
         }
-        _ => resize,
+        _ => Subscription::batch([resize, events]),
     }
 }
 

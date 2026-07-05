@@ -1434,7 +1434,9 @@ fn context_action(m: &mut Main, action: ContextAction) -> Task<Msg> {
 pub fn subscription(app: &App) -> Subscription<Msg> {
     let mut subs = vec![];
     if let App::Ready(m) = app {
-        subs.push(crate::gui::ipc::all_events().map(Msg::Daemon));
+        subs.push(
+            crate::gui::ipc::all_events(crate::ipc_local::protocol::GuiKind::Main).map(Msg::Daemon),
+        );
         subs.push(iced::event::listen_with(
             |event, _status, _id| match event {
                 iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {

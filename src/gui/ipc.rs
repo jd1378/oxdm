@@ -7,7 +7,7 @@ use iced::Subscription;
 use iced::futures::{SinkExt, Stream};
 
 use crate::ipc_local::Client;
-use crate::ipc_local::protocol::{Event, SubFilter};
+use crate::ipc_local::protocol::{Event, GuiKind, SubFilter};
 
 #[derive(Debug, Clone)]
 pub enum DaemonSignal {
@@ -15,7 +15,7 @@ pub enum DaemonSignal {
     Lost,
 }
 
-fn event_stream(filter: SubFilter) -> impl Stream<Item = DaemonSignal> {
+fn event_stream(filter: SubFilter, kind: GuiKind) -> impl Stream<Item = DaemonSignal> {
     iced::stream::channel(64, async move |mut out| {
         let client = match Client::connect().await {
             Ok(c) => c,
@@ -25,6 +25,18 @@ fn event_stream(filter: SubFilter) -> impl Stream<Item = DaemonSignal> {
             }
         };
         if client.subscribe(filter).await.is_err() {
+            let _ = out.send(DaemonSignal::Lost).await;
+            return;
+        }
+        // Register THIS connection in the daemon's focus registry:
+        // `register_if_ready` requires Hello + Subscribe on the same
+        // conn before `try_close` / `try_focus` can reach the window.
+        // The window's request/reply connection also says Hello, but
+        // it never Subscribes, so it alone can't complete
+        // registration — without this, the tray spawn state sticks at
+        // `Spawning` and singleton re-triggers (evict + respawn) are
+        // silently dropped.
+        if client.hello(kind).await.is_err() {
             let _ = out.send(DaemonSignal::Lost).await;
             return;
         }
@@ -41,13 +53,13 @@ fn event_stream(filter: SubFilter) -> impl Stream<Item = DaemonSignal> {
     })
 }
 
-/// All daemon events (main window).
-pub fn all_events() -> Subscription<DaemonSignal> {
-    Subscription::run(|| event_stream(SubFilter::All))
+/// All daemon events, registered under `kind` for focus/evict.
+pub fn all_events(kind: GuiKind) -> Subscription<DaemonSignal> {
+    Subscription::run_with(kind, |k| event_stream(SubFilter::All, *k))
 }
 
 /// Lifecycle events only — no per-tick counter pumps. For dialog
 /// windows that don't render progress.
-pub fn lifecycle_events() -> Subscription<DaemonSignal> {
-    Subscription::run(|| event_stream(SubFilter::Lifecycle))
+pub fn lifecycle_events(kind: GuiKind) -> Subscription<DaemonSignal> {
+    Subscription::run_with(kind, |k| event_stream(SubFilter::Lifecycle, *k))
 }

@@ -196,7 +196,8 @@ pub fn subscription(app: &App) -> Subscription<Msg> {
             }
             _ => None,
         }),
-        crate::gui::ipc::lifecycle_events().map(Msg::Daemon),
+        crate::gui::ipc::lifecycle_events(crate::ipc_local::protocol::GuiKind::Power)
+            .map(Msg::Daemon),
         iced::time::every(TICK).map(|_| Msg::Tick),
     ];
     if st.shot.is_some() {

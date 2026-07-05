@@ -30,6 +30,7 @@ pub struct Row {
 pub enum Msg {
     Connected(Result<Box<(Arc<Client>, Vec<(QueueId, String)>, crate::domain::Settings)>, String>),
     Window(WindowControl),
+    Daemon(crate::gui::ipc::DaemonSignal),
     Probed(usize, Result<Box<ProbeResult>, String>),
     SelectAll(bool),
     Select(usize, bool),
@@ -266,6 +267,14 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
         }
         Msg::Sent(_) => iced::exit(),
         Msg::Cancel => iced::exit(),
+        Msg::Daemon(crate::gui::ipc::DaemonSignal::Lost) => iced::exit(),
+        Msg::Daemon(crate::gui::ipc::DaemonSignal::Event(ev)) => match ev {
+            crate::ipc_local::protocol::Event::Close => iced::exit(),
+            crate::ipc_local::protocol::Event::Focus => {
+                iced::window::latest().and_then(iced::window::gain_focus)
+            }
+            _ => Task::none(),
+        },
         Msg::WinResized(w, h) => {
             chrome::enforce_min_size(iced::Size::new(w, h), iced::Size::new(520.0, 360.0))
         }
@@ -292,11 +301,13 @@ pub fn subscription(app: &App) -> Subscription<Msg> {
         }
         _ => None,
     });
+    let events = crate::gui::ipc::lifecycle_events(crate::ipc_local::protocol::GuiKind::Batch)
+        .map(Msg::Daemon);
     match app {
         App::Ready(st) if st.shot.is_some() => {
-            Subscription::batch([resize, Shot::frames().map(|_| Msg::ShotTick)])
+            Subscription::batch([resize, events, Shot::frames().map(|_| Msg::ShotTick)])
         }
-        _ => resize,
+        _ => Subscription::batch([resize, events]),
     }
 }
 
