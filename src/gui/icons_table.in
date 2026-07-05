@@ -13,6 +13,7 @@ pub static ICONS: &[(&str, &[u8])] = &[
     ("circle-alert", include_bytes!("../../assets/icons/circle-alert.svg")),
     ("circle-check", include_bytes!("../../assets/icons/circle-check.svg")),
     ("circle-check-big", include_bytes!("../../assets/icons/circle-check-big.svg")),
+    ("circle-plus", include_bytes!("../../assets/icons/circle-plus.svg")),
     ("circle", include_bytes!("../../assets/icons/circle.svg")),
     ("circle-x", include_bytes!("../../assets/icons/circle-x.svg")),
     ("clipboard", include_bytes!("../../assets/icons/clipboard.svg")),

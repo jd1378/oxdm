@@ -1636,53 +1636,122 @@ fn cs_lockhint(t: &Tokens) -> Element<'_, Msg> {
     .into()
 }
 
+/// AddChecksumForm card border (design `.prop-add-cs`: 1.5px clay).
+const PAC_BORDER_W: f32 = 1.5;
+/// Corner radius of the header/footer strips: the outer 10px radius
+/// minus the border they sit inside, so the tinted fills follow the
+/// card's rounding (tiny-skia has no clip, memory `with_clip` no-op).
+const PAC_INNER_R: f32 = theme::radius::SM - PAC_BORDER_W;
+
 /// Inline add-checksum form (design §3.4 Properties `AddChecksumForm`:
-/// algo seg-radio with "taken" lockout, hash input with live char-count
-/// meter + validity message, auto-detect toggle).
+/// clay-bordered card with a tinted uppercase header strip, algo
+/// seg-radio in a contained chip box with "taken" lockout, hash input
+/// with live char-count meter + validity message, auto-detect toggle,
+/// and a sunken footer strip).
 fn add_checksum_form(st: &State) -> Element<'_, Msg> {
     let t = &st.tokens;
+    let t2 = *t;
     let form = cs_form(st);
 
-    let head = row![
-        icons::icon("plus", 13.0, t.fg_2),
-        text("Add checksum manually")
-            .font(theme::BODY_BOLD)
-            .size(12.0)
-            .color(t.fg_1),
-        iced::widget::Space::new().width(Length::Fill),
-        Btn::new("")
-            .toolbar()
-            .icon_only("x")
-            .size(BtnSize::Sm)
-            .on_press(Msg::CsAddCancel)
-            .view(t),
-    ]
-    .spacing(theme::space::S2)
-    .align_y(Alignment::Center);
+    // `.pac-head`: clay-50 strip, uppercase clay title, close button.
+    let head = container(
+        row![
+            icons::icon("circle-plus", 13.0, t.action_primary),
+            text("ADD CHECKSUM MANUALLY")
+                .font(theme::BODY_BOLD)
+                .size(10.0)
+                .color(t.action_primary_press),
+            iced::widget::Space::new().width(Length::Fill),
+            Btn::new("")
+                .toolbar()
+                .icon_only("x")
+                .size(BtnSize::Sm)
+                .on_press(Msg::CsAddCancel)
+                .view(t),
+        ]
+        .spacing(6.0)
+        .align_y(Alignment::Center),
+    )
+    .width(Length::Fill)
+    .padding([4.0, 12.0])
+    .style(move |_| container::Style {
+        background: Some(t2.row_selected_bg.into()),
+        border: iced::Border {
+            radius: iced::border::Radius {
+                top_left: PAC_INNER_R,
+                top_right: PAC_INNER_R,
+                bottom_left: 0.0,
+                bottom_right: 0.0,
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    });
 
-    // Algorithm seg-radio; algorithms already in the list are locked
-    // out ("taken") unless currently selected.
-    let mut algos = row![].spacing(theme::space::S1).align_y(Alignment::Center);
+    // `.pac-algos` seg-radio: chips live inside a contained box (page
+    // bg, 2px inner padding). Selected chip: surface fill + clay ring +
+    // clay text; taken algorithms are locked out at half opacity
+    // unless currently selected.
+    let mut chips = row![].spacing(2.0);
     for (i, algo) in Algo::ALL.iter().enumerate() {
         let taken = st.checksums.iter().any(|c| c.algo == *algo);
         let on = form.algo == *algo;
-        algos = algos.push(
-            Btn::new(algo.label())
-                .secondary()
-                .size(BtnSize::Sm)
-                .font_size(10.0)
-                .selected(on)
-                .enabled(!taken || on)
-                .on_press(Msg::CsAlgoPick(i))
-                .view(t),
+        let enabled = !taken || on;
+        chips = chips.push(
+            iced::widget::button(text(algo.label()).font(theme::MONO).size(11.0))
+                .padding([5.0, 10.0])
+                .style(move |_, status| {
+                    use iced::widget::button::Status;
+                    let hovered = matches!(status, Status::Hovered | Status::Pressed);
+                    let (bg, text_color, ring) = if on {
+                        (
+                            Some(t2.bg_surface),
+                            t2.action_primary_press,
+                            t2.border_brand,
+                        )
+                    } else if !enabled {
+                        (
+                            None,
+                            color::with_alpha(t2.fg_2, 0.5),
+                            iced::Color::TRANSPARENT,
+                        )
+                    } else if hovered {
+                        (Some(t2.bg_sunken), t2.fg_1, iced::Color::TRANSPARENT)
+                    } else {
+                        (None, t2.fg_2, iced::Color::TRANSPARENT)
+                    };
+                    iced::widget::button::Style {
+                        background: bg.map(Into::into),
+                        text_color,
+                        border: iced::Border {
+                            color: ring,
+                            width: 1.0,
+                            radius: theme::radius::CTRL.into(),
+                        },
+                        ..Default::default()
+                    }
+                })
+                .on_press_maybe(enabled.then(|| Msg::CsAlgoPick(i))),
         );
     }
+    let chip_box = container(chips)
+        .padding(3.0)
+        .style(move |_| container::Style {
+            background: Some(t2.bg_page.into()),
+            border: iced::Border {
+                color: t2.border_default,
+                width: 1.0,
+                radius: theme::radius::XS.into(),
+            },
+            ..Default::default()
+        });
+    let mut algo_row = row![chip_box].spacing(10.0).align_y(Alignment::Center);
     if form.detected && !form.canon.is_empty() {
-        algos = algos.push(
+        algo_row = algo_row.push(
             text("auto-detected")
                 .font(theme::BODY_MEDIUM)
                 .size(10.0)
-                .color(t.action_primary),
+                .color(t.action_primary_press),
         );
     }
 
@@ -1754,11 +1823,36 @@ fn add_checksum_form(st: &State) -> Element<'_, Msg> {
     .spacing(theme::space::S2)
     .align_y(Alignment::Center);
 
-    let body = column![
-        head,
-        crate::gui::widget::field_label(t, "algorithm"),
-        algos,
-        crate::gui::widget::field_label(t, &format!("hash — expects {target} hex characters")),
+    // `.pac-lbl`: sentence-case semibold label; the hash label carries
+    // a lighter hint with the expected count in bold mono.
+    let algo_field = column![
+        text("Algorithm")
+            .font(theme::BODY_BOLD)
+            .size(11.0)
+            .color(t.fg_2),
+        algo_row,
+    ]
+    .spacing(6.0);
+    // Single rich-text run so the mixed body/mono fragments share one
+    // baseline (a `row` of `text`s can only box-align, not
+    // baseline-align).
+    let hash_lbl = iced::widget::rich_text::<(), Msg, _, _>([
+        iced::widget::span("Hash")
+            .font(theme::BODY_BOLD)
+            .color(t.fg_2),
+        iced::widget::span(" · expects ")
+            .font(theme::BODY)
+            .color(t.fg_3),
+        iced::widget::span(target.to_string())
+            .font(theme::MONO_BOLD)
+            .color(t.fg_2),
+        iced::widget::span(" hex characters")
+            .font(theme::BODY)
+            .color(t.fg_3),
+    ])
+    .size(11.0);
+    let hash_field = column![
+        hash_lbl,
         TextInput::new(&st.checksum_hash)
             .hint(format!(
                 "Paste the {} hash from the publisher's website…",
@@ -1772,33 +1866,78 @@ fn add_checksum_form(st: &State) -> Element<'_, Msg> {
             .font(theme::BODY_MEDIUM)
             .size(10.5)
             .color(msg_color),
-        checkbox(
-            t,
-            "Auto-detect algorithm from hash length",
-            st.cs_auto,
-            true,
-            Msg::CsAuto,
-        ),
+    ]
+    .spacing(6.0);
+
+    let body = container(
+        column![
+            algo_field,
+            hash_field,
+            checkbox(
+                t,
+                "Auto-detect algorithm from hash length",
+                st.cs_auto,
+                true,
+                Msg::CsAuto,
+            ),
+        ]
+        .spacing(theme::space::S3 + 2.0),
+    )
+    .width(Length::Fill)
+    .padding([theme::space::S3, 14.0]);
+
+    // `.pac-foot`: sunken action strip below a hairline.
+    let foot = container(
         row![
             Btn::new("Cancel")
                 .ghost()
-                .size(BtnSize::Sm)
                 .on_press(Msg::CsAddCancel)
                 .view(t),
             iced::widget::Space::new().width(Length::Fill),
             Btn::new(format!("Save {}", form.algo.label()))
                 .primary()
-                .size(BtnSize::Sm)
                 .icon("check")
                 .enabled(form.valid)
                 .on_press(Msg::ChecksumSave)
                 .view(t),
         ]
         .align_y(Alignment::Center),
-    ]
-    .spacing(theme::space::S2);
+    )
+    .width(Length::Fill)
+    .padding([theme::space::S2, 12.0])
+    .style(move |_| container::Style {
+        background: Some(t2.bg_sunken.into()),
+        border: iced::Border {
+            radius: iced::border::Radius {
+                top_left: 0.0,
+                top_right: 0.0,
+                bottom_left: PAC_INNER_R,
+                bottom_right: PAC_INNER_R,
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    });
 
-    crate::gui::widget::card(t, theme::space::S3, body.into())
+    container(column![
+        head,
+        hairline(color::with_alpha(t.action_primary, 0.20)),
+        body,
+        hairline(t.border_subtle),
+        foot,
+    ])
+    .width(Length::Fill)
+    .padding(PAC_BORDER_W)
+    .style(move |_| container::Style {
+        background: Some(t2.bg_surface.into()),
+        border: iced::Border {
+            color: t2.border_brand,
+            width: PAC_BORDER_W,
+            radius: theme::radius::SM.into(),
+        },
+        ..Default::default()
+    })
+    .into()
 }
 
 fn toggle_row<'a>(
