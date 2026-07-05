@@ -30,6 +30,28 @@ pub fn window_task<M: Send + 'static>(control: WindowControl) -> Task<M> {
     }
 }
 
+/// Wrap a window's root view in the design's 1px black window ring
+/// (`.win` box-shadow `0 0 0 1px rgba(0,0,0,.6)` — borderless windows
+/// otherwise blend into whatever is behind them). Padding insets the
+/// content by the border width so the child's background cannot paint
+/// over the ring.
+pub fn framed<'a, M: 'a>(content: impl Into<iced::Element<'a, M>>) -> iced::Element<'a, M> {
+    const BORDER_W: f32 = 1.0;
+    iced::widget::container(content)
+        .width(iced::Length::Fill)
+        .height(iced::Length::Fill)
+        .padding(BORDER_W)
+        .style(|_| iced::widget::container::Style {
+            border: iced::Border {
+                color: iced::Color::BLACK,
+                width: BORDER_W,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .into()
+}
+
 /// Snap the window back to its minimum size when a resize event
 /// reports a smaller one. Belt-and-braces on top of winit's
 /// `min_inner_size`: headless X servers have no WM to enforce hints,

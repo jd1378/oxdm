@@ -1510,11 +1510,11 @@ fn default_tokens() -> Tokens {
 }
 
 pub fn view(app: &App) -> Element<'_, Msg> {
-    match app {
+    chrome::framed(match app {
         App::Connecting => splash("Connecting to the oxdm daemon…".to_owned()),
         App::Failed(e) => splash(format!("Could not reach the daemon: {e}")),
         App::Ready(m) => main_view(m),
-    }
+    })
 }
 
 fn splash<'a>(message: String) -> Element<'a, Msg> {
@@ -2047,9 +2047,7 @@ fn toolbar(m: &Main) -> Element<'_, Msg> {
             .view(t),
         Btn::new("Stop all")
             .toolbar()
-            // design `octagon-x`; not in the icon set, `circle-x` is the
-            // closest stop-with-X glyph available.
-            .icon("circle-x")
+            .icon("octagon-x")
             .on_press(Msg::Toolbar(ToolbarAction::StopAll))
             .view(t),
         Btn::new("Clean")

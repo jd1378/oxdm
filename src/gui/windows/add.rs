@@ -703,11 +703,11 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
 // ---------------------------------------------------------------- view
 
 pub fn view(app: &App) -> Element<'_, Msg> {
-    match app {
+    chrome::framed(match app {
         App::Connecting => connecting_view("Connecting…"),
         App::Failed(e) => connecting_view(e),
         App::Ready(st) => ready_view(st),
-    }
+    })
 }
 
 fn connecting_view(msg: &str) -> Element<'_, Msg> {

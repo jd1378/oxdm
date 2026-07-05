@@ -580,7 +580,7 @@ pub fn subscription(app: &App) -> Subscription<Msg> {
 // ---------------------------------------------------------------- view
 
 pub fn view(app: &App) -> Element<'_, Msg> {
-    match app {
+    chrome::framed(match app {
         App::Connecting => splash("Connecting…".to_owned()),
         App::Failed(e) => splash(e.clone()),
         App::Ready(st) => {
@@ -590,7 +590,7 @@ pub fn view(app: &App) -> Element<'_, Msg> {
                 running_view(st)
             }
         }
-    }
+    })
 }
 
 fn splash<'a>(msg: String) -> Element<'a, Msg> {
