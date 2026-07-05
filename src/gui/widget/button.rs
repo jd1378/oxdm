@@ -186,7 +186,15 @@ impl<'a, M: Clone + 'a> Btn<'a, M> {
     fn fg(&self, t: &Tokens, status: button::Status) -> Color {
         use button::Status::*;
         if !self.enabled || status == Disabled {
-            return t.fg_4;
+            // Filled variants emulate the design's `.btn:disabled
+            // { opacity: .5 }`: the label fades by the same 50%
+            // page-mix as the fill, keeping their relative contrast —
+            // `fg_4` on a still-tinted fill was near-unreadable.
+            return match self.variant {
+                BtnVariant::Primary => mix(t.action_primary_fg, t.bg_page, 0.5),
+                BtnVariant::DangerFilled => mix(Color::WHITE, t.bg_page, 0.5),
+                _ => t.fg_4,
+            };
         }
         match self.variant {
             BtnVariant::Primary => t.action_primary_fg,
