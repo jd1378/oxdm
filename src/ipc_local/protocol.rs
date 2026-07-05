@@ -13,7 +13,7 @@ use crate::data::RemoveOpts;
 use crate::data::UpdateInfo;
 use crate::data::UpdaterEvent;
 use crate::domain::{
-    Advanced, Category, Checksum, HostSetting, Job, JobError, JobId, OnCompletion, Phase,
+    Advanced, Category, Checksum, CondKind, HostSetting, Job, JobError, JobId, OnCompletion, Phase,
     PowerAction, Queue, QueueId, Settings,
 };
 
@@ -64,6 +64,10 @@ pub enum GuiKind {
     /// request while one is still on screen merges into the same
     /// window (current impl: focuses the existing dialog).
     Batch,
+    /// Shutdown/sleep grace-countdown window (singleton). Spawned by
+    /// the daemon when a destructive power action arms; offers instant
+    /// Cancel / Confirm.
+    Power,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -187,6 +191,10 @@ pub enum Request {
     /// Cancel button). Idempotent: replies `Ok` even when nothing is
     /// pending (e.g. the timer fired a beat earlier).
     CancelPendingShutdown,
+    /// Execute the pending destructive power action immediately
+    /// ("Shut down now" in the countdown window). Idempotent — Ok even
+    /// when nothing is pending.
+    ConfirmPendingShutdown,
 
     // ── update channel ─────────────────────────────────────────────
     UpdateCheck,
@@ -406,6 +414,11 @@ pub struct SnapshotData {
     /// GUI connecting mid-countdown still shows the banner.
     #[serde(default)]
     pub pending_shutdown: Option<(PowerAction, i64)>,
+    /// Schedule conditions this host can evaluate right now (runtime
+    /// capability, e.g. AC power only when a battery exists). The
+    /// queues GUI hides the rest; the scheduler ignores them.
+    #[serde(default)]
+    pub cond_available: Vec<CondKind>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

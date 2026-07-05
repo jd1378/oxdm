@@ -72,6 +72,7 @@ fn spawn_workers(
     }
     crate::ipc::manifest_check::spawn();
     notifications::spawn(state.clone());
+    spawn_power_prompt(state.clone());
     completion_actions::spawn(state.clone());
     crate::data::spawn_hook_executor(state.clone());
     crate::data::spawn_queue_scheduler(state.clone());
@@ -115,4 +116,18 @@ fn spawn_workers(
     {
         tracing::warn!(error = %e, "single-instance listener");
     }
+}
+
+/// Surface the grace-countdown window whenever a destructive power
+/// action arms. The window itself handles Cancel / Confirm-now and
+/// closes on `ShutdownCancelled` or when the deadline passes.
+fn spawn_power_prompt(state: std::sync::Arc<crate::data::AppState>) {
+    tokio::spawn(async move {
+        let mut rx = state.subscribe();
+        while let Ok(ev) = rx.recv().await {
+            if matches!(ev, crate::data::DomainEvent::ShutdownPending { .. }) {
+                tray::spawn_power_gui();
+            }
+        }
+    });
 }

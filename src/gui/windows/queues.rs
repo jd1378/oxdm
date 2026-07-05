@@ -9,13 +9,17 @@ use std::time::Duration;
 use iced::widget::{button, column, container, mouse_area, row, scrollable, text};
 use iced::{Alignment, Element, Length, Subscription, Task};
 
-use crate::domain::{Queue, QueueHook, QueueId, QueueSchedule, ShutdownAction, WeekDayMask};
+use crate::domain::{
+    CMD_INTERVAL_RANGE, CondCombine, CondCommand, CondKind, CondSet, IDLE_MINUTES_RANGE, Queue,
+    QueueHook, QueueId, QueueSchedule, ShutdownAction, WeekDayMask,
+};
 use crate::gui::chrome::{self, WindowControl, titlebar};
 use crate::gui::color;
+use crate::gui::icons;
 use crate::gui::ipc::DaemonSignal;
 use crate::gui::shot::Shot;
 use crate::gui::theme::{self, Tokens};
-use crate::gui::widget::{Btn, TextInput, hairline, number_stepper, section_card};
+use crate::gui::widget::{Btn, TextInput, hairline, number_stepper, section_card, toggle};
 use crate::ipc_local::Client;
 use crate::ipc_local::protocol::Event;
 
@@ -79,6 +83,100 @@ pub enum SchedKind {
     Condition,
 }
 
+/// Condition-builder geometry (design `.cond-builder` family,
+/// styles.css:2111-2192). Cards: radius 8, head padding 10/12 gap 11;
+/// 30px icon tile radius 7; params rows indent to the text column
+/// (12 + 30 + 11 = 53) and use 58px number inputs. Combine bar padding
+/// 8/10 radius 7 with a mini segmented (buttons pad 3/12 radius 4).
+/// Connector rows inset 27 with a 999-radius AND/OR pill (pad 2/9).
+const COND_GAP: f32 = 10.0;
+const COND_LIST_GAP: f32 = 6.0;
+const COND_CARD_RADIUS: f32 = 8.0;
+const COND_HEAD_PAD_Y: f32 = 10.0;
+const COND_HEAD_PAD_X: f32 = 12.0;
+const COND_HEAD_GAP: f32 = 11.0;
+const COND_ICO: f32 = 30.0;
+const COND_ICO_RADIUS: f32 = 7.0;
+const COND_PARAM_INDENT: f32 = COND_HEAD_PAD_X + COND_ICO + COND_HEAD_GAP;
+const COND_NUM_W: f32 = 58.0;
+const COMBINE_PAD_Y: f32 = 8.0;
+const COMBINE_PAD_X: f32 = 10.0;
+const COMBINE_RADIUS: f32 = 7.0;
+const COMBINE_BTN_PAD_Y: f32 = 3.0;
+const COMBINE_BTN_PAD_X: f32 = 12.0;
+const CONNECTOR_INSET: f32 = 27.0;
+const CONJ_PAD_Y: f32 = 2.0;
+const CONJ_PAD_X: f32 = 9.0;
+/// Param defaults shown when a card is first enabled (design
+/// `state.minutes ?? 10`, `state.interval ?? 60`).
+const DEFAULT_IDLE_MINUTES: u16 = 10;
+const DEFAULT_CMD_INTERVAL: u32 = 60;
+
+/// One-off inputs (design `once` row: 160px date, 100px time) and the
+/// calendar popup: 32px day cells, 7 columns.
+const ONCE_DATE_W: f32 = 160.0;
+const ONCE_TIME_W: f32 = 100.0;
+const CAL_CELL: f32 = 32.0;
+const CAL_GAP: f32 = 2.0;
+const CAL_PAD: f32 = 12.0;
+
+fn parse_once_date(s: &str) -> Option<chrono::NaiveDate> {
+    chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").ok()
+}
+
+fn parse_once_time(s: &str) -> Option<chrono::NaiveTime> {
+    chrono::NaiveTime::parse_from_str(s.trim(), "%H:%M").ok()
+}
+
+/// Builder cards in display order (design `CONDS`). Copy is verbatim
+/// from the mock, except "Wi-Fi / Ethernet" phrasing which the mock
+/// already carries; the mock gates `unmetered` per platform
+/// (`platformSupportsMetered`) — here `CondKind::SUPPORTED` gates
+/// every card by what this build can honestly probe.
+const COND_CARDS: [(CondKind, &str, &str, &str); 4] = [
+    (
+        CondKind::Unmetered,
+        "wifi",
+        "On an unmetered connection",
+        "Only run when the active network is not billed by usage (Wi-Fi / Ethernet, not cellular or a metered hotspot).",
+    ),
+    (
+        CondKind::Idle,
+        "mouse-pointer-click",
+        "System has been idle",
+        "Wait until there\u{2019}s been no keyboard or mouse activity for a while.",
+    ),
+    (
+        CondKind::AcPower,
+        "plug-zap",
+        "On AC power",
+        "Only run while plugged in \u{2014} never on battery.",
+    ),
+    (
+        CondKind::Command,
+        "terminal",
+        "Custom command returns true",
+        "Poll a shell command; the queue runs while it exits 0.",
+    ),
+];
+
+/// Dark-remapped clay tint trio (bg / fg / border) used by the active
+/// card icon tile and the AND/OR pill — same remap as `conc_pill`.
+/// clay-600 stays saturated in both themes (tokens.css keeps the
+/// middle of the ramp untouched), so the tinted glyph uses `C600`
+/// everywhere except dark, where the remapped `DARK_C700` text tint
+/// keeps contrast on the dark clay-50.
+fn clay_tint(t: &Tokens) -> (iced::Color, iced::Color, iced::Color) {
+    match t.theme {
+        theme::ResolvedTheme::Dark => (
+            color::clay::DARK_C50,
+            color::clay::DARK_C700,
+            color::clay::DARK_C200,
+        ),
+        _ => (color::clay::C50, color::clay::C600, color::clay::C200),
+    }
+}
+
 /// On-finish choices. The mock's "Disconnect" pill is omitted: no
 /// disconnect hook exists in the domain (it round-tripped to a silent
 /// no-op — dishonest UI per the features-pass rubric).
@@ -93,7 +191,17 @@ pub enum FinishKind {
 
 #[derive(Clone)]
 pub enum Msg {
-    Connected(Result<Box<(Arc<Client>, Vec<Queue>, crate::domain::Settings)>, String>),
+    Connected(
+        Result<
+            Box<(
+                Arc<Client>,
+                Vec<Queue>,
+                crate::domain::Settings,
+                Vec<CondKind>,
+            )>,
+            String,
+        >,
+    ),
     Queues(Vec<Queue>),
     Daemon(DaemonSignal),
     Window(WindowControl),
@@ -108,6 +216,18 @@ pub enum Msg {
     Sched(SchedKind),
     SchedStart(String),
     SchedDay(u8, bool),
+    OnceDate(String),
+    OnceTime(String),
+    CalToggle,
+    CalClose,
+    /// Shift the calendar's displayed month by ±1.
+    CalMonth(i32),
+    CalPick(chrono::NaiveDate),
+    CondToggle(CondKind),
+    CondCombine(CondCombine),
+    CondIdleMin(String),
+    CondCmdText(String),
+    CondCmdInterval(String),
     Finish(FinishKind),
     FinishCommand(String),
     DeleteAsk,
@@ -140,6 +260,26 @@ pub struct State {
     sched: SchedKind,
     sched_start: String,
     sched_days: WeekDayMask,
+    cond_combine: CondCombine,
+    cond_unmetered: bool,
+    cond_ac: bool,
+    cond_idle: bool,
+    /// Text buffers for the idle-minutes / command / interval params;
+    /// parsed + clamped to the domain ranges on Save.
+    cond_idle_min: String,
+    cond_cmd: bool,
+    cond_cmd_text: String,
+    cond_cmd_interval: String,
+    /// Conditions this host can evaluate (from the daemon snapshot);
+    /// cards outside this set are hidden and don't participate.
+    cond_avail: Vec<CondKind>,
+    /// One-off date/time buffers, validated on change (`YYYY-MM-DD`,
+    /// `HH:MM`).
+    once_date: String,
+    once_time: String,
+    cal_open: bool,
+    /// Month the calendar popup is showing: (year, month 1-12).
+    cal_ym: (i32, u32),
     finish: FinishKind,
     finish_cmd: String,
 
@@ -187,16 +327,54 @@ impl State {
             QueueSchedule::Manual => SchedKind::Manual,
             QueueSchedule::Daily { .. } => SchedKind::Recurring,
             QueueSchedule::Once { .. } => SchedKind::OneOff,
+            QueueSchedule::Condition { .. } => SchedKind::Condition,
         };
         self.sched_start = match q.schedule {
             QueueSchedule::Daily { start, .. } => start.format("%H:%M").to_string(),
-            QueueSchedule::Once { start, .. } => start.format("%Y-%m-%d %H:%M").to_string(),
             _ => String::new(),
         };
+        let once_start = match q.schedule {
+            QueueSchedule::Once { start, .. } => start.naive_local(),
+            _ => chrono::Local::now()
+                .date_naive()
+                .and_hms_opt(9, 0, 0)
+                .unwrap(),
+        };
+        self.once_date = once_start.format("%Y-%m-%d").to_string();
+        self.once_time = once_start.format("%H:%M").to_string();
+        self.cal_open = false;
+        self.cal_ym = (
+            chrono::Datelike::year(&once_start),
+            chrono::Datelike::month(&once_start),
+        );
         self.sched_days = match q.schedule {
             QueueSchedule::Daily { days, .. } => days,
             _ => WeekDayMask(0x7F),
         };
+        let conds = match q.schedule {
+            QueueSchedule::Condition(set) => set,
+            _ => CondSet::default(),
+        };
+        self.cond_combine = conds.combine;
+        self.cond_unmetered = conds.unmetered;
+        self.cond_ac = conds.ac_power;
+        self.cond_idle = conds.idle_minutes.is_some();
+        self.cond_idle_min = conds
+            .idle_minutes
+            .unwrap_or(DEFAULT_IDLE_MINUTES)
+            .to_string();
+        self.cond_cmd = conds.command.is_some();
+        self.cond_cmd_text = conds
+            .command
+            .as_ref()
+            .map(|c| c.cmd.clone())
+            .unwrap_or_default();
+        self.cond_cmd_interval = conds
+            .command
+            .as_ref()
+            .map(|c| c.interval_secs)
+            .unwrap_or(DEFAULT_CMD_INTERVAL)
+            .to_string();
         self.finish = q
             .on_finish
             .first()
@@ -224,7 +402,28 @@ impl State {
         q.color = self.color;
         q.max_concurrent = self.max_concurrent;
         q.schedule = match self.sched {
-            SchedKind::Manual | SchedKind::Condition => QueueSchedule::Manual,
+            SchedKind::Manual => QueueSchedule::Manual,
+            SchedKind::Condition => QueueSchedule::Condition(CondSet {
+                combine: self.cond_combine,
+                unmetered: self.cond_unmetered,
+                ac_power: self.cond_ac,
+                idle_minutes: self.cond_idle.then(|| {
+                    self.cond_idle_min
+                        .trim()
+                        .parse::<u16>()
+                        .unwrap_or(DEFAULT_IDLE_MINUTES)
+                        .clamp(*IDLE_MINUTES_RANGE.start(), *IDLE_MINUTES_RANGE.end())
+                }),
+                command: self.cond_cmd.then(|| CondCommand {
+                    cmd: self.cond_cmd_text.trim().to_owned(),
+                    interval_secs: self
+                        .cond_cmd_interval
+                        .trim()
+                        .parse::<u32>()
+                        .unwrap_or(DEFAULT_CMD_INTERVAL)
+                        .clamp(*CMD_INTERVAL_RANGE.start(), *CMD_INTERVAL_RANGE.end()),
+                }),
+            }),
             SchedKind::Recurring => QueueSchedule::Daily {
                 start: chrono::NaiveTime::parse_from_str(self.sched_start.trim(), "%H:%M")
                     .unwrap_or_else(|_| chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap()),
@@ -232,13 +431,11 @@ impl State {
                 days: self.sched_days,
             },
             SchedKind::OneOff => QueueSchedule::Once {
-                start: chrono::NaiveDateTime::parse_from_str(
-                    self.sched_start.trim(),
-                    "%Y-%m-%d %H:%M",
-                )
-                .ok()
-                .and_then(|n| n.and_local_timezone(chrono::Local).single())
-                .unwrap_or_else(chrono::Local::now),
+                start: parse_once_date(&self.once_date)
+                    .zip(parse_once_time(&self.once_time))
+                    .map(|(d, t)| d.and_time(t))
+                    .and_then(|n| n.and_local_timezone(chrono::Local).single())
+                    .unwrap_or_else(chrono::Local::now),
                 stop: None,
             },
         };
@@ -271,7 +468,12 @@ pub fn boot() -> (App, Task<Msg>) {
                     .hello(crate::ipc_local::protocol::GuiKind::Queues)
                     .await?;
                 let snap = client.snapshot().await?;
-                Ok(Box::new((client, snap.queues, snap.settings)))
+                Ok(Box::new((
+                    client,
+                    snap.queues,
+                    snap.settings,
+                    snap.cond_available,
+                )))
             },
             Msg::Connected,
         ),
@@ -281,7 +483,7 @@ pub fn boot() -> (App, Task<Msg>) {
 pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
     match msg {
         Msg::Connected(Ok(boxed)) => {
-            let (client, queues, settings) = *boxed;
+            let (client, queues, settings, cond_avail) = *boxed;
             let mut st = State {
                 tokens: Tokens::from_settings(&settings),
                 selected: queues.first().map(|q| q.id),
@@ -291,6 +493,19 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 sched: SchedKind::Manual,
                 sched_start: String::new(),
                 sched_days: WeekDayMask(0x7F),
+                cond_combine: CondCombine::default(),
+                cond_unmetered: false,
+                cond_ac: false,
+                cond_idle: false,
+                cond_idle_min: DEFAULT_IDLE_MINUTES.to_string(),
+                cond_cmd: false,
+                cond_cmd_text: String::new(),
+                cond_cmd_interval: DEFAULT_CMD_INTERVAL.to_string(),
+                cond_avail,
+                once_date: String::new(),
+                once_time: String::new(),
+                cal_open: false,
+                cal_ym: (2026, 1),
                 finish: FinishKind::Nothing,
                 finish_cmd: String::new(),
                 color: None,
@@ -407,6 +622,63 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             }
             Task::none()
         }
+        Msg::OnceDate(v) => {
+            st.once_date = v;
+            Task::none()
+        }
+        Msg::OnceTime(v) => {
+            st.once_time = v;
+            Task::none()
+        }
+        Msg::CalToggle => {
+            st.cal_open = !st.cal_open;
+            if st.cal_open
+                && let Some(d) = parse_once_date(&st.once_date)
+            {
+                st.cal_ym = (chrono::Datelike::year(&d), chrono::Datelike::month(&d));
+            }
+            Task::none()
+        }
+        Msg::CalClose => {
+            st.cal_open = false;
+            Task::none()
+        }
+        Msg::CalMonth(delta) => {
+            let (y, m) = st.cal_ym;
+            let total = y * 12 + (m as i32 - 1) + delta;
+            st.cal_ym = (total.div_euclid(12), (total.rem_euclid(12) + 1) as u32);
+            Task::none()
+        }
+        Msg::CalPick(d) => {
+            st.once_date = d.format("%Y-%m-%d").to_string();
+            st.cal_open = false;
+            Task::none()
+        }
+        Msg::CondToggle(kind) => {
+            match kind {
+                CondKind::Unmetered => st.cond_unmetered = !st.cond_unmetered,
+                CondKind::AcPower => st.cond_ac = !st.cond_ac,
+                CondKind::Idle => st.cond_idle = !st.cond_idle,
+                CondKind::Command => st.cond_cmd = !st.cond_cmd,
+            }
+            Task::none()
+        }
+        Msg::CondCombine(c) => {
+            st.cond_combine = c;
+            Task::none()
+        }
+        Msg::CondIdleMin(v) => {
+            st.cond_idle_min = v;
+            Task::none()
+        }
+        Msg::CondCmdText(v) => {
+            st.cond_cmd_text = v;
+            Task::none()
+        }
+        Msg::CondCmdInterval(v) => {
+            st.cond_cmd_interval = v;
+            Task::none()
+        }
         Msg::Finish(k) => {
             st.finish = k;
             Task::none()
@@ -451,6 +723,10 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                 && matches!(key.as_ref(), iced::keyboard::Key::Named(Named::Escape))
             {
                 return update_ready(st, Msg::ColorClose);
+            } else if st.cal_open
+                && matches!(key.as_ref(), iced::keyboard::Key::Named(Named::Escape))
+            {
+                return update_ready(st, Msg::CalClose);
             }
             Task::none()
         }
@@ -667,6 +943,333 @@ fn day_square<'a>(t: &Tokens, label: &str, on: bool, msg: Msg) -> Element<'a, Ms
         .into()
 }
 
+impl State {
+    fn cond_on(&self, kind: CondKind) -> bool {
+        match kind {
+            CondKind::Unmetered => self.cond_unmetered,
+            CondKind::Idle => self.cond_idle,
+            CondKind::AcPower => self.cond_ac,
+            CondKind::Command => self.cond_cmd,
+        }
+    }
+}
+
+/// The design's `.cond-builder`: help line, All/Any combine bar (when
+/// ≥2 conditions are on), the card list with AND/OR connectors, and
+/// the rust empty-state warning.
+fn cond_builder<'a>(t: &Tokens, st: &'a State) -> Element<'a, Msg> {
+    let mut col = column![
+        text("The queue starts automatically while its conditions hold, and pauses when they no longer do.")
+            .font(theme::BODY)
+            .size(11.0)
+            .color(t.fg_3),
+    ]
+    .spacing(COND_GAP);
+
+    // Only cards this host can evaluate right now (daemon capability
+    // snapshot). A hidden condition does not participate in the
+    // scheduler either, so showing it — even enabled by a foreign
+    // config — would be dishonest.
+    let visible: Vec<&(CondKind, &str, &str, &str)> = COND_CARDS
+        .iter()
+        .filter(|(k, ..)| st.cond_avail.contains(k))
+        .collect();
+    let enabled_count = visible.iter().filter(|(k, ..)| st.cond_on(*k)).count();
+
+    if enabled_count >= 2 {
+        col = col.push(combine_bar(t, st.cond_combine, enabled_count));
+    }
+
+    let mut list = column![].spacing(COND_LIST_GAP);
+    let mut enabled_seen = 0usize;
+    for (kind, icon_name, label, desc) in visible {
+        let on = st.cond_on(*kind);
+        if on && enabled_seen > 0 {
+            list = list.push(cond_connector(t, st.cond_combine));
+        }
+        if on {
+            enabled_seen += 1;
+        }
+        list = list.push(cond_card(t, st, *kind, icon_name, label, desc, on));
+    }
+    col = col.push(list);
+
+    if enabled_count == 0 {
+        col = col.push(
+            row![
+                icons::icon("toggle-left", 13.0, t.status_danger),
+                text("Enable at least one condition, or the queue will never start on its own.")
+                    .font(theme::BODY)
+                    .size(11.0)
+                    .color(t.status_danger),
+            ]
+            .spacing(7.0)
+            .align_y(Alignment::Center),
+        );
+    }
+    col.into()
+}
+
+/// `.cond-combine`: "Start when [All|Any] of the N enabled conditions
+/// are/is met" in a sunken bar.
+fn combine_bar<'a>(t: &Tokens, combine: CondCombine, enabled: usize) -> Element<'a, Msg> {
+    let t2 = *t;
+    let seg_btn = |label: &'a str, value: CondCombine| {
+        let on = combine == value;
+        button(text(label).font(theme::BODY_BOLD).size(11.5))
+            .padding([COMBINE_BTN_PAD_Y, COMBINE_BTN_PAD_X])
+            .on_press(Msg::CondCombine(value))
+            .style(move |_th, _status| iced::widget::button::Style {
+                background: Some(if on {
+                    t2.action_primary.into()
+                } else {
+                    iced::Color::TRANSPARENT.into()
+                }),
+                text_color: if on { t2.action_primary_fg } else { t2.fg_2 },
+                border: iced::Border {
+                    radius: 4.0.into(),
+                    ..Default::default()
+                },
+                shadow: iced::Shadow::default(),
+                snap: true,
+            })
+    };
+    let seg = container(
+        row![
+            seg_btn("All", CondCombine::All),
+            seg_btn("Any", CondCombine::Any)
+        ]
+        .spacing(2.0),
+    )
+    .padding(2.0)
+    .style(move |_| container::Style {
+        background: Some(t2.bg_page.into()),
+        border: iced::Border {
+            color: t2.border_default,
+            width: 1.0,
+            radius: 6.0.into(),
+        },
+        ..Default::default()
+    });
+    let tail = format!(
+        "of the {enabled} enabled conditions {}",
+        if combine == CondCombine::All {
+            "are met"
+        } else {
+            "is met"
+        }
+    );
+    container(
+        row![
+            text("Start when")
+                .font(theme::BODY)
+                .size(11.5)
+                .color(t.fg_2),
+            seg,
+            text(tail).font(theme::BODY).size(11.5).color(t.fg_2),
+        ]
+        .spacing(theme::space::S2)
+        .align_y(Alignment::Center),
+    )
+    .padding([COMBINE_PAD_Y, COMBINE_PAD_X])
+    .width(Length::Fill)
+    .style(move |_| container::Style {
+        background: Some(t2.bg_sunken.into()),
+        border: iced::Border {
+            color: t2.border_subtle,
+            width: 1.0,
+            radius: COMBINE_RADIUS.into(),
+        },
+        ..Default::default()
+    })
+    .into()
+}
+
+/// `.cond-connector`: hairline · AND/OR pill · hairline between
+/// enabled cards; clicking the pill flips the combine mode.
+fn cond_connector<'a>(t: &Tokens, combine: CondCombine) -> Element<'a, Msg> {
+    let t2 = *t;
+    let (tint_bg, tint_fg, tint_border) = clay_tint(t);
+    let flipped = match combine {
+        CondCombine::All => CondCombine::Any,
+        CondCombine::Any => CondCombine::All,
+    };
+    let conj = button(
+        text(if combine == CondCombine::All {
+            "AND"
+        } else {
+            "OR"
+        })
+        .font(theme::MONO_BOLD)
+        .size(10.0),
+    )
+    .padding([CONJ_PAD_Y, CONJ_PAD_X])
+    .on_press(Msg::CondCombine(flipped))
+    .style(move |_th, status| {
+        let hovered = matches!(status, iced::widget::button::Status::Hovered);
+        iced::widget::button::Style {
+            background: Some(
+                if hovered {
+                    color::mix(tint_bg, tint_border, 0.3)
+                } else {
+                    tint_bg
+                }
+                .into(),
+            ),
+            text_color: tint_fg,
+            border: iced::Border {
+                color: tint_border,
+                width: 1.0,
+                radius: 999.0.into(),
+            },
+            shadow: iced::Shadow::default(),
+            snap: true,
+        }
+    });
+    container(
+        row![hairline(t2.border_subtle), conj, hairline(t2.border_subtle)]
+            .spacing(theme::space::S2)
+            .align_y(Alignment::Center),
+    )
+    .padding(iced::Padding {
+        top: 1.0,
+        bottom: 1.0,
+        left: CONNECTOR_INSET,
+        right: 0.0,
+    })
+    .into()
+}
+
+/// One `.cond-card`: clickable head (icon tile + label/desc + switch)
+/// and, when on, the per-condition parameter row.
+fn cond_card<'a>(
+    t: &Tokens,
+    st: &'a State,
+    kind: CondKind,
+    icon_name: &'a str,
+    label: &'a str,
+    desc: &'a str,
+    on: bool,
+) -> Element<'a, Msg> {
+    let t2 = *t;
+    let (tint_bg, tint_fg, tint_border) = clay_tint(t);
+
+    let ico = container(icons::icon(
+        icon_name,
+        15.0,
+        if on { tint_fg } else { t.fg_3 },
+    ))
+    .width(Length::Fixed(COND_ICO))
+    .height(Length::Fixed(COND_ICO))
+    .align_x(Alignment::Center)
+    .align_y(Alignment::Center)
+    .style(move |_| container::Style {
+        background: Some(if on { tint_bg } else { t2.bg_sunken }.into()),
+        border: iced::Border {
+            color: if on { tint_border } else { t2.border_subtle },
+            width: 1.0,
+            radius: COND_ICO_RADIUS.into(),
+        },
+        ..Default::default()
+    });
+
+    let text_col = column![
+        text(label).font(theme::BODY_BOLD).size(12.0).color(t.fg_1),
+        text(desc)
+            .font(theme::BODY)
+            .size(11.0)
+            .color(t.fg_3)
+            .line_height(1.35),
+    ]
+    .spacing(2.0)
+    .width(Length::Fill);
+
+    // The switch handles its own click; the rest of the head is one
+    // big toggle target (design: the whole `.cc-head` toggles).
+    let head = row![
+        mouse_area(
+            row![ico, text_col]
+                .spacing(COND_HEAD_GAP)
+                .align_y(Alignment::Center)
+                .width(Length::Fill),
+        )
+        .on_press(Msg::CondToggle(kind))
+        .interaction(iced::mouse::Interaction::Pointer),
+        toggle(t, on, true, move |_| Msg::CondToggle(kind)),
+    ]
+    .spacing(COND_HEAD_GAP)
+    .align_y(Alignment::Center)
+    .padding([COND_HEAD_PAD_Y, COND_HEAD_PAD_X]);
+
+    let mut card = column![head];
+
+    let params_pad = iced::Padding {
+        top: 0.0,
+        right: COND_HEAD_PAD_X,
+        bottom: 12.0,
+        left: COND_PARAM_INDENT,
+    };
+    let param_label = |s: &'a str| text(s).font(theme::BODY).size(11.0).color(t2.fg_3);
+    if on && kind == CondKind::Idle {
+        card = card.push(
+            container(
+                row![
+                    param_label("for"),
+                    TextInput::new(&st.cond_idle_min)
+                        .mono()
+                        .width(Length::Fixed(COND_NUM_W))
+                        .on_input(Msg::CondIdleMin)
+                        .view(t),
+                    param_label("minutes"),
+                ]
+                .spacing(theme::space::S2)
+                .align_y(Alignment::Center),
+            )
+            .padding(params_pad),
+        );
+    }
+    if on && kind == CondKind::Command {
+        card = card.push(
+            container(
+                column![
+                    TextInput::new(&st.cond_cmd_text)
+                        .hint("/usr/local/bin/ready-to-download.sh")
+                        .mono()
+                        .width(Length::Fill)
+                        .on_input(Msg::CondCmdText)
+                        .view(t),
+                    row![
+                        param_label("re-check every"),
+                        TextInput::new(&st.cond_cmd_interval)
+                            .mono()
+                            .width(Length::Fixed(COND_NUM_W))
+                            .on_input(Msg::CondCmdInterval)
+                            .view(t),
+                        param_label("seconds \u{b7} runs while exit code is 0"),
+                    ]
+                    .spacing(theme::space::S2)
+                    .align_y(Alignment::Center),
+                ]
+                .spacing(theme::space::S2),
+            )
+            .padding(params_pad),
+        );
+    }
+
+    container(card)
+        .width(Length::Fill)
+        .style(move |_| container::Style {
+            background: Some(if on { t2.bg_surface } else { t2.bg_page }.into()),
+            border: iced::Border {
+                color: if on { tint_border } else { t2.border_subtle },
+                width: 1.0,
+                radius: COND_CARD_RADIUS.into(),
+            },
+            ..Default::default()
+        })
+        .into()
+}
+
 fn ready_view(st: &State) -> Element<'_, Msg> {
     let t = &st.tokens;
     let t2 = *t;
@@ -818,40 +1421,43 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
         .into(),
     );
 
-    let mut sched_col = column![
-        row![
-            seg_btn(
-                t,
-                "Manual",
-                Some("calendar"),
-                st.sched == SchedKind::Manual,
-                Msg::Sched(SchedKind::Manual)
-            ),
-            seg_btn(
-                t,
-                "Recurring",
-                Some("refresh-cw"),
-                st.sched == SchedKind::Recurring,
-                Msg::Sched(SchedKind::Recurring)
-            ),
-            seg_btn(
-                t,
-                "One-off",
-                Some("zap"),
-                st.sched == SchedKind::OneOff,
-                Msg::Sched(SchedKind::OneOff)
-            ),
-            seg_btn(
-                t,
-                "Condition",
-                Some("wifi"),
-                st.sched == SchedKind::Condition,
-                Msg::Sched(SchedKind::Condition)
-            ),
-        ]
-        .spacing(4.0),
+    let mut sched_pills = row![
+        seg_btn(
+            t,
+            "Manual",
+            Some("calendar"),
+            st.sched == SchedKind::Manual,
+            Msg::Sched(SchedKind::Manual)
+        ),
+        seg_btn(
+            t,
+            "Recurring",
+            Some("refresh-cw"),
+            st.sched == SchedKind::Recurring,
+            Msg::Sched(SchedKind::Recurring)
+        ),
+        seg_btn(
+            t,
+            "One-off",
+            Some("zap"),
+            st.sched == SchedKind::OneOff,
+            Msg::Sched(SchedKind::OneOff)
+        ),
     ]
-    .spacing(theme::space::S3);
+    .spacing(4.0);
+    // Offer Condition only where this host can evaluate at least one
+    // condition; still show the pill when the saved schedule already
+    // is one (honest display beats silently rewriting to Manual).
+    if !st.cond_avail.is_empty() || st.sched == SchedKind::Condition {
+        sched_pills = sched_pills.push(seg_btn(
+            t,
+            "Condition",
+            Some("wifi"),
+            st.sched == SchedKind::Condition,
+            Msg::Sched(SchedKind::Condition),
+        ));
+    }
+    let mut sched_col = column![sched_pills].spacing(theme::space::S3);
     match st.sched {
         SchedKind::Recurring => {
             let mut days = row![].spacing(theme::space::S1);
@@ -887,27 +1493,52 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
                 .push(days);
         }
         SchedKind::OneOff => {
+            let date_ok = parse_once_date(&st.once_date).is_some();
+            let time_ok = parse_once_time(&st.once_time).is_some();
             sched_col = sched_col.push(
                 row![
                     text("Start at").font(theme::BODY).size(13.0).color(t.fg_2),
-                    TextInput::new(&st.sched_start)
-                        .hint("2026-06-11 09:00")
+                    TextInput::new(&st.once_date)
+                        .hint("2026-06-11")
                         .mono()
-                        .width(Length::Fixed(170.0))
-                        .on_input(Msg::SchedStart)
+                        .width(Length::Fixed(ONCE_DATE_W))
+                        .on_input(Msg::OnceDate)
+                        .view(t),
+                    Btn::new("")
+                        .icon_only("calendar")
+                        .on_press(Msg::CalToggle)
+                        .view(t),
+                    TextInput::new(&st.once_time)
+                        .hint("09:00")
+                        .mono()
+                        .width(Length::Fixed(ONCE_TIME_W))
+                        .on_input(Msg::OnceTime)
                         .view(t),
                 ]
                 .spacing(theme::space::S2)
                 .align_y(Alignment::Center),
             );
+            if !date_ok || !time_ok {
+                let what = match (date_ok, time_ok) {
+                    (false, false) => "date (YYYY-MM-DD) and time (HH:MM)",
+                    (false, true) => "date — use YYYY-MM-DD",
+                    _ => "time — use HH:MM",
+                };
+                sched_col = sched_col.push(
+                    row![
+                        icons::icon("triangle-alert", 12.0, t.status_danger),
+                        text(format!("Invalid {what}."))
+                            .font(theme::BODY)
+                            .size(11.0)
+                            .color(t.status_danger),
+                    ]
+                    .spacing(theme::space::S1)
+                    .align_y(Alignment::Center),
+                );
+            }
         }
         SchedKind::Condition => {
-            sched_col = sched_col.push(
-                text("Run while a condition holds (e.g. on Wi-Fi). Coming soon.")
-                    .font(theme::BODY)
-                    .size(12.0)
-                    .color(t.fg_3),
-            );
+            sched_col = sched_col.push(cond_builder(t, st));
         }
         SchedKind::Manual => {}
     }
@@ -1002,6 +1633,8 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
         delete_overlay(st, body)
     } else if st.color_open {
         color_pop_overlay(st, body)
+    } else if st.cal_open {
+        calendar_overlay(st, body)
     } else {
         body
     };
@@ -1164,6 +1797,196 @@ fn color_pop_overlay<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a, M
             top,
             ..Default::default()
         }),
+    ]
+    .into()
+}
+
+/// Centered month-calendar popup for the One-off date input. Centered
+/// (not anchored) because the schedule card's position shifts with the
+/// editor's scroll offset.
+fn calendar_overlay<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a, Msg> {
+    use chrono::Datelike;
+    let t = &st.tokens;
+    let t2 = *t;
+    let (year, month) = st.cal_ym;
+    let selected = parse_once_date(&st.once_date);
+    let today = chrono::Local::now().date_naive();
+
+    let nav = |icon_name: &'static str, delta: i32| {
+        button(icons::icon(icon_name, 14.0, t2.fg_2))
+            .padding(4.0)
+            .on_press(Msg::CalMonth(delta))
+            .style(move |_th, status| iced::widget::button::Style {
+                background: Some(
+                    if matches!(status, iced::widget::button::Status::Hovered) {
+                        t2.bg_sunken_hover
+                    } else {
+                        iced::Color::TRANSPARENT
+                    }
+                    .into(),
+                ),
+                text_color: t2.fg_2,
+                border: iced::Border {
+                    radius: theme::radius::XS.into(),
+                    ..Default::default()
+                },
+                shadow: iced::Shadow::default(),
+                snap: true,
+            })
+    };
+    let month_name = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ][(month - 1) as usize];
+    let head = row![
+        nav("chevron-left", -1),
+        text(format!("{month_name} {year}"))
+            .font(theme::BODY_BOLD)
+            .size(13.0)
+            .color(t.fg_1)
+            .width(Length::Fill)
+            .center(),
+        nav("chevron-right", 1),
+    ]
+    .align_y(Alignment::Center);
+
+    let mut weekdays = row![].spacing(CAL_GAP);
+    for d in ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"] {
+        weekdays = weekdays.push(
+            container(text(d).font(theme::BODY).size(11.0).color(t.fg_3))
+                .width(Length::Fixed(CAL_CELL))
+                .align_x(Alignment::Center),
+        );
+    }
+
+    let first = chrono::NaiveDate::from_ymd_opt(year, month, 1)
+        .unwrap_or_else(|| today.with_day(1).unwrap_or(today));
+    let lead = first.weekday().num_days_from_monday() as usize;
+    let days_in_month = (1..=31u32)
+        .rev()
+        .find_map(|d| chrono::NaiveDate::from_ymd_opt(year, month, d).map(|_| d))
+        .unwrap_or(28);
+
+    let mut grid = column![].spacing(CAL_GAP);
+    let mut cells: Vec<Element<'_, Msg>> = Vec::new();
+    for _ in 0..lead {
+        cells.push(
+            iced::widget::Space::new()
+                .width(Length::Fixed(CAL_CELL))
+                .height(Length::Fixed(CAL_CELL))
+                .into(),
+        );
+    }
+    for day in 1..=days_in_month {
+        let date = first.with_day(day).unwrap_or(first);
+        let is_sel = selected == Some(date);
+        let is_today = date == today;
+        cells.push(
+            button(
+                container(text(day.to_string()).font(theme::BODY).size(12.0))
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .align_x(Alignment::Center)
+                    .align_y(Alignment::Center),
+            )
+            .width(Length::Fixed(CAL_CELL))
+            .height(Length::Fixed(CAL_CELL))
+            .padding(0.0)
+            .on_press(Msg::CalPick(date))
+            .style(move |_th, status| {
+                let hovered = matches!(status, iced::widget::button::Status::Hovered);
+                iced::widget::button::Style {
+                    background: Some(
+                        if is_sel {
+                            t2.action_primary
+                        } else if hovered {
+                            t2.bg_sunken_hover
+                        } else {
+                            iced::Color::TRANSPARENT
+                        }
+                        .into(),
+                    ),
+                    text_color: if is_sel {
+                        t2.action_primary_fg
+                    } else {
+                        t2.fg_1
+                    },
+                    border: iced::Border {
+                        color: if is_today && !is_sel {
+                            t2.border_brand
+                        } else {
+                            iced::Color::TRANSPARENT
+                        },
+                        width: 1.0,
+                        radius: theme::radius::XS.into(),
+                    },
+                    shadow: iced::Shadow::default(),
+                    snap: true,
+                }
+            })
+            .into(),
+        );
+    }
+    let mut cells = cells.into_iter();
+    loop {
+        let week: Vec<Element<'_, Msg>> = cells.by_ref().take(7).collect();
+        if week.is_empty() {
+            break;
+        }
+        let mut r = row![].spacing(CAL_GAP);
+        for c in week {
+            r = r.push(c);
+        }
+        grid = grid.push(r);
+    }
+
+    let card = container(
+        column![head, weekdays, grid]
+            .spacing(theme::space::S2)
+            .width(Length::Shrink),
+    )
+    .padding(CAL_PAD)
+    .style(move |_| container::Style {
+        background: Some(t2.bg_surface.into()),
+        border: iced::Border {
+            color: t2.border_default,
+            width: 1.0,
+            radius: theme::radius::SM.into(),
+        },
+        shadow: iced::Shadow {
+            color: color::with_alpha(iced::Color::BLACK, 80.0 / 255.0),
+            offset: iced::Vector::new(0.0, 4.0),
+            blur_radius: 16.0,
+        },
+        ..Default::default()
+    });
+
+    let scrim = mouse_area(
+        container(iced::widget::Space::new())
+            .width(Length::Fill)
+            .height(Length::Fill),
+    )
+    .on_press(Msg::CalClose)
+    .on_right_press(Msg::CalClose);
+
+    iced::widget::stack![
+        base,
+        scrim,
+        container(iced::widget::opaque(card))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center),
     ]
     .into()
 }

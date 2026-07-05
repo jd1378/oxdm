@@ -6,6 +6,7 @@
 //! [`runner::JobRunner`]; pause/cancel policy is hidden behind
 //! [`pause::PauseStrategy`].
 
+mod conditions;
 pub mod crypto;
 mod events;
 mod hooks;
@@ -20,6 +21,7 @@ pub mod state;
 pub mod store;
 mod update_channel;
 
+pub use conditions::available_conditions;
 pub use events::{ConflictKind, DomainEvent};
 pub use hooks::spawn as spawn_hook_executor;
 pub use pause::{CancelResumeStrategy, PauseStrategy};

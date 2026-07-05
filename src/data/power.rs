@@ -39,6 +39,9 @@ struct Pending {
     action: PowerAction,
     deadline_ms: i64,
     abort: tokio::task::AbortHandle,
+    /// "Confirm now" signal: firing it wakes the grace task early so
+    /// the action executes immediately (same claim path as expiry).
+    fire: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 /// One-slot guard for pending destructive power actions. Owned by
@@ -82,11 +85,15 @@ impl PowerGuard {
         g.0 += 1;
         let seq = g.0;
         let guard = Arc::clone(self);
+        let (fire_tx, fire_rx) = tokio::sync::oneshot::channel::<()>();
         // Spawn while still holding the lock: with a zero grace (tests,
         // debug override) the task could otherwise win the race and
         // find an empty slot below.
         let handle = tokio::spawn(async move {
-            tokio::time::sleep(delay).await;
+            tokio::select! {
+                _ = tokio::time::sleep(delay) => {}
+                _ = fire_rx => {}
+            }
             let claimed = {
                 let mut g = guard.pending.lock().expect("power guard mutex poisoned");
                 match &g.1 {
@@ -110,6 +117,7 @@ impl PowerGuard {
             action,
             deadline_ms,
             abort: handle.abort_handle(),
+            fire: Some(fire_tx),
         });
         drop(g);
         let _ = self.events.send(DomainEvent::ShutdownPending {
@@ -133,6 +141,27 @@ impl PowerGuard {
         p.abort.abort();
         let _ = self.events.send(DomainEvent::ShutdownCancelled);
         tracing::info!(action = ?p.action, "pending power action cancelled");
+    }
+
+    /// Execute the pending action *now*, skipping the rest of the
+    /// grace period ("confirm instantly" in the countdown window).
+    /// Returns `false` when nothing is pending (or the timer already
+    /// fired) — idempotent like [`cancel`](Self::cancel). The grace
+    /// task's claim path runs unchanged, so a racing cancel still
+    /// wins or loses atomically.
+    pub fn confirm(&self) -> bool {
+        let fire = {
+            let mut g = self.pending.lock().expect("power guard mutex poisoned");
+            g.1.as_mut().and_then(|p| p.fire.take())
+        };
+        match fire {
+            Some(tx) => {
+                tracing::info!("pending power action confirmed; executing immediately");
+                // Err = grace task already gone (fired/aborted) — no-op.
+                tx.send(()).is_ok()
+            }
+            None => false,
+        }
     }
 
     /// Currently pending action, for snapshots to late-connecting GUIs.
@@ -223,5 +252,44 @@ mod tests {
         // Slot is free again — a new action can be armed.
         assert!(g.arm(PowerAction::Hibernate, counter_action(&hits)));
         assert!(matches!(g.pending(), Some((PowerAction::Hibernate, _))));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn confirm_executes_immediately_without_waiting_grace() {
+        let (g, mut rx) = guard();
+        let hits = Arc::new(AtomicU32::new(0));
+        assert!(g.arm(PowerAction::Sleep, counter_action(&hits)));
+        let _ = rx.try_recv(); // ShutdownPending
+        assert!(g.confirm());
+        // Yield to the grace task without advancing the paused clock —
+        // the action must fire from the confirm signal, not the timer.
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert!(g.pending().is_none());
+        // Second confirm: nothing pending → no-op.
+        assert!(!g.confirm());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn confirm_with_nothing_pending_is_noop() {
+        let (g, _rx) = guard();
+        assert!(!g.confirm());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancel_after_confirm_signal_does_not_double_fire() {
+        let (g, _rx) = guard();
+        let hits = Arc::new(AtomicU32::new(0));
+        assert!(g.arm(PowerAction::ShutDown, counter_action(&hits)));
+        assert!(g.confirm());
+        g.cancel();
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        advance_past_grace().await;
+        assert!(hits.load(Ordering::SeqCst) <= 1);
+        assert!(g.pending().is_none());
     }
 }

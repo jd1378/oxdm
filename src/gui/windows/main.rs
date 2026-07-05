@@ -9,7 +9,7 @@ use iced::widget::{column, container, mouse_area, row, scrollable, text};
 use iced::{Alignment, Element, Length, Subscription, Task};
 
 use super::main_dialogs::{self, AboutState, HostState, RemoveState, UpdateUi};
-use crate::domain::{Category, Density, JobId, Phase, PowerAction, QueueId};
+use crate::domain::{Category, Density, JobId, Phase, QueueId};
 use crate::gui::chrome::{self, WindowControl, titlebar};
 use crate::gui::format::{format_bytes, format_eta, format_speed};
 use crate::gui::ipc::DaemonSignal;
@@ -74,12 +74,6 @@ const NAME_PILL_GAP: f32 = 10.0;
 // clay-500 grip + a full-height clay-300 guideline"): a 1px clay-300
 // vertical rule over the table body at the dragged boundary.
 const GUIDELINE_W: f32 = 1.0;
-
-// Shutdown countdown banner refresh rate. Remaining time is DERIVED
-// from `deadline_ms` on every render — this tick only forces the
-// redraw (it carries no timer state and runs only while the banner
-// is visible; W6 reduce_motion doesn't apply: it's data, not motion).
-const SHUTDOWN_TICK_MS: u64 = 250;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarFilter {
@@ -172,9 +166,6 @@ pub enum Msg {
     // First-run welcome overlay: either dismissal persists
     // `first_run_seen` (design §3.8 welcome mode)
     WelcomeDismiss,
-    // Shutdown countdown banner (B4/G1d)
-    ShutdownTick,
-    CancelShutdown,
     // Conflict / recovery
     Conflict(JobId, u64, crate::data::ConflictKind, ConflictChoice),
     DbExit,
@@ -322,10 +313,6 @@ pub struct Main {
     pub anim_t: f32,
     /// Job count at the last snapshot — used to toast genuine adds.
     pub prev_job_count: usize,
-    /// Pending destructive power action `(action, deadline_ms)` — the
-    /// countdown banner. Remaining seconds derive from the deadline;
-    /// no timer state (B4).
-    pub shutdown: Option<(PowerAction, i64)>,
     /// First-run welcome overlay already shown this session — never
     /// re-show even if the settings flag hasn't round-tripped yet.
     pub welcome_shown: bool,
@@ -377,8 +364,6 @@ impl Main {
             drag_hover: false,
             anim_t: 0.0,
             prev_job_count: snap.jobs.len(),
-            // Late-connecting GUI: a countdown may already be armed.
-            shutdown: snap.pending_shutdown,
             welcome_shown: false,
             snap,
         }
@@ -654,12 +639,6 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             // the confirm path, so only surface increases here.
             let added = new_count.saturating_sub(m.prev_job_count);
             m.prev_job_count = new_count;
-            // Adopt a pending power action the snapshot knows about
-            // (late connect / armed before this refetch). A `None`
-            // snapshot does NOT clear an armed banner: clearing is
-            // owned by `ShutdownCancelled` + the deadline tick, so a
-            // refetch racing the arm event can't hide the countdown.
-            m.shutdown = snap.pending_shutdown.or(m.shutdown);
             m.snap = snap;
             m.selection
                 .retain(|id| m.snap.jobs.iter().any(|j| j.id == *id));
@@ -690,17 +669,9 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             | Event::SettingsChanged
             | Event::ActiveQueuesChanged
             | Event::ConflictChanged => refresh(m.client.clone()),
-            Event::ShutdownPending {
-                action,
-                deadline_ms,
-            } => {
-                m.shutdown = Some((action, deadline_ms));
-                Task::none()
-            }
-            Event::ShutdownCancelled => {
-                m.shutdown = None;
-                Task::none()
-            }
+            // The grace countdown lives in its own window
+            // (`gui power`); the main window ignores these.
+            Event::ShutdownPending { .. } | Event::ShutdownCancelled => Task::none(),
             Event::Close => iced::exit(),
             Event::Focus | Event::ShowMainWindow => iced::window::latest().and_then(|id| {
                 Task::batch([
@@ -808,23 +779,6 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             let settings = m.snap.settings.clone();
             let client = m.client.clone();
             act(async move { client.update_settings(settings).await })
-        }
-        Msg::ShutdownTick => {
-            // Banner clears itself when the deadline passes (the action
-            // fires daemon-side; nothing left to cancel).
-            if let Some((_, deadline_ms)) = m.shutdown
-                && chrono::Utc::now().timestamp_millis() >= deadline_ms
-            {
-                m.shutdown = None;
-            }
-            Task::none()
-        }
-        Msg::CancelShutdown => {
-            // Clear optimistically; `CancelPendingShutdown` is
-            // idempotent daemon-side (Ok even when already fired).
-            m.shutdown = None;
-            let client = m.client.clone();
-            act(async move { client.cancel_pending_shutdown().await })
         }
         Msg::KeyPressed(key, mods) => handle_key(m, key, mods),
         Msg::Modifiers(mods) => {
@@ -1526,14 +1480,6 @@ pub fn subscription(app: &App) -> Subscription<Msg> {
                     .map(|_| Msg::AnimTick),
             );
         }
-        // Countdown-banner redraw clock — only while a shutdown is
-        // pending. Not motion: the remaining seconds are data.
-        if m.shutdown.is_some() {
-            subs.push(
-                iced::time::every(std::time::Duration::from_millis(SHUTDOWN_TICK_MS))
-                    .map(|_| Msg::ShutdownTick),
-            );
-        }
     }
     Subscription::batch(subs)
 }
@@ -1595,16 +1541,7 @@ fn main_view(m: &Main) -> Element<'_, Msg> {
 
     // Overlays/modals cover the body only — the titlebar stays above
     // them (matches the egui app, whose scrim started below the bar).
-    let mut body = column![];
-    // Shutdown countdown strip (G1d): pinned at the top of the body.
-    // Inside the overlay-stack region so the context-menu anchor math
-    // (cursor − titlebar) stays exact while the banner is up.
-    if let Some((action, deadline_ms)) = m.shutdown {
-        body = body
-            .push(shutdown_banner(m, action, deadline_ms))
-            .push(hairline(t.border_subtle));
-    }
-    let body = body.push(
+    let body = column![].push(
         column![
             row![
                 sidebar(m),
@@ -1798,54 +1735,6 @@ fn toast_layer<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg> {
         .align_y(Alignment::End)
         .padding(TOAST_MARGIN);
     iced::widget::stack![base, anchored].into()
-}
-
-// ------------------------------------------------------- shutdown banner
-
-/// Rust-tinted countdown strip (B4/G1d), pinned at the top of the
-/// body while a destructive power action is pending. Reuses the
-/// tinted callout grammar of the download-window reconnect banner
-/// (status fg over its `*_bg` tint, icon 17 + 12px medium body) but
-/// square-cornered/full-width as a strip; the body adds the hairline
-/// below. Remaining seconds are DERIVED from `deadline_ms` on every
-/// redraw — no local timer state (B4).
-fn shutdown_banner(m: &Main, action: PowerAction, deadline_ms: i64) -> Element<'_, Msg> {
-    let t = &m.tokens;
-    let fg = t.status_danger;
-    let bg = t.status_danger_bg;
-    let verb = match action {
-        PowerAction::ShutDown => "shut down",
-        PowerAction::Restart => "restart",
-        PowerAction::Sleep => "sleep",
-        PowerAction::Hibernate => "hibernate",
-    };
-    // Ceil so the banner never shows "0s" while the action is pending.
-    let remaining_s = ((deadline_ms - chrono::Utc::now().timestamp_millis()).max(0) + 999) / 1000;
-    container(
-        row![
-            icons::icon("power", 17.0, fg),
-            text(format!("System will {verb} in {remaining_s}s"))
-                .font(theme::BODY_MEDIUM)
-                .size(12.0)
-                .color(fg),
-            iced::widget::Space::new().width(Length::Fill),
-            Btn::new("Cancel shutdown")
-                .secondary()
-                .size(BtnSize::Sm)
-                .icon("x")
-                .on_press(Msg::CancelShutdown)
-                .view(t),
-        ]
-        .spacing(theme::space::S2)
-        .align_y(Alignment::Center),
-    )
-    .width(Length::Fill)
-    .padding([theme::space::S1, theme::space::S3])
-    .style(move |_| container::Style {
-        background: Some(bg.into()),
-        ..Default::default()
-    })
-    .into()
 }
 
 // ---------------------------------------------------------------- sidebar

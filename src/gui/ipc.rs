@@ -45,3 +45,9 @@ fn event_stream(filter: SubFilter) -> impl Stream<Item = DaemonSignal> {
 pub fn all_events() -> Subscription<DaemonSignal> {
     Subscription::run(|| event_stream(SubFilter::All))
 }
+
+/// Lifecycle events only — no per-tick counter pumps. For dialog
+/// windows that don't render progress.
+pub fn lifecycle_events() -> Subscription<DaemonSignal> {
+    Subscription::run(|| event_stream(SubFilter::Lifecycle))
+}

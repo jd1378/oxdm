@@ -6,6 +6,7 @@ pub mod batch;
 pub mod download;
 pub mod main;
 pub mod main_dialogs;
+pub mod power;
 pub mod properties;
 pub mod queues;
 pub mod settings;

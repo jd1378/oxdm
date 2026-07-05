@@ -91,6 +91,9 @@ fn main() {
             Some("queues") => {
                 oxdm::gui::windows::queues::launch_queues();
             }
+            Some("power") => {
+                oxdm::gui::windows::power::launch_power();
+            }
             Some("batch") => {
                 let Some(path) = args.next() else {
                     eprintln!("oxdm gui batch <staged-json-path>");

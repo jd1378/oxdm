@@ -272,6 +272,15 @@ pub fn spawn_queues_gui() {
     );
 }
 
+/// Shutdown/sleep grace-countdown window. Spawned by the daemon's
+/// power-prompt listener when a destructive power action arms.
+pub fn spawn_power_gui() {
+    evict_and_spawn(
+        crate::ipc_local::protocol::GuiKind::Power,
+        &["gui", "power"],
+    );
+}
+
 /// Grant a freshly spawned GUI subprocess permission to call
 /// `SetForegroundWindow`. Without this, Windows' focus-stealing
 /// prevention forces the new window to the background and only flashes

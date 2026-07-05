@@ -448,6 +448,10 @@ impl Client {
         self.expect_ok(Request::CancelPendingShutdown).await
     }
 
+    pub async fn confirm_pending_shutdown(&self) -> Result<(), String> {
+        self.expect_ok(Request::ConfirmPendingShutdown).await
+    }
+
     pub async fn daemon_quit(&self) -> Result<(), String> {
         self.expect_ok(Request::DaemonQuit).await
     }

@@ -1017,6 +1017,12 @@ impl AppState {
         self.power.cancel();
     }
 
+    /// Execute the pending power action immediately ("confirm now"
+    /// from the countdown window). Idempotent.
+    pub fn confirm_pending_shutdown(&self) {
+        self.power.confirm();
+    }
+
     /// `(action, deadline_ms)` of the pending power action, for
     /// snapshots to late-connecting GUIs.
     pub fn pending_shutdown(&self) -> Option<(crate::domain::PowerAction, i64)> {

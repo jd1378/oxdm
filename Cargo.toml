@@ -52,6 +52,8 @@ iced = { version = "0.14", default-features = false, features = ["tiny-skia", "w
 gtk = "0.18"
 ksni = "0.3.4"
 keyring = { version = "3", features = ["linux-native-sync-persistent"] }
+# Already in-tree via notify-rust; direct use: NetworkManager Metered probe.
+zbus = { version = "5", default-features = false, features = ["tokio"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }

@@ -18,5 +18,8 @@ pub use job::{
     Job, JobError, JobId, JobSnapshot, JobStatus, LiveCounters, OnCompletion, Phase, PowerAction,
     SHUTDOWN_GRACE_SECS, ShutdownAction, SpeedSample, WillSendHeader, will_send_headers,
 };
-pub use queue::{Queue, QueueHook, QueueId, QueueSchedule, WeekDayMask, random_vivid_color};
+pub use queue::{
+    CMD_INTERVAL_RANGE, CondCombine, CondCommand, CondKind, CondSet, IDLE_MINUTES_RANGE, Queue,
+    QueueHook, QueueId, QueueSchedule, WeekDayMask, random_vivid_color,
+};
 pub use settings::{ConflictWhileHidden, Density, Settings, Theme};

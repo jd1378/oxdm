@@ -425,6 +425,7 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
                 conflict_len: state.conflict_len().await,
                 counters,
                 pending_shutdown: state.pending_shutdown(),
+                cond_available: crate::data::available_conditions(),
             };
             Reply::Snapshot(snap)
         }
@@ -707,6 +708,10 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
         }
         Request::CancelPendingShutdown => {
             state.cancel_pending_shutdown();
+            Reply::Ok
+        }
+        Request::ConfirmPendingShutdown => {
+            state.confirm_pending_shutdown();
             Reply::Ok
         }
         Request::Probe(url) => Reply::ProbeResult(state.probe(url).await),
