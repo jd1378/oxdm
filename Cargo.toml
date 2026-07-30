@@ -104,5 +104,11 @@ path = "src/bin/oxdm-updater.rs"
 # iced 0.14.0's tiny-skia backend double-transforms canvas clip bounds
 # (draw_primitive_group pre-multiplies, the renderer multiplies again),
 # shifting/clipping all nested canvas geometry. Vendored with a 2-line fix.
+#
+# iced 0.14.0's winit runtime discards `request_inner_size`'s return
+# value. Wayland resizes synchronously and returns the applied size
+# instead of emitting `Resized`, so a programmatic `window::resize`
+# never reached the viewport. Vendored with the feedback path added.
 [patch.crates-io]
 iced_tiny_skia = { path = "vendor/iced_tiny_skia" }
+iced_winit = { path = "vendor/iced_winit" }
