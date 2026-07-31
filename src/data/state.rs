@@ -1201,7 +1201,24 @@ impl AppState {
         }
     }
 
-    pub async fn update_settings(&self, new: Settings) -> Result<(), String> {
+    pub async fn update_settings(&self, mut new: Settings) -> Result<(), String> {
+        // Autostart lives outside the DB (XDG autostart entry / launch
+        // agent / Run key), so the flag has to be reconciled with the
+        // OS whenever it flips. A failure there must not lose the rest
+        // of the save, so we keep the persisted flag matching what the
+        // OS actually has instead of writing a promise we didn't keep.
+        let was = self.settings.read().await.start_at_login;
+        if new.start_at_login != was {
+            let want = new.start_at_login;
+            let applied = tokio::task::spawn_blocking(move || crate::platform::set_autostart(want))
+                .await
+                .map_err(|e| e.to_string())?;
+            if let Err(e) = applied {
+                tracing::warn!(error = %e, enabled = want, "set autostart failed");
+                new.start_at_login = was;
+            }
+        }
+
         let manager = build_manager(&new);
         self.store
             .save_settings(&new)

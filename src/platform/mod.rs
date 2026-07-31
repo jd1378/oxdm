@@ -150,40 +150,56 @@ pub fn install_desktop_entry() -> Result<std::path::PathBuf, String> {
     Err("Create Desktop Entry is Linux-only".into())
 }
 
+/// Write (or remove) the XDG autostart entry for `exe` under `dir`.
+/// Split out from [`set_autostart`] so the entry contents are testable
+/// without touching the real `~/.config/autostart`.
+#[cfg(target_os = "linux")]
+fn write_xdg_autostart(
+    dir: &std::path::Path,
+    exe: &std::path::Path,
+    enabled: bool,
+) -> Result<(), String> {
+    use std::io::Write;
+    let path = dir.join("oxdm.desktop");
+    if !enabled {
+        let _ = std::fs::remove_file(&path);
+        return Ok(());
+    }
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let body = format!(
+        "[Desktop Entry]\n\
+         Type=Application\n\
+         Name=oxdm\n\
+         Comment=Cross-platform download manager\n\
+         Exec={}\n\
+         Terminal=false\n\
+         X-GNOME-Autostart-enabled=true\n\
+         Categories=Network;FileTransfer;\n",
+        exe.to_string_lossy()
+    );
+    let mut f = std::fs::File::create(&path).map_err(|e| e.to_string())?;
+    f.write_all(body.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Install or remove a system autostart entry for oxdm.
 ///
 /// - Linux: writes `~/.config/autostart/oxdm.desktop` (XDG autostart).
 /// - macOS: writes `~/Library/LaunchAgents/com.oxdm.app.plist`.
 /// - Windows: writes / clears
 ///   `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\oxdm`.
+///
+/// The entry launches oxdm with no arguments so the separate
+/// "start to tray" setting stays in charge of whether the main window
+/// opens; hard-coding `--tray` here would silently override it.
 pub fn set_autostart(enabled: bool) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        use std::io::Write;
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let dir = dirs::config_dir()
             .ok_or_else(|| "no config dir".to_string())?
             .join("autostart");
-        let path = dir.join("oxdm.desktop");
-        if !enabled {
-            let _ = std::fs::remove_file(&path);
-            return Ok(());
-        }
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let body = format!(
-            "[Desktop Entry]\n\
-             Type=Application\n\
-             Name=oxdm\n\
-             Comment=Cross-platform download manager\n\
-             Exec={} --tray\n\
-             Terminal=false\n\
-             X-GNOME-Autostart-enabled=true\n\
-             Categories=Network;FileTransfer;\n",
-            exe.to_string_lossy()
-        );
-        let mut f = std::fs::File::create(&path).map_err(|e| e.to_string())?;
-        f.write_all(body.as_bytes()).map_err(|e| e.to_string())?;
-        Ok(())
+        write_xdg_autostart(&dir, &exe, enabled)
     }
     #[cfg(target_os = "macos")]
     {
@@ -210,7 +226,6 @@ pub fn set_autostart(enabled: bool) -> Result<(), String> {
     <key>ProgramArguments</key>
     <array>
         <string>{}</string>
-        <string>--tray</string>
     </array>
     <key>RunAtLoad</key><true/>
 </dict>
@@ -236,7 +251,7 @@ pub fn set_autostart(enabled: bool) -> Result<(), String> {
             return Ok(());
         }
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        let value = format!("\"{}\" --tray", exe.to_string_lossy());
+        let value = format!("\"{}\"", exe.to_string_lossy());
         let status = Command::new("reg")
             .args(["add", key, "/v", "oxdm", "/t", "REG_SZ", "/d", &value, "/f"])
             .status()
@@ -284,4 +299,36 @@ pub fn show_notification(summary: String, body: String) {
             tracing::debug!(error = %e, "notification failed (no daemon?)");
         }
     });
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn autostart_entry_is_written_then_removed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("autostart");
+        let exe = std::path::Path::new("/opt/oxdm/oxdm");
+
+        write_xdg_autostart(&dir, exe, true).unwrap();
+        let body = std::fs::read_to_string(dir.join("oxdm.desktop")).unwrap();
+        assert!(body.contains("Exec=/opt/oxdm/oxdm\n"));
+        // The entry must not force tray mode — `start_to_tray` owns that.
+        assert!(!body.contains("--tray"));
+
+        write_xdg_autostart(&dir, exe, false).unwrap();
+        assert!(!dir.join("oxdm.desktop").exists());
+    }
+
+    #[test]
+    fn disabling_autostart_when_absent_is_ok() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_xdg_autostart(
+            &tmp.path().join("nope"),
+            std::path::Path::new("/opt/oxdm/oxdm"),
+            false,
+        )
+        .unwrap();
+    }
 }
