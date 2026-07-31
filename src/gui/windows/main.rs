@@ -16,8 +16,8 @@ use crate::gui::ipc::DaemonSignal;
 use crate::gui::shot::Shot;
 use crate::gui::theme::{self, Tokens};
 use crate::gui::widget::{
-    Btn, BtnSize, TabBtn, col_header_sortable, hairline, inline_progress, search_field, status_dot,
-    swatch, vdivider,
+    Btn, BtnSize, ProgressTone, TabBtn, col_header_sortable, hairline, inline_progress,
+    search_field, status_dot, swatch, vdivider,
 };
 use crate::gui::{color, icons};
 use crate::ipc_local::Client;
@@ -200,6 +200,10 @@ pub enum ToolAction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextAction {
+    /// Open the per-job window (`oxdm gui download <id>`): live
+    /// progress while the job runs, the completion view once it is
+    /// done. Design calls this "Show progress…".
+    ShowProgress,
     Open,
     OpenFolder,
     Resume,
@@ -1422,6 +1426,12 @@ fn context_action(m: &mut Main, action: ContextAction) -> Task<Msg> {
                 .collect();
             iced::clipboard::write(urls.join("\n"))
         }
+        ContextAction::ShowProgress => act(async move {
+            for id in ids {
+                client.open_download_window(id).await?;
+            }
+            Ok(())
+        }),
         ContextAction::Properties => act(async move {
             for id in ids {
                 client.open_properties_window(id).await?;
@@ -2441,23 +2451,36 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
         Alignment::End, // design: numeric columns right-align
     );
 
-    let status_cell: Element<'_, Msg> = if phase.is_terminal()
-        || matches!(phase, Phase::Paused | Phase::Cancelled | Phase::Queued)
-    {
-        let (color, label) = phase_style(t, phase);
+    // Status cell shows a progress bar whenever there is progress worth
+    // showing (design `DLRow.showBar`, generalised): a live transfer, or
+    // any stopped one that already has bytes on disk. Keyed on the bytes
+    // rather than on a phase allow-list — `cancel_to_queued` parks a
+    // half-finished job at `Queued` without discarding its `.part`
+    // files, and an allow-list would hide progress that is still there.
+    // Only Queued-at-0% and Completed (100%, already said by the label)
+    // stay plain dots.
+    let frac = match (c.map(|c| c.downloaded), total) {
+        (Some(d), Some(tot)) if tot > 0 => d as f64 / tot as f64,
+        _ => 0.0,
+    };
+    let tone = match phase {
+        Phase::Failed => ProgressTone::Failed,
+        // Anything stopped-with-bytes reads as parked, not live.
+        _ if !phase.is_running() => ProgressTone::Paused,
+        _ => ProgressTone::Active,
+    };
+    let stopped_with_progress = frac > 0.0 && phase != Phase::Completed;
+    let status_cell: Element<'_, Msg> = if phase.is_running() || stopped_with_progress {
+        let (_, label) = phase_style(t, phase);
         cell(
-            status_dot(color, label, 12.0),
+            inline_progress(t, frac as f32, label, selected, tone, Length::Fill, 22.0),
             Length::Fixed(m.columns.width(SortColumn::Status as usize)),
             Alignment::Start,
         )
     } else {
-        let frac = match (c.map(|c| c.downloaded), total) {
-            (Some(d), Some(tot)) if tot > 0 => d as f64 / tot as f64,
-            _ => 0.0,
-        };
-        let (_, label) = phase_style(t, phase);
+        let (color, label) = phase_style(t, phase);
         cell(
-            inline_progress(t, frac as f32, label, selected, Length::Fill, 22.0),
+            status_dot(color, label, 12.0),
             Length::Fixed(m.columns.width(SortColumn::Status as usize)),
             Alignment::Start,
         )
@@ -2925,6 +2948,21 @@ fn context_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>, id: JobId) -> E
 
     let menu = container(
         column![
+            // Design puts "Show progress…" first and offers it in every
+            // state — the same window carries the completion view, so a
+            // finished download can be reopened after its dialog was
+            // dismissed. The label follows what the window will show.
+            item(
+                "activity",
+                if done {
+                    "Show Completion Dialog"
+                } else {
+                    "Show Progress\u{2026}"
+                },
+                None,
+                true,
+                Msg::Context(ContextAction::ShowProgress)
+            ),
             item(
                 "file",
                 "Open",

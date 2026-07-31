@@ -293,6 +293,27 @@ fn inputs_page(t: &theme::Tokens) -> Element<'static, Msg> {
             0.63,
             "Downloading".into(),
             false,
+            widget::ProgressTone::Active,
+            Length::Fixed(260.0),
+            22.0
+        ),
+        // Stalled tones: a paused / failed row keeps its bar, muted so
+        // it cannot be mistaken for a live transfer.
+        widget::inline_progress(
+            t,
+            0.38,
+            "Paused".into(),
+            false,
+            widget::ProgressTone::Paused,
+            Length::Fixed(260.0),
+            22.0
+        ),
+        widget::inline_progress(
+            t,
+            0.23,
+            "Failed".into(),
+            false,
+            widget::ProgressTone::Failed,
             Length::Fixed(260.0),
             22.0
         ),

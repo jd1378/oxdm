@@ -96,24 +96,43 @@ pub fn pill_progress<'a, M: 'a>(
     .into()
 }
 
-/// Table-cell progress: sunken track + translucent clay fill +
+/// Fill treatment of an [`inline_progress`] bar (design
+/// `.pfill` / `.pfill.paused` / `.pfill.failed`): a stalled transfer
+/// still shows how far it got, but must not read as live.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgressTone {
+    /// Live transfer — clay fill.
+    Active,
+    /// Stopped with bytes on disk — muted grey fill.
+    Paused,
+    /// Stopped by an error — rust fill.
+    Failed,
+}
+
+/// Table-cell progress: sunken track + translucent fill (per `tone`) +
 /// centered `"{label} · {pct}%"` body_bold(11) caption.
 pub fn inline_progress<'a, M: 'a>(
     t: &Tokens,
     frac: f32,
     label: String,
     selected: bool,
+    tone: ProgressTone,
     width: Length,
     height: f32,
 ) -> Element<'a, M> {
-    let fill = with_alpha(
-        crate::gui::color::clay::C300,
-        if selected {
-            150.0 / 255.0
-        } else {
-            100.0 / 255.0
-        },
-    );
+    // Selection wins over tone: on a selected row the design's
+    // `tr.selected .pfill` rule overrides the paused/failed variants
+    // (equal specificity, declared later), so every fill goes solid
+    // clay against the selected background.
+    let fill = if selected {
+        with_alpha(crate::gui::color::clay::C300, 150.0 / 255.0)
+    } else {
+        match tone {
+            ProgressTone::Active => with_alpha(crate::gui::color::clay::C300, 100.0 / 255.0),
+            ProgressTone::Paused => with_alpha(t.fg_3, 0.35),
+            ProgressTone::Failed => with_alpha(crate::gui::color::rust::R300, 0.5),
+        }
+    };
     canvas(PillProgress {
         frac: frac.clamp(0.0, 1.0),
         track: t.bg_sunken,

@@ -18,6 +18,7 @@ pub use controls::{
 };
 pub use inputs::{FileInput, PasswordInput, TextInput, search_field};
 pub use pills::{
-    dot, eyebrow, field_label, inline_progress, pill_count, pill_progress, status_dot, swatch,
+    ProgressTone, dot, eyebrow, field_label, inline_progress, pill_count, pill_progress,
+    status_dot, swatch,
 };
 pub use striped::{RateChart, rate_chart, striped_progress};
