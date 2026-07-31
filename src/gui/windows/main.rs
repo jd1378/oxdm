@@ -167,8 +167,14 @@ pub enum Msg {
     /// Clicked away before its TTL ran out. Same removal as expiry —
     /// the pending `ToastExpired` for this id then finds nothing.
     ToastDismissed(u64),
-    /// Pointer entered (`Some`) or left (`None`) a table row.
-    RowHover(Option<JobId>),
+    /// Pointer entered a table row.
+    RowHovered(JobId),
+    /// Pointer left a table row. Carries the row's own id: a fast move
+    /// makes the entered and exited rows report in the SAME batch, and
+    /// rows update top-down, so moving upwards the new row's enter
+    /// arrives before the old row's exit. An id-less exit would clear
+    /// the highlight that had just been set.
+    RowUnhovered(JobId),
     // Pulse clock for the queue live-dot (gated on !reduce_motion)
     AnimTick,
     // Browser-extensions overlay store link
@@ -765,8 +771,16 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                 act(async move { client.open_download_window(id).await })
             }
         }
-        Msg::RowHover(id) => {
-            m.hovered_row = id;
+        Msg::RowHovered(id) => {
+            m.hovered_row = Some(id);
+            Task::none()
+        }
+        Msg::RowUnhovered(id) => {
+            // Only clear if this row still owns the slot; a newer enter
+            // for another row must win regardless of message order.
+            if m.hovered_row == Some(id) {
+                m.hovered_row = None;
+            }
             Task::none()
         }
         Msg::RowRightClick(id) => {
@@ -2628,8 +2642,8 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
         .on_press(Msg::RowClick(id, ctrl, shift))
         .on_double_click(Msg::RowDoubleClick(id))
         .on_right_press(Msg::RowRightClick(id))
-        .on_enter(Msg::RowHover(Some(id)))
-        .on_exit(Msg::RowHover(None))
+        .on_enter(Msg::RowHovered(id))
+        .on_exit(Msg::RowUnhovered(id))
         .interaction(iced::mouse::Interaction::Pointer);
 
     // 1px bottom row separator (design `.tr` border-subtle hairline).
