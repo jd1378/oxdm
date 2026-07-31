@@ -32,7 +32,10 @@ fn control_button<'a, M: Clone + 'a>(
     let idle = if danger { t.status_danger } else { t.fg_2 };
     let hover_fg = if danger { Color::WHITE } else { t.fg_1 };
     iced::widget::button(
-        container(icons::icon_dyn(icon, 14.0, idle, hover_fg))
+        // Tint comes from the button's per-status `text_color` below,
+        // so the glyph flips with the whole control, not just when the
+        // pointer is on the 14px icon itself.
+        container(icons::icon_current(icon, 14.0))
             .center_x(Length::Fill)
             .center_y(Length::Fill),
     )
@@ -46,9 +49,15 @@ fn control_button<'a, M: Clone + 'a>(
             }
             _ => None,
         };
+        let fg = match status {
+            iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed => {
+                hover_fg
+            }
+            _ => idle,
+        };
         iced::widget::button::Style {
             background: bg.map(Into::into),
-            text_color: idle,
+            text_color: fg,
             border: iced::Border {
                 radius: theme::control::RADIUS.into(),
                 ..Default::default()

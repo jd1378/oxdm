@@ -65,8 +65,13 @@ pub fn icon<'a, M: 'a>(name: &str, size: f32, color: Color) -> Element<'a, M> {
         .into()
 }
 
-/// Icon that swaps tint when its interactive ancestor is hovered
-/// (iced propagates hover to the svg's own `Status`).
+/// Icon that swaps tint when the pointer is over **the icon itself**.
+///
+/// `svg::Status::Hovered` is computed from the svg's own bounds, NOT an
+/// interactive ancestor's — inside a button this makes the icon recolor
+/// only when the cursor is directly on the glyph, out of step with the
+/// label beside it. Prefer [`icon_current`] there; this is for icons
+/// that really are their own hit target.
 pub fn icon_dyn<'a, M: 'a>(name: &str, size: f32, idle: Color, hovered: Color) -> Element<'a, M> {
     svg(handle(name))
         .width(Length::Fixed(size))
@@ -78,4 +83,66 @@ pub fn icon_dyn<'a, M: 'a>(name: &str, size: f32, idle: Color, hovered: Color) -
             }),
         })
         .into()
+}
+
+/// Icon painted in the **inherited** foreground color — the CSS
+/// `currentColor` behaviour the design assumes.
+///
+/// `button` draws its content with `renderer::Style { text_color }` set
+/// from its own per-status style, which is how a `text` child follows
+/// hover/press/disabled. The stock `svg` widget ignores that style and
+/// takes an explicit color instead, so icons fell out of step with the
+/// labels next to them. This widget reads `text_color` at draw time, so
+/// one element covers every status of every interactive ancestor with
+/// no hover state to track.
+pub fn icon_current<'a, M: 'a>(name: &str, size: f32) -> Element<'a, M> {
+    Element::new(CurrentColorIcon {
+        handle: handle(name),
+        size,
+    })
+}
+
+struct CurrentColorIcon {
+    handle: svg::Handle,
+    size: f32,
+}
+
+impl<M, R> iced::advanced::Widget<M, iced::Theme, R> for CurrentColorIcon
+where
+    R: iced::advanced::svg::Renderer,
+{
+    fn size(&self) -> iced::Size<Length> {
+        iced::Size::new(Length::Fixed(self.size), Length::Fixed(self.size))
+    }
+
+    fn layout(
+        &mut self,
+        _tree: &mut iced::advanced::widget::Tree,
+        _renderer: &R,
+        limits: &iced::advanced::layout::Limits,
+    ) -> iced::advanced::layout::Node {
+        iced::advanced::layout::Node::new(limits.resolve(
+            Length::Fixed(self.size),
+            Length::Fixed(self.size),
+            iced::Size::new(self.size, self.size),
+        ))
+    }
+
+    fn draw(
+        &self,
+        _tree: &iced::advanced::widget::Tree,
+        renderer: &mut R,
+        _theme: &iced::Theme,
+        style: &iced::advanced::renderer::Style,
+        layout: iced::advanced::Layout<'_>,
+        _cursor: iced::advanced::mouse::Cursor,
+        viewport: &iced::Rectangle,
+    ) {
+        let bounds = layout.bounds();
+        renderer.draw_svg(
+            iced::advanced::svg::Svg::new(self.handle.clone()).color(style.text_color),
+            bounds,
+            *viewport,
+        );
+    }
 }

@@ -324,18 +324,15 @@ impl<'a, M: Clone + 'a> Btn<'a, M> {
         let height = self.size.height();
         let font_size = self.font_size.unwrap_or(self.size.font_size());
         let icon_size = self.icon_size.unwrap_or(self.size.icon_size());
-        // Icon tint follows the idle foreground; hover recolor handled
-        // via icon_dyn for the variants whose fg changes on hover.
-        let fg_idle = self.fg(&t, button::Status::Active);
-        let fg_hover = self.fg(&t, button::Status::Hovered);
-
+        // Icon inherits the button's per-status `text_color`, exactly
+        // like the label beside it — `Btn::style` already resolves it
+        // through `fg(t, status)` for hover / press / disabled. The old
+        // `icon_dyn` pairing recolored on the icon's OWN hover bounds,
+        // so the glyph and its label disagreed whenever the pointer sat
+        // on the label or the button's padding.
         let mut parts = row![].spacing(6.0).align_y(Alignment::Center);
         if let Some(name) = self.icon {
-            parts = parts.push(if fg_idle == fg_hover {
-                icons::icon(name, icon_size, fg_idle)
-            } else {
-                icons::icon_dyn(name, icon_size, fg_idle, fg_hover)
-            });
+            parts = parts.push(icons::icon_current(name, icon_size));
         }
         if !self.icon_only && !self.label.is_empty() {
             parts = parts.push(
