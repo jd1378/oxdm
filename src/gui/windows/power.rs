@@ -2,8 +2,12 @@
 //! whenever a destructive power action (shutdown / restart / sleep /
 //! hibernate) arms behind the grace timer. Offers an instant **Cancel**
 //! and an instant **Confirm now** — the main window no longer shows a
-//! countdown banner. Closing the window without choosing dismisses the
-//! prompt only; the countdown keeps running daemon-side.
+//! countdown banner. Closing the window **cancels** the pending action:
+//! dismissing a "your machine is about to shut down" prompt reads as
+//! "no", and the alternative (close = keep counting, with the prompt
+//! gone) hides an irreversible action behind a window the user just
+//! dismissed. Only the daemon's own `Close` (singleton eviction) exits
+//! without cancelling.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -108,6 +112,13 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
             Task::none()
         }
         Msg::Connected(Err(_)) => iced::exit(), // raced a cancel; nothing to prompt
+        // Titlebar X on a live prompt = Cancel. Before we are Ready
+        // there is no pending action to cancel (or no client to say it
+        // with), so it stays a plain close.
+        Msg::Window(WindowControl::Close) => match app {
+            App::Ready(st) => update_ready(st, Msg::Cancel),
+            _ => chrome::window_task(WindowControl::Close),
+        },
         Msg::Window(ctl) => chrome::window_task(ctl),
         msg => {
             let App::Ready(st) = app else {
@@ -194,6 +205,11 @@ pub fn subscription(app: &App) -> Subscription<Msg> {
             iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) => {
                 Some(Msg::KeyPressed(key))
             }
+            // Alt+F4 / the WM close button / the decorated macOS button
+            // never touch our titlebar. `exit_on_close_request` is off
+            // for this window (see `launch_power`) so the request lands
+            // here instead of killing the process mid-cancel.
+            iced::Event::Window(iced::window::Event::CloseRequested) => Some(Msg::Cancel),
             _ => None,
         }),
         crate::gui::ipc::lifecycle_events(crate::ipc_local::protocol::GuiKind::Power)
@@ -321,10 +337,13 @@ pub fn launch_power() {
         .subscription(subscription)
         .default_font(theme::BODY)
         .antialiasing(true)
-        .window(chrome::window_settings(
-            iced::Size::new(WIN_W, WIN_H),
-            iced::Size::new(WIN_W, WIN_H),
-        ));
+        .window(iced::window::Settings {
+            // Close must reach `update` as a Cancel (see the module
+            // doc); the default would exit the process before the
+            // cancel IPC is sent.
+            exit_on_close_request: false,
+            ..chrome::window_settings(iced::Size::new(WIN_W, WIN_H), iced::Size::new(WIN_W, WIN_H))
+        });
     for f in theme::fonts::ALL {
         app = app.font(*f);
     }
