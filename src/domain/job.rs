@@ -222,6 +222,12 @@ pub struct Job {
     /// [`Category::Other`] when nothing matches.
     #[serde(default = "default_category")]
     pub category: Category,
+    /// Headers the server sent on the most recent evaluate probe
+    /// (Properties → Headers, "captured response"). `None` until the
+    /// job has been evaluated at least once. Persisted as JSON in the
+    /// `response_headers_json` column.
+    #[serde(default)]
+    pub captured_response: Option<CapturedResponse>,
 }
 
 fn default_category() -> Category {
@@ -364,6 +370,31 @@ impl LiveCounters {
     pub fn speed_bps(&self) -> f64 {
         f64::from_bits(self.speed_bps_bits.load(Ordering::Relaxed))
     }
+}
+
+// ---------------------------------------------------------------- captured response
+
+/// One response header as the server sent it. Repeated names are kept
+/// (a response may carry several `Vary` / `Link` lines), so this is a
+/// list rather than a map.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResponseHeader {
+    pub name: String,
+    pub value: String,
+}
+
+/// Response headers observed on one `evaluate` probe.
+///
+/// The values describe **that** probe, not the server's current state —
+/// `probed_at` is shown next to them so a stale capture reads as stale.
+/// Credential-bearing headers are dropped before the capture reaches
+/// this type (`data::mapping::captured_response`); nothing secret is
+/// ever persisted or displayed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapturedResponse {
+    pub headers: Vec<ResponseHeader>,
+    /// When the probe happened, in unix seconds.
+    pub probed_at: i64,
 }
 
 // ---------------------------------------------------------------- will-send headers

@@ -76,6 +76,13 @@ pub trait LiveBridge: Send + Sync + 'static {
     fn on_evaluated(&self, id: JobId, is_resumable: bool) {
         let _ = (id, is_resumable);
     }
+    /// Called once after `evaluate` succeeds with the headers the
+    /// server sent on that probe (already stripped of credential-
+    /// bearing entries). Feeds Properties → Headers → captured
+    /// response. Not called when the probe returned no headers.
+    fn on_response_headers(&self, id: JobId, captured: crate::domain::CapturedResponse) {
+        let _ = (id, captured);
+    }
 }
 
 impl JobRunner {
@@ -137,6 +144,9 @@ impl JobRunner {
 
         self.bridge
             .on_evaluated(self.job_id, instruction.is_resumable());
+        if let Some(captured) = crate::data::mapping::captured_response(&instruction) {
+            self.bridge.on_response_headers(self.job_id, captured);
+        }
 
         // Feature #14: hand the job's expected checksums to odl so the
         // Verifying phase actually compares — a mismatch surfaces as
@@ -301,9 +311,12 @@ mod tests {
                         }
                     }
                     let head_only = buf.starts_with(b"HEAD ");
+                    // `Set-Cookie` is here on purpose: the capture path
+                    // must drop it before it can reach the store or UI.
                     let header = format!(
                         "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: \
-                         application/octet-stream\r\nConnection: close\r\n\r\n",
+                         application/octet-stream\r\nSet-Cookie: sid=secret; \
+                         Path=/\r\nConnection: close\r\n\r\n",
                         BODY.len()
                     );
                     let _ = sock.write_all(header.as_bytes()).await;
@@ -317,9 +330,16 @@ mod tests {
         format!("http://{addr}/file.bin")
     }
 
-    struct NoopBridge;
-    impl LiveBridge for NoopBridge {
+    /// Records what the runner hands back after `evaluate`.
+    #[derive(Default)]
+    struct RecordingBridge {
+        captured: std::sync::Mutex<Option<crate::domain::CapturedResponse>>,
+    }
+    impl LiveBridge for RecordingBridge {
         fn on_event(&self, _id: JobId, _event: &OdlProgressEvent) {}
+        fn on_response_headers(&self, _id: JobId, captured: crate::domain::CapturedResponse) {
+            *self.captured.lock().unwrap() = Some(captured);
+        }
     }
 
     fn test_job(url: &str, save_dir: std::path::PathBuf, sha256: &str) -> Job {
@@ -353,12 +373,21 @@ mod tests {
                 expected: None,
             }],
             category: crate::domain::Category::Other,
+            captured_response: None,
         }
     }
 
     /// Mirrors the real layout: `save_dir` = final destination,
     /// `work_dir` = metadata + `.part` files, per-job subdir under it.
     async fn run_job(job: Job, work_dir: &std::path::Path) -> Result<RunOutcome, JobError> {
+        run_job_with(job, work_dir, Arc::new(RecordingBridge::default())).await
+    }
+
+    async fn run_job_with(
+        job: Job,
+        work_dir: &std::path::Path,
+        bridge: Arc<dyn LiveBridge>,
+    ) -> Result<RunOutcome, JobError> {
         let per_job = crate::data::state::per_job_dir(work_dir, job.id);
         tokio::fs::create_dir_all(&per_job).await.expect("mkdir");
         let cfg = odl::config::ConfigBuilder::default()
@@ -372,7 +401,7 @@ mod tests {
             manager,
             events,
             cancel: CancellationToken::new(),
-            bridge: Arc::new(NoopBridge),
+            bridge,
             interactive: false,
             per_job_dir: Some(per_job),
             live_controls: odl::progress::LiveControls::new(),
@@ -398,6 +427,38 @@ mod tests {
                 if expected.contains(BAD_SHA256)),
             "expected ChecksumMismatch, got {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn evaluate_captures_response_headers_without_secrets() {
+        let url = spawn_http_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let job = test_job(&url, dir.path().join("save"), GOOD_SHA256);
+        let bridge = Arc::new(RecordingBridge::default());
+        run_job_with(job, &dir.path().join("work"), bridge.clone())
+            .await
+            .expect("download should verify");
+
+        let captured = bridge
+            .captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("evaluate must report response headers");
+        let names: Vec<_> = captured
+            .headers
+            .iter()
+            .map(|h| h.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            names.contains(&"content-type"),
+            "expected content-type in {names:?}"
+        );
+        assert!(
+            !names.contains(&"set-cookie"),
+            "Set-Cookie must never be captured: {names:?}"
+        );
+        assert!(captured.probed_at > 0);
     }
 
     #[tokio::test]

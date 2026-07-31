@@ -68,6 +68,11 @@ pub struct JobEntry {
     /// evaluate succeeds. UI exposes the value as
     /// "Resume support: Yes / No / Unknown".
     pub is_resumable: std::sync::atomic::AtomicI8,
+    /// Response headers from this session's evaluate probe. Overlays
+    /// `Job::captured_response` (the load-time snapshot from the store)
+    /// via `splice_live`, so a fresh probe supersedes an older capture
+    /// and the same splice persists it back through `persist_job`.
+    pub captured_response: std::sync::RwLock<Option<crate::domain::CapturedResponse>>,
     /// Session-scoped per-job speed cap, in bytes/sec. `0` = inherit
     /// the global `Settings::speed_limit`. Lives only in memory; the
     /// Speed tab's "Remember" checkbox writes the value to
@@ -122,6 +127,7 @@ impl JobEntry {
             cancel: std::sync::Mutex::new(CancellationToken::new()),
             running: AtomicBool::new(false),
             is_resumable: std::sync::atomic::AtomicI8::new(0),
+            captured_response: std::sync::RwLock::new(None),
             session_speed_override: std::sync::atomic::AtomicU64::new(0),
             on_completion: std::sync::RwLock::new(crate::domain::OnCompletion::default()),
             resolver: RwLock::new(None),
@@ -1316,6 +1322,7 @@ impl AppState {
             advanced: crate::domain::Advanced::default(),
             checksums: Vec::new(),
             category,
+            captured_response: None,
         };
         self.store
             .upsert_job(&job)
@@ -2083,6 +2090,13 @@ pub(crate) fn splice_live(entry: &JobEntry) -> Job {
     {
         j.status.final_path = Some(p);
     }
+    // A probe from this session supersedes the stored capture; with no
+    // probe yet the persisted one (possibly from a past run) stands.
+    if let Ok(g) = entry.captured_response.read()
+        && let Some(c) = g.clone()
+    {
+        j.captured_response = Some(c);
+    }
     // Overlay live run-stats from the entry atomics (epoch-ms → option,
     // `0` = None). These are the authoritative in-session values;
     // `persist_job` round-trips them back to the store via this same
@@ -2133,6 +2147,11 @@ async fn clone_entry_with_job(old: &Arc<JobEntry>, new_job: Job) -> Arc<JobEntry
         .map(|g| g.clone())
         .unwrap_or_default();
     let final_path = old.final_path.read().map(|g| g.clone()).unwrap_or(None);
+    let captured_response = old
+        .captured_response
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or(None);
     let retrying_parts = old
         .retrying_parts
         .lock()
@@ -2151,6 +2170,7 @@ async fn clone_entry_with_job(old: &Arc<JobEntry>, new_job: Job) -> Arc<JobEntry
         cancel: std::sync::Mutex::new(cancel_token),
         running: AtomicBool::new(old.running.load(Ordering::Acquire)),
         is_resumable: std::sync::atomic::AtomicI8::new(old.is_resumable.load(Ordering::Acquire)),
+        captured_response: std::sync::RwLock::new(captured_response),
         session_speed_override: std::sync::atomic::AtomicU64::new(
             old.session_speed_override.load(Ordering::Acquire),
         ),
@@ -2255,6 +2275,18 @@ impl LiveBridge for StateLiveBridge {
             entry
                 .is_resumable
                 .store(if is_resumable { 1 } else { -1 }, Ordering::Release);
+        }
+    }
+
+    fn on_response_headers(&self, id: JobId, captured: crate::domain::CapturedResponse) {
+        let Some(state) = self.state.upgrade() else {
+            return;
+        };
+        if let Ok(jobs) = state.jobs.try_read()
+            && let Some(entry) = jobs.get(&id)
+            && let Ok(mut slot) = entry.captured_response.write()
+        {
+            *slot = Some(captured);
         }
     }
 

@@ -2332,35 +2332,31 @@ fn cookies_tab(st: &State) -> Element<'_, Msg> {
     )
 }
 
-fn headers_tab(st: &State) -> Element<'_, Msg> {
-    let t = &st.tokens;
+/// Read-only header table shared by the will-send and captured-response
+/// sections (design `.prop-hdrs` / `.prop-hdr-row`). `custom` rows get
+/// the clay accent (`.prop-hdr-row-custom`); `masked` rows dim their
+/// value because it is a "(stored)" placeholder, never a real secret.
+fn hdr_table<'a>(
+    t: &Tokens,
+    rows: impl IntoIterator<Item = (String, String, bool, bool)>,
+) -> Element<'a, Msg> {
     let t2 = *t;
-    let editable = !st.locked();
-
-    // --- Read-only "Request headers (will send)" table (#7) -----------
-    // Derived by the pure domain mirror of the run-time merge; custom
-    // (job-level) rows get the clay accent (design `.prop-hdr-row-custom`),
-    // secret-backed rows stay masked.
-    let mut will_send = column![];
-    let rows = crate::domain::will_send_headers(&st.settings, &st.entry.job);
+    let rows: Vec<_> = rows.into_iter().collect();
     let n = rows.len();
-    for (i, h) in rows.into_iter().enumerate() {
-        let name_color = if h.custom { t.action_primary } else { t.fg_2 };
-        let value_color = if h.masked { t.fg_3 } else { t.fg_1 };
-        let accent = h.custom;
+    let mut table = column![];
+    for (i, (name, value, custom, masked)) in rows.into_iter().enumerate() {
+        let name_color = if custom { t.action_primary } else { t.fg_2 };
+        let value_color = if masked { t.fg_3 } else { t.fg_1 };
         let row_el = container(
             row![
                 container(
-                    text(h.name)
+                    text(name)
                         .font(theme::MONO_BOLD)
                         .size(11.0)
                         .color(name_color)
                 )
                 .width(Length::Fixed(140.0)),
-                text(h.value)
-                    .font(theme::MONO)
-                    .size(11.0)
-                    .color(value_color),
+                text(value).font(theme::MONO).size(11.0).color(value_color),
             ]
             .spacing(theme::space::S3)
             .align_y(Alignment::Center),
@@ -2368,7 +2364,7 @@ fn headers_tab(st: &State) -> Element<'_, Msg> {
         .width(Length::Fill)
         .padding([6.0, theme::space::S3])
         .style(move |_| {
-            if accent {
+            if custom {
                 // Faint clay wash; the clay key color carries the
                 // "custom" signal (iced has no per-side border, so the
                 // mock's 2px left rule is folded into these two cues).
@@ -2380,27 +2376,117 @@ fn headers_tab(st: &State) -> Element<'_, Msg> {
                 container::Style::default()
             }
         });
-        will_send = will_send.push(row_el);
+        table = table.push(row_el);
         if i + 1 < n {
-            will_send = will_send.push(row_sep(t));
+            table = table.push(row_sep(t));
         }
     }
-    let will_send_section = column![
-        section(t, "request headers (will send)", will_send.into()),
-        row![
-            icons::icon("info", 12.0, t.fg_3),
-            text(
-                "Merged from your global settings and this download's overrides — \
-                 what oxdm sends on the next request. Stored cookies and credentials \
-                 are never displayed."
-            )
+    table.into()
+}
+
+/// Note line under a header table (design `.prop-note`).
+fn hdr_note<'a>(t: &Tokens, body: String) -> Element<'a, Msg> {
+    row![
+        icons::icon("info", 12.0, t.fg_3),
+        text(body)
             .font(theme::BODY_MEDIUM)
             .size(11.0)
             .color(t.fg_3)
             .line_height(iced::widget::text::LineHeight::Relative(1.4)),
-        ]
-        .spacing(6.0),
     ]
+    .spacing(6.0)
+    .into()
+}
+
+fn headers_tab(st: &State) -> Element<'_, Msg> {
+    let t = &st.tokens;
+    let editable = !st.locked();
+
+    // --- Read-only "Request headers (will send)" table (#7) -----------
+    // Derived by the pure domain mirror of the run-time merge.
+    let will_send = hdr_table(
+        t,
+        crate::domain::will_send_headers(&st.settings, &st.entry.job)
+            .into_iter()
+            .map(|h| (h.name, h.value, h.custom, h.masked)),
+    );
+    let will_send_section = column![
+        section(t, "request headers (will send)", will_send),
+        hdr_note(
+            t,
+            "Merged from your global settings and this download's overrides — \
+             what oxdm sends on the next request. Stored cookies and credentials \
+             are never displayed."
+                .to_owned(),
+        ),
+    ]
+    .spacing(theme::space::S2);
+
+    // --- Read-only "Captured response" table (#7) ---------------------
+    // Headers the server sent on the last evaluate probe. They describe
+    // that one probe, so the note carries its timestamp. Three states:
+    // never probed, probed with headers, and probed but nothing left to
+    // show (every header was credential-bearing) — the last two must not
+    // read alike, or a stripped probe looks like it never happened.
+    let captured_section = match &st.entry.job.captured_response {
+        Some(c) => {
+            let when = chrono::DateTime::from_timestamp(c.probed_at, 0)
+                .map(|d| {
+                    d.with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d %H:%M:%S")
+                        .to_string()
+                })
+                .unwrap_or_else(|| "an earlier request".to_owned());
+            let body = if c.headers.is_empty() {
+                container(
+                    text(
+                        "The server sent nothing displayable — every header it returned \
+                          was credential-bearing and is never stored.",
+                    )
+                    .font(theme::BODY)
+                    .size(11.0)
+                    .color(t.fg_3)
+                    .line_height(iced::widget::text::LineHeight::Relative(1.4)),
+                )
+                .padding([10.0, theme::space::S3])
+                .into()
+            } else {
+                hdr_table(
+                    t,
+                    c.headers
+                        .iter()
+                        .map(|h| (h.name.clone(), h.value.clone(), false, false)),
+                )
+            };
+            column![
+                section(t, "captured response", body),
+                hdr_note(
+                    t,
+                    format!(
+                        "Captured on {when} — what the server sent then, not necessarily \
+                         what it would send now. Cookies and credential-bearing headers \
+                         are never stored."
+                    ),
+                ),
+            ]
+        }
+        None => column![section(
+            t,
+            "captured response",
+            container(
+                text(
+                    "Nothing captured yet — starting this download records the headers \
+                     the server replies with."
+                )
+                .font(theme::BODY)
+                .size(11.0)
+                .color(t.fg_3)
+                .line_height(iced::widget::text::LineHeight::Relative(1.4)),
+            )
+            .padding([10.0, theme::space::S3])
+            .into(),
+        )],
+    }
     .spacing(theme::space::S2);
 
     let mut custom = column![
@@ -2465,6 +2551,7 @@ fn headers_tab(st: &State) -> Element<'_, Msg> {
 
     column![
         will_send_section,
+        captured_section,
         section(t, "custom request headers", custom.into())
     ]
     .spacing(theme::space::S3)

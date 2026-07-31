@@ -11,7 +11,8 @@ use odl::hash::{HashDigest, HashEncoding};
 use odl::progress::Phase as OdlPhase;
 
 use crate::domain::{
-    Algo, AuthScheme, Checksum, CsSource, Job, JobError, Phase, ProxyAdv, ProxyMode, Settings,
+    Algo, AuthScheme, CapturedResponse, Checksum, CsSource, Job, JobError, Phase, ProxyAdv,
+    ProxyMode, ResponseHeader, Settings,
 };
 
 pub fn settings_to_odl_config(s: &Settings) -> Result<OdlConfig, String> {
@@ -239,6 +240,41 @@ fn checksum_to_digest(c: &Checksum) -> Option<HashDigest> {
     })
 }
 
+/// Response headers the server sent on the `evaluate` probe, ready for
+/// `Job::captured_response`.
+///
+/// `None` when odl made no probe (`quick_evaluate`) — distinct from a
+/// probe whose headers were all filtered away, which is `Some` with an
+/// empty list.
+///
+/// The probe/no-probe signal is `response_headers_probed_at`, NOT the
+/// header list: odl persists the timestamp independently, so an
+/// instruction rebuilt from `metadata.pb` whose every header was
+/// dropped comes back with `response_headers() == None` but the
+/// timestamp intact. Branching on the list would report that probe as
+/// "never happened".
+///
+/// Filtering (credential-bearing names dropped, oversized values and an
+/// oversized total capped) is odl's: `stored_response_headers` applies
+/// exactly what it writes to `metadata.pb`, so a job displays the same
+/// headers before and after a restart. `Download::response_headers`
+/// would hand back the *raw* map — never use it for anything we store
+/// or show.
+pub fn captured_response(instr: &odl::Download) -> Option<CapturedResponse> {
+    let probed_at = instr.response_headers_probed_at()?;
+    Some(CapturedResponse {
+        headers: instr
+            .stored_response_headers()
+            .into_iter()
+            .map(|h| ResponseHeader {
+                name: h.name,
+                value: h.value,
+            })
+            .collect(),
+        probed_at,
+    })
+}
+
 pub fn phase_from_odl(p: OdlPhase) -> Phase {
     match p {
         OdlPhase::Evaluating => Phase::Evaluating,
@@ -343,6 +379,7 @@ mod tests {
             advanced: crate::domain::Advanced::default(),
             checksums: Vec::new(),
             category: crate::domain::Category::Other,
+            captured_response: None,
         }
     }
 
@@ -482,5 +519,102 @@ mod tests {
         job.advanced.auth.scheme = AuthScheme::Basic;
         let opts = job_overlay_options(&base, &job, None, None, Some("pw")).unwrap();
         assert!(opts.headers().is_none());
+    }
+
+    /// Rebuild an instruction the way odl does on resume, so
+    /// `captured_response` runs against a real `Download`.
+    fn instruction_with_headers(headers: &[(&str, &str)], probed_at: Option<i64>) -> odl::Download {
+        let metadata = odl::download_metadata::DownloadMetadata {
+            url: "https://example.com/file.zip".into(),
+            filename: "file.zip".into(),
+            save_dir: "/tmp/oxdm-test".into(),
+            max_connections: 1,
+            response_headers: headers
+                .iter()
+                .map(|(n, v)| odl::download_metadata::ResponseHeader {
+                    name: (*n).to_owned(),
+                    value: (*v).to_owned(),
+                })
+                .collect(),
+            response_headers_probed_at: probed_at,
+            ..Default::default()
+        };
+        odl::Download::from_metadata(std::path::PathBuf::from("/tmp/oxdm-test"), metadata)
+            .expect("valid metadata")
+    }
+
+    #[test]
+    fn captured_response_maps_stored_headers_in_order() {
+        // Repeated names survive (a response may carry several `Vary`
+        // lines), and server order is preserved.
+        let instr = instruction_with_headers(
+            &[
+                ("content-type", "application/zip"),
+                ("vary", "accept-encoding"),
+                ("vary", "origin"),
+            ],
+            Some(1_700_000_000),
+        );
+        let captured = captured_response(&instr).expect("probe headers present");
+        assert_eq!(
+            captured
+                .headers
+                .iter()
+                .map(|h| (h.name.as_str(), h.value.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("content-type", "application/zip"),
+                ("vary", "accept-encoding"),
+                ("vary", "origin"),
+            ]
+        );
+        assert_eq!(captured.probed_at, 1_700_000_000);
+    }
+
+    #[test]
+    fn captured_response_goes_through_odls_secret_filter() {
+        // Guards the contract we depend on: we call
+        // `stored_response_headers`, never the raw map, so nothing
+        // credential-bearing can reach the store or the UI.
+        let instr = instruction_with_headers(
+            &[
+                ("content-type", "application/zip"),
+                ("set-cookie", "sid=deadbeef; HttpOnly"),
+                ("www-authenticate", "Basic realm=\"x\""),
+                ("x-amz-security-token", "AQoDY..."),
+            ],
+            Some(1),
+        );
+        let captured = captured_response(&instr).expect("probe headers present");
+        assert_eq!(
+            captured
+                .headers
+                .iter()
+                .map(|h| h.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["content-type"]
+        );
+    }
+
+    #[test]
+    fn captured_response_is_none_without_a_probe() {
+        // No probe (`quick_evaluate`, or a pre-1.2 metadata file) must
+        // stay distinguishable from a probe that yielded no displayable
+        // headers.
+        let instr = instruction_with_headers(&[], None);
+        assert!(captured_response(&instr).is_none());
+    }
+
+    #[test]
+    fn captured_response_keeps_a_probe_whose_headers_were_all_filtered() {
+        // odl persists the timestamp independently of the list, so a
+        // metadata file whose every header was dropped rebuilds with
+        // `response_headers() == None` but the timestamp intact. That
+        // probe DID happen — branching on the list would erase it.
+        let instr = instruction_with_headers(&[], Some(1_700_000_000));
+        assert!(instr.response_headers().is_none());
+        let captured = captured_response(&instr).expect("the probe still counts");
+        assert!(captured.headers.is_empty());
+        assert_eq!(captured.probed_at, 1_700_000_000);
     }
 }

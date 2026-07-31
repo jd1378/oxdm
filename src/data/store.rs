@@ -16,7 +16,7 @@ use crate::domain::{
 
 /// Schema version. Bump on every breaking change. Migrations are a
 /// match on the read-back version; tiny enough to keep DIY.
-const SCHEMA_VERSION: i32 = 3;
+const SCHEMA_VERSION: i32 = 4;
 
 /// Async-friendly handle around a blocking `rusqlite::Connection`.
 #[derive(Clone)]
@@ -129,6 +129,7 @@ impl Store {
                      started_at            TEXT,
                      finished_at           TEXT,
                      retries               INTEGER NOT NULL DEFAULT 0,
+                     response_headers_json TEXT NOT NULL DEFAULT 'null',
                      FOREIGN KEY(queue_id) REFERENCES queues(id) ON DELETE RESTRICT
                  );
                  CREATE INDEX IF NOT EXISTS idx_jobs_queue ON jobs(queue_id, queue_position);
@@ -193,6 +194,19 @@ impl Store {
                                 "ALTER TABLE jobs ADD COLUMN started_at TEXT;
                                  ALTER TABLE jobs ADD COLUMN finished_at TEXT;
                                  ALTER TABLE jobs ADD COLUMN retries INTEGER NOT NULL DEFAULT 0;",
+                            )
+                        })
+                        .await
+                        .map_err(StoreError::Sql)?;
+                    }
+                    4 => {
+                        // v4: captured response headers from the last
+                        // evaluate probe. `'null'` hydrates to
+                        // `captured_response: None` — "never probed",
+                        // which is what an existing row means.
+                        self.with_conn(|conn| {
+                            conn.execute_batch(
+                                "ALTER TABLE jobs ADD COLUMN response_headers_json TEXT NOT NULL DEFAULT 'null';",
                             )
                         })
                         .await
@@ -529,7 +543,7 @@ impl Store {
                             downloaded, total, final_path, proxy, auth_user, \
                             auth_password_enc, proxy_password_enc, cookies_enc, \
                             advanced_json, checksums_json, category, \
-                            started_at, finished_at, retries \
+                            started_at, finished_at, retries, response_headers_json \
                      FROM jobs ORDER BY created_at ASC",
                 )?;
                 let iter = stmt.query_map([], |row| {
@@ -559,6 +573,9 @@ impl Store {
                         started_at: row.get(22).ok(),
                         finished_at: row.get(23).ok(),
                         retries: row.get(24).unwrap_or(0),
+                        response_headers_json: row
+                            .get::<_, String>(25)
+                            .unwrap_or_else(|_| "null".into()),
                     })
                 })?;
                 iter.collect::<Result<Vec<_>, _>>()
@@ -579,8 +596,8 @@ impl Store {
                     downloaded, total, final_path, proxy, auth_user, \
                     auth_password_enc, proxy_password_enc, cookies_enc, \
                     advanced_json, checksums_json, category, \
-                    started_at, finished_at, retries) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25) \
+                    started_at, finished_at, retries, response_headers_json) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26) \
                  ON CONFLICT(id) DO UPDATE SET \
                     url=excluded.url, save_dir=excluded.save_dir, \
                     filename=excluded.filename, referrer=excluded.referrer, \
@@ -602,7 +619,8 @@ impl Store {
                     category=excluded.category, \
                     started_at=excluded.started_at, \
                     finished_at=excluded.finished_at, \
-                    retries=excluded.retries",
+                    retries=excluded.retries, \
+                    response_headers_json=excluded.response_headers_json",
                 params![
                     row.id,
                     row.url,
@@ -629,6 +647,7 @@ impl Store {
                     row.started_at,
                     row.finished_at,
                     row.retries,
+                    row.response_headers_json,
                 ],
             )
         })
@@ -739,6 +758,7 @@ struct JobRow {
     started_at: Option<String>,
     finished_at: Option<String>,
     retries: i64,
+    response_headers_json: String,
 }
 
 struct QueueRow {
@@ -843,6 +863,8 @@ impl JobRow {
             started_at: job.started_at.map(|d| d.to_rfc3339()),
             finished_at: job.finished_at.map(|d| d.to_rfc3339()),
             retries: job.retries as i64,
+            response_headers_json: serde_json::to_string(&job.captured_response)
+                .map_err(|e| StoreError::Other(e.to_string()))?,
         })
     }
 
@@ -925,6 +947,10 @@ impl JobRow {
             checksums,
             category: serde_json::from_str(&self.category)
                 .unwrap_or(crate::domain::Category::Other),
+            // A garbled blob reads as "never probed" rather than
+            // wedging the row; the next probe rewrites the column.
+            captured_response: serde_json::from_str(&self.response_headers_json)
+                .unwrap_or_default(),
         })
     }
 }
@@ -1014,6 +1040,7 @@ mod tests {
             advanced: crate::domain::Advanced::default(),
             checksums: Vec::new(),
             category: crate::domain::Category::Other,
+            captured_response: None,
         }
     }
 
@@ -1142,7 +1169,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn migrates_v2_db_to_v3_adding_run_stat_columns() {
+    async fn migrates_v2_db_to_current_adding_new_columns() {
         // Hand-build a v2-shaped DB (no started_at/finished_at/retries),
         // then open it through `Store` and confirm the v3 ALTER arm runs
         // cleanly and the old row hydrates with the new defaults.
@@ -1206,15 +1233,26 @@ mod tests {
         assert_eq!(j.started_at, None);
         assert_eq!(j.finished_at, None);
         assert_eq!(j.retries, 0);
+        // v4 column: a row written before response capture existed
+        // reads as "never probed", not as an empty capture.
+        assert_eq!(j.captured_response, None);
 
         // And the new columns are now writable end-to-end.
         let mut updated = j.clone();
         updated.retries = 4;
         updated.finished_at = Some(chrono::Utc::now());
+        updated.captured_response = Some(crate::domain::CapturedResponse {
+            headers: vec![crate::domain::ResponseHeader {
+                name: "content-type".into(),
+                value: "application/zip".into(),
+            }],
+            probed_at: 1_700_000_000,
+        });
         store.upsert_job(&updated).await.unwrap();
         let reread = store.list_jobs().await.unwrap();
         assert_eq!(reread[0].retries, 4);
         assert!(reread[0].finished_at.is_some());
+        assert_eq!(reread[0].captured_response, updated.captured_response);
     }
 
     #[tokio::test]
