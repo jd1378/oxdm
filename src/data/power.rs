@@ -22,6 +22,23 @@ use crate::domain::{PowerAction, SHUTDOWN_GRACE_SECS};
 /// tests and the visual sweep — never documented as a user setting.
 pub const GRACE_ENV: &str = "OXDM_SHUTDOWN_GRACE_SECS";
 
+/// Kill switch for destructive power actions. Set to `1` / `true` and
+/// [`PowerGuard::arm`] refuses to arm at all — nothing is scheduled, no
+/// countdown is shown, and no `systemctl poweroff` can ever run.
+///
+/// Exists because an automated harness (the visual-test sandbox) runs a
+/// **real** daemon: XDG dirs are sandboxed, but a power action is not —
+/// a queue with a shutdown hook powers off the developer's machine for
+/// real. Never documented as a user setting.
+pub const DISABLE_ENV: &str = "OXDM_NO_POWER_ACTIONS";
+
+fn power_actions_disabled() -> bool {
+    matches!(
+        std::env::var(DISABLE_ENV).as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE")
+    )
+}
+
 fn grace_period() -> Duration {
     let secs = std::env::var(GRACE_ENV)
         .ok()
@@ -51,13 +68,28 @@ pub struct PowerGuard {
     /// occupancy stay consistent.
     pending: Mutex<(u64, Option<Pending>)>,
     events: broadcast::Sender<DomainEvent>,
+    /// [`DISABLE_ENV`] was set at construction: every arm is refused.
+    /// Read once, so a test harness cannot lose the switch to a later
+    /// env mutation.
+    disabled: bool,
 }
 
 impl PowerGuard {
     pub fn new(events: broadcast::Sender<DomainEvent>) -> Self {
+        Self::with_disabled(events, power_actions_disabled())
+    }
+
+    fn with_disabled(events: broadcast::Sender<DomainEvent>, disabled: bool) -> Self {
+        if disabled {
+            tracing::warn!(
+                env = DISABLE_ENV,
+                "destructive power actions are disabled for this process"
+            );
+        }
         Self {
             pending: Mutex::new((0, None)),
             events,
+            disabled,
         }
     }
 
@@ -75,6 +107,14 @@ impl PowerGuard {
     where
         F: FnOnce() -> Result<(), String> + Send + 'static,
     {
+        if self.disabled {
+            tracing::warn!(
+                ?action,
+                env = DISABLE_ENV,
+                "power actions disabled for this process; refusing to arm"
+            );
+            return false;
+        }
         let delay = grace_period();
         let deadline_ms = chrono::Utc::now().timestamp_millis() + delay.as_millis() as i64;
         let mut g = self.pending.lock().expect("power guard mutex poisoned");
@@ -182,7 +222,12 @@ mod tests {
 
     fn guard() -> (Arc<PowerGuard>, broadcast::Receiver<DomainEvent>) {
         let (tx, rx) = broadcast::channel(16);
-        (Arc::new(PowerGuard::new(tx)), rx)
+        (Arc::new(PowerGuard::with_disabled(tx, false)), rx)
+    }
+
+    fn disabled_guard() -> (Arc<PowerGuard>, broadcast::Receiver<DomainEvent>) {
+        let (tx, rx) = broadcast::channel(16);
+        (Arc::new(PowerGuard::with_disabled(tx, true)), rx)
     }
 
     fn counter_action(hits: &Arc<AtomicU32>) -> impl FnOnce() -> Result<(), String> + Send + use<> {
@@ -197,6 +242,25 @@ mod tests {
     /// under paused time regardless of the env override.
     async fn advance_past_grace() {
         tokio::time::sleep(grace_period() + Duration::from_secs(5)).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn disabled_guard_never_arms_or_fires() {
+        // The visual-test harness runs a real daemon; without this
+        // switch a queue with a shutdown hook powers off the developer's
+        // machine (it did, once). Arming must be refused outright — no
+        // pending action, no countdown banner, no execute.
+        let (g, mut rx) = disabled_guard();
+        let hits = Arc::new(AtomicU32::new(0));
+        assert!(!g.arm(PowerAction::ShutDown, counter_action(&hits)));
+        assert!(g.pending().is_none());
+        advance_past_grace().await;
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+        assert!(rx.try_recv().is_err(), "no ShutdownPending event");
+        // "Confirm now" cannot resurrect it either.
+        g.confirm();
+        advance_past_grace().await;
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test(start_paused = true)]
