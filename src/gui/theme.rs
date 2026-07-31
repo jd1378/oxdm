@@ -376,6 +376,39 @@ impl Tokens {
         t
     }
 
+    /// Chip / dot color for a queue, in precedence order: the user's
+    /// persisted `Queue::color`, then the clay accent for the built-in
+    /// Main queue, then a stable per-name pick from the category
+    /// palette so unnamed-colour queues still differ from each other.
+    ///
+    /// Lives here rather than in a window module because both the main
+    /// sidebar and the queues manager render it — they had separate
+    /// copies, and the main window's ignored `Queue::color` outright, so
+    /// a colour set in the manager never showed on the sidebar.
+    pub fn queue_color(&self, q: &crate::domain::Queue) -> Color {
+        if let Some([r, g, b]) = q.color {
+            return Color::from_rgb8(r, g, b);
+        }
+        if q.builtin {
+            return self.action_primary;
+        }
+        let palette = [
+            self.cat_music,
+            self.cat_programs,
+            self.cat_pictures,
+            self.cat_videos,
+            self.cat_documents,
+            self.cat_compressed,
+            self.status_info,
+            self.status_success,
+        ];
+        let mut h: u32 = 0;
+        for b in q.name.bytes() {
+            h = h.wrapping_mul(131).wrapping_add(b as u32);
+        }
+        palette[(h as usize) % palette.len()]
+    }
+
     /// iced `Theme` whose palette derives from these tokens. Widgets
     /// are styled per-widget from `Tokens`; the palette mostly feeds
     /// default text/background colors and built-in widget fallbacks.

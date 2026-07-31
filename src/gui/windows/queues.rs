@@ -805,30 +805,6 @@ fn splash<'a>(msg: String) -> Element<'a, Msg> {
         .into()
 }
 
-fn queue_color(t: &Tokens, q: &Queue) -> iced::Color {
-    if let Some([r, g, b]) = q.color {
-        return iced::Color::from_rgb8(r, g, b);
-    }
-    if q.builtin {
-        return t.action_primary;
-    }
-    let palette = [
-        t.cat_music,
-        t.cat_programs,
-        t.cat_pictures,
-        t.cat_videos,
-        t.cat_documents,
-        t.cat_compressed,
-        t.status_info,
-        t.status_success,
-    ];
-    let mut h: u32 = 0;
-    for b in q.name.bytes() {
-        h = h.wrapping_mul(131).wrapping_add(b as u32);
-    }
-    palette[(h as usize) % palette.len()]
-}
-
 fn seg_btn<'a>(
     t: &Tokens,
     label: &'a str,
@@ -1285,7 +1261,7 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
             mouse_area(
                 container(
                     row![
-                        crate::gui::widget::dot(8.0, queue_color(t, q)),
+                        crate::gui::widget::dot(8.0, t.queue_color(q)),
                         text(q.name.clone())
                             .font(theme::BODY_MEDIUM)
                             .size(13.0)
@@ -1343,7 +1319,7 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
     let eff_color = st
         .color
         .map(|[r, g, b]| iced::Color::from_rgb8(r, g, b))
-        .or_else(|| st.selected_queue().map(|q| queue_color(t, q)))
+        .or_else(|| st.selected_queue().map(|q| t.queue_color(q)))
         .unwrap_or(t.action_primary);
     let color_btn = button(iced::widget::Space::new())
         .width(Length::Fixed(COLOR_BTN))

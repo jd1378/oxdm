@@ -44,7 +44,12 @@ const TOAST_TTL_MS: u64 = 3000;
 const TOAST_ACCENT_W: f32 = 3.0;
 const TOAST_W: f32 = 320.0;
 const TOAST_GAP: f32 = 8.0;
-const TOAST_MARGIN: f32 = 16.0;
+/// Design `.toast { bottom: 24px; right: 24px }` — measured from the
+/// window edge, so the card floats over the status bar (z-index 400).
+const TOAST_MARGIN: f32 = 24.0;
+/// Design `.toast { padding: 10px 14px }`.
+const TOAST_PAD_Y: f32 = 10.0;
+const TOAST_PAD_X: f32 = 14.0;
 
 // Pulse clock (design `pulse` keyframe). Drives the live-dot's alpha;
 // the whole subscription is gated on `!reduce_motion` (W6).
@@ -1690,33 +1695,41 @@ fn toast_card<'a>(t: &Tokens, toast: &'a Toast) -> Element<'a, Msg> {
     };
     let t2 = *t;
     let body = row![
-        icons::icon(icon, 15.0, accent),
+        icons::icon(icon, 14.0, accent),
         text(toast.message.clone())
-            .font(theme::BODY)
-            .size(12.5)
+            // Design `.toast { font: 500 12px }`.
+            .font(theme::BODY_MEDIUM)
+            .size(12.0)
             .color(t.fg_1),
     ]
-    .spacing(theme::space::S2)
+    .spacing(10.0) // design `.toast { gap: 10px }`
     .align_y(Alignment::Center);
-    // 3px left accent rail + surface card.
+    // Design `.toast`: surface card with a 3px left accent (CSS
+    // `border-left`). Painted as the outer container's background with
+    // the inner surface inset by `TOAST_ACCENT_W`, NOT as a sibling rail
+    // widget: a rail needs `height(Fill)` to match the card, and a Fill
+    // child resolves against the whole available height, which stretched
+    // every toast down the full window.
     container(
-        row![
-            container(iced::widget::Space::new())
-                .width(Length::Fixed(TOAST_ACCENT_W))
-                .height(Length::Fill)
-                .style(move |_| container::Style {
-                    background: Some(accent.into()),
+        container(body)
+            .padding([TOAST_PAD_Y, TOAST_PAD_X])
+            .width(Length::Fill)
+            .style(move |_| container::Style {
+                background: Some(t2.bg_raised.into()),
+                border: iced::Border {
+                    radius: theme::radius::SM.into(),
                     ..Default::default()
-                }),
-            container(body)
-                .padding(theme::space::S2)
-                .width(Length::Fill),
-        ]
-        .align_y(Alignment::Center),
+                },
+                ..Default::default()
+            }),
     )
     .width(Length::Fixed(TOAST_W))
+    .padding(iced::Padding {
+        left: TOAST_ACCENT_W,
+        ..iced::Padding::ZERO
+    })
     .style(move |_| container::Style {
-        background: Some(t2.bg_raised.into()),
+        background: Some(accent.into()),
         border: iced::Border {
             color: t2.border_default,
             width: 1.0,
@@ -1885,27 +1898,6 @@ fn section_header<'a>(
     .into()
 }
 
-fn queue_color(t: &Tokens, name: &str, builtin: bool) -> iced::Color {
-    if builtin {
-        return t.action_primary;
-    }
-    let palette = [
-        t.cat_music,
-        t.cat_programs,
-        t.cat_pictures,
-        t.cat_videos,
-        t.cat_documents,
-        t.cat_compressed,
-        t.status_info,
-        t.status_success,
-    ];
-    let mut h: u32 = 0;
-    for b in name.bytes() {
-        h = h.wrapping_mul(131).wrapping_add(b as u32);
-    }
-    palette[(h as usize) % palette.len()]
-}
-
 fn sidebar(m: &Main) -> Element<'_, Msg> {
     let t = &m.tokens;
     let rh = m.sidebar_row_h();
@@ -1963,7 +1955,7 @@ fn sidebar(m: &Main) -> Element<'_, Msg> {
         for q in &m.snap.queues {
             let active = m.filter == SidebarFilter::Queue(q.id);
             let count = m.snap.jobs.iter().filter(|j| j.queue_id == q.id).count() as u64;
-            let chip = swatch(8.0, 2.0, queue_color(t, &q.name, q.builtin));
+            let chip = swatch(8.0, 2.0, t.queue_color(q));
             // Live-dot (design `.q-live-dot`): pulsing moss dot when the
             // queue has ≥1 running job (N2). Pulse gated on !reduce_motion.
             let leader: Element<'_, Msg> = if live.contains(&q.id) {
