@@ -164,6 +164,11 @@ pub enum Msg {
     // Toasts (design `.toast`)
     Toast(ToastSeverity, String),
     ToastExpired(u64),
+    /// Clicked away before its TTL ran out. Same removal as expiry —
+    /// the pending `ToastExpired` for this id then finds nothing.
+    ToastDismissed(u64),
+    /// Pointer entered (`Some`) or left (`None`) a table row.
+    RowHover(Option<JobId>),
     // Pulse clock for the queue live-dot (gated on !reduce_motion)
     AnimTick,
     // Browser-extensions overlay store link
@@ -292,6 +297,10 @@ pub struct Main {
     pub collapsed_sections: HashSet<u8>,
     pub maximized: bool,
     pub context_menu: Option<JobId>,
+    /// Row under the pointer, for the design's `tr:hover` background.
+    /// iced containers have no hover status, so the table row tracks it
+    /// explicitly via `mouse_area` enter/exit.
+    pub hovered_row: Option<JobId>,
     pub overlay: Overlay,
     pub about: AboutState,
     pub host: HostState,
@@ -352,6 +361,7 @@ impl Main {
             collapsed_sections: HashSet::new(),
             maximized: false,
             context_menu: None,
+            hovered_row: None,
             overlay: Overlay::None,
             about: AboutState::default(),
             host: HostState::default(),
@@ -755,6 +765,10 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                 act(async move { client.open_download_window(id).await })
             }
         }
+        Msg::RowHover(id) => {
+            m.hovered_row = id;
+            Task::none()
+        }
         Msg::RowRightClick(id) => {
             if !m.selection.contains(&id) {
                 m.selection.clear();
@@ -1003,7 +1017,7 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             act(async move { client.open_add_window(None, Some(prefill)).await })
         }
         Msg::Toast(severity, message) => spawn_toast(m, severity, message),
-        Msg::ToastExpired(id) => {
+        Msg::ToastExpired(id) | Msg::ToastDismissed(id) => {
             m.toasts.retain(|t| t.id != id);
             Task::none()
         }
@@ -1710,7 +1724,7 @@ fn toast_card<'a>(t: &Tokens, toast: &'a Toast) -> Element<'a, Msg> {
     // widget: a rail needs `height(Fill)` to match the card, and a Fill
     // child resolves against the whole available height, which stretched
     // every toast down the full window.
-    container(
+    let card = container(
         container(body)
             .padding([TOAST_PAD_Y, TOAST_PAD_X])
             .width(Length::Fill)
@@ -1741,8 +1755,17 @@ fn toast_card<'a>(t: &Tokens, toast: &'a Toast) -> Element<'a, Msg> {
             blur_radius: 14.0,
         },
         ..Default::default()
-    })
-    .into()
+    });
+
+    // Click anywhere on the card to dismiss it early. The button is
+    // styled to nothing so the card's own surface still shows through;
+    // it exists for the hit box (and gives the pointer cursor).
+    let id = toast.id;
+    iced::widget::button(card)
+        .padding(0)
+        .style(|_, _| iced::widget::button::Style::default())
+        .on_press(Msg::ToastDismissed(id))
+        .into()
 }
 
 /// Bottom-right toast stack (design `.toast`). Non-modal: the layer
@@ -2162,60 +2185,97 @@ fn tab_strip(m: &Main) -> Element<'_, Msg> {
 
 fn header_cell<'a>(m: &Main, label: &'a str, col: SortColumn, width: f32) -> Element<'a, Msg> {
     let (active_col, desc) = m.sort;
-    let t2 = m.tokens;
-    // Resize grip (design `ResizableHeader`): 1px quiet idle, 3px
-    // clay-400 at ~70% height on hover, 3px clay-500 while dragging.
-    let dragging = matches!(m.col_drag, Some((c, _, _)) if c == col);
-    let hovering = m.col_handle_hover == Some(col);
-    let (line_w, line_h, line_color) = if dragging {
-        (GRIP_W_ACTIVE, HEADER_H, color::clay::C500)
-    } else if hovering {
-        (
-            GRIP_W_ACTIVE,
-            HEADER_H * GRIP_ACTIVE_RATIO,
-            color::clay::C400,
-        )
-    } else {
-        (GRIP_W_IDLE, HEADER_H, t2.border_subtle)
-    };
-    let handle = mouse_area(
-        container(
-            container(iced::widget::Space::new())
-                .width(Length::Fixed(line_w))
-                .height(Length::Fixed(line_h))
-                .style(move |_| container::Style {
-                    background: Some(line_color.into()),
-                    ..Default::default()
-                }),
-        )
-        .width(Length::Fixed(RESIZE_HANDLE_W))
-        .height(Length::Fixed(HEADER_H))
-        .align_x(Alignment::Center)
-        .align_y(Alignment::Center),
-    )
-    .on_press(Msg::ColResizeStart(col))
-    .on_enter(Msg::ColHandleHover(col, true))
-    .on_exit(Msg::ColHandleHover(col, false))
-    .interaction(iced::mouse::Interaction::ResizingHorizontally);
+    // Grips are NOT part of the cell: they must straddle the column
+    // boundary (design `.col-resizer { right: -8px; width: 16px }`),
+    // which flow layout cannot express. They are overlaid by
+    // `header_grips` instead, so the cell owns its full width.
     mouse_area(
-        row![
-            container(col_header_sortable(
-                &m.tokens,
-                label,
-                active_col == col,
-                desc,
-                Msg::SetSort(col),
-            ))
-            .width(Length::Fixed(width - RESIZE_HANDLE_W))
-            .padding([0.0, theme::space::S2])
-            .align_y(Alignment::Center)
-            .height(Length::Fixed(HEADER_H)),
-            handle,
-        ]
-        .align_y(Alignment::Center),
+        container(col_header_sortable(
+            &m.tokens,
+            label,
+            active_col == col,
+            desc,
+            Msg::SetSort(col),
+        ))
+        .width(Length::Fixed(width))
+        .padding([0.0, theme::space::S2])
+        .align_y(Alignment::Center)
+        .height(Length::Fixed(HEADER_H)),
     )
+    // The whole cell sorts, not just the label: `col_header_sortable`
+    // shrink-wraps its hit area to the text, so clicking the empty part
+    // of a header did nothing. The inner area handles (and captures)
+    // presses over the text, so this never double-toggles.
+    .on_press(Msg::SetSort(col))
     .on_right_press(Msg::HeaderRightClick)
+    .interaction(iced::mouse::Interaction::Pointer)
     .into()
+}
+
+/// Resize grips, overlaid on the header row and centered on each column
+/// boundary (design `.col-resizer`: centered hit area, grip centered in
+/// it, and the drag guideline at its center). Laid out as spacers +
+/// fixed-width grips so each lands on its boundary without absolute
+/// positioning; the layer sits above the header cells in a `stack`, so
+/// a press on a grip is captured before it can reach the sort control.
+fn header_grips(m: &Main) -> Element<'_, Msg> {
+    const HALF: f32 = RESIZE_HANDLE_W / 2.0;
+    let t2 = m.tokens;
+    let mut strip = row![].align_y(Alignment::Center);
+    let mut first = true;
+    for (col, _) in TABLE_COLS {
+        if !m.columns.is_visible(col as usize) {
+            continue;
+        }
+        let width = m.columns.width(col as usize);
+        // Gap from the previous grip's right edge to this grip's left
+        // edge: the first is measured from the header's left edge.
+        let gap = if first {
+            width - HALF
+        } else {
+            width - RESIZE_HANDLE_W
+        };
+        first = false;
+        strip = strip.push(iced::widget::Space::new().width(Length::Fixed(gap.max(0.0))));
+
+        // Design `ResizableHeader`: 1px quiet idle, 3px clay-400 at ~70%
+        // height on hover, 3px clay-500 full height while dragging.
+        let dragging = matches!(m.col_drag, Some((c, _, _)) if c == col);
+        let hovering = m.col_handle_hover == Some(col);
+        let (line_w, line_h, line_color) = if dragging {
+            (GRIP_W_ACTIVE, HEADER_H, color::clay::C500)
+        } else if hovering {
+            (
+                GRIP_W_ACTIVE,
+                HEADER_H * GRIP_ACTIVE_RATIO,
+                color::clay::C400,
+            )
+        } else {
+            (GRIP_W_IDLE, HEADER_H, t2.border_subtle)
+        };
+        strip = strip.push(
+            mouse_area(
+                container(
+                    container(iced::widget::Space::new())
+                        .width(Length::Fixed(line_w))
+                        .height(Length::Fixed(line_h))
+                        .style(move |_| container::Style {
+                            background: Some(line_color.into()),
+                            ..Default::default()
+                        }),
+                )
+                .width(Length::Fixed(RESIZE_HANDLE_W))
+                .height(Length::Fixed(HEADER_H))
+                .align_x(Alignment::Center)
+                .align_y(Alignment::Center),
+            )
+            .on_press(Msg::ColResizeStart(col))
+            .on_enter(Msg::ColHandleHover(col, true))
+            .on_exit(Msg::ColHandleHover(col, false))
+            .interaction(iced::mouse::Interaction::ResizingHorizontally),
+        );
+    }
+    strip.height(Length::Fixed(HEADER_H)).into()
 }
 
 const TABLE_COLS: [(SortColumn, &str); 6] = [
@@ -2240,7 +2300,7 @@ fn table(m: &Main) -> Element<'_, Msg> {
     // via TableScrolled -> scroll_to); its own scrollbar is hidden.
     let header = container(
         mouse_area(
-            scrollable(header_row)
+            scrollable(iced::widget::stack![header_row, header_grips(m)])
                 .id(iced::widget::Id::new("tbl-header"))
                 .direction(scrollable::Direction::Horizontal(
                     scrollable::Scrollbar::new()
@@ -2301,7 +2361,9 @@ fn table(m: &Main) -> Element<'_, Msg> {
                         .width(Length::Fill)
                         .height(Length::Fill)
                         .padding(iced::Padding {
-                            left: x,
+                            // Centered on the boundary, matching the
+                            // grip above it (design `translateX(-50%)`).
+                            left: (x - GUIDELINE_W / 2.0).max(0.0),
                             ..Default::default()
                         }),
                 ]
@@ -2371,6 +2433,7 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
     let t = &m.tokens;
     let id = job.id;
     let selected = m.selection.contains(&id);
+    let hovered = m.hovered_row == Some(id);
     let c = m.counters.get(&id);
     let phase = m.phase(id);
 
@@ -2556,7 +2619,7 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
         .height(Length::Fixed(m.row_h()))
         .width(Length::Shrink)
         .style(move |_| container::Style {
-            background: bg(false).map(Into::into),
+            background: bg(hovered).map(Into::into),
             ..Default::default()
         });
 
@@ -2564,7 +2627,10 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
     let row_area = mouse_area(row_el)
         .on_press(Msg::RowClick(id, ctrl, shift))
         .on_double_click(Msg::RowDoubleClick(id))
-        .on_right_press(Msg::RowRightClick(id));
+        .on_right_press(Msg::RowRightClick(id))
+        .on_enter(Msg::RowHover(Some(id)))
+        .on_exit(Msg::RowHover(None))
+        .interaction(iced::mouse::Interaction::Pointer);
 
     // 1px bottom row separator (design `.tr` border-subtle hairline).
     // Fixed width = sum of visible columns so it tracks the Shrink row
