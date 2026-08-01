@@ -478,7 +478,10 @@ pub fn host_settings<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg
                         .view(t),
                     crate::gui::widget::field_label(t, "password"),
                     PasswordInput::new(&st.password)
-                        .hint(if st.had_password {
+                        // The dots stand for a secret that is still
+                        // there; once removal is pending they would
+                        // contradict the warning below.
+                        .hint(if st.had_password && !st.password_edited {
                             "••••••••"
                         } else {
                             ""

@@ -1013,7 +1013,7 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                 async move {
                     let host = setting.host.clone();
                     let renamed = old.as_ref().is_some_and(|o| *o != host);
-                    // Carry an untouched secret across a rename before
+                    // Carry an untouched secret across a rename, before
                     // `delete_host` drops the old keyring entry.
                     let carried = match (renamed, &secret) {
                         (true, None) => client
@@ -1023,24 +1023,30 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                             .flatten(),
                         _ => None,
                     };
+                    // Keyring first: `has_password` on the row is a
+                    // promise the keyring has to keep, so a failed write
+                    // must abort before the row claims otherwise.
+                    // Explicit edit wins; a rename only moves what was
+                    // already stored.
+                    match (secret, carried) {
+                        (Some(new), _) => client.set_host_password(host.clone(), new).await?,
+                        (None, Some(pw)) => client.set_host_password(host, Some(pw)).await?,
+                        (None, None) => {}
+                    }
                     if let Some(old) = old
                         && renamed
                     {
                         let _ = client.delete_host(old).await;
                     }
                     client.upsert_host(setting).await?;
-                    // Explicit edit wins; otherwise only a rename needs
-                    // to move what was already stored.
-                    match (secret, carried) {
-                        (Some(new), _) => client.set_host_password(host, new).await?,
-                        (None, Some(pw)) => client.set_host_password(host, Some(pw)).await?,
-                        (None, None) => {}
-                    }
                     client.host_list().await
                 },
                 |r| match r {
                     Ok(hosts) => Msg::HostsLoaded(hosts),
-                    Err(_) => Msg::Noop,
+                    // A keyring write can fail (locked keychain, no
+                    // Secret Service). Staying silent would leave the
+                    // row claiming a password that was never stored.
+                    Err(e) => Msg::Toast(ToastSeverity::Error, format!("Host not saved: {e}")),
                 },
             )
         }
