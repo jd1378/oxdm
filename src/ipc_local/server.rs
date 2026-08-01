@@ -573,6 +573,16 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
             Ok(v) => Reply::HostPassword(v),
             Err(e) => Reply::Err(e),
         },
+        Request::SetHostPassword(host, secret) => {
+            let r = match secret {
+                Some(pw) => crate::data::keyring::set_password(&host, &pw),
+                None => crate::data::keyring::delete_password(&host),
+            };
+            match r {
+                Ok(()) => Reply::Ok,
+                Err(e) => Reply::Err(e),
+            }
+        }
         Request::SecretsStatus => Reply::SecretsStatus {
             locked: state.is_secrets_locked().await,
         },

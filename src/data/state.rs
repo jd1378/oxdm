@@ -644,6 +644,12 @@ impl AppState {
             .delete_host_setting(host)
             .await
             .map_err(|e| e.to_string())?;
+        // The row is gone; leaving its keyring entry behind would strand
+        // a credential no UI can reach. Best-effort — a locked keyring
+        // must not block the delete.
+        if let Err(e) = crate::data::keyring::delete_password(host) {
+            tracing::warn!(host, error = %e, "could not delete host password from the keyring");
+        }
         self.host_settings
             .write()
             .await
@@ -802,9 +808,11 @@ impl AppState {
         let auth_username = std::mem::take(&mut advanced.auth.username);
         let auth_password = std::mem::take(&mut advanced.auth.password);
         let auth_token = std::mem::take(&mut advanced.auth.token);
+        let clear_auth_secret = std::mem::take(&mut advanced.auth.clear_secret);
         // Cookie text is a secret too — never persisted in the blob;
         // routed onto `enc_cookies` like the passwords above.
         let cookie_jar = std::mem::take(&mut advanced.cookie_jar);
+        let clear_cookie_jar = std::mem::take(&mut advanced.clear_cookie_jar);
 
         // Encrypt before taking the jobs lock — `encrypt_field` awaits
         // on the master key and must not run under the registry lock.
@@ -853,9 +861,13 @@ impl AppState {
         }
         if let Some(enc) = enc_auth_secret {
             new_job.enc_auth_password = Some(enc);
+        } else if clear_auth_secret {
+            new_job.enc_auth_password = None;
         }
         if let Some(enc) = enc_cookie_jar {
             new_job.enc_cookies = Some(enc);
+        } else if clear_cookie_jar {
+            new_job.enc_cookies = None;
         }
         match new_job.advanced.auth.scheme {
             AuthScheme::Basic if !auth_username.is_empty() => {
@@ -864,8 +876,12 @@ impl AppState {
             // Scheme "None" must actually stop Basic credentials from
             // being sent: the runner builds them off `auth_user`, so
             // clearing it is what makes the selection honest (F2/F4).
+            // The stored secret goes with it — without `auth_user` it
+            // could never be used again, and keeping the ciphertext
+            // leaves a secret at rest with no UI left to remove it.
             AuthScheme::None => {
                 new_job.auth_user = None;
+                new_job.enc_auth_password = None;
             }
             _ => {}
         }

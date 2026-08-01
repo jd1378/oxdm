@@ -88,6 +88,10 @@ pub struct AuthAdv {
     /// See `ProxyAdv::password` — same caveat applies.
     pub password: String,
     pub token: String,
+    /// See `ProxyAdv::clear_password`. Covers whichever secret the
+    /// current scheme uses — both land on `Job::enc_auth_password`.
+    #[serde(default)]
+    pub clear_secret: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -102,6 +106,11 @@ pub struct Advanced {
     pub referer: String,
     pub cookies_enabled: bool,
     pub cookie_jar: String,
+    /// See `ProxyAdv::clear_password`. An emptied cookie editor is
+    /// otherwise indistinguishable from "the stored jar never came
+    /// back down to the form", which is the normal case.
+    #[serde(default)]
+    pub clear_cookie_jar: bool,
     pub segments: i64,
     /// 0 = unlimited.
     pub speed_kbps: i64,
@@ -127,6 +136,7 @@ impl Default for Advanced {
             referer: String::new(),
             cookies_enabled: true,
             cookie_jar: String::new(),
+            clear_cookie_jar: false,
             segments: 8,
             speed_kbps: 0,
             speed_unit_mb: false,

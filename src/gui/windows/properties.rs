@@ -97,6 +97,10 @@ pub enum Msg {
     AuthUser(String),
     AuthPass(String),
     AuthToken(String),
+    /// Explicit "delete the stored secret" for the current scheme.
+    AuthSecretClear,
+    /// Explicit "delete the stored proxy password".
+    ProxyPassClear,
     // Cookies
     CookiesEnabled(bool),
     CookiesEdit(text_editor::Action),
@@ -168,11 +172,16 @@ pub struct State {
     auth_user: String,
     auth_pass: String,
     auth_token: String,
+    /// Same rule as `proxy_pass_edited`, for whichever secret field the
+    /// active scheme uses.
+    auth_secret_edited: bool,
     cookies_enabled: bool,
     cookies: text_editor::Content,
     /// Encrypted cookies exist on the job (shown as "(stored)" — the
     /// plaintext never round-trips back into the editor).
     has_stored_cookies: bool,
+    /// Same rule as `proxy_pass_edited`, for the cookie editor.
+    cookies_edited: bool,
     headers: Vec<(String, String)>,
     adv: crate::domain::Advanced,
     checksums: Vec<Checksum>,
@@ -292,6 +301,7 @@ fn hydrate(st: &mut State) {
     st.auth_user = job.auth_user.clone().unwrap_or_default();
     st.auth_pass.clear();
     st.auth_token.clear();
+    st.auth_secret_edited = false;
     st.headers = job
         .headers
         .iter()
@@ -304,6 +314,7 @@ fn hydrate(st: &mut State) {
     // `enc_cookies` and never round-trip plaintext back here.
     st.cookies = text_editor::Content::with_text(&job.advanced.cookie_jar);
     st.has_stored_cookies = job.enc_cookies.is_some();
+    st.cookies_edited = false;
     st.checksums = job.checksums.clone();
 }
 
@@ -329,9 +340,11 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 auth_user: String::new(),
                 auth_pass: String::new(),
                 auth_token: String::new(),
+                auth_secret_edited: false,
                 cookies_enabled: false,
                 cookies: text_editor::Content::new(),
                 has_stored_cookies: false,
+                cookies_edited: false,
                 headers: Vec::new(),
                 adv: Default::default(),
                 checksums: Vec::new(),
@@ -504,11 +517,26 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
         }
         Msg::AuthPass(v) => {
             st.auth_pass = v;
+            st.auth_secret_edited = true;
             mark(st);
             Task::none()
         }
         Msg::AuthToken(v) => {
             st.auth_token = v;
+            st.auth_secret_edited = true;
+            mark(st);
+            Task::none()
+        }
+        Msg::AuthSecretClear => {
+            st.auth_pass.clear();
+            st.auth_token.clear();
+            st.auth_secret_edited = true;
+            mark(st);
+            Task::none()
+        }
+        Msg::ProxyPassClear => {
+            st.proxy_pass.clear();
+            st.proxy_pass_edited = true;
             mark(st);
             Task::none()
         }
@@ -522,6 +550,7 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             let edit = a.is_edit();
             st.cookies.perform(a);
             if edit {
+                st.cookies_edited = true;
                 st.dirty_overlay = true;
                 mark(st);
             }
@@ -529,6 +558,7 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
         }
         Msg::CookiesClear => {
             st.cookies = text_editor::Content::new();
+            st.cookies_edited = true;
             st.dirty_overlay = true;
             mark(st);
             Task::none()
@@ -732,6 +762,14 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             // to delete it; leaving it untouched still means "keep".
             adv.proxy.clear_password = st.proxy_pass_edited && st.proxy_pass.is_empty();
             adv.proxy.remote_dns = st.remote_dns;
+            // Emptying a secret field that held a stored value is the
+            // only way to delete it; untouched still means "keep".
+            adv.auth.clear_secret = st.auth_secret_edited
+                && match st.auth_scheme {
+                    AuthScheme::Bearer => st.auth_token.is_empty(),
+                    _ => st.auth_pass.is_empty(),
+                };
+            adv.clear_cookie_jar = st.cookies_edited && st.cookies.text().trim().is_empty();
             adv.auth.scheme = st.auth_scheme;
             adv.auth.username = st.auth_user.trim().to_owned();
             adv.auth.password = st.auth_pass.clone();
@@ -798,9 +836,11 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
         Msg::Applied(Ok(())) => {
             st.dirty_source = false;
             st.dirty_overlay = false;
-            // The daemon consumed the clear; a later Apply must not
-            // re-send it off a stale flag.
+            // The daemon consumed the clears; a later Apply must not
+            // re-send them off stale flags.
             st.proxy_pass_edited = false;
+            st.auth_secret_edited = false;
+            st.cookies_edited = false;
             Task::none()
         }
         Msg::Applied(Err(e)) => {
@@ -1998,6 +2038,48 @@ fn toggle_row<'a>(
     .into()
 }
 
+/// Footer for a secret input whose stored value never round-trips into
+/// the form. Without it "delete the stored secret" would be an
+/// invisible gesture — type into an already-empty field, then erase it
+/// — so the state and the way out are both spelled out.
+fn stored_secret_row<'a>(
+    t: &Tokens,
+    editable: bool,
+    pending_clear: bool,
+    clear: Msg,
+) -> Element<'a, Msg> {
+    if pending_clear {
+        return row![
+            icons::icon("triangle-alert", 11.0, t.status_danger),
+            text("Stored secret will be removed on Apply.")
+                .font(theme::BODY)
+                .size(11.0)
+                .color(t.status_danger),
+        ]
+        .spacing(4.0)
+        .align_y(Alignment::Center)
+        .into();
+    }
+    row![
+        icons::icon("lock", 11.0, t.status_success),
+        text("Stored (encrypted). Leave blank to keep it.")
+            .font(theme::BODY)
+            .size(11.0)
+            .color(t.fg_3),
+        iced::widget::Space::new().width(Length::Fill),
+        Btn::new("Remove")
+            .toolbar()
+            .icon("trash-2")
+            .size(BtnSize::Sm)
+            .enabled(editable)
+            .on_press(clear)
+            .view(t),
+    ]
+    .spacing(4.0)
+    .align_y(Alignment::Center)
+    .into()
+}
+
 fn connection_tab(st: &State) -> Element<'_, Msg> {
     let t = &st.tokens;
     let editable = !st.locked();
@@ -2147,31 +2229,38 @@ fn connection_tab(st: &State) -> Element<'_, Msg> {
                 Msg::ProxyAuth,
             ));
         if st.proxy_auth {
-            proxy_body = proxy_body.push(
-                container(
-                    row![
-                        TextInput::new(&st.proxy_user)
-                            .hint("username")
-                            .enabled(editable)
-                            .on_input(Msg::ProxyUser)
-                            .view(t),
-                        // Stored secret never round-trips into the form;
-                        // empty input on Apply keeps it (guardian F1).
-                        TextInput::new(&st.proxy_pass)
-                            .hint(if st.entry.job.enc_proxy_password.is_some() {
-                                "(unchanged)"
-                            } else {
-                                "password"
-                            })
-                            .secure(true)
-                            .enabled(editable)
-                            .on_input(Msg::ProxyPass)
-                            .view(t),
-                    ]
-                    .spacing(theme::space::S2),
-                )
-                .padding([10.0, theme::space::S3]),
-            );
+            let mut creds = column![
+                row![
+                    TextInput::new(&st.proxy_user)
+                        .hint("username")
+                        .enabled(editable)
+                        .on_input(Msg::ProxyUser)
+                        .view(t),
+                    // Stored secret never round-trips into the form;
+                    // empty input on Apply keeps it (guardian F1).
+                    TextInput::new(&st.proxy_pass)
+                        .hint(if st.entry.job.enc_proxy_password.is_some() {
+                            "(unchanged)"
+                        } else {
+                            "password"
+                        })
+                        .secure(true)
+                        .enabled(editable)
+                        .on_input(Msg::ProxyPass)
+                        .view(t),
+                ]
+                .spacing(theme::space::S2)
+            ]
+            .spacing(6.0);
+            if st.entry.job.enc_proxy_password.is_some() {
+                creds = creds.push(stored_secret_row(
+                    t,
+                    editable,
+                    st.proxy_pass_edited && st.proxy_pass.is_empty(),
+                    Msg::ProxyPassClear,
+                ));
+            }
+            proxy_body = proxy_body.push(container(creds).padding([10.0, theme::space::S3]));
         }
         if socks5 {
             proxy_body = proxy_body.push(row_sep(t)).push(toggle_row(
@@ -2226,54 +2315,69 @@ fn connection_tab(st: &State) -> Element<'_, Msg> {
     ];
     match st.auth_scheme {
         AuthScheme::Basic => {
-            auth_body = auth_body.push(row_sep(t)).push(
-                container(
-                    row![
-                        TextInput::new(&st.auth_user)
-                            .hint("username")
-                            .enabled(editable)
-                            .on_input(Msg::AuthUser)
-                            .view(t),
-                        TextInput::new(&st.auth_pass)
-                            .hint(if stored_secret {
-                                "(unchanged)"
-                            } else {
-                                "password"
-                            })
-                            .secure(true)
-                            .enabled(editable)
-                            .on_input(Msg::AuthPass)
-                            .view(t),
-                    ]
-                    .spacing(theme::space::S2),
-                )
-                .padding([10.0, theme::space::S3]),
-            );
+            let mut creds = column![
+                row![
+                    TextInput::new(&st.auth_user)
+                        .hint("username")
+                        .enabled(editable)
+                        .on_input(Msg::AuthUser)
+                        .view(t),
+                    TextInput::new(&st.auth_pass)
+                        .hint(if stored_secret {
+                            "(unchanged)"
+                        } else {
+                            "password"
+                        })
+                        .secure(true)
+                        .enabled(editable)
+                        .on_input(Msg::AuthPass)
+                        .view(t),
+                ]
+                .spacing(theme::space::S2)
+            ]
+            .spacing(6.0);
+            if stored_secret {
+                creds = creds.push(stored_secret_row(
+                    t,
+                    editable,
+                    st.auth_secret_edited && st.auth_pass.is_empty(),
+                    Msg::AuthSecretClear,
+                ));
+            }
+            auth_body = auth_body
+                .push(row_sep(t))
+                .push(container(creds).padding([10.0, theme::space::S3]));
         }
         AuthScheme::Bearer => {
-            auth_body = auth_body.push(row_sep(t)).push(
-                container(
-                    column![
-                        text("Token")
-                            .font(theme::BODY_MEDIUM)
-                            .size(12.0)
-                            .color(t.fg_1),
-                        TextInput::new(&st.auth_token)
-                            .hint(if stored_secret {
-                                "(unchanged)"
-                            } else {
-                                "eyJhbGciOi…"
-                            })
-                            .mono()
-                            .secure(true)
-                            .enabled(editable)
-                            .on_input(Msg::AuthToken)
-                            .view(t),
-                    ]
-                    .spacing(6.0),
-                )
-                .padding([10.0, theme::space::S3]),
-            );
+            let mut field = column![
+                text("Token")
+                    .font(theme::BODY_MEDIUM)
+                    .size(12.0)
+                    .color(t.fg_1),
+                TextInput::new(&st.auth_token)
+                    .hint(if stored_secret {
+                        "(unchanged)"
+                    } else {
+                        "eyJhbGciOi…"
+                    })
+                    .mono()
+                    .secure(true)
+                    .enabled(editable)
+                    .on_input(Msg::AuthToken)
+                    .view(t),
+            ]
+            .spacing(6.0);
+            if stored_secret {
+                field = field.push(stored_secret_row(
+                    t,
+                    editable,
+                    st.auth_secret_edited && st.auth_token.is_empty(),
+                    Msg::AuthSecretClear,
+                ));
+            }
+            auth_body = auth_body
+                .push(row_sep(t))
+                .push(container(field).padding([10.0, theme::space::S3]));
         }
         _ => {}
     }
@@ -2328,7 +2432,10 @@ fn cookies_tab(st: &State) -> Element<'_, Msg> {
                             .toolbar()
                             .icon("trash-2")
                             .size(BtnSize::Sm)
-                            .enabled(editable && parsed > 0)
+                            // A stored jar leaves the editor empty, so
+                            // `parsed` alone would lock the only way to
+                            // delete it.
+                            .enabled(editable && (parsed > 0 || st.has_stored_cookies))
                             .on_press(Msg::CookiesClear)
                             .view(t),
                     ],

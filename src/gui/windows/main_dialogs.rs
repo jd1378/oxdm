@@ -48,6 +48,10 @@ pub struct HostState {
     pub password: String,
     pub password_revealed: bool,
     pub had_password: bool,
+    /// The password field was touched this session. Empty + touched
+    /// means "delete the stored secret"; empty + untouched keeps it
+    /// (the keyring value never round-trips into the form).
+    pub password_edited: bool,
     pub user_agent: String,
 }
 
@@ -63,6 +67,7 @@ impl HostState {
         self.threads = h.thread_count.map(|v| v.to_string()).unwrap_or_default();
         self.username = h.username.clone().unwrap_or_default();
         self.password = String::new();
+        self.password_edited = false;
         self.had_password = h.has_password;
         self.user_agent = h.default_user_agent.clone().unwrap_or_default();
     }
@@ -79,7 +84,13 @@ impl HostState {
                 let u = self.username.trim();
                 (!u.is_empty()).then(|| u.to_owned())
             },
-            has_password: self.had_password || !self.password.is_empty(),
+            // Only a truthful claim: the row's flag is what the UI
+            // reads back, and `HostSave` writes the keyring to match.
+            has_password: if self.password_edited {
+                !self.password.is_empty()
+            } else {
+                self.had_password
+            },
             default_user_agent: {
                 let u = self.user_agent.trim();
                 (!u.is_empty()).then(|| u.to_owned())
@@ -476,7 +487,19 @@ pub fn host_settings<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg
                         .on_input(Msg::HostPassword)
                         .on_reveal(Msg::HostReveal)
                         .view(t),
-                    if st.had_password {
+                    if st.had_password && st.password_edited && st.password.is_empty() {
+                        Element::from(
+                            row![
+                                icons::icon("triangle-alert", 12.0, t.status_danger),
+                                text("Stored password will be removed on Save")
+                                    .font(theme::BODY_BOLD)
+                                    .size(11.0)
+                                    .color(t.status_danger),
+                            ]
+                            .spacing(4.0)
+                            .align_y(Alignment::Center),
+                        )
+                    } else if st.had_password {
                         Element::from(
                             row![
                                 icons::icon("lock", 12.0, t.status_success),
@@ -484,6 +507,13 @@ pub fn host_settings<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg
                                     .font(theme::BODY_BOLD)
                                     .size(11.0)
                                     .color(t.status_success),
+                                iced::widget::Space::new().width(Length::Fill),
+                                Btn::new("Remove")
+                                    .toolbar()
+                                    .icon("trash-2")
+                                    .size(BtnSize::Sm)
+                                    .on_press(Msg::HostPasswordClear)
+                                    .view(t),
                             ]
                             .spacing(4.0)
                             .align_y(Alignment::Center),

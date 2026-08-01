@@ -150,6 +150,8 @@ pub enum Msg {
     HostThreads(String),
     HostUsername(String),
     HostPassword(String),
+    /// Explicit "delete the stored keyring password for this host".
+    HostPasswordClear,
     HostReveal(bool),
     HostUserAgent(String),
     HostSave,
@@ -981,6 +983,12 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
         }
         Msg::HostPassword(v) => {
             m.host.password = v;
+            m.host.password_edited = true;
+            Task::none()
+        }
+        Msg::HostPasswordClear => {
+            m.host.password.clear();
+            m.host.password_edited = true;
             Task::none()
         }
         Msg::HostReveal(v) => {
@@ -995,14 +1003,39 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             let setting = m.host.build();
             let old = m.host.selected.clone();
             let client = m.client.clone();
+            // `password` is a scratch buffer: empty means "keep the
+            // stored secret" unless the field was actually touched.
+            let secret = m
+                .host
+                .password_edited
+                .then(|| (!m.host.password.is_empty()).then(|| m.host.password.clone()));
             Task::perform(
                 async move {
+                    let host = setting.host.clone();
+                    let renamed = old.as_ref().is_some_and(|o| *o != host);
+                    // Carry an untouched secret across a rename before
+                    // `delete_host` drops the old keyring entry.
+                    let carried = match (renamed, &secret) {
+                        (true, None) => client
+                            .host_password(old.clone().unwrap_or_default())
+                            .await
+                            .ok()
+                            .flatten(),
+                        _ => None,
+                    };
                     if let Some(old) = old
-                        && old != setting.host
+                        && renamed
                     {
                         let _ = client.delete_host(old).await;
                     }
                     client.upsert_host(setting).await?;
+                    // Explicit edit wins; otherwise only a rename needs
+                    // to move what was already stored.
+                    match (secret, carried) {
+                        (Some(new), _) => client.set_host_password(host, new).await?,
+                        (None, Some(pw)) => client.set_host_password(host, Some(pw)).await?,
+                        (None, None) => {}
+                    }
                     client.host_list().await
                 },
                 |r| match r {

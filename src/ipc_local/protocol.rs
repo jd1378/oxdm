@@ -138,6 +138,10 @@ pub enum Request {
     /// exists. The reply travels over the per-user local socket — same
     /// trust boundary as the keyring itself.
     HostPassword(String),
+    /// Store (`Some`) or delete (`None`) the OS-keyring password for a
+    /// host. The GUI never receives the secret back except through
+    /// `HostPassword`, so this is the only way to change it.
+    SetHostPassword(String, Option<String>),
     /// Inspect the daemon's secrets-encryption state. Used by the GUI
     /// at boot to decide whether to surface the "master key missing"
     /// wipe-confirmation dialog. Reply is `Reply::SecretsStatus`.

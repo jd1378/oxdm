@@ -332,6 +332,15 @@ impl Client {
         }
     }
 
+    /// `Some` stores the secret, `None` deletes it.
+    pub async fn set_host_password(
+        &self,
+        host: String,
+        secret: Option<String>,
+    ) -> Result<(), String> {
+        self.expect_ok(Request::SetHostPassword(host, secret)).await
+    }
+
     pub async fn host_password(&self, host: String) -> Result<Option<String>, String> {
         match self
             .request(Request::HostPassword(host))
