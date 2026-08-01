@@ -244,7 +244,20 @@ pub struct OnCompletion {
     pub show_dialog: bool,
     pub exit_app: bool,
     pub shutdown: Option<ShutdownAction>,
-    pub force_terminate: bool,
+    /// Windows only: pass `/f` to `shutdown`, closing open applications
+    /// without waiting for them to save. Ignored elsewhere — it is
+    /// picked as part of the power action, not as a separate option.
+    /// The alias is the pre-rename wire name — an older GUI talking to
+    /// a newer daemon still lands on this field, which always carried
+    /// exactly this meaning despite the misleading old label.
+    #[serde(alias = "force_terminate")]
+    pub force_shutdown: bool,
+    /// Turn the machine's network off once the download finishes (IDM's
+    /// "disconnect when done"). Runs through the same cancellable grace
+    /// timer as the power actions; suppressed when a power action is
+    /// already armed, since that takes the link down anyway.
+    #[serde(default)]
+    pub disconnect: bool,
 }
 
 impl Default for OnCompletion {
@@ -253,7 +266,8 @@ impl Default for OnCompletion {
             show_dialog: true,
             exit_app: false,
             shutdown: None,
-            force_terminate: false,
+            force_shutdown: false,
+            disconnect: false,
         }
     }
 }
@@ -274,7 +288,8 @@ pub enum ShutdownAction {
 pub const SHUTDOWN_GRACE_SECS: u64 = 60;
 
 /// A destructive power action waiting out the shutdown grace timer.
-/// Superset of [`ShutdownAction`]: queue hooks can also hibernate.
+/// Superset of [`ShutdownAction`]: queue hooks can also hibernate, and
+/// the per-job completion tab can drop the network connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PowerAction {
@@ -282,6 +297,7 @@ pub enum PowerAction {
     Restart,
     Sleep,
     Hibernate,
+    Disconnect,
 }
 
 impl From<ShutdownAction> for PowerAction {
@@ -531,4 +547,21 @@ pub fn will_send_headers(settings: &super::Settings, job: &Job) -> Vec<WillSendH
     }
 
     rows
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn on_completion_accepts_pre_rename_payload() {
+        // An older GUI still sends `force_terminate` and omits
+        // `disconnect`; both must land on the renamed fields.
+        let legacy = r#"{"show_dialog":false,"exit_app":false,
+            "shutdown":"shut_down","force_terminate":true}"#;
+        let oc: OnCompletion = serde_json::from_str(legacy).unwrap();
+        assert!(oc.force_shutdown);
+        assert!(!oc.disconnect);
+        assert_eq!(oc.shutdown, Some(ShutdownAction::ShutDown));
+    }
 }

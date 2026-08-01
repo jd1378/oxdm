@@ -108,7 +108,7 @@ pub enum Msg {
     ExitDone(bool),
     PowerEnabled(bool),
     PowerAction(String),
-    ForceTerminate(bool),
+    Disconnect(bool),
     ApplyCompletion,
     // Footer / complete view
     PauseResume,
@@ -406,18 +406,19 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
         }
         Msg::PowerEnabled(v) => {
             st.on_completion.shutdown = v.then_some(ShutdownAction::ShutDown);
+            if !v {
+                st.on_completion.force_shutdown = false;
+            }
             Task::none()
         }
         Msg::PowerAction(s) => {
-            st.on_completion.shutdown = Some(match s.as_str() {
-                "Restart" => ShutdownAction::Restart,
-                "Sleep" => ShutdownAction::Sleep,
-                _ => ShutdownAction::ShutDown,
-            });
+            let (action, force) = parse_power_label(&s);
+            st.on_completion.shutdown = Some(action);
+            st.on_completion.force_shutdown = force;
             Task::none()
         }
-        Msg::ForceTerminate(v) => {
-            st.on_completion.force_terminate = v;
+        Msg::Disconnect(v) => {
+            st.on_completion.disconnect = v;
             Task::none()
         }
         Msg::ApplyCompletion => {
@@ -1333,15 +1334,54 @@ fn toggle_row<'a>(
     .into()
 }
 
+/// Windows' `shutdown /f` closes open applications without letting them
+/// save. That is a property of *how* the machine goes down, so it rides
+/// along with the chosen action instead of being a separate toggle.
+/// `run_shutdown` ignores the flag on Linux/macOS, so the forced
+/// variants are only offered where they mean something. Sleep has no
+/// forced form (`shutdown /h` rejects `/f`).
+const FORCE_SUFFIX: &str = " (force)";
+const POWER_FORCEABLE: bool = cfg!(target_os = "windows");
+
+fn power_options() -> Vec<String> {
+    let mut out = Vec::with_capacity(5);
+    for base in ["Shut down", "Restart"] {
+        out.push(base.to_owned());
+        if POWER_FORCEABLE {
+            out.push(format!("{base}{FORCE_SUFFIX}"));
+        }
+    }
+    out.push("Sleep".to_owned());
+    out
+}
+
+fn power_label(action: ShutdownAction, force: bool) -> String {
+    let base = match action {
+        ShutdownAction::ShutDown => "Shut down",
+        ShutdownAction::Restart => "Restart",
+        ShutdownAction::Sleep => "Sleep",
+    };
+    if force && POWER_FORCEABLE && action != ShutdownAction::Sleep {
+        format!("{base}{FORCE_SUFFIX}")
+    } else {
+        base.to_owned()
+    }
+}
+
+fn parse_power_label(label: &str) -> (ShutdownAction, bool) {
+    let force = label.ends_with(FORCE_SUFFIX);
+    let action = match label.trim_end_matches(FORCE_SUFFIX) {
+        "Restart" => ShutdownAction::Restart,
+        "Sleep" => ShutdownAction::Sleep,
+        _ => ShutdownAction::ShutDown,
+    };
+    (action, force)
+}
+
 fn completion_tab(st: &State) -> Element<'_, Msg> {
     let t = &st.tokens;
     let oc = &st.on_completion;
     let power_on = oc.shutdown.is_some();
-    let power_label = match oc.shutdown {
-        Some(ShutdownAction::Restart) => "Restart",
-        Some(ShutdownAction::Sleep) => "Sleep",
-        _ => "Shut down",
-    };
 
     let power_row = row![
         text("Power action")
@@ -1351,14 +1391,10 @@ fn completion_tab(st: &State) -> Element<'_, Msg> {
             .width(Length::Fill),
         combo(
             t,
-            vec![
-                "Shut down".to_owned(),
-                "Restart".to_owned(),
-                "Sleep".to_owned()
-            ],
-            power_on.then(|| power_label.to_owned()),
+            power_options(),
+            oc.shutdown.map(|a| power_label(a, oc.force_shutdown)),
             Msg::PowerAction,
-            Length::Fixed(140.0),
+            Length::Fixed(if POWER_FORCEABLE { 176.0 } else { 140.0 }),
         ),
         toggle(t, power_on, true, Msg::PowerEnabled),
     ]
@@ -1377,10 +1413,10 @@ fn completion_tab(st: &State) -> Element<'_, Msg> {
         power_row,
         toggle_row(
             t,
-            "Force terminate other transfers",
-            oc.force_terminate,
-            true,
-            Msg::ForceTerminate
+            "Disconnect from network when done",
+            oc.disconnect,
+            !power_on,
+            Msg::Disconnect
         ),
     ]
     .spacing(theme::space::S3);
@@ -1418,8 +1454,15 @@ fn completion_warn(st: &State) -> Option<Element<'_, Msg>> {
     if oc.exit_app {
         items.push("oxdm will quit.");
     }
-    if oc.force_terminate {
-        items.push("Other running transfers will be terminated without finishing.");
+    if oc.force_shutdown && oc.shutdown.is_some() {
+        items.push("Open apps will be closed without saving.");
+    }
+    // Mirrors the daemon's precedence: a power action supersedes the
+    // disconnect, so don't promise something that won't run.
+    if oc.disconnect && oc.shutdown.is_none() {
+        items.push(
+            "Your network connection will be turned off — other running transfers will fail.",
+        );
     }
     if items.is_empty() {
         return None;

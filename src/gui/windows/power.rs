@@ -73,6 +73,7 @@ fn action_words(action: PowerAction) -> (&'static str, &'static str, &'static st
         PowerAction::Restart => ("restart", "Restart now", "rotate-cw"),
         PowerAction::Sleep => ("sleep", "Sleep now", "moon"),
         PowerAction::Hibernate => ("hibernate", "Hibernate now", "moon"),
+        PowerAction::Disconnect => ("go offline", "Disconnect now", "unplug"),
     }
 }
 

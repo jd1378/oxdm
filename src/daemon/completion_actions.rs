@@ -36,10 +36,24 @@ pub fn spawn(state: Arc<AppState>) {
                 // immediately — the GUI shows a cancellable countdown.
                 let mut power_armed = false;
                 if let Some(action) = prefs.shutdown {
-                    let force = prefs.force_terminate;
+                    let force = prefs.force_shutdown;
                     power_armed = state.arm_power_action(action.into(), move || {
                         run_shutdown(action, force).map_err(|e| e.to_string())
                     });
+                }
+                // A power action already takes the link down; arming
+                // disconnect too would only lose the race for the
+                // one-slot guard and drop the shutdown countdown.
+                if prefs.disconnect {
+                    if power_armed || state.pending_shutdown().is_some() {
+                        tracing::info!(
+                            "skipping disconnect completion action: a power action is pending"
+                        );
+                    } else {
+                        state.arm_power_action(crate::domain::PowerAction::Disconnect, || {
+                            run_disconnect().map_err(|e| e.to_string())
+                        });
+                    }
                 }
                 if prefs.exit_app {
                     if power_armed || state.pending_shutdown().is_some() {
@@ -105,4 +119,59 @@ fn run_shutdown(action: ShutdownAction, force: bool) -> std::io::Result<()> {
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn run_shutdown(_action: ShutdownAction, _force: bool) -> std::io::Result<()> {
     Err(std::io::Error::other("unsupported platform"))
+}
+
+/// Take the machine's network down. Each platform's command needs
+/// rights the daemon may not have (PolicyKit on Linux, an elevated
+/// process on Windows); a refusal surfaces as a non-zero exit that we
+/// turn into an error, so the GUI reports it instead of silently
+/// pretending the link went down.
+#[cfg(target_os = "linux")]
+fn run_disconnect() -> std::io::Result<()> {
+    // NetworkManager is the only cross-distro handle we can rely on;
+    // `networking off` deactivates every managed device and, unlike
+    // `nmcli radio all off`, also covers wired links.
+    check(Command::new("nmcli").args(["networking", "off"]).status()?)
+}
+
+#[cfg(target_os = "macos")]
+fn run_disconnect() -> std::io::Result<()> {
+    // "airport" is networksetup's alias for every Wi-Fi device, so this
+    // does not hard-code en0. Wired links are left alone: disabling a
+    // service by name would need the localized service name.
+    check(
+        Command::new("networksetup")
+            .args(["-setairportpower", "airport", "off"])
+            .status()?,
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn run_disconnect() -> std::io::Result<()> {
+    check(
+        Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Disable-NetAdapter -Name * -Confirm:$false",
+            ])
+            .status()?,
+    )
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn run_disconnect() -> std::io::Result<()> {
+    Err(std::io::Error::other("unsupported platform"))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+fn check(status: std::process::ExitStatus) -> std::io::Result<()> {
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "disconnect command failed ({status})"
+        )))
+    }
 }
