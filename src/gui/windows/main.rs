@@ -944,6 +944,7 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             m.host = HostState {
                 hosts,
                 search,
+                adding: true,
                 ..Default::default()
             };
             Task::none()
@@ -1009,6 +1010,14 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                 .host
                 .password_edited
                 .then(|| (!m.host.password.is_empty()).then(|| m.host.password.clone()));
+            // The row now exists under this name: leaving the form in
+            // add mode would make a second Save insert it again, and a
+            // stale `selected` would make it look like a rename.
+            m.host.selected = Some(setting.host.clone());
+            m.host.adding = false;
+            m.host.password.clear();
+            m.host.password_edited = false;
+            m.host.had_password = setting.has_password;
             Task::perform(
                 async move {
                     let host = setting.host.clone();

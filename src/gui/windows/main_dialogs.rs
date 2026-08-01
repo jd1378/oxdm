@@ -40,6 +40,10 @@ pub struct HostState {
     pub hosts: Vec<HostSetting>,
     pub search: String,
     pub selected: Option<String>,
+    /// Editing a host that does not exist yet. Without it the editor
+    /// pane keys off `selected`/`host`, so "Add host" cleared the form
+    /// and then rendered the empty-state placeholder over it.
+    pub adding: bool,
     pub host: String,
     pub speed_enabled: bool,
     pub speed_kbs: String,
@@ -58,6 +62,7 @@ pub struct HostState {
 impl HostState {
     pub fn hydrate(&mut self, h: &HostSetting) {
         self.selected = Some(h.host.clone());
+        self.adding = false;
         self.host = h.host.clone();
         self.speed_enabled = h.speed_limit.is_some();
         self.speed_kbs = h
@@ -413,7 +418,7 @@ pub fn host_settings<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg
     .spacing(theme::space::S2)
     .width(Length::Fixed(220.0));
 
-    let editor: Element<'a, Msg> = if st.selected.is_some() || !st.host.is_empty() {
+    let editor: Element<'a, Msg> = if st.adding || st.selected.is_some() || !st.host.is_empty() {
         column![
             section_card(
                 t,
