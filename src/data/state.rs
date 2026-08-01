@@ -796,6 +796,9 @@ impl AppState {
     ) -> Result<(), JobError> {
         use crate::domain::AuthScheme;
         let proxy_password = std::mem::take(&mut advanced.proxy.password);
+        // Consumed here: a persisted `true` would re-clear the secret on
+        // every later Apply that never touched the field.
+        let clear_proxy_password = std::mem::take(&mut advanced.proxy.clear_password);
         let auth_username = std::mem::take(&mut advanced.auth.username);
         let auth_password = std::mem::take(&mut advanced.auth.password);
         let auth_token = std::mem::take(&mut advanced.auth.token);
@@ -845,6 +848,8 @@ impl AppState {
         new_job.advanced = advanced;
         if let Some(enc) = enc_proxy_password {
             new_job.enc_proxy_password = Some(enc);
+        } else if clear_proxy_password {
+            new_job.enc_proxy_password = None;
         }
         if let Some(enc) = enc_auth_secret {
             new_job.enc_auth_password = Some(enc);

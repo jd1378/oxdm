@@ -159,6 +159,10 @@ pub struct State {
     proxy_auth: bool,
     proxy_user: String,
     proxy_pass: String,
+    /// The user edited the proxy password field this session. Empty +
+    /// edited means "delete the stored secret"; empty + untouched keeps
+    /// it (the ciphertext never round-trips into the form).
+    proxy_pass_edited: bool,
     remote_dns: bool,
     auth_scheme: AuthScheme,
     auth_user: String,
@@ -197,14 +201,31 @@ impl State {
         self.entry.counters.phase.is_running()
     }
 
-    /// Explicit proxy mode with a non-empty, out-of-range port typed
-    /// (inline validation, design §3.5: 1–65535). Blocks Apply.
-    fn port_invalid(&self) -> bool {
+    /// Mode that synthesizes its own `scheme://host:port` and therefore
+    /// needs both fields (`Inherit` / `System` carry no address).
+    fn proxy_explicit(&self) -> bool {
         matches!(
             self.proxy_mode,
             ProxyMode::Http | ProxyMode::Https | ProxyMode::Socks5
-        ) && !self.proxy_port.trim().is_empty()
-            && !self.proxy_port.trim().parse::<u16>().is_ok_and(|p| p >= 1)
+        )
+    }
+
+    /// Explicit mode with no host. `synth_proxy_url` rejects this, but
+    /// only at job start — catch it while the user is still looking at
+    /// the field.
+    fn host_invalid(&self) -> bool {
+        self.proxy_explicit() && self.proxy_host.trim().is_empty()
+    }
+
+    /// Explicit mode without a usable port (inline validation, design
+    /// §3.5: 1–65535). Empty counts: the data layer has no default to
+    /// fall back on. Blocks Apply.
+    fn port_invalid(&self) -> bool {
+        self.proxy_explicit() && !self.proxy_port.trim().parse::<u16>().is_ok_and(|p| p >= 1)
+    }
+
+    fn proxy_invalid(&self) -> bool {
+        self.host_invalid() || self.port_invalid()
     }
 }
 
@@ -255,6 +276,7 @@ fn hydrate(st: &mut State) {
     st.proxy_auth = p.auth_enabled;
     st.proxy_user = p.username.clone();
     st.proxy_pass.clear();
+    st.proxy_pass_edited = false;
     st.remote_dns = p.remote_dns;
     st.auth_scheme = match job.advanced.auth.scheme {
         AuthScheme::Digest => AuthScheme::None,
@@ -301,6 +323,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 proxy_auth: false,
                 proxy_user: String::new(),
                 proxy_pass: String::new(),
+                proxy_pass_edited: false,
                 remote_dns: true,
                 auth_scheme: AuthScheme::None,
                 auth_user: String::new(),
@@ -458,6 +481,7 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
         }
         Msg::ProxyPass(v) => {
             st.proxy_pass = v;
+            st.proxy_pass_edited = true;
             mark(st);
             Task::none()
         }
@@ -676,7 +700,7 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
         }
         Msg::CloseWin => iced::exit(),
         Msg::Apply => {
-            if st.locked() || st.port_invalid() {
+            if st.locked() || st.proxy_invalid() {
                 return Task::none();
             }
             let client = st.client.clone();
@@ -704,6 +728,9 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             adv.proxy.auth_enabled = st.proxy_auth;
             adv.proxy.username = st.proxy_user.trim().to_owned();
             adv.proxy.password = st.proxy_pass.clone();
+            // Emptying a field that held a stored secret is the only way
+            // to delete it; leaving it untouched still means "keep".
+            adv.proxy.clear_password = st.proxy_pass_edited && st.proxy_pass.is_empty();
             adv.proxy.remote_dns = st.remote_dns;
             adv.auth.scheme = st.auth_scheme;
             adv.auth.username = st.auth_user.trim().to_owned();
@@ -771,6 +798,9 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
         Msg::Applied(Ok(())) => {
             st.dirty_source = false;
             st.dirty_overlay = false;
+            // The daemon consumed the clear; a later Apply must not
+            // re-send it off a stale flag.
+            st.proxy_pass_edited = false;
             Task::none()
         }
         Msg::Applied(Err(e)) => {
@@ -1038,7 +1068,7 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
                     Btn::new("Apply")
                         .primary()
                         .icon("check")
-                        .enabled(st.dirty && !st.locked() && !st.port_invalid())
+                        .enabled(st.dirty && !st.locked() && !st.proxy_invalid())
                         .on_press(Msg::Apply)
                         .view(t),
                 )
@@ -2079,12 +2109,23 @@ fn connection_tab(st: &State) -> Element<'_, Msg> {
             .align_y(Alignment::Center),
         ]
         .spacing(6.0);
-        if st.port_invalid() {
-            // Inline validation (design §3.5: 1–65535).
+        // Inline validation (design §3.5: 1–65535). Both fields are
+        // required — the data layer has no fallback for either, so an
+        // explicit mode with a blank one only fails at job start.
+        let problem = if st.host_invalid() {
+            Some("Host is required for an explicit proxy.")
+        } else if st.proxy_port.trim().is_empty() {
+            Some("Port is required for an explicit proxy.")
+        } else if st.port_invalid() {
+            Some("Port must be between 1 and 65535.")
+        } else {
+            None
+        };
+        if let Some(problem) = problem {
             server = server.push(
                 row![
                     icons::icon("triangle-alert", 10.0, t.status_danger),
-                    text("Port must be between 1 and 65535.")
+                    text(problem)
                         .font(theme::BODY_MEDIUM)
                         .size(10.5)
                         .color(t.status_danger),

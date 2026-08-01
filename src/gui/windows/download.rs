@@ -918,6 +918,71 @@ fn stat<'a>(t: &Tokens, label: &'a str, value: String, accent: bool) -> Element<
     .into()
 }
 
+/// One-line "this transfer goes through a proxy" note, mirroring
+/// `apply_job_proxy`'s precedence: an explicit mode wins, `Inherit`
+/// falls back to the legacy per-job proxy URL, and `System` only means
+/// "whatever the environment says" — no host to name, and claiming one
+/// would be a guess. Credentials are never rendered.
+fn proxy_note(st: &State) -> Option<Element<'_, Msg>> {
+    use crate::domain::ProxyMode;
+    let t = &st.tokens;
+    let p = &st.entry.job.advanced.proxy;
+    let text_line = match p.mode {
+        ProxyMode::Http | ProxyMode::Https | ProxyMode::Socks5 if !p.host.trim().is_empty() => {
+            let scheme = match p.mode {
+                ProxyMode::Http => "HTTP",
+                ProxyMode::Https => "HTTPS",
+                _ => "SOCKS5",
+            };
+            let port = p.port.trim();
+            let host = p.host.trim();
+            if port.is_empty() {
+                format!("Downloading through {scheme} proxy {host}")
+            } else {
+                format!("Downloading through {scheme} proxy {host}:{port}")
+            }
+        }
+        ProxyMode::System => "Downloading through the system proxy settings".to_owned(),
+        // `Inherit` (and a legacy `None`) still honour `Job.proxy`.
+        _ => {
+            let host = st
+                .entry
+                .job
+                .proxy
+                .as_deref()
+                .and_then(|u| url::Url::parse(u).ok())
+                .and_then(|u| u.host_str().map(|h| (h.to_owned(), u.port())))?;
+            match host {
+                (h, Some(port)) => format!("Downloading through proxy {h}:{port}"),
+                (h, None) => format!("Downloading through proxy {h}"),
+            }
+        }
+    };
+
+    let t2 = *t;
+    Some(
+        container(
+            row![
+                icons::icon("globe", 14.0, t.fg_3),
+                text(text_line).font(theme::BODY).size(11.5).color(t.fg_2),
+            ]
+            .spacing(theme::space::S2)
+            .align_y(Alignment::Center),
+        )
+        .width(Length::Fill)
+        .padding([6.0, theme::space::S3])
+        .style(move |_| container::Style {
+            background: Some(t2.bg_sunken.into()),
+            border: iced::Border {
+                radius: theme::radius::XS.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .into(),
+    )
+}
+
 fn info_tab(st: &State) -> Element<'_, Msg> {
     let t = &st.tokens;
     let t2 = *t;
@@ -1090,26 +1155,26 @@ fn info_tab(st: &State) -> Element<'_, Msg> {
             .into()
     };
 
-    column![
-        strip,
-        collapsible_card(
-            t,
-            "Transfer rate",
-            None,
-            st.rate_open,
-            Msg::ToggleRate,
-            || { rate_body.into() }
-        ),
-        collapsible_card(
-            t,
-            "Segments",
-            Some(segments_right.into()),
-            st.segments_open,
-            Msg::ToggleSegments,
-            || segments_body,
-        ),
-    ]
-    .spacing(theme::space::S3)
+    let mut body = column![strip].spacing(theme::space::S3);
+    if let Some(note) = proxy_note(st) {
+        body = body.push(note);
+    }
+    body.push(collapsible_card(
+        t,
+        "Transfer rate",
+        None,
+        st.rate_open,
+        Msg::ToggleRate,
+        || rate_body.into(),
+    ))
+    .push(collapsible_card(
+        t,
+        "Segments",
+        Some(segments_right.into()),
+        st.segments_open,
+        Msg::ToggleSegments,
+        || segments_body,
+    ))
     .into()
 }
 

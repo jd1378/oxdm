@@ -37,6 +37,13 @@ pub struct ProxyAdv {
     /// only. `set_job_advanced` strips it from the blob and routes it
     /// onto the encrypted `Job::enc_proxy_password` column.
     pub password: String,
+    /// Set by the UI when the user emptied a password field that held a
+    /// stored secret. Without it an empty `password` is ambiguous —
+    /// "keep what's stored" (the common case, since the ciphertext
+    /// never round-trips into the form) versus "delete it".
+    /// `set_job_advanced` consumes the flag and never persists it.
+    #[serde(default)]
+    pub clear_password: bool,
     pub remote_dns: bool,
     /// Unused: odl exposes no `no_proxy`/bypass API. Kept for serde
     /// compat with persisted blobs; never surfaced in the UI.
@@ -52,6 +59,7 @@ impl Default for ProxyAdv {
             auth_enabled: false,
             username: String::new(),
             password: String::new(),
+            clear_password: false,
             remote_dns: true,
             bypass: String::new(),
         }
