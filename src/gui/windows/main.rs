@@ -3038,28 +3038,28 @@ fn context_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>, id: JobId) -> E
             item(
                 "file",
                 "Open",
-                Some("Ctrl+O"),
+                None,
                 done,
                 Msg::Context(ContextAction::Open)
             ),
             item(
                 "folder",
                 "Open Containing Folder",
-                Some("Ctrl+F"),
+                None,
                 true,
                 Msg::Context(ContextAction::OpenFolder)
             ),
             item(
                 "play",
                 "Resume",
-                Some("Ctrl+R"),
+                None,
                 can_resume,
                 Msg::Context(ContextAction::Resume)
             ),
             item(
                 "pause",
                 "Pause",
-                Some("Ctrl+P"),
+                None,
                 can_pause,
                 Msg::Context(ContextAction::Pause)
             ),
