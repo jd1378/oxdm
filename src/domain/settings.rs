@@ -65,6 +65,12 @@ pub struct Settings {
     /// when this is `false`; that decision is per-prompt by design.
     #[serde(default = "yes_default")]
     pub remove_confirm_completed: bool,
+    /// Confirm the toolbar's Clean action, which removes every completed
+    /// entry at once. Separate from `remove_confirm_completed`: that one
+    /// answers for a selection the user made by hand, this one for a set
+    /// they never saw listed.
+    #[serde(default = "yes_default")]
+    pub remove_confirm_clean: bool,
     /// If true, app starts on system login (handled by platform code).
     pub start_at_login: bool,
     /// If true, launching the app starts hidden in the tray instead of
@@ -217,6 +223,11 @@ pub enum ConflictWhileHidden {
     NotifyAndPark,
 }
 
+/// "Unlimited" concurrent downloads. Not a sentinel the scheduler knows
+/// about — a ceiling no real queue reaches, so the limit simply never
+/// binds while the field stays an ordinary number.
+pub const UNLIMITED_CONCURRENT: usize = 999;
+
 fn yes_default() -> bool {
     true
 }
@@ -296,7 +307,7 @@ impl Default for Settings {
             download_dir: dl,
             work_dir: default_work_dir(),
             max_connections: None,
-            max_concurrent_downloads: 3,
+            max_concurrent_downloads: UNLIMITED_CONCURRENT,
             max_retries: 3,
             wait_between_retries: Duration::from_millis(700),
             n_fixed_retries: 3,
@@ -313,6 +324,7 @@ impl Default for Settings {
             conflict_while_hidden: ConflictWhileHidden::AutoPopup,
             remove_confirm_incomplete: true,
             remove_confirm_completed: true,
+            remove_confirm_clean: true,
             start_at_login: false,
             start_to_tray: false,
             show_complete_dialog: true,

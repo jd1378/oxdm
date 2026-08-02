@@ -113,6 +113,10 @@ pub struct RemoveState {
     pub kind: RemoveKind,
     pub delete_on_disk: bool,
     pub dont_ask_again: bool,
+    /// Raised by the toolbar's Clean rather than by a selection: the
+    /// set was assembled for the user, so the dialog says how many and
+    /// the "don't ask again" answers for Clean alone.
+    pub clean: bool,
 }
 
 // ---------------------------------------------------------------- scaffolding
@@ -626,6 +630,13 @@ pub fn remove_confirm<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Ms
             "Delete permanently",
             "trash-2",
         ),
+        RemoveKind::Entry if st.clean => (
+            "trash-2",
+            t.status_danger,
+            "Clears every completed entry from the list. Files stay on disk.",
+            "Clean",
+            "trash-2",
+        ),
         RemoveKind::Entry if st.completed => (
             "triangle-alert",
             t.status_danger,
@@ -641,7 +652,9 @@ pub fn remove_confirm<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Ms
             "trash-2",
         ),
     };
-    let dont_label = if st.completed {
+    let dont_label = if st.clean {
+        "Don't ask again when cleaning"
+    } else if st.completed {
         "Don't ask again for completed downloads"
     } else {
         "Don't ask again for incomplete downloads"
@@ -679,7 +692,7 @@ pub fn remove_confirm<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Ms
 
     // On-disk delete toggle: meaningful only for completed entries that
     // aren't going to Trash (Trash moves the file itself).
-    if st.completed && st.kind != RemoveKind::Trash {
+    if st.completed && !st.clean && st.kind != RemoveKind::Trash {
         card = card.push(checkbox(
             t,
             "Also delete file on disk",

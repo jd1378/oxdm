@@ -42,14 +42,16 @@ const SIDEBAR_ROW_H: f32 = 26.0;
 const LIVE_DOT_SIZE: f32 = 7.0;
 
 // Toast (design `.toast`): bottom-right surface card with a 3px left
-// accent border, auto-dismissed after `TOAST_TTL_MS`.
+// auto-dismissed after `TOAST_TTL_MS`.
 const TOAST_TTL_MS: u64 = 3000;
-const TOAST_ACCENT_W: f32 = 3.0;
 const TOAST_W: f32 = 320.0;
 const TOAST_GAP: f32 = 8.0;
 /// Design `.toast { bottom: 24px; right: 24px }` — measured from the
 /// window edge, so the card floats over the status bar (z-index 400).
 const TOAST_MARGIN: f32 = 24.0;
+/// Status-bar height, also the toast stack's floor: the layer spans the
+/// whole body, so without it the bottom toast sits on the bar.
+const STATUSBAR_H: f32 = 28.0;
 /// Design `.toast { padding: 10px 14px }`.
 const TOAST_PAD_Y: f32 = 10.0;
 const TOAST_PAD_X: f32 = 14.0;
@@ -136,6 +138,8 @@ pub enum Msg {
     /// Pointer left the window or focus was lost mid-drag.
     DragCancelled,
     HeaderRightClick,
+    /// Status-bar disk button: reveal the in-flight cache folder.
+    OpenWorkDir,
     ColToggle(SortColumn),
     // About overlay
     AboutCheckUpdate,
@@ -978,6 +982,10 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             }
             Task::none()
         }
+        Msg::OpenWorkDir => {
+            crate::platform::open_path(&m.snap.settings.work_dir);
+            Task::none()
+        }
         Msg::HeaderRightClick => {
             m.columns_menu = true;
             m.menu_anchor = m.cursor;
@@ -1297,7 +1305,9 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                             .await;
                     }
                     if r.dont_ask_again {
-                        if r.completed {
+                        if r.clean {
+                            settings.remove_confirm_clean = false;
+                        } else if r.completed {
                             settings.remove_confirm_completed = false;
                         } else {
                             settings.remove_confirm_incomplete = false;
@@ -1459,23 +1469,7 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                     }
                 },
                 ToolbarAction::StopAll => act(async move { client.pause_all().await }),
-                ToolbarAction::Clean => {
-                    let done: Vec<JobId> = m
-                        .snap
-                        .jobs
-                        .iter()
-                        .filter(|j| m.phase(j.id) == Phase::Completed)
-                        .map(|j| j.id)
-                        .collect();
-                    act(async move {
-                        for id in done {
-                            client
-                                .remove(id, crate::data::RemoveOpts::default())
-                                .await?;
-                        }
-                        Ok(())
-                    })
-                }
+                ToolbarAction::Clean => request_clean(m),
                 ToolbarAction::Schedule => act(async move { client.open_queues_window().await }),
             }
         }
@@ -1555,6 +1549,45 @@ fn handle_key(
     }
 }
 
+/// Toolbar Clean: drop every completed entry from the list. Files are
+/// never touched, so this is the safe entry-only removal — but it acts
+/// on a set the user never picked, hence its own confirmation setting.
+fn request_clean(m: &mut Main) -> Task<Msg> {
+    let ids: Vec<JobId> = m
+        .snap
+        .jobs
+        .iter()
+        .filter(|j| m.phase(j.id) == Phase::Completed)
+        .map(|j| j.id)
+        .collect();
+    if ids.is_empty() {
+        return update_main(
+            m,
+            Msg::Toast(ToastSeverity::Info, "No finished downloads to clean".into()),
+        );
+    }
+    let n = ids.len();
+    m.remove = Some(RemoveState {
+        ids,
+        filename: if n == 1 {
+            "1 finished download".to_owned()
+        } else {
+            format!("{n} finished downloads")
+        },
+        completed: true,
+        kind: RemoveKind::Entry,
+        delete_on_disk: false,
+        dont_ask_again: false,
+        clean: true,
+    });
+    if m.snap.settings.remove_confirm_clean {
+        m.overlay = Overlay::Remove;
+        Task::none()
+    } else {
+        update_main(m, Msg::RemoveConfirm)
+    }
+}
+
 /// Delete request: show the confirm overlay when settings demand it,
 /// else remove immediately. `kind` PRE-SELECTS the destructive option
 /// (B4) — confirmation is NEVER skipped for the irreversible kinds.
@@ -1588,6 +1621,7 @@ fn request_remove(m: &mut Main, kind: RemoveKind) -> Task<Msg> {
         // entries; the user can still untick before confirming.
         delete_on_disk: matches!(kind, RemoveKind::Permanent) && completed,
         dont_ask_again: false,
+        clean: false,
     });
     // Trash / Permanent are irreversible → ALWAYS confirm (B4); only the
     // safe entry-only removal honors the "don't ask again" preference.
@@ -1926,44 +1960,26 @@ fn toast_card<'a>(t: &Tokens, toast: &'a Toast) -> Element<'a, Msg> {
     ]
     .spacing(10.0) // design `.toast { gap: 10px }`
     .align_y(Alignment::Center);
-    // Design `.toast`: surface card with a 3px left accent (CSS
-    // `border-left`). Painted as the outer container's background with
-    // the inner surface inset by `TOAST_ACCENT_W`, NOT as a sibling rail
-    // widget: a rail needs `height(Fill)` to match the card, and a Fill
-    // child resolves against the whole available height, which stretched
-    // every toast down the full window.
-    let card = container(
-        container(body)
-            .padding([TOAST_PAD_Y, TOAST_PAD_X])
-            .width(Length::Fill)
-            .style(move |_| container::Style {
-                background: Some(t2.bg_raised.into()),
-                border: iced::Border {
-                    radius: theme::radius::SM.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            }),
-    )
-    .width(Length::Fixed(TOAST_W))
-    .padding(iced::Padding {
-        left: TOAST_ACCENT_W,
-        ..iced::Padding::ZERO
-    })
-    .style(move |_| container::Style {
-        background: Some(accent.into()),
-        border: iced::Border {
-            color: t2.border_default,
-            width: 1.0,
-            radius: theme::radius::SM.into(),
-        },
-        shadow: iced::Shadow {
-            color: color::with_alpha(iced::Color::BLACK, 70.0 / 255.0),
-            offset: iced::Vector::new(0.0, 3.0),
-            blur_radius: 14.0,
-        },
-        ..Default::default()
-    });
+    // The severity reads from the icon alone — a coloured rail down the
+    // card's edge said the same thing twice and fought the card's own
+    // rounding.
+    let card = container(body)
+        .width(Length::Fixed(TOAST_W))
+        .padding([TOAST_PAD_Y, TOAST_PAD_X])
+        .style(move |_| container::Style {
+            background: Some(t2.bg_raised.into()),
+            border: iced::Border {
+                color: t2.border_default,
+                width: 1.0,
+                radius: theme::radius::SM.into(),
+            },
+            shadow: iced::Shadow {
+                color: color::with_alpha(iced::Color::BLACK, 70.0 / 255.0),
+                offset: iced::Vector::new(0.0, 3.0),
+                blur_radius: 14.0,
+            },
+            ..Default::default()
+        });
 
     // Click anywhere on the card to dismiss it early. The button is
     // styled to nothing so the card's own surface still shows through;
@@ -1989,7 +2005,10 @@ fn toast_layer<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg> {
         .height(Length::Fill)
         .align_x(Alignment::End)
         .align_y(Alignment::End)
-        .padding(TOAST_MARGIN);
+        .padding(iced::Padding {
+            bottom: TOAST_MARGIN + STATUSBAR_H,
+            ..iced::Padding::from(TOAST_MARGIN)
+        });
     iced::widget::stack![base, anchored].into()
 }
 
@@ -3252,14 +3271,16 @@ fn statusbar(m: &Main) -> Element<'_, Msg> {
     } else {
         ("globe", "Direct")
     };
-    let free = free_disk_str(&m.snap.settings.download_dir);
+    // Free space is reported for the work directory, so the button opens
+    // that one: the in-flight `.part` files are what consume it.
+    let free = free_disk_str(&m.snap.settings.work_dir);
 
     let right = row![
         Btn::new(free)
             .toolbar()
             .icon("hard-drive")
             .size(BtnSize::Sm)
-            .on_press(Msg::Noop)
+            .on_press(Msg::OpenWorkDir)
             .view(t),
         sep(),
         Btn::new(proxy_label)
@@ -3278,7 +3299,7 @@ fn statusbar(m: &Main) -> Element<'_, Msg> {
             .align_y(Alignment::Center),
     )
     .width(Length::Fill)
-    .height(Length::Fixed(28.0))
+    .height(Length::Fixed(STATUSBAR_H))
     .padding([0.0, theme::space::S3])
     .align_y(Alignment::Center)
     .style(move |_| container::Style {
