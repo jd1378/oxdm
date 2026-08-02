@@ -81,21 +81,24 @@ pub struct Settings {
     pub show_complete_dialog: bool,
     /// System notification when a download completes. Independent of
     /// `show_complete_dialog`: the dialog is a window that wants
-    /// attention, the notification only reports.
-    #[serde(default = "yes_default")]
+    /// attention, the notification only reports. Off by default — the
+    /// dialog already covers the event, and two surfaces for one thing
+    /// is noise until the user asks for it.
+    #[serde(default)]
     pub notify_complete: bool,
     /// If true, a failed download surfaces the per-job window on its
     /// error view. A download parked by a conflict is not a failure and
     /// keeps its own flow.
     #[serde(default = "yes_default")]
     pub show_failed_dialog: bool,
-    /// System notification when a download fails.
-    #[serde(default = "yes_default")]
+    /// System notification when a download fails. Off by default, like
+    /// the other notifications.
+    #[serde(default)]
     pub notify_failed: bool,
     /// System notification when every job in a queue reaches a terminal
     /// phase. Queue completion has no dialog — the queue window and the
-    /// tray already carry the state.
-    #[serde(default = "yes_default")]
+    /// tray already carry the state. Off by default.
+    #[serde(default)]
     pub notify_queue_finished: bool,
     /// Update-available surfaces. Both are inert for now: the updater
     /// only checks on demand from the About dialog, so nothing raises
@@ -313,10 +316,10 @@ impl Default for Settings {
             start_at_login: false,
             start_to_tray: false,
             show_complete_dialog: true,
-            notify_complete: true,
+            notify_complete: false,
             show_failed_dialog: true,
-            notify_failed: true,
-            notify_queue_finished: true,
+            notify_failed: false,
+            notify_queue_finished: false,
             show_update_dialog: false,
             notify_update: false,
             update_feed_url: String::new(),
