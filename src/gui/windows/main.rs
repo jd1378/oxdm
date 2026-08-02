@@ -2126,7 +2126,10 @@ fn toolbar(m: &Main) -> Element<'_, Msg> {
     let bar = row![
         Btn::new("Add URL")
             .primary()
-            .size(BtnSize::Lg) // design: hero CTA is the lg button
+            // `.tb-btn.primary`: the CTA shares the toolbar's metrics so
+            // it sits at the same height as the buttons beside it, with
+            // the same 16px glyph.
+            .tb()
             .icon("plus")
             .on_press(Msg::Toolbar(ToolbarAction::AddUrl))
             .view(t),

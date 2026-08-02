@@ -91,6 +91,8 @@ pub struct Btn<'a, M> {
     /// clay tint instead of the generic sunken + brand border. Used by
     /// `segmented`, so a one-of-N row reads the same everywhere.
     pill: bool,
+    /// Use the toolbar metric set regardless of variant. See [`Btn::tb`].
+    tb_metrics: bool,
     /// Ghost/Toolbar button that escalates to the danger tone (rust
     /// text + rust-50 bg) on hover only — borderless/neutral at idle.
     /// Mirrors design `.tb-btn.danger`. Ignored by other variants.
@@ -114,6 +116,7 @@ impl<'a, M: Clone + 'a> Btn<'a, M> {
             selected: false,
             accent: false,
             pill: false,
+            tb_metrics: false,
             danger_hover: false,
             min_width: None,
             fill_width: false,
@@ -174,6 +177,15 @@ impl<'a, M: Clone + 'a> Btn<'a, M> {
     }
     pub fn pill(mut self) -> Self {
         self.pill = true;
+        self
+    }
+    /// Opt a non-`Toolbar` variant into the toolbar's metrics (design
+    /// `.toolbar .tb-btn`: 600 12px label, 16px glyph, 6/10 padding).
+    /// The main toolbar's primary CTA needs them so it lines up with
+    /// the plain toolbar buttons beside it — styles.css has the
+    /// `.tb-btn.primary` rule for exactly this pairing.
+    pub fn tb(mut self) -> Self {
+        self.tb_metrics = true;
         self
     }
     /// Borderless ghost/toolbar button that turns rust on hover only
@@ -371,7 +383,7 @@ impl<'a, M: Clone + 'a> Btn<'a, M> {
         // Design `.toolbar .tb-btn`: 600 12px label, 16px icon, 6/10
         // padding — its own metrics, not `.btn`'s. Every other variant
         // keeps the size scale.
-        let toolbar = self.variant == BtnVariant::Toolbar;
+        let toolbar = self.tb_metrics || self.variant == BtnVariant::Toolbar;
         let font_size =
             self.font_size
                 .unwrap_or(if toolbar { 12.0 } else { self.size.font_size() });
@@ -425,6 +437,7 @@ impl<'a, M: Clone + 'a> Btn<'a, M> {
             selected,
             accent,
             pill,
+            tb_metrics: false,
             danger_hover,
             min_width: None,
             fill_width: false,
