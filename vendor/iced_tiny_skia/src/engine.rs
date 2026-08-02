@@ -36,6 +36,12 @@ impl Engine {
         clip_mask: &mut tiny_skia::Mask,
         clip_bounds: Rectangle,
     ) {
+        // Upstream only honours `Quad::snap` in the wgpu backend; without
+        // this, a 1px hairline or border landing on a half-pixel is
+        // anti-aliased into a soft 2px band.
+        let snapped = quad.snap.then(|| snap_quad(quad, transformation));
+        let quad = snapped.as_ref().unwrap_or(quad);
+
         let physical_bounds = quad.bounds * transformation;
 
         if !clip_bounds.intersects(&physical_bounds) {
@@ -650,6 +656,44 @@ impl Engine {
 pub fn into_color(color: Color) -> tiny_skia::Color {
     tiny_skia::Color::from_rgba(color.b, color.g, color.r, color.a)
         .expect("Convert color from iced to tiny_skia")
+}
+
+/// Round a quad's device-space edges — and its border width — to whole
+/// pixels, so hairlines and 1px borders land on the pixel grid instead of
+/// being anti-aliased across two rows.
+///
+/// The rounding is expressed back in the quad's own (logical) space so
+/// every downstream path — fill, border, shadow — sees the same bounds.
+fn snap_quad(quad: &Quad, transformation: Transformation) -> Quad {
+    let scale = transformation.scale_factor();
+
+    if scale <= 0.0 {
+        return *quad;
+    }
+
+    let physical = quad.bounds * transformation;
+    let left = physical.x.round();
+    let top = physical.y.round();
+    // A sub-pixel quad keeps one pixel: rounding must never erase an edge
+    // the caller asked to draw.
+    let width = (physical.x + physical.width).round().max(left + 1.0) - left;
+    let height = (physical.y + physical.height).round().max(top + 1.0) - top;
+
+    let mut snapped = *quad;
+
+    snapped.bounds = Rectangle {
+        x: quad.bounds.x + (left - physical.x) / scale,
+        y: quad.bounds.y + (top - physical.y) / scale,
+        width: width / scale,
+        height: height / scale,
+    };
+
+    if quad.border.width > 0.0 {
+        snapped.border.width =
+            (quad.border.width * scale).round().max(1.0) / scale;
+    }
+
+    snapped
 }
 
 fn into_transform(transformation: Transformation) -> tiny_skia::Transform {

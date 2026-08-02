@@ -22,6 +22,8 @@ pub fn card<'a, M: 'a>(t: &Tokens, padding: f32, content: Element<'a, M>) -> Ele
                 width: 1.0,
                 radius: theme::surface::RADIUS.into(),
             },
+            // 1px borders blur into a 2px band off the pixel grid.
+            snap: true,
             ..Default::default()
         })
         .into()
