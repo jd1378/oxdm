@@ -19,7 +19,7 @@ pub fn chip<'a, M: 'a>(t: &Tokens, label: impl Into<String>) -> Element<'a, M> {
             // Pin the line box to the font size. iced's default line
             // height reserves descender room that an all-caps label
             // never uses, so the glyphs sit above the chip's centre.
-            .line_height(text::LineHeight::Absolute(CHIP_TEXT.into()))
+            .line_height(text::LineHeight::Absolute(CHIP_LINE.into()))
             .color(t.fg_3),
     )
     .padding([CHIP_PAD_Y, CHIP_PAD_X])
@@ -43,8 +43,18 @@ pub fn chip<'a, M: 'a>(t: &Tokens, label: impl Into<String>) -> Element<'a, M> {
 /// The design's 2px y-padding sits around a full line box; pinning the
 /// box to the glyphs (see `chip`) removes that leading, so the padding
 /// absorbs it to keep the chip the height the design draws.
-const CHIP_TEXT: f32 = 9.5;
-const CHIP_PAD_Y: f32 = 3.5;
+///
+/// The totals matter as much as the parts: the chip is 20px tall so that
+/// centring it against a 28px control in a row leaves a whole-pixel
+/// offset. An odd total puts the whole chip — label included — on a half
+/// pixel, which reads as off-centre text.
+///
+/// The caps measure 7px, an odd ink height inside an even box, so the
+/// gaps can only be 5 above / 6 below — never exactly equal. The extra
+/// pixel belongs below, where the missing descenders would sit.
+const CHIP_TEXT: f32 = 9.0;
+const CHIP_LINE: f32 = 10.0;
+const CHIP_PAD_Y: f32 = 5.0;
 const CHIP_PAD_X: f32 = 6.0;
 const CHIP_RADIUS: f32 = 4.0;
 
