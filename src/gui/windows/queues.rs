@@ -233,7 +233,11 @@ pub enum Msg {
     DeleteAsk,
     DeleteConfirm,
     DeleteCancel,
-    KeyPressed(iced::keyboard::Key),
+    /// `bool` = the event was captured by a focused widget (a text
+    /// input swallowing the key), so window-level shortcuts must not
+    /// also fire — Delete while renaming a queue is a keystroke, not a
+    /// destructive action.
+    KeyPressed(iced::keyboard::Key, bool),
     Save,
     Saved(Result<(), String>),
     Cancel,
@@ -700,6 +704,21 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             let Some(id) = st.selected else {
                 return Task::none();
             };
+            // Move to the neighbour above before the list reloads —
+            // otherwise `Msg::Queues` finds the selection gone and
+            // falls back to the first queue, throwing the user back to
+            // Main from wherever they were working.
+            if let Some(i) = st.queues.iter().position(|q| q.id == id) {
+                let neighbour = if i > 0 {
+                    st.queues.get(i - 1)
+                } else {
+                    st.queues.get(1)
+                };
+                if let Some(q) = neighbour {
+                    st.selected = Some(q.id);
+                    st.hydrate();
+                }
+            }
             let client = st.client.clone();
             Task::perform(async move { client.delete_queue(id).await }, |_| Msg::Noop)
         }
@@ -707,7 +726,7 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
         // confirms, Escape cancels. `listen_with` ignores capture
         // status, so both are gated on the confirm overlay being open.
         // Escape also dismisses the color popup when it is open.
-        Msg::KeyPressed(key) => {
+        Msg::KeyPressed(key, captured) => {
             use iced::keyboard::key::Named;
             if st.confirm_delete {
                 match key.as_ref() {
@@ -727,6 +746,12 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                 && matches!(key.as_ref(), iced::keyboard::Key::Named(Named::Escape))
             {
                 return update_ready(st, Msg::CalClose);
+            } else if !captured
+                && matches!(key.as_ref(), iced::keyboard::Key::Named(Named::Delete))
+                && st.selected_queue().is_some_and(|q| !q.builtin)
+            {
+                // Same route as the Delete button — via the confirm.
+                return update_ready(st, Msg::DeleteAsk);
             }
             Task::none()
         }
@@ -764,13 +789,13 @@ pub fn subscription(app: &App) -> Subscription<Msg> {
         return Subscription::none();
     };
     let mut subs = vec![
-        iced::event::listen_with(|event, _status, _id| match event {
+        iced::event::listen_with(|event, status, _id| match event {
             iced::Event::Window(iced::window::Event::Resized(size)) => {
                 Some(Msg::WinResized(size.width, size.height))
             }
-            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) => {
-                Some(Msg::KeyPressed(key))
-            }
+            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) => Some(
+                Msg::KeyPressed(key, matches!(status, iced::event::Status::Captured)),
+            ),
             _ => None,
         }),
         crate::gui::ipc::all_events(crate::ipc_local::protocol::GuiKind::Queues).map(Msg::Daemon),

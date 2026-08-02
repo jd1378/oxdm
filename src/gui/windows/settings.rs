@@ -809,6 +809,9 @@ fn splash<'a>(msg: String) -> Element<'a, Msg> {
         .into()
 }
 
+/// Design `.settings-nav .s-item`: 500 12.5px, 600 when selected.
+const NAV_FONT: f32 = 12.5;
+
 fn ready_view(st: &State) -> Element<'_, Msg> {
     let t = &st.tokens;
     let t2 = *t;
@@ -827,30 +830,44 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
         };
         let icon_color = if active { color::clay::C500 } else { t.fg_3 };
         list = list.push(
-            mouse_area(
-                container(
-                    row![
-                        icons::icon(icon, 15.0, icon_color),
-                        text(label).font(label_font).size(13.0).color(fg),
-                    ]
-                    .spacing(theme::space::S2)
-                    .align_y(Alignment::Center),
-                )
-                .width(Length::Fill)
-                .height(Length::Fixed(34.0))
-                .align_y(Alignment::Center)
-                .padding([0.0, theme::space::S3])
-                .style(move |_| container::Style {
-                    background: active.then(|| t2.bg_raised.into()),
-                    border: iced::Border {
-                        radius: theme::control::RADIUS.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }),
+            iced::widget::button(
+                row![
+                    icons::icon(icon, 15.0, icon_color),
+                    text(label).font(label_font).size(NAV_FONT).color(fg),
+                ]
+                .spacing(theme::space::S2)
+                // `button` does not centre its content the way the
+                // styled container did — fill the row and centre in it,
+                // or the label rides the top of the 34px pill.
+                .height(Length::Fill)
+                .align_y(Alignment::Center),
             )
-            .on_press(Msg::SetSection(sec))
-            .interaction(iced::mouse::Interaction::Pointer),
+            .width(Length::Fill)
+            .height(Length::Fixed(34.0))
+            .padding([0.0, theme::space::S3])
+            // Design `.s-item:hover { background: bg-sunken }` — a
+            // styled container has no hover status to key off, so
+            // the row never reacted to the pointer.
+            .style(move |_th, status| iced::widget::button::Style {
+                background: if active {
+                    Some(t2.bg_raised.into())
+                } else {
+                    matches!(
+                        status,
+                        iced::widget::button::Status::Hovered
+                            | iced::widget::button::Status::Pressed
+                    )
+                    .then(|| t2.bg_sunken.into())
+                },
+                text_color: fg,
+                border: iced::Border {
+                    radius: theme::control::RADIUS.into(),
+                    ..Default::default()
+                },
+                shadow: iced::Shadow::default(),
+                snap: true,
+            })
+            .on_press(Msg::SetSection(sec)),
         );
     }
     let sidebar = container(list)

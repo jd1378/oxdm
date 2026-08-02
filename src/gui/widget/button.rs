@@ -258,10 +258,13 @@ impl<'a, M: Clone + 'a> Btn<'a, M> {
         let disabled = !self.enabled || status == Disabled;
         let (bg, border_color): (Option<Color>, Option<Color>) = match self.variant {
             BtnVariant::Primary => {
+                // Design `.btn.primary`: clay-400 fill, clay-500 border,
+                // clay-500 on hover — literal clay, not the themed
+                // `action_primary` (which lightens to clay-300 in dark).
                 let bg = match status {
-                    Hovered => darken(clay::C500, 0.06),
+                    Hovered => clay::C500,
                     Pressed => clay::C600,
-                    _ => t.action_primary,
+                    _ => clay::C400,
                 };
                 (Some(bg), Some(clay::C500))
             }

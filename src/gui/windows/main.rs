@@ -1901,8 +1901,11 @@ fn sidebar_row<'a>(
     .on_press(msg)
     .style(move |_, status| {
         use iced::widget::button::Status;
+        // Design `.nav-item.on { background: clay-400 }` — a literal,
+        // so the selected row keeps the same clay in every theme and
+        // does not shift under the pointer.
         let background = if active {
-            Some(t2.action_primary.into())
+            Some(crate::gui::color::clay::C400.into())
         } else if matches!(status, Status::Hovered | Status::Pressed) {
             Some(t2.bg_sunken.into())
         } else {

@@ -313,7 +313,13 @@ impl Tokens {
             border_brand: clay::C300,
             action_primary: clay::C300,
             action_primary_press: clay::C200,
-            action_primary_fg: hex(0x181715),
+            // tokens.css flips this to #181715 under the dark theme,
+            // but every component that actually paints on the clay fill
+            // (`.btn.primary`, `.nav-item.on`, `.day-grid .d.on`)
+            // hard-codes `#fff` — only the toolbar's primary button
+            // reads the token. Dark-on-clay would be the odd one out,
+            // so keep the accent foreground light in every theme.
+            action_primary_fg: Color::WHITE,
             action_primary_shadow: clay::C500,
             pill_active_bg: clay::DARK_C100,
             pill_active_fg: clay::DARK_C700,

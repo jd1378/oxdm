@@ -297,13 +297,15 @@ pub fn vscroll<'a, M: 'a>(content: impl Into<Element<'a, M>>) -> iced::widget::S
     .style(theme::scrollbar_style)
 }
 
-/// 1px hairline.
+/// 1px hairline. `snap` keeps it on the pixel grid — an unsnapped 1px
+/// rect that lands on a half-pixel is antialiased into a soft 2px band.
 pub fn hairline<'a, M: 'a>(color: Color) -> Element<'a, M> {
     container(iced::widget::Space::new())
         .width(Length::Fill)
         .height(Length::Fixed(1.0))
         .style(move |_| container::Style {
             background: Some(color.into()),
+            snap: true,
             ..Default::default()
         })
         .into()
@@ -316,6 +318,7 @@ pub fn vdivider<'a, M: 'a>(color: Color, height: f32) -> Element<'a, M> {
         .height(Length::Fixed(height))
         .style(move |_| container::Style {
             background: Some(color.into()),
+            snap: true,
             ..Default::default()
         })
         .into()
