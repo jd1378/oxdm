@@ -14,7 +14,7 @@ pub fn chip<'a, M: 'a>(t: &Tokens, label: impl Into<String>) -> Element<'a, M> {
     let t = *t;
     container(
         text(label.into())
-            .font(theme::MONO)
+            .font(theme::MONO_SEMIBOLD)
             .size(CHIP_TEXT)
             // Pin the line box to the font size. iced's default line
             // height reserves descender room that an all-caps label
@@ -30,7 +30,6 @@ pub fn chip<'a, M: 'a>(t: &Tokens, label: impl Into<String>) -> Element<'a, M> {
             width: 1.0,
             radius: CHIP_RADIUS.into(),
         },
-        snap: true,
         ..Default::default()
     })
     .into()

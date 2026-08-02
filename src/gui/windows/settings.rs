@@ -860,7 +860,7 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
                     ..Default::default()
                 },
                 shadow: iced::Shadow::default(),
-                snap: true,
+                ..Default::default()
             })
             .on_press(Msg::SetSection(sec)),
         );

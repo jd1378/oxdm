@@ -374,7 +374,7 @@ impl<'a, M: Clone + 'a> Btn<'a, M> {
                 radius: theme::control::RADIUS.into(),
             },
             shadow: Shadow::default(),
-            snap: true,
+            ..Default::default()
         }
     }
 

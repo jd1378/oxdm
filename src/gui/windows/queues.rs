@@ -905,7 +905,7 @@ fn radio_pill<'a>(
                         radius: theme::control::RADIUS.into(),
                     },
                     shadow: iced::Shadow::default(),
-                    snap: true,
+                    ..Default::default()
                 };
             }
             let bg = match status {
@@ -922,7 +922,7 @@ fn radio_pill<'a>(
                     radius: theme::control::RADIUS.into(),
                 },
                 shadow: iced::Shadow::default(),
-                snap: true,
+                ..Default::default()
             }
         })
         .into()
@@ -963,7 +963,7 @@ fn day_square<'a>(t: &Tokens, label: &str, on: bool, msg: Msg) -> Element<'a, Ms
                     radius: theme::radius::XS.into(),
                 },
                 shadow: iced::Shadow::default(),
-                snap: true,
+                ..Default::default()
             }
         })
         .into()
@@ -1057,7 +1057,7 @@ fn combine_bar<'a>(t: &Tokens, combine: CondCombine, enabled: usize) -> Element<
                     ..Default::default()
                 },
                 shadow: iced::Shadow::default(),
-                snap: true,
+                ..Default::default()
             })
     };
     let seg = container(
@@ -1149,7 +1149,7 @@ fn cond_connector<'a>(t: &Tokens, combine: CondCombine) -> Element<'a, Msg> {
                 radius: 999.0.into(),
             },
             shadow: iced::Shadow::default(),
-            snap: true,
+            ..Default::default()
         }
     });
     container(
@@ -1349,7 +1349,7 @@ fn qitem_style(t: &Tokens, active: bool, status: iced::widget::button::Status) -
             radius: 5.0.into(),
         },
         shadow: iced::Shadow::default(),
-        snap: true,
+        ..Default::default()
     }
 }
 
@@ -1440,7 +1440,7 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
                 radius: COLOR_BTN_RADIUS.into(),
             },
             shadow: iced::Shadow::default(),
-            snap: true,
+            ..Default::default()
         });
     let head = row![
         color_btn,
@@ -1798,7 +1798,7 @@ fn color_pop_overlay<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a, M
                         radius: theme::control::RADIUS.into(),
                     },
                     shadow: iced::Shadow::default(),
-                    snap: true,
+                    ..Default::default()
                 }),
         );
     }
@@ -1897,7 +1897,7 @@ fn calendar_overlay<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a, Ms
                     ..Default::default()
                 },
                 shadow: iced::Shadow::default(),
-                snap: true,
+                ..Default::default()
             })
     };
     let month_name = [
@@ -1997,7 +1997,7 @@ fn calendar_overlay<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a, Ms
                         radius: theme::radius::XS.into(),
                     },
                     shadow: iced::Shadow::default(),
-                    snap: true,
+                    ..Default::default()
                 }
             })
             .into(),

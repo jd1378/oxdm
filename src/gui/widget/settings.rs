@@ -165,7 +165,6 @@ fn section<'a, M: 'a>(
                 width: 1.0,
                 radius: theme::surface::RADIUS.into(),
             },
-            snap: true,
             ..Default::default()
         });
     column![head(title, head_color), surface]

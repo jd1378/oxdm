@@ -62,7 +62,7 @@ pub fn toggle<'a, M: Clone + 'a>(
                 text_color: Color::TRANSPARENT,
                 border: Border::default(),
                 shadow: Shadow::default(),
-                snap: true,
+                ..Default::default()
             })
             .into()
     })

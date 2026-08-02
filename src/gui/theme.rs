@@ -712,6 +712,7 @@ pub mod fonts {
         include_bytes!("../../assets/fonts/Fraunces72pt-SemiBold.ttf"),
         include_bytes!("../../assets/fonts/JetBrainsMono-Regular.ttf"),
         include_bytes!("../../assets/fonts/JetBrainsMono-Medium.ttf"),
+        include_bytes!("../../assets/fonts/JetBrainsMono-SemiBold.ttf"),
         include_bytes!("../../assets/fonts/JetBrainsMono-Bold.ttf"),
     ];
 }
@@ -757,6 +758,9 @@ pub const DISPLAY_REGULAR: Font = fraunces(Weight::Normal);
 pub const MONO: Font = jbmono(Weight::Medium);
 /// Mono regular (used where egui fell back to JBMono Regular).
 pub const MONO_REGULAR: Font = jbmono(Weight::Normal);
+/// Mono semibold (600) — the design's weight for mono chips and
+/// seg-radio labels (`.pac-algos .seg-r`, `.prop-cs-algochip`).
+pub const MONO_SEMIBOLD: Font = jbmono(Weight::Semibold);
 /// Mono bold (700) — e.g. `.prop-hero-ext`.
 pub const MONO_BOLD: Font = jbmono(Weight::Bold);
 

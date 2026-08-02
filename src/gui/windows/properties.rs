@@ -117,7 +117,7 @@ pub enum Msg {
     CsAddCancel,
     CsAlgoPick(usize),
     CsAuto(bool),
-    ChecksumHash(String),
+    ChecksumHash(text_editor::Action),
     ChecksumSave,
     ChecksumRemove(usize),
     CsVerify(usize),
@@ -189,7 +189,9 @@ pub struct State {
     cs_adding: bool,
     cs_algo: Algo,
     cs_auto: bool,
-    checksum_hash: String,
+    /// Hash entry is a multi-line editor (design `.pac-input` is a
+    /// textarea): pasted hashes wrap instead of scrolling out of view.
+    checksum_hash: text_editor::Content,
     /// Row currently hashing on a blocking thread, identified by
     /// (algo, saved hash).
     cs_verifying: Option<(Algo, String)>,
@@ -351,7 +353,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 cs_adding: false,
                 cs_algo: Algo::Sha256,
                 cs_auto: true,
-                checksum_hash: String::new(),
+                checksum_hash: text_editor::Content::new(),
                 cs_verifying: None,
                 cs_verify_error: None,
                 dirty: false,
@@ -600,7 +602,7 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
         }
         Msg::CsAddOpen => {
             st.cs_adding = true;
-            st.checksum_hash.clear();
+            st.checksum_hash = text_editor::Content::new();
             st.cs_auto = true;
             // Auto-pick the first algorithm not already in the list
             // (mock AddChecksumForm behavior).
@@ -613,7 +615,7 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
         }
         Msg::CsAddCancel => {
             st.cs_adding = false;
-            st.checksum_hash.clear();
+            st.checksum_hash = text_editor::Content::new();
             Task::none()
         }
         Msg::CsAlgoPick(i) => {
@@ -629,8 +631,8 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             st.cs_auto = v;
             Task::none()
         }
-        Msg::ChecksumHash(v) => {
-            st.checksum_hash = v;
+        Msg::ChecksumHash(a) => {
+            st.checksum_hash.perform(a);
             Task::none()
         }
         Msg::ChecksumSave => {
@@ -646,7 +648,7 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                 expected: None,
             });
             st.cs_adding = false;
-            st.checksum_hash.clear();
+            st.checksum_hash = text_editor::Content::new();
             persist_checksums(st)
         }
         Msg::ChecksumRemove(i) => {
@@ -924,7 +926,7 @@ struct CsForm {
 }
 
 fn cs_form(st: &State) -> CsForm {
-    let canon = canonical_hash(&st.checksum_hash);
+    let canon = canonical_hash(&st.checksum_hash.text());
     let hex_ok = canon.is_empty() || canon.bytes().all(|b| b.is_ascii_hexdigit());
     let det = detect_algo(&canon);
     let algo = if st.cs_auto {
@@ -1689,13 +1691,24 @@ fn cs_lockhint(t: &Tokens) -> Element<'_, Msg> {
     .into()
 }
 
-/// `.pac-algos`: 2px inner padding around the seg-radio chips, each
-/// chip 4px-rounded (`radius::CTRL` is 5 and reads too soft here).
-const SEG_BOX_PAD: f32 = 2.0;
+/// `.pac-algos`: inner padding around the seg-radio chips, each chip
+/// 4px-rounded (`radius::CTRL` is 5 and reads too soft here). The chip
+/// padding runs a pixel over the design's 5×10 on each axis: the design
+/// measures against a browser line box, and iced's is a pixel tighter.
+const SEG_BOX_PAD: f32 = 3.0;
 const SEG_RADIUS: f32 = 4.0;
+const SEG_PAD_Y: f32 = 6.0;
+const SEG_PAD_X: f32 = 11.0;
 
-/// AddChecksumForm card border (design `.prop-add-cs`: 1.5px clay).
-const PAC_BORDER_W: f32 = 1.5;
+/// `.pac-input`: mono 11.5px in a 52px-min textarea.
+const HASH_TEXT: f32 = 11.5;
+const HASH_MIN_H: f32 = 52.0;
+
+/// AddChecksumForm card border. The design asks for 1.5px clay, which a
+/// 1x display cannot draw evenly — the stroke snapped to 2px while the
+/// 1.5px padding laid the strips out on half pixels, so the border read
+/// as thicker on some edges. Draw a whole 1px instead.
+const PAC_BORDER_W: f32 = 1.0;
 /// Corner radius of the header/footer strips: the outer 10px radius
 /// minus the border they sit inside, so the tinted fills follow the
 /// card's rounding (tiny-skia has no clip, memory `with_clip` no-op).
@@ -1756,8 +1769,8 @@ fn add_checksum_form(st: &State) -> Element<'_, Msg> {
         let on = form.algo == *algo;
         let enabled = !taken || on;
         chips = chips.push(
-            iced::widget::button(text(algo.label()).font(theme::MONO).size(11.0))
-                .padding([5.0, 10.0])
+            iced::widget::button(text(algo.label()).font(theme::MONO_SEMIBOLD).size(11.0))
+                .padding([SEG_PAD_Y, SEG_PAD_X])
                 .style(move |_, status| {
                     use iced::widget::button::Status;
                     let hovered = matches!(status, Status::Hovered | Status::Pressed);
@@ -1911,14 +1924,32 @@ fn add_checksum_form(st: &State) -> Element<'_, Msg> {
     .size(11.0);
     let hash_field = column![
         hash_lbl,
-        TextInput::new(&st.checksum_hash)
-            .hint(format!(
+        // `.pac-input` is a textarea, not an input: a 128-char SHA-512
+        // wraps across lines instead of scrolling out of sight.
+        text_editor::TextEditor::new(&st.checksum_hash)
+            .placeholder(format!(
                 "Paste the {} hash from the publisher's website…",
                 form.algo.label()
             ))
-            .mono()
-            .on_input(Msg::ChecksumHash)
-            .view(t),
+            .font(theme::MONO)
+            .size(HASH_TEXT)
+            .height(Length::Fixed(HASH_MIN_H))
+            .on_action(Msg::ChecksumHash)
+            .style(move |_th, _| text_editor::Style {
+                background: t2.bg_page.into(),
+                border: iced::Border {
+                    color: if form.canon.is_empty() || form.hex_ok {
+                        t2.border_default
+                    } else {
+                        t2.status_danger
+                    },
+                    width: 1.0,
+                    radius: theme::radius::XS.into(),
+                },
+                placeholder: t2.fg_4,
+                value: t2.fg_1,
+                selection: t2.selection_bg(),
+            }),
         meter,
         text(msg_text)
             .font(theme::BODY_MEDIUM)
