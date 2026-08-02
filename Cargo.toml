@@ -46,7 +46,11 @@ interprocess = { version = "2", features = ["tokio"] }
 single-instance = "0.3"
 image = { version = "0.25", default-features = false, features = ["png"] }
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
-iced = { version = "0.14", default-features = false, features = ["tiny-skia", "wayland", "x11", "tokio", "canvas", "svg", "image", "advanced"] }
+# `crisp` (an iced default we lost by opting out of default-features)
+# makes every quad snap to the pixel grid, so 1px borders and hairlines
+# stay 1px instead of being anti-aliased into a soft 2px band. Honoured
+# by the vendored tiny-skia backend — see `engine.rs::snap_quad`.
+iced = { version = "0.14", default-features = false, features = ["tiny-skia", "wayland", "x11", "tokio", "canvas", "svg", "image", "advanced", "crisp"] }
 # Pinned exactly: 0.3.1 is the audited revision (source reviewed — no
 # `unsafe`, no I/O, no build script; only deps are `iced_core` /
 # `iced_widget`, which are already in-tree via `iced`). Re-audit before

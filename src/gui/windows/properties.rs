@@ -1689,6 +1689,11 @@ fn cs_lockhint(t: &Tokens) -> Element<'_, Msg> {
     .into()
 }
 
+/// `.pac-algos`: 2px inner padding around the seg-radio chips, each
+/// chip 4px-rounded (`radius::CTRL` is 5 and reads too soft here).
+const SEG_BOX_PAD: f32 = 2.0;
+const SEG_RADIUS: f32 = 4.0;
+
 /// AddChecksumForm card border (design `.prop-add-cs`: 1.5px clay).
 const PAC_BORDER_W: f32 = 1.5;
 /// Corner radius of the header/footer strips: the outer 10px radius
@@ -1779,7 +1784,7 @@ fn add_checksum_form(st: &State) -> Element<'_, Msg> {
                         border: iced::Border {
                             color: ring,
                             width: 1.0,
-                            radius: theme::radius::CTRL.into(),
+                            radius: SEG_RADIUS.into(),
                         },
                         ..Default::default()
                     }
@@ -1788,7 +1793,7 @@ fn add_checksum_form(st: &State) -> Element<'_, Msg> {
         );
     }
     let chip_box = container(chips)
-        .padding(3.0)
+        .padding(SEG_BOX_PAD)
         .style(move |_| container::Style {
             background: Some(t2.bg_page.into()),
             border: iced::Border {
