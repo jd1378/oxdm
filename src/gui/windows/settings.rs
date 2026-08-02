@@ -17,9 +17,9 @@ use crate::gui::ipc::DaemonSignal;
 use crate::gui::shot::Shot;
 use crate::gui::theme::{self, Tokens};
 use crate::gui::widget::{
-    Btn, BtnSize, FileInput, SECTION_GAP, TextInput, card, combo, hairline, number_stepper,
-    segmented, set_group, set_note, set_row, set_row_stack, set_section, set_section_danger,
-    toggle,
+    Btn, BtnSize, FileInput, PasswordInput, SECTION_GAP, TextInput, card, combo, hairline,
+    number_stepper, segmented, set_group, set_note, set_row, set_row_stack, set_section,
+    set_section_danger, toggle,
 };
 use crate::ipc_local::Client;
 use crate::ipc_local::protocol::Event;
@@ -90,31 +90,33 @@ impl std::fmt::Display for QueueChoice {
 }
 
 impl State {
-    /// Options for a category's default-queue combo: "Default" (daemon
-    /// picks) plus every known queue.
+    /// Options for a category's default-queue combo: the real queues,
+    /// nothing else. A "Default" entry only named whichever queue the
+    /// daemon would have picked anyway, so it read as a distinct choice
+    /// while being one of the rows below it.
     fn queue_choices(&self) -> Vec<QueueChoice> {
-        let mut v = vec![QueueChoice {
-            id: None,
-            name: "Default".to_owned(),
-        }];
-        v.extend(self.queues.iter().map(|q| QueueChoice {
-            id: Some(q.id),
-            name: q.name.clone(),
-        }));
-        v
+        self.queues
+            .iter()
+            .map(|q| QueueChoice {
+                id: Some(q.id),
+                name: q.name.clone(),
+            })
+            .collect()
     }
 
-    /// The current selection for a category (falls back to "Default"
-    /// when the stored queue no longer exists).
+    /// The current selection for a category. An unset category — or one
+    /// pointing at a deleted queue — shows the first queue, which is the
+    /// one the daemon would use.
     fn queue_choice_for(&self, sel: Option<QueueId>) -> QueueChoice {
         sel.and_then(|id| self.queues.iter().find(|q| q.id == id))
+            .or_else(|| self.queues.first())
             .map(|q| QueueChoice {
                 id: Some(q.id),
                 name: q.name.clone(),
             })
             .unwrap_or(QueueChoice {
                 id: None,
-                name: "Default".to_owned(),
+                name: String::new(),
             })
     }
 }
@@ -146,6 +148,7 @@ pub enum Msg {
     UseServerTime(bool),
     ConfirmIncomplete(bool),
     ConfirmCompleted(bool),
+    ConfirmClean(bool),
     // Categories
     CategoryToggle(Category),
     CategoryExts(Category, String),
@@ -155,10 +158,17 @@ pub enum Msg {
     BrowsedCategoryFolder(Category, Option<std::path::PathBuf>),
     CategoryQueue(Category, QueueChoice),
     // Network
-    AutoConnections(bool),
+    Connections(Option<u64>),
     Concurrent(String),
-    SpeedLimit(String),
-    Proxy(String),
+    SpeedLimitOn(bool),
+    SpeedLimitValue(String),
+    SpeedLimitUnit(bool),
+    ProxyMode(usize),
+    ProxyHost(String),
+    ProxyPort(String),
+    ProxyAuth(bool),
+    ProxyUser(String),
+    ProxyPass(String),
     ConnectTimeout(String),
     InvalidCerts(bool),
     UserAgent(String),
@@ -212,8 +222,20 @@ pub struct State {
     fixed_retries: String,
     retry_wait: String,
     concurrent: String,
-    speed_limit: String,
+    /// Speed-limit picker parts, same shape as the download window's
+    /// limiter: on/off, a value, and the unit it is written in.
+    limit_on: bool,
+    limit_value: String,
+    limit_unit_mb: bool,
     proxy: String,
+    /// Proxy picker parts. `proxy` stays the composed URL the daemon
+    /// stores; these are what the rows edit.
+    proxy_mode: usize,
+    proxy_host: String,
+    proxy_port: String,
+    proxy_auth: bool,
+    proxy_user: String,
+    proxy_pass: String,
     connect_timeout: String,
     user_agent: String,
     ipc_port: String,
@@ -245,8 +267,23 @@ fn mirror(st: &mut State) {
     st.fixed_retries = s.n_fixed_retries.to_string();
     st.retry_wait = humantime::format_duration(s.wait_between_retries).to_string();
     st.concurrent = s.max_concurrent_downloads.to_string();
-    st.speed_limit = s.speed_limit.map(|v| v.to_string()).unwrap_or_default();
+    // Bytes/sec on the wire; shown in whichever unit divides evenly.
+    st.limit_on = s.speed_limit.is_some();
+    let bps = s.speed_limit.unwrap_or(0);
+    st.limit_unit_mb = bps > 0 && bps.is_multiple_of(BYTES_PER_MB);
+    st.limit_value = match bps {
+        0 => String::new(),
+        v if st.limit_unit_mb => (v / BYTES_PER_MB).to_string(),
+        v => (v / BYTES_PER_KB).to_string(),
+    };
     st.proxy = s.proxy.clone().unwrap_or_default();
+    let parts = split_proxy(&st.proxy);
+    st.proxy_mode = parts.mode;
+    st.proxy_host = parts.host;
+    st.proxy_port = parts.port;
+    st.proxy_auth = !parts.user.is_empty() || !parts.pass.is_empty();
+    st.proxy_user = parts.user;
+    st.proxy_pass = parts.pass;
     st.connect_timeout = s
         .connect_timeout
         .map(|d| humantime::format_duration(d).to_string())
@@ -265,15 +302,20 @@ fn mirror(st: &mut State) {
             (*c, exts)
         })
         .collect();
+    // Show a real path rather than an empty field explained by a hint,
+    // and make it a per-category subfolder: sorting downloads by kind is
+    // the whole point of categories, so the default should already do
+    // it. Writing these back on the next apply is intended.
     st.cat_folders = Category::ALL_ASSIGNABLE
         .iter()
         .map(|c| {
             let dir = s
                 .category_folders
                 .get(c)
-                .map(|p| p.display().to_string())
-                .unwrap_or_default();
-            (*c, dir)
+                .filter(|p| !p.as_os_str().is_empty())
+                .cloned()
+                .unwrap_or_else(|| s.download_dir.join(c.label()));
+            (*c, dir.display().to_string())
         })
         .collect();
     st.cat_queues = Category::ALL_ASSIGNABLE
@@ -349,8 +391,16 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 fixed_retries: String::new(),
                 retry_wait: String::new(),
                 concurrent: String::new(),
-                speed_limit: String::new(),
+                limit_on: false,
+                limit_value: String::new(),
+                limit_unit_mb: false,
                 proxy: String::new(),
+                proxy_mode: 0,
+                proxy_host: String::new(),
+                proxy_port: String::new(),
+                proxy_auth: false,
+                proxy_user: String::new(),
+                proxy_pass: String::new(),
                 connect_timeout: String::new(),
                 user_agent: String::new(),
                 ipc_port: String::new(),
@@ -479,6 +529,10 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             st.s.remove_confirm_completed = v;
             Task::none()
         }
+        Msg::ConfirmClean(v) => {
+            st.s.remove_confirm_clean = v;
+            Task::none()
+        }
         Msg::CategoryToggle(cat) => {
             st.cat_open = (st.cat_open != Some(cat)).then_some(cat);
             Task::none()
@@ -523,20 +577,58 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             }
             Task::none()
         }
-        Msg::AutoConnections(v) => {
-            st.s.max_connections = if v { None } else { Some(8) };
+        Msg::Connections(v) => {
+            st.s.max_connections = v;
             Task::none()
         }
         Msg::Concurrent(v) => {
             st.concurrent = v;
             Task::none()
         }
-        Msg::SpeedLimit(v) => {
-            st.speed_limit = v;
+        Msg::SpeedLimitOn(v) => {
+            st.limit_on = v;
             Task::none()
         }
-        Msg::Proxy(v) => {
-            st.proxy = v;
+        Msg::SpeedLimitValue(v) => {
+            st.limit_value = v.chars().filter(char::is_ascii_digit).collect();
+            Task::none()
+        }
+        Msg::SpeedLimitUnit(mb) => {
+            st.limit_unit_mb = mb;
+            Task::none()
+        }
+        Msg::ProxyMode(i) => {
+            st.proxy_mode = i;
+            recompose_proxy(st);
+            Task::none()
+        }
+        Msg::ProxyHost(v) => {
+            st.proxy_host = v;
+            recompose_proxy(st);
+            Task::none()
+        }
+        Msg::ProxyPort(v) => {
+            st.proxy_port = v.chars().filter(char::is_ascii_digit).collect();
+            recompose_proxy(st);
+            Task::none()
+        }
+        Msg::ProxyAuth(v) => {
+            st.proxy_auth = v;
+            if !v {
+                st.proxy_user.clear();
+                st.proxy_pass.clear();
+            }
+            recompose_proxy(st);
+            Task::none()
+        }
+        Msg::ProxyUser(v) => {
+            st.proxy_user = v;
+            recompose_proxy(st);
+            Task::none()
+        }
+        Msg::ProxyPass(v) => {
+            st.proxy_pass = v;
+            recompose_proxy(st);
             Task::none()
         }
         Msg::ConnectTimeout(v) => {
@@ -658,6 +750,7 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                     st.s.use_server_time = orig.use_server_time;
                     st.s.remove_confirm_incomplete = orig.remove_confirm_incomplete;
                     st.s.remove_confirm_completed = orig.remove_confirm_completed;
+                    st.s.remove_confirm_clean = orig.remove_confirm_clean;
                 }
                 Section::Categories => {
                     st.s.category_extensions = orig.category_extensions;
@@ -710,7 +803,14 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             if let Ok(v) = st.concurrent.trim().parse() {
                 s.max_concurrent_downloads = v;
             }
-            s.speed_limit = st.speed_limit.trim().parse().ok();
+            s.speed_limit = st.limit_on.then(|| {
+                let unit = if st.limit_unit_mb {
+                    BYTES_PER_MB
+                } else {
+                    BYTES_PER_KB
+                };
+                st.limit_value.trim().parse::<u64>().unwrap_or(0) * unit
+            });
             s.proxy = (!st.proxy.trim().is_empty()).then(|| st.proxy.trim().to_owned());
             s.connect_timeout = humantime::parse_duration(st.connect_timeout.trim()).ok();
             s.user_agent =
@@ -761,10 +861,18 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                     Some((k.trim().to_owned(), v.trim().to_owned()))
                 })
                 .collect();
+            // Keep `st.s` in step with what was sent: the mirrors were
+            // just folded in, and `original` is rebased off it on ack.
+            st.s = s.clone();
             let client = st.client.clone();
             Task::perform(async move { client.update_settings(s).await }, Msg::Saved)
         }
-        Msg::Saved(Ok(())) => iced::exit(),
+        Msg::Saved(Ok(())) => {
+            // The window stays open, so "Reset <section>" has to mean
+            // "back to what is saved" — which is now this.
+            st.original = st.s.clone();
+            Task::none()
+        }
         Msg::Saved(Err(_)) => Task::none(),
         Msg::Cancel => iced::exit(),
         Msg::WinResized(w, h) => {
@@ -923,7 +1031,7 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
         );
     }
     right = right.push(
-        Btn::new("Save")
+        Btn::new("Apply")
             .primary()
             .icon("save")
             .on_press(Msg::Save)
@@ -992,6 +1100,8 @@ const RETRIES_MAX: i64 = 20;
 /// Concurrent downloads must stay ≥ 1 (zero would stall the queue).
 const CONCURRENT_MIN: i64 = 1;
 const CONCURRENT_MAX: i64 = 20;
+/// Anything at or above this reads as Unlimited (see `UNLIMITED_CONCURRENT`).
+const CONCURRENT_UNLIMITED: i64 = crate::domain::settings::UNLIMITED_CONCURRENT as i64;
 
 /// Per-pane head (`.s-pane-head`): Fraunces h2 title + muted description
 /// line + a 1px bottom rule.
@@ -1067,6 +1177,299 @@ fn stepper<'a>(
         .unwrap_or(default)
         .clamp(min, max);
     number_stepper(t, v, min, max, true, move |n| msg(n.to_string()))
+}
+
+/// Connection-count presets (design: the Queues window's concurrency
+/// pills). `None` is Auto — the per-job size heuristic picks the count.
+const CONN_PRESETS: [u64; 3] = [4, 8, 16];
+/// A file is one part at minimum; the ceiling matches the queue window's
+/// concurrency cap, since both are "how many sockets at once".
+const CONN_MIN: i64 = 1;
+const CONN_MAX: i64 = 16;
+
+/// Auto / 4x / 8x / 16x pills plus a stepper for anything else.
+fn connections_picker<'a>(t: &Tokens, current: Option<u64>) -> Element<'a, Msg> {
+    let mut r = row![
+        Btn::new("Auto")
+            .secondary()
+            .pill()
+            .size(BtnSize::Md)
+            .selected(current.is_none())
+            .on_press(Msg::Connections(None))
+            .view(t),
+    ]
+    .spacing(4.0)
+    .align_y(Alignment::Center);
+    for n in CONN_PRESETS {
+        r = r.push(
+            Btn::new(format!("{n}x"))
+                .secondary()
+                .pill()
+                .size(BtnSize::Md)
+                .selected(current == Some(n))
+                .on_press(Msg::Connections(Some(n)))
+                .view(t),
+        );
+    }
+    // Custom: the stepper writes through the same message, so a value the
+    // presets don't cover simply leaves them all unselected.
+    r.push(number_stepper(
+        t,
+        current.unwrap_or(8) as i64,
+        CONN_MIN,
+        CONN_MAX,
+        true,
+        |n| Msg::Connections(Some(n as u64)),
+    ))
+    .into()
+}
+
+/// Speed-limit units. The daemon stores bytes/sec; the picker writes
+/// whichever unit the user chose, exactly like the download window's.
+const BYTES_PER_KB: u64 = 1024;
+const BYTES_PER_MB: u64 = 1024 * 1024;
+/// Width of the value field (download window `LIMIT_INPUT_W`).
+const LIMIT_INPUT_W: f32 = 80.0;
+
+/// Unlimited / Limit-to chips, a value field and a KB/s ‖ MB/s toggle —
+/// the same control the download window uses for one job.
+fn speed_limit_picker(st: &State) -> Element<'_, Msg> {
+    let t = &st.tokens;
+    row![
+        segmented(
+            t,
+            &[("Unlimited", None), ("Limit to", None)],
+            if st.limit_on { 1 } else { 0 },
+            BtnSize::Sm,
+            |i| Msg::SpeedLimitOn(i == 1),
+        ),
+        TextInput::new(&st.limit_value)
+            .width(Length::Fixed(LIMIT_INPUT_W))
+            .enabled(st.limit_on)
+            .on_input(Msg::SpeedLimitValue)
+            .view(t),
+        segmented(
+            t,
+            &[("KB/s", None), ("MB/s", None)],
+            if st.limit_unit_mb { 1 } else { 0 },
+            BtnSize::Sm,
+            |i| Msg::SpeedLimitUnit(i == 1),
+        ),
+    ]
+    .spacing(theme::space::S2)
+    .align_y(Alignment::Center)
+    .into()
+}
+
+/// Unlimited pill + a stepper for a specific ceiling. Unlimited is not a
+/// separate mode: it writes a count no queue reaches.
+fn concurrent_picker<'a>(t: &Tokens, value: &str) -> Element<'a, Msg> {
+    let v = value
+        .trim()
+        .parse::<i64>()
+        .unwrap_or(CONCURRENT_UNLIMITED)
+        .max(CONCURRENT_MIN);
+    let unlimited = v >= CONCURRENT_UNLIMITED;
+    row![
+        Btn::new("Unlimited")
+            .secondary()
+            .pill()
+            .size(BtnSize::Md)
+            .selected(unlimited)
+            .on_press(Msg::Concurrent(CONCURRENT_UNLIMITED.to_string()))
+            .view(t),
+        number_stepper(
+            t,
+            if unlimited { CONCURRENT_MAX } else { v },
+            CONCURRENT_MIN,
+            CONCURRENT_MAX,
+            true,
+            |n| Msg::Concurrent(n.to_string()),
+        ),
+    ]
+    .spacing(4.0)
+    .align_y(Alignment::Center)
+    .into()
+}
+
+/// Global proxy modes. The per-job control in Properties opens with
+/// "Inherit", which has no meaning here — this *is* what a job inherits.
+/// "System" is the empty setting: reqwest then reads the standard proxy
+/// environment variables.
+const PROXY_MODES: &[(&str, Option<&str>)] = &[
+    ("System", None),
+    ("HTTP", None),
+    ("HTTPS", None),
+    ("SOCKS5", None),
+];
+const PROXY_SCHEMES: [&str; 3] = ["http", "https", "socks5"];
+/// Width of the port field (matches the per-job `.prop-proxy-port`).
+const PROXY_PORT_W: f32 = 90.0;
+
+/// The `Settings::proxy` URL, taken apart for editing.
+struct ProxyParts {
+    /// Index into `PROXY_MODES`; 0 is System (no explicit proxy).
+    mode: usize,
+    host: String,
+    port: String,
+    user: String,
+    pass: String,
+}
+
+/// Split `scheme://[user:pass@]host[:port]`. Anything unparseable reads
+/// as System, which is what an empty value means too.
+fn split_proxy(url: &str) -> ProxyParts {
+    let none = || ProxyParts {
+        mode: 0,
+        host: String::new(),
+        port: String::new(),
+        user: String::new(),
+        pass: String::new(),
+    };
+    let url = url.trim();
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return none();
+    };
+    let Some(i) = PROXY_SCHEMES
+        .iter()
+        .position(|s| *s == scheme.to_lowercase())
+    else {
+        return none();
+    };
+    let rest = rest.trim_end_matches('/');
+    // Credentials may themselves contain '@' once encoded, so split at
+    // the LAST one: everything after it is the authority.
+    let (creds, authority) = match rest.rsplit_once('@') {
+        Some((c, a)) => (c, a),
+        None => ("", rest),
+    };
+    let (user, pass) = match creds.split_once(':') {
+        Some((u, p)) => (decode(u), decode(p)),
+        None => (decode(creds), String::new()),
+    };
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((h, p)) if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => (h, p),
+        _ => (authority, ""),
+    };
+    ProxyParts {
+        mode: i + 1,
+        host: host.to_owned(),
+        port: port.to_owned(),
+        user,
+        pass,
+    }
+}
+
+fn decode(s: &str) -> String {
+    percent_encoding::percent_decode_str(s)
+        .decode_utf8_lossy()
+        .into_owned()
+}
+
+/// Encode a credential for the userinfo slot: anything that would end
+/// the field early has to travel escaped.
+fn encode(s: &str) -> String {
+    const USERINFO: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+        .remove(b'-')
+        .remove(b'.')
+        .remove(b'_')
+        .remove(b'~');
+    percent_encoding::utf8_percent_encode(s, USERINFO).to_string()
+}
+
+/// Rebuild the stored URL from the picker's parts. A mode without a host
+/// is not a proxy yet, so it stores empty rather than `http://`.
+fn recompose_proxy(st: &mut State) {
+    let host = st.proxy_host.trim();
+    st.proxy = if st.proxy_mode == 0 || host.is_empty() {
+        String::new()
+    } else {
+        let scheme = PROXY_SCHEMES[st.proxy_mode - 1];
+        let creds = if st.proxy_auth && !st.proxy_user.trim().is_empty() {
+            format!(
+                "{}:{}@",
+                encode(st.proxy_user.trim()),
+                encode(&st.proxy_pass)
+            )
+        } else {
+            String::new()
+        };
+        let port = st.proxy_port.trim();
+        if port.is_empty() {
+            format!("{scheme}://{creds}{host}")
+        } else {
+            format!("{scheme}://{creds}{host}:{port}")
+        }
+    };
+}
+
+/// Proxy rows: the same mode-then-server shape as the per-job control in
+/// Properties, over the single URL the daemon stores.
+fn proxy_rows(st: &State) -> Vec<Element<'_, Msg>> {
+    let t = &st.tokens;
+    let mut rows = vec![set_row_stack(
+        t,
+        "Use proxy",
+        Some(
+            "Routes every download. System reads your proxy environment variables; \
+             a job can still override this from its Properties.",
+        ),
+        segmented(t, PROXY_MODES, st.proxy_mode, BtnSize::Sm, Msg::ProxyMode),
+    )];
+    if st.proxy_mode > 0 {
+        rows.push(set_row_stack(
+            t,
+            "Server",
+            None,
+            row![
+                TextInput::new(&st.proxy_host)
+                    .width(Length::Fill)
+                    .hint("proxy.example.com")
+                    .on_input(Msg::ProxyHost)
+                    .view(t),
+                TextInput::new(&st.proxy_port)
+                    .width(Length::Fixed(PROXY_PORT_W))
+                    .hint("8080")
+                    .on_input(Msg::ProxyPort)
+                    .view(t),
+            ]
+            .spacing(theme::space::S2)
+            .align_y(Alignment::Center)
+            .into(),
+        ));
+        rows.push(toggle_row(
+            t,
+            "Proxy needs a sign-in",
+            Some(
+                "Stored in the proxy URL, in the settings database — unlike a job's own \
+                 proxy password, which is encrypted.",
+            ),
+            st.proxy_auth,
+            Msg::ProxyAuth,
+        ));
+        if st.proxy_auth {
+            rows.push(set_row_stack(
+                t,
+                "Credentials",
+                None,
+                row![
+                    TextInput::new(&st.proxy_user)
+                        .width(Length::Fill)
+                        .hint("username")
+                        .on_input(Msg::ProxyUser)
+                        .view(t),
+                    PasswordInput::new(&st.proxy_pass)
+                        .hint("password")
+                        .on_input(Msg::ProxyPass)
+                        .view(t),
+                ]
+                .spacing(theme::space::S2)
+                .align_y(Alignment::Center)
+                .into(),
+            ));
+        }
+    }
+    rows
 }
 
 fn label_input<'a>(t: &Tokens, label: &str, input: Element<'a, Msg>) -> Element<'a, Msg> {
@@ -1252,6 +1655,13 @@ fn downloads_section(st: &State) -> Element<'_, Msg> {
                         st.s.remove_confirm_completed,
                         Msg::ConfirmCompleted
                     ),
+                    toggle_row(
+                        t,
+                        "Confirm cleaning finished downloads",
+                        Some("Ask before the toolbar's Clean clears every finished job at once."),
+                        st.s.remove_confirm_clean,
+                        Msg::ConfirmClean
+                    ),
                 ]
             ),
         ]
@@ -1319,13 +1729,10 @@ fn categories_section(st: &State) -> Element<'_, Msg> {
             .and_then(|(_, q)| *q);
 
         let n_exts = exts.split(',').filter(|e| !e.trim().is_empty()).count();
-        let summary = {
-            let dest = if folder.trim().is_empty() {
-                "Default folder".to_owned()
-            } else {
-                folder.to_owned()
-            };
-            format!("{n_exts} extensions · {dest}")
+        let summary = if cat == Category::Other {
+            "Everything the other categories don't claim".to_owned()
+        } else {
+            format!("{n_exts} extensions")
         };
 
         let icon_tile = container(icons::icon(cat_icon_name(cat), 14.0, tint))
@@ -1384,14 +1791,25 @@ fn categories_section(st: &State) -> Element<'_, Msg> {
                 label_input(
                     t,
                     "extensions — comma-separated, no dots",
-                    TextInput::new(exts)
-                        .mono()
-                        .on_input(move |v| Msg::CategoryExts(cat, v))
-                        .view(t)
+                    // "Other" is the overflow bucket, not a list: it
+                    // takes whatever the named categories don't claim,
+                    // so there is nothing to edit.
+                    if cat == Category::Other {
+                        TextInput::new("")
+                            .mono()
+                            .enabled(false)
+                            .hint("Everything the other categories don't claim lands here")
+                            .view(t)
+                    } else {
+                        TextInput::new(exts)
+                            .mono()
+                            .on_input(move |v| Msg::CategoryExts(cat, v))
+                            .view(t)
+                    }
                 ),
                 label_input(
                     t,
-                    "save folder — blank inherits the default download folder",
+                    "save folder",
                     FileInput::new(folder)
                         .on_input(move |v| Msg::CategoryFolder(cat, v))
                         .on_browse(Msg::BrowseCategoryFolder(cat))
@@ -1414,6 +1832,7 @@ fn categories_section(st: &State) -> Element<'_, Msg> {
                         .ghost()
                         .accent(true)
                         .size(BtnSize::Sm)
+                        .enabled(cat != Category::Other)
                         .on_press(Msg::CategoryReset(cat))
                         .view(t),
                 ],
@@ -1464,34 +1883,26 @@ fn network_section(st: &State) -> Element<'_, Msg> {
                 t,
                 "Connections",
                 vec![
-                    toggle_row(
+                    set_row(
                         t,
-                        "Automatic connections per file",
-                        Some("Pick the segment count from the file size instead of a fixed value."),
-                        st.s.max_connections.is_none(),
-                        Msg::AutoConnections
+                        "Connections per file",
+                        Some(
+                            "How many parts a file is split into. Auto picks the count from \
+                             the file size."
+                        ),
+                        connections_picker(t, st.s.max_connections)
                     ),
                     set_row(
                         t,
                         "Concurrent downloads",
                         Some("How many jobs run at the same time."),
-                        stepper(
-                            t,
-                            &st.concurrent,
-                            3,
-                            CONCURRENT_MIN,
-                            CONCURRENT_MAX,
-                            Msg::Concurrent
-                        )
+                        concurrent_picker(t, &st.concurrent)
                     ),
                     set_row(
                         t,
                         "Speed limit",
-                        Some("Bytes per second across all downloads. Blank means unlimited."),
-                        TextInput::new(&st.speed_limit)
-                            .width(Length::Fixed(140.0))
-                            .on_input(Msg::SpeedLimit)
-                            .view(t)
+                        Some("Applies across every download at once."),
+                        speed_limit_picker(st)
                     ),
                     set_row(
                         t,
@@ -1504,27 +1915,17 @@ fn network_section(st: &State) -> Element<'_, Msg> {
                     ),
                 ]
             ),
+            set_section(t, "Proxy", proxy_rows(st)),
             set_section(
                 t,
-                "Proxy & TLS",
-                vec![
-                    set_row_stack(
-                        t,
-                        "Proxy URL",
-                        Some("Routes every request. Blank connects directly."),
-                        TextInput::new(&st.proxy)
-                            .width(Length::Fill)
-                            .on_input(Msg::Proxy)
-                            .view(t)
-                    ),
-                    toggle_row(
-                        t,
-                        "Accept invalid TLS certificates",
-                        Some("Dangerous — disables certificate verification for every host."),
-                        st.s.accept_invalid_certs,
-                        Msg::InvalidCerts
-                    ),
-                ]
+                "TLS",
+                vec![toggle_row(
+                    t,
+                    "Accept invalid TLS certificates",
+                    Some("Dangerous — disables certificate verification for every host."),
+                    st.s.accept_invalid_certs,
+                    Msg::InvalidCerts
+                )]
             ),
             set_section(
                 t,
@@ -1533,9 +1934,17 @@ fn network_section(st: &State) -> Element<'_, Msg> {
                     set_row_stack(
                         t,
                         "Custom User-Agent",
-                        Some("Sent with every request. Blank uses the oxdm default."),
+                        Some("Sent with every request."),
                         TextInput::new(&st.user_agent)
                             .width(Length::Fill)
+                            // Blank really does mean blank: oxdm sets no
+                            // User-Agent of its own, so the header is
+                            // simply absent unless randomising is on.
+                            .hint(if st.s.randomize_user_agent {
+                                "A random browser User-Agent per request"
+                            } else {
+                                "No User-Agent sent"
+                            })
                             .on_input(Msg::UserAgent)
                             .view(t)
                     ),

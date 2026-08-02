@@ -195,6 +195,17 @@ where
 {
     let t = *t;
     let width = width.into();
+    // Nothing to choose from: render the value the way a disabled input
+    // reads, rather than a menu that opens onto a single row.
+    if options.len() < 2 {
+        return locked_combo(
+            &t,
+            selected
+                .or_else(|| options.first().cloned())
+                .map(|v| v.to_string()),
+            width,
+        );
+    }
     let list = pick_list(options, selected, on_select)
         .width(Length::Fill)
         .text_size(13.0)
@@ -222,7 +233,14 @@ where
                     t.bg_raised.into()
                 },
                 border: Border {
-                    color: t.border_subtle,
+                    // Same idle/active border as `TextInput`: a combo is
+                    // a field, and `border_subtle` all but vanished on
+                    // the raised fill.
+                    color: if matches!(status, pick_list::Status::Opened { .. }) {
+                        t.border_brand
+                    } else {
+                        t.border_default
+                    },
                     width: t.border_width,
                     radius: theme::control::RADIUS.into(),
                 },
@@ -262,6 +280,47 @@ where
     ])
     .width(width)
     .into()
+}
+
+/// A `combo` with nothing to pick: the field, its value and a dimmed
+/// chevron, minus the menu.
+fn locked_combo<'a, M: 'a>(t: &Tokens, value: Option<String>, width: Length) -> Element<'a, M> {
+    let t = *t;
+    let label = value.unwrap_or_default();
+    let field = container(
+        text(label)
+            .font(theme::BODY)
+            .size(13.0)
+            .color(with_alpha(t.fg_1, 0.5)),
+    )
+    .width(Length::Fill)
+    .height(Length::Fixed(theme::control::H_MD))
+    .align_y(Alignment::Center)
+    .padding([0.0, theme::control::INPUT_PAD_X])
+    .style(move |_| container::Style {
+        background: Some(t.bg_raised.into()),
+        border: Border {
+            color: t.border_default,
+            width: t.border_width,
+            radius: theme::control::RADIUS.into(),
+        },
+        ..Default::default()
+    });
+    let chevron = container(
+        container(icons::icon("chevron-down", 14.0, with_alpha(t.fg_3, 0.5))).padding(
+            iced::Padding {
+                right: theme::control::INPUT_PAD_X,
+                ..Default::default()
+            },
+        ),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .align_x(iced::alignment::Horizontal::Right)
+    .align_y(Alignment::Center);
+    container(iced::widget::stack![field, chevron])
+        .width(width)
+        .into()
 }
 
 /// Horizontal button group, 4px gaps; selected option gets the

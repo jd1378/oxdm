@@ -763,7 +763,10 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             let client = st.client.clone();
             Task::perform(async move { client.upsert_queue(q).await }, Msg::Saved)
         }
-        Msg::Saved(_) => iced::exit(),
+        // Applying leaves the window open: editing several queues in one
+        // sitting is the normal case, and closing after each would make
+        // the user reopen it every time.
+        Msg::Saved(_) => Task::none(),
         Msg::Cancel => iced::exit(),
         Msg::WinResized(w, h) => {
             st.win_size = (w, h);
@@ -1681,7 +1684,7 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
     let footer_el = crate::gui::windows::add::footer(
         t,
         Btn::new("Cancel").ghost().on_press(Msg::Cancel).view(t),
-        Btn::new("Save")
+        Btn::new("Apply")
             .primary()
             .icon("check")
             .on_press(Msg::Save)
