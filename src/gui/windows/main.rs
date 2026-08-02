@@ -29,6 +29,12 @@ const HEADER_H: f32 = 22.0;
 // Row heights per UI `Density` (design `--density`). Comfortable keeps
 // the roomy default; Compact tightens the vertical rhythm. Applied to
 // the jobs-table row and the sidebar/list nav rows only.
+/// 1px hairline under every row (design `.tr`), so the pitch a virtual
+/// list counts in is the row plus this.
+const ROW_SEPARATOR_H: f32 = 1.0;
+/// Rows built above and below the viewport, so a flick has something to
+/// show before the next scroll event lands.
+const ROW_OVERSCAN: usize = 6;
 const ROW_H_COMFORTABLE: f32 = 48.0;
 const ROW_H_COMPACT: f32 = 40.0;
 const SIDEBAR_ROW_H_COMFORTABLE: f32 = 26.0;
@@ -128,7 +134,10 @@ pub enum Msg {
     CursorMoved(f32, f32),
     MouseReleased,
     ColHandleHover(SortColumn, bool),
-    TableScrolled(f32),
+    /// `(x, y, viewport height)` from the table's scrollable. The x
+    /// keeps the header in step; the other two are what the virtual
+    /// list needs to know which rows are on screen.
+    TableScrolled(f32, f32, f32),
     WindowResized(f32, f32),
     ColResizeStart(SortColumn),
     ColMoveStart(SortColumn),
@@ -363,6 +372,11 @@ pub struct Main {
     /// Horizontal scroll offset of the table body (mirrored on every
     /// `TableScrolled`); corrects the resize guideline x.
     pub table_scroll_x: f32,
+    /// Vertical scroll offset and the height of the scrollable's own
+    /// viewport, both from `TableScrolled`. The virtual list turns them
+    /// into the slice of rows worth building.
+    pub table_scroll_y: f32,
+    pub table_viewport_h: f32,
     pub columns_menu: bool,
     pub shot: Option<Shot>,
     /// Active toasts, newest last (rendered bottom-right).
@@ -423,6 +437,8 @@ impl Main {
             col_preview: None,
             col_handle_hover: None,
             table_scroll_x: 0.0,
+            table_scroll_y: 0.0,
+            table_viewport_h: 0.0,
             columns_menu: false,
             shot: Shot::from_env(),
             toasts: Vec::new(),
@@ -953,8 +969,10 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             m.col_drag = Some((col, m.cursor.0, m.columns.width(col as usize)));
             Task::none()
         }
-        Msg::TableScrolled(x) => {
+        Msg::TableScrolled(x, y, viewport_h) => {
             m.table_scroll_x = x;
+            m.table_scroll_y = y;
+            m.table_viewport_h = viewport_h;
             iced::widget::operation::scroll_to(
                 iced::widget::Id::new("tbl-header"),
                 iced::widget::scrollable::AbsoluteOffset {
@@ -2767,9 +2785,37 @@ fn table(m: &Main) -> Element<'_, Msg> {
     let body: Element<'_, Msg> = if jobs.is_empty() {
         empty_state(m)
     } else {
+        // Virtual list: every row is the same height, so the slice on
+        // screen is arithmetic. Everything above and below collapses
+        // into one spacer each, which keeps the scrollbar honest while
+        // sparing iced ~10k widgets to lay out and diff per frame — the
+        // difference between a 20ms frame and a multi-second one on a
+        // table that size.
+        let pitch = m.row_h() + ROW_SEPARATOR_H;
+        // Until the first scroll event the viewport height is unknown;
+        // the window is a safe over-estimate (it can only be smaller).
+        let viewport_h = if m.table_viewport_h > 0.0 {
+            m.table_viewport_h
+        } else {
+            m.win_size.1
+        };
+        let first = ((m.table_scroll_y / pitch).floor() as usize).saturating_sub(ROW_OVERSCAN);
+        let visible = (viewport_h / pitch).ceil() as usize + ROW_OVERSCAN * 2 + 1;
+        let last = (first + visible).min(jobs.len());
+
         let mut rows = column![];
-        for job in &jobs {
+        if first > 0 {
+            rows =
+                rows.push(iced::widget::Space::new().height(Length::Fixed(first as f32 * pitch)));
+        }
+        for job in jobs.iter().take(last).skip(first) {
             rows = rows.push(job_row(m, job));
+        }
+        if last < jobs.len() {
+            rows = rows.push(
+                iced::widget::Space::new()
+                    .height(Length::Fixed((jobs.len() - last) as f32 * pitch)),
+            );
         }
         // Design-spec scrollbars (§4): 10px rail, thin rounded thumb.
         let bar = || {
@@ -2784,7 +2830,13 @@ fn table(m: &Main) -> Element<'_, Msg> {
                 horizontal: bar(),
             })
             .style(theme::scrollbar_style)
-            .on_scroll(|vp| Msg::TableScrolled(vp.absolute_offset().x))
+            .on_scroll(|vp| {
+                Msg::TableScrolled(
+                    vp.absolute_offset().x,
+                    vp.absolute_offset().y,
+                    vp.bounds().height,
+                )
+            })
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
@@ -3093,7 +3145,7 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
         .sum();
     let separator = container(iced::widget::Space::new())
         .width(Length::Fixed(total_w))
-        .height(Length::Fixed(1.0))
+        .height(Length::Fixed(ROW_SEPARATOR_H))
         .style(move |_| container::Style {
             background: Some(t.border_subtle.into()),
             ..Default::default()
