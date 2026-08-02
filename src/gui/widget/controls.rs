@@ -5,19 +5,19 @@ use iced::widget::{button, canvas, checkbox as iced_checkbox, container, pick_li
 use iced::{Alignment, Border, Color, Element, Length, Point, Rectangle, Shadow, Size};
 use iced_anim::animation_builder;
 
-use crate::gui::color::{mix, with_alpha};
+use crate::gui::color::{clay, mix, with_alpha};
 use crate::gui::icons;
 use crate::gui::theme::{self, Tokens};
 use crate::gui::widget::button::{Btn, BtnSize};
 
-/// Switch geometry, carried over verbatim from the `toggler` this used
-/// to wrap (`toggler` laid out `2 * size` by `size` and inset the knob
-/// by `round(padding_ratio * height)`), so the swap is pixel-neutral.
-const TRACK_W: f32 = 40.0;
+/// Design `.s-toggle`: 36×20 track, 16px thumb inset 2px (1px border +
+/// `left: 1px`), so it travels `36 - 2*2 - 16 = 16px`. The `toggler`
+/// this replaced was locked to `2 * size` by `size`, i.e. 40×20.
+const TRACK_W: f32 = 36.0;
 const TRACK_H: f32 = 20.0;
 const KNOB_PAD: f32 = 2.0;
 
-/// Pill switch 40×20, white knob 16, clay track when on. The knob
+/// Pill switch 36×20, white knob 16, clay track when on. The knob
 /// slides and the track cross-fades over `motion::FAST`.
 ///
 /// Hand-rolled rather than `iced::widget::toggler` because `toggler`
@@ -40,10 +40,13 @@ pub fn toggle<'a, M: Clone + 'a>(
     let press = enabled.then(|| on_toggle(!on));
 
     animation_builder(if on { 1.0f32 } else { 0.0 }, move |p| {
+        // Design `.s-toggle.on`: literal clay-400 fill / clay-500
+        // border, like `.btn.primary` — not the themed `action_primary`
+        // pair, which lightens to clay-300 under the dark theme.
         let pill = canvas(Switch {
             progress: p,
-            track: with_alpha(mix(t.bg_sunken, t.action_primary, p), alpha),
-            track_border: with_alpha(mix(t.border_default, t.action_primary_press, p), alpha),
+            track: with_alpha(mix(t.bg_sunken, clay::C400, p), alpha),
+            track_border: with_alpha(mix(t.border_default, clay::C500, p), alpha),
             knob: with_alpha(Color::WHITE, alpha),
         })
         .width(Length::Fixed(TRACK_W))
