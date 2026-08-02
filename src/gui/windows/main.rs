@@ -132,6 +132,8 @@ pub enum Msg {
     WindowResized(f32, f32),
     ColResizeStart(SortColumn),
     ColMoveStart(SortColumn),
+    /// Pointer left the window or focus was lost mid-drag.
+    DragCancelled,
     HeaderRightClick,
     ColToggle(SortColumn),
     // About overlay
@@ -350,7 +352,11 @@ pub struct Main {
     /// Header being dragged to a new position: `(column, press x)`.
     /// Until the pointer travels `COL_MOVE_SLOP` this is still a click,
     /// so the release sorts instead of reordering.
-    pub col_move: Option<(SortColumn, f32)>,
+    /// `(column, press x, grab offset)`. The grab offset — how far into
+    /// the cell the press landed — is captured once: recomputing it from
+    /// the live layout would move the ghost every time the preview
+    /// reorders underneath it.
+    pub col_move: Option<(SortColumn, f32, f32)>,
     pub col_handle_hover: Option<SortColumn>,
     /// Horizontal scroll offset of the table body (mirrored on every
     /// `TableScrolled`); corrects the resize guideline x.
@@ -872,7 +878,7 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             if let Some((col, start_x, start_w)) = m.col_drag {
                 m.columns.set_width(col as usize, start_w + (x - start_x));
             }
-            if let Some((col, press_x)) = m.col_move
+            if let Some((col, press_x, _)) = m.col_move
                 && (x - press_x).abs() >= COL_MOVE_SLOP
             {
                 drag_step(m, col);
@@ -883,7 +889,7 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             if m.col_drag.take().is_some() {
                 crate::gui::ui_prefs::save_columns(&m.columns);
             }
-            if let Some((col, press_x)) = m.col_move.take() {
+            if let Some((col, press_x, _)) = m.col_move.take() {
                 if (m.cursor.0 - press_x).abs() < COL_MOVE_SLOP {
                     // The pointer never left the header cell: a plain
                     // click, so sort (same toggle as `Msg::SetSort`).
@@ -905,8 +911,29 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             }
             Task::none()
         }
+        Msg::DragCancelled => {
+            // Abandon the move (the preview was never committed), but
+            // keep a resize — its width is already applied, and undoing
+            // it would be the surprise.
+            m.col_move = None;
+            m.col_preview = None;
+            m.col_handle_hover = None;
+            if m.col_drag.take().is_some() {
+                crate::gui::ui_prefs::save_columns(&m.columns);
+            }
+            Task::none()
+        }
         Msg::ColMoveStart(col) => {
-            m.col_move = Some((col, m.cursor.0));
+            let mut left = 0.0;
+            for c in visible_cols(m) {
+                if c == col {
+                    break;
+                }
+                left += m.columns.width(c as usize);
+            }
+            let cell_x = theme::size::SIDEBAR_W + left - m.table_scroll_x;
+            let grab = (m.cursor.0 - cell_x).clamp(0.0, m.columns.width(col as usize));
+            m.col_move = Some((col, m.cursor.0, grab));
             m.col_preview = Some(m.columns.order);
             // A grip left highlighted under the pointer would keep
             // glowing for the whole drag.
@@ -1638,6 +1665,12 @@ pub fn subscription(app: &App) -> Subscription<Msg> {
                 iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
                     iced::mouse::Button::Left,
                 )) => Some(Msg::MouseReleased),
+                // A drag can end without a release ever reaching us —
+                // the pointer leaves the window, or the compositor takes
+                // focus away mid-gesture. Without this the header keeps
+                // previewing an order the table never adopts.
+                iced::Event::Mouse(iced::mouse::Event::CursorLeft)
+                | iced::Event::Window(iced::window::Event::Unfocused) => Some(Msg::DragCancelled),
                 iced::Event::Window(iced::window::Event::Resized(size)) => {
                     Some(Msg::WindowResized(size.width, size.height))
                 }
@@ -2407,7 +2440,7 @@ fn header_cell<'a>(m: &Main, label: &'a str, col: SortColumn, width: f32) -> Ele
     // boundary (design `.col-resizer { right: -8px; width: 16px }`),
     // which flow layout cannot express. They are overlaid by
     // `header_grips` instead, so the cell owns its full width.
-    let dragged = matches!(m.col_move, Some((c, press_x)) if c == col
+    let dragged = matches!(m.col_move, Some((c, press_x, _)) if c == col
         && (m.cursor.0 - press_x).abs() >= COL_MOVE_SLOP);
     let t2 = m.tokens;
     mouse_area(
@@ -2447,7 +2480,7 @@ fn header_cell<'a>(m: &Main, label: &'a str, col: SortColumn, width: f32) -> Ele
 /// Positioned in window space (not the header's), hence a layer over
 /// the whole body rather than one inside the header's scrollable.
 fn header_ghost<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg> {
-    let Some((col, press_x)) = m.col_move else {
+    let Some((col, press_x, grab)) = m.col_move else {
         return base;
     };
     if (m.cursor.0 - press_x).abs() < COL_MOVE_SLOP {
@@ -2455,18 +2488,6 @@ fn header_ghost<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg> {
     }
     let t = m.tokens;
     let width = m.columns.width(col as usize);
-
-    // Keep the grab point under the cursor: the offset from the cell's
-    // left edge to where the press landed.
-    let mut left = 0.0;
-    for c in header_cols(m) {
-        if c == col {
-            break;
-        }
-        left += m.columns.width(c as usize);
-    }
-    let cell_x = theme::size::SIDEBAR_W + left - m.table_scroll_x;
-    let grab = (press_x - cell_x).clamp(0.0, width);
 
     let ghost = container(
         text(COL_LABELS[col as usize].to_uppercase())
@@ -2603,58 +2624,41 @@ const COL_MOVE_SLOP: f32 = 5.0;
 /// Opacity of the dragged-header ghost.
 const GHOST_ALPHA: f32 = 0.5;
 
-/// Nudge the dragged column one place when the pointer leaves the cell
-/// it currently occupies — the behaviour Chrome's tabs and the big data
-/// grids use. The table reorders live under the pointer, so there is no
-/// separate marker that can promise a move the release then declines.
+/// Slot the dragged column where the pointer is: it lands before the
+/// first remaining column whose midpoint the pointer has not yet passed.
 ///
-/// Swapping on the dragged cell's own edges (rather than a neighbour's
-/// midpoint) is what keeps it stable: after the swap the pointer sits
-/// inside the cell's new bounds, so it cannot immediately swap back.
+/// Two details make this stable and predictable. The midpoints come from
+/// the layout of the *other* columns — with the dragged one removed —
+/// so the choice cannot feed back into itself; comparing against the
+/// dragged cell's own edges oscillates whenever widths differ (carry a
+/// 58px column past a 420px one and the swap drops the pointer outside
+/// the cell's new bounds, which swaps it straight back). And the
+/// comparison uses the pointer rather than the ghost's centre, so the
+/// swap happens where the user is looking instead of half a column
+/// ahead of it.
 fn drag_step(m: &mut Main, col: SortColumn) {
     let x = m.cursor.0 - theme::size::SIDEBAR_W + m.table_scroll_x;
-    let cols = header_cols(m);
-    let Some(cur) = cols.iter().position(|c| *c == col) else {
-        return;
-    };
-    let left: f32 = cols
-        .iter()
-        .take(cur)
-        .map(|c| m.columns.width(*c as usize))
-        .sum();
-    let right = left + m.columns.width(col as usize);
-    if x < left && cur > 0 {
-        apply_col_drop(m, col, cur - 1);
-    } else if x > right && cur + 1 < cols.len() {
-        apply_col_drop(m, col, cur + 2);
-    }
-}
 
-/// Move `col` into the gap at `boundary`, keeping hidden columns where
-/// they are relative to their visible neighbours.
-fn apply_col_drop(m: &mut Main, col: SortColumn, boundary: usize) {
-    let vis = header_cols(m);
-    let Some(from) = vis.iter().position(|c| *c == col) else {
-        return;
-    };
-    // Removing the dragged column closes its own gap, so a boundary to
-    // its right shifts one place left.
-    let to = if boundary > from {
-        boundary - 1
-    } else {
-        boundary
-    };
-    if to == from {
-        return;
+    let others: Vec<SortColumn> = header_cols(m).into_iter().filter(|c| *c != col).collect();
+    let mut target = others.len();
+    let mut edge = 0.0;
+    for (i, c) in others.iter().enumerate() {
+        let w = m.columns.width(*c as usize);
+        if x < edge + w / 2.0 {
+            target = i;
+            break;
+        }
+        edge += w;
     }
-    let mut after = vis;
-    after.remove(from);
-    let anchor = after.get(to).copied();
 
+    // Rebuild the preview: the others in order, dragged spliced in at
+    // `target`. Hidden columns ride along with the visible neighbour
+    // they currently follow.
     let mut order: Vec<usize> = m.col_preview.unwrap_or(m.columns.order).to_vec();
     order.retain(|&i| COL_BY_INDEX[i] != col);
-    let at = anchor
-        .and_then(|a| order.iter().position(|&i| COL_BY_INDEX[i] == a))
+    let at = others
+        .get(target)
+        .and_then(|a| order.iter().position(|&i| COL_BY_INDEX[i] == *a))
         .unwrap_or(order.len());
     order.insert(at, col as usize);
     if let Ok(order) = <[usize; crate::gui::ui_prefs::COLS]>::try_from(order) {
