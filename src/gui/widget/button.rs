@@ -34,25 +34,32 @@ impl BtnSize {
             BtnSize::Lg => theme::control::H_LG,
         }
     }
+    /// Design `.btn` / `.btn.sm` / `.btn.lg` padding.
     fn pad_x(self) -> f32 {
         match self {
-            BtnSize::Sm => 10.0,
-            BtnSize::Md => 14.0,
-            BtnSize::Lg => 18.0,
-        }
-    }
-    fn font_size(self) -> f32 {
-        match self {
-            BtnSize::Sm => 12.0,
-            BtnSize::Md => 13.0,
+            BtnSize::Sm => 8.0,
+            BtnSize::Md => 12.0,
             BtnSize::Lg => 14.0,
         }
     }
-    fn icon_size(self) -> f32 {
+    /// Design `.btn`: 600 12px, 11px small, 12.5px large.
+    fn font_size(self) -> f32 {
         match self {
-            BtnSize::Sm => 16.0,
-            BtnSize::Md => 17.0,
-            BtnSize::Lg => 20.0,
+            BtnSize::Sm => 11.0,
+            BtnSize::Md => 12.0,
+            BtnSize::Lg => 12.5,
+        }
+    }
+    /// Design `.btn svg { width: 14px }` — one icon size for every
+    /// `.btn`; only the toolbar variant scales its glyph up to 16.
+    fn icon_size(self) -> f32 {
+        14.0
+    }
+    /// Design gap between glyph and label (`.btn.sm` tightens it).
+    fn gap(self) -> f32 {
+        match self {
+            BtnSize::Sm => 4.0,
+            _ => 6.0,
         }
     }
 }
@@ -361,15 +368,23 @@ impl<'a, M: Clone + 'a> Btn<'a, M> {
     pub fn view(self, t: &Tokens) -> Element<'a, M> {
         let t = *t;
         let height = self.size.height();
-        let font_size = self.font_size.unwrap_or(self.size.font_size());
-        let icon_size = self.icon_size.unwrap_or(self.size.icon_size());
+        // Design `.toolbar .tb-btn`: 600 12px label, 16px icon, 6/10
+        // padding — its own metrics, not `.btn`'s. Every other variant
+        // keeps the size scale.
+        let toolbar = self.variant == BtnVariant::Toolbar;
+        let font_size =
+            self.font_size
+                .unwrap_or(if toolbar { 12.0 } else { self.size.font_size() });
+        let icon_size =
+            self.icon_size
+                .unwrap_or(if toolbar { 16.0 } else { self.size.icon_size() });
         // Icon inherits the button's per-status `text_color`, exactly
         // like the label beside it — `Btn::style` already resolves it
         // through `fg(t, status)` for hover / press / disabled. The old
         // `icon_dyn` pairing recolored on the icon's OWN hover bounds,
         // so the glyph and its label disagreed whenever the pointer sat
         // on the label or the button's padding.
-        let mut parts = row![].spacing(6.0).align_y(Alignment::Center);
+        let mut parts = row![].spacing(self.size.gap()).align_y(Alignment::Center);
         if let Some(name) = self.icon {
             parts = parts.push(icons::icon_current(name, icon_size));
         }
@@ -383,6 +398,8 @@ impl<'a, M: Clone + 'a> Btn<'a, M> {
 
         let pad_x = if self.icon_only {
             ((height - icon_size) * 0.5).max(0.0)
+        } else if toolbar {
+            10.0
         } else {
             self.size.pad_x()
         };
