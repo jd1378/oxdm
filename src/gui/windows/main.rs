@@ -131,6 +131,7 @@ pub enum Msg {
     CursorMoved(f32, f32),
     MouseReleased,
     ColHandleHover(SortColumn, bool),
+    ColHeaderHover(SortColumn, bool),
     /// `(x, y, viewport height)` from the table's scrollable. The x
     /// keeps the header in step; the other two are what the virtual
     /// list needs to know which rows are on screen.
@@ -366,6 +367,9 @@ pub struct Main {
     /// preview reorders underneath it.
     pub col_grab: f32,
     pub col_handle_hover: Option<SortColumn>,
+    /// Header cell under the pointer — sortable headers tint on hover so
+    /// they read as clickable (design `tbody tr:hover` treatment).
+    pub col_header_hover: Option<SortColumn>,
     /// Horizontal scroll offset of the table body (mirrored on every
     /// `TableScrolled`); corrects the resize guideline x.
     pub table_scroll_x: f32,
@@ -433,6 +437,7 @@ impl Main {
             col_grab: 0.0,
             col_preview: None,
             col_handle_hover: None,
+            col_header_hover: None,
             table_scroll_x: 0.0,
             table_scroll_y: 0.0,
             table_viewport_h: 0.0,
@@ -967,6 +972,16 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                 m.col_handle_hover = Some(col);
             } else if m.col_handle_hover == Some(col) {
                 m.col_handle_hover = None;
+            }
+            Task::none()
+        }
+        Msg::ColHeaderHover(col, on) => {
+            // Guarded so the exit of the cell being left cannot clear the
+            // enter of the one being entered, whichever order they arrive.
+            if on {
+                m.col_header_hover = Some(col);
+            } else if m.col_header_hover == Some(col) {
+                m.col_header_hover = None;
             }
             Task::none()
         }
@@ -2450,6 +2465,13 @@ fn header_cell<'a>(m: &Main, label: &'a str, col: SortColumn, width: f32) -> Ele
     // `header_grips` instead, so the cell owns its full width.
     let dragged = matches!(m.col_move, Some((c, press_x, _)) if c == col
         && (m.cursor.0 - press_x).abs() >= COL_MOVE_SLOP);
+    // Hover tint stops at the grip: over a resizer the gesture is a
+    // resize, not a sort, and lighting the whole cell would promise the
+    // wrong thing.
+    let hovered = !dragged
+        && m.col_move.is_none()
+        && m.col_header_hover == Some(col)
+        && m.col_handle_hover.is_none();
     let t2 = m.tokens;
     mouse_area(
         container(col_header_sortable(
@@ -2466,7 +2488,13 @@ fn header_cell<'a>(m: &Main, label: &'a str, col: SortColumn, width: f32) -> Ele
         // The header being carried dims, so it is obvious which one the
         // drop marker belongs to.
         .style(move |_| container::Style {
-            background: dragged.then(|| t2.bg_sunken.into()),
+            background: if dragged {
+                Some(t2.bg_sunken.into())
+            } else if hovered {
+                Some(t2.row_hover_bg.into())
+            } else {
+                None
+            },
             ..Default::default()
         }),
     )
@@ -2478,6 +2506,8 @@ fn header_cell<'a>(m: &Main, label: &'a str, col: SortColumn, width: f32) -> Ele
     // gesture was a click (sort) or a drag (move).
     .on_press(Msg::ColMoveStart(col))
     .on_right_press(Msg::HeaderRightClick)
+    .on_enter(Msg::ColHeaderHover(col, true))
+    .on_exit(Msg::ColHeaderHover(col, false))
     .interaction(iced::mouse::Interaction::Pointer)
     .into()
 }
