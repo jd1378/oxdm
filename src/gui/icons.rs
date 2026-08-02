@@ -22,10 +22,14 @@ pub fn raw_svg(name: &str) -> Option<&'static [u8]> {
     ICONS.iter().find(|(n, _)| *n == name).map(|(_, b)| *b)
 }
 
-/// Lucide ships at stroke-width=2 (24px grid). At in-app sizes (14–20px)
-/// that reads heavy/mechanical; trim to ~1.75 for a lighter feel without
-/// losing presence.
-const STROKE_WIDTH: &str = "1.75";
+/// Lucide ships at stroke-width=2 on a 24px grid, which is also what the
+/// design specifies for every glyph (`styles.css`: `.btn svg`,
+/// `.tb-btn svg`, `.nav-item .icon svg`, …). The egui port thinned it to
+/// 1.75 for a lighter feel; that cost real ink once glyphs shrank to the
+/// design's sizes — at 16px a 1.75 stroke rasterises to 1.17px, so
+/// antialiasing renders it as a partly-transparent line. Keep the
+/// design's 2.
+const STROKE_WIDTH: &str = "2";
 
 fn handle(name: &str) -> svg::Handle {
     static CACHE: OnceLock<Mutex<HashMap<&'static str, svg::Handle>>> = OnceLock::new();
@@ -138,7 +142,16 @@ where
         _cursor: iced::advanced::mouse::Cursor,
         viewport: &iced::Rectangle,
     ) {
-        let bounds = layout.bounds();
+        // Round onto the pixel grid: layout centring routinely lands a
+        // glyph on a fractional origin, and a hairline stroke split
+        // across two pixel columns reads as washed-out rather than
+        // merely soft.
+        let b = layout.bounds();
+        let bounds = iced::Rectangle {
+            x: b.x.round(),
+            y: b.y.round(),
+            ..b
+        };
         renderer.draw_svg(
             iced::advanced::svg::Svg::new(self.handle.clone()).color(style.text_color),
             bounds,
