@@ -260,13 +260,12 @@ pub fn col_header_sortable<'a, M: Clone + 'a>(
     on_press: M,
 ) -> Element<'a, M> {
     let color = if active { t.fg_2 } else { t.fg_3 };
-    let mut content = row![
-        text(label.to_uppercase())
-            .font(theme::BODY_BOLD)
-            .size(11.0)
-            .color(color)
-            .wrapping(iced::widget::text::Wrapping::None),
-    ]
+    let mut content = row![crate::gui::widget::ellipsized(
+        label.to_uppercase(),
+        theme::BODY_BOLD,
+        11.0,
+        color,
+    )]
     .spacing(4.0)
     .align_y(Alignment::Center);
     if active {

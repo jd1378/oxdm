@@ -2642,16 +2642,8 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
         row![
             ext_pill,
             column![
-                text(name)
-                    .font(theme::BODY_BOLD)
-                    .size(13.0)
-                    .color(t.fg_1)
-                    .wrapping(iced::widget::text::Wrapping::None),
-                text(host)
-                    .font(theme::MONO)
-                    .size(10.0)
-                    .color(t.fg_3)
-                    .wrapping(iced::widget::text::Wrapping::None),
+                crate::gui::widget::ellipsized(name, theme::BODY_BOLD, 13.0, t.fg_1),
+                crate::gui::widget::ellipsized(host, theme::MONO, 10.0, t.fg_3),
             ]
             .spacing(2.0),
         ]
@@ -2666,12 +2658,12 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
 
     let total = c.and_then(|c| c.total);
     let size_cell = cell(
-        text(total.map(format_bytes).unwrap_or_else(|| "—".into()))
-            .font(theme::MONO)
-            .size(12.0)
-            .color(t.fg_2)
-            .wrapping(iced::widget::text::Wrapping::None)
-            .into(),
+        crate::gui::widget::ellipsized(
+            total.map(format_bytes).unwrap_or_else(|| "—".into()),
+            theme::MONO,
+            12.0,
+            t.fg_2,
+        ),
         Length::Fixed(m.columns.width(SortColumn::Size as usize)),
         Alignment::End, // design: numeric columns right-align
     );
@@ -2713,38 +2705,38 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
 
     let speed = c.map(|c| c.speed_bps).unwrap_or(0.0);
     let speed_cell = cell(
-        text(if phase == Phase::Downloading {
-            format_speed(speed)
-        } else {
-            "—".into()
-        })
-        .font(theme::MONO)
-        .size(12.0)
-        .color(t.fg_2)
-        .wrapping(iced::widget::text::Wrapping::None)
-        .into(),
+        crate::gui::widget::ellipsized(
+            if phase == Phase::Downloading {
+                format_speed(speed)
+            } else {
+                "—".into()
+            },
+            theme::MONO,
+            12.0,
+            t.fg_2,
+        ),
         Length::Fixed(m.columns.width(SortColumn::Speed as usize)),
         Alignment::End,
     );
 
     let eta_cell = cell(
-        text(eta_of(c).map(format_eta).unwrap_or_else(|| "—".into()))
-            .font(theme::MONO)
-            .size(12.0)
-            .color(t.fg_2)
-            .wrapping(iced::widget::text::Wrapping::None)
-            .into(),
+        crate::gui::widget::ellipsized(
+            eta_of(c).map(format_eta).unwrap_or_else(|| "—".into()),
+            theme::MONO,
+            12.0,
+            t.fg_2,
+        ),
         Length::Fixed(m.columns.width(SortColumn::Eta as usize)),
         Alignment::End,
     );
 
     let date_cell = cell(
-        text(format_short_date(&job.created_at))
-            .font(theme::MONO)
-            .size(11.0)
-            .color(t.fg_3)
-            .wrapping(iced::widget::text::Wrapping::None)
-            .into(),
+        crate::gui::widget::ellipsized(
+            format_short_date(&job.created_at),
+            theme::MONO,
+            11.0,
+            t.fg_3,
+        ),
         Length::Fixed(m.columns.width(SortColumn::Date as usize)),
         Alignment::End,
     );

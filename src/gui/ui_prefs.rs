@@ -20,8 +20,11 @@ pub struct ColumnsState {
     pub hidden: [bool; 6],
 }
 
-/// Minimum table column width (design `ResizableHeader` min 60px).
-pub const COL_MIN_W: f32 = 60.0;
+/// Minimum table column width. The design's `ResizableHeader` says 60px,
+/// but its headers are plain text; ours reserve room for the sort
+/// chevron and the ellipsis, so 60 left the shortest labels truncated on
+/// arrival.
+pub const COL_MIN_W: f32 = 75.0;
 
 impl Default for ColumnsState {
     fn default() -> Self {

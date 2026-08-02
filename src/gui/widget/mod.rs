@@ -3,6 +3,7 @@
 pub mod button;
 pub mod cards;
 pub mod controls;
+pub mod ellipsis;
 pub mod error_panel;
 pub mod inputs;
 pub mod pills;
@@ -16,6 +17,7 @@ pub use cards::{
 pub use controls::{
     checkbox, col_header, col_header_sortable, combo, number_stepper, segmented, toggle,
 };
+pub use ellipsis::ellipsized;
 pub use inputs::{FileInput, PasswordInput, TextInput, search_field};
 pub use pills::{
     ProgressTone, dot, eyebrow, field_label, inline_progress, pill_count, pill_progress,
