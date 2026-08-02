@@ -17,7 +17,8 @@ use crate::gui::ipc::DaemonSignal;
 use crate::gui::shot::Shot;
 use crate::gui::theme::{self, Tokens};
 use crate::gui::widget::{
-    Btn, BtnSize, FileInput, TextInput, combo, hairline, number_stepper, section_card, segmented,
+    Btn, BtnSize, FileInput, SECTION_GAP, TextInput, card, combo, hairline, number_stepper,
+    segmented, set_group, set_note, set_row, set_row_stack, set_section, set_section_danger,
     toggle,
 };
 use crate::ipc_local::Client;
@@ -998,24 +999,15 @@ fn pane<'a>(t: &Tokens, section: Section, body: Element<'a, Msg>) -> Element<'a,
         .into()
 }
 
-/// Boolean `.set-row`: label left (fills), `controls::toggle` right.
+/// Boolean `.set-row`: label (+ hint) left, `controls::toggle` right.
 fn toggle_row<'a>(
     t: &Tokens,
     label: &'a str,
+    hint: Option<&'a str>,
     on: bool,
     msg: impl Fn(bool) -> Msg + 'a,
 ) -> Element<'a, Msg> {
-    row![
-        text(label)
-            .font(theme::BODY)
-            .size(13.0)
-            .color(t.fg_1)
-            .width(Length::Fill),
-        toggle(t, on, true, msg),
-    ]
-    .spacing(theme::space::S2)
-    .align_y(Alignment::Center)
-    .into()
+    set_row(t, label, hint, toggle(t, on, true, msg))
 }
 
 /// Bounded numeric `.set-row` control: a `NumberStepper` whose value reads
@@ -1042,16 +1034,6 @@ fn label_input<'a>(t: &Tokens, label: &str, input: Element<'a, Msg>) -> Element<
         .into()
 }
 
-fn inline_input<'a>(t: &Tokens, label: &'a str, input: Element<'a, Msg>) -> Element<'a, Msg> {
-    row![
-        text(label).font(theme::BODY).size(13.0).color(t.fg_2),
-        input
-    ]
-    .spacing(theme::space::S2)
-    .align_y(Alignment::Center)
-    .into()
-}
-
 fn general_section(st: &State) -> Element<'_, Msg> {
     let t = &st.tokens;
     // Design `.s-seg` segments, extended with an Auto segment so every
@@ -1068,14 +1050,14 @@ fn general_section(st: &State) -> Element<'_, Msg> {
         t,
         Section::General,
         column![
-            section_card(
+            set_section(
                 t,
-                "moon",
                 "Appearance",
-                column![
-                    label_input(
+                vec![
+                    set_row(
                         t,
-                        "theme",
+                        "Theme",
+                        Some("Color palette for the whole app. Auto follows your system."),
                         segmented(
                             t,
                             &[
@@ -1099,59 +1081,56 @@ fn general_section(st: &State) -> Element<'_, Msg> {
                     ),
                     toggle_row(
                         t,
-                        "Reduce motion (skip animations)",
+                        "Reduce motion",
+                        Some("Skip animations and transitions across the app."),
                         st.s.reduce_motion,
                         Msg::ReduceMotion
                     ),
                 ]
-                .spacing(theme::space::S3)
-                .into()
             ),
-            section_card(
+            set_section(
                 t,
-                "save",
                 "Storage",
-                column![
-                    label_input(
+                vec![
+                    set_row_stack(
                         t,
-                        "default download folder",
+                        "Default download folder",
+                        Some("Where finished files land unless a category overrides it."),
                         FileInput::new(&st.download_dir)
                             .on_input(Msg::DownloadDir)
                             .on_browse(Msg::BrowseDownloadDir)
                             .view(t)
                     ),
-                    label_input(
+                    set_row_stack(
                         t,
-                        "in-flight cache folder (per-job .part + metadata)",
+                        "In-flight cache folder",
+                        Some("Holds per-job .part files and metadata until a download completes."),
                         FileInput::new(&st.work_dir).on_input(Msg::WorkDir).view(t)
                     ),
                 ]
-                .spacing(theme::space::S3)
-                .into()
             ),
-            section_card(
+            set_section(
                 t,
-                "settings",
-                "Misc",
-                column![
+                "Startup",
+                vec![
                     toggle_row(
                         t,
-                        "Start oxdm on system login",
+                        "Launch at login",
+                        Some("Start oxdm automatically when you log in."),
                         st.s.start_at_login,
                         Msg::StartAtLogin
                     ),
                     toggle_row(
                         t,
-                        "Start to tray (no main window on boot)",
+                        "Start to tray",
+                        Some("Boot without opening the main window."),
                         st.s.start_to_tray,
                         Msg::StartToTray
                     ),
                 ]
-                .spacing(theme::space::S3)
-                .into()
             ),
         ]
-        .spacing(theme::space::S3)
+        .spacing(SECTION_GAP)
         .into(),
     )
 }
@@ -1162,14 +1141,14 @@ fn downloads_section(st: &State) -> Element<'_, Msg> {
         t,
         Section::Downloads,
         column![
-            section_card(
+            set_section(
                 t,
-                "rotate-cw",
-                "Behavior",
-                column![
-                    inline_input(
+                "Retries",
+                vec![
+                    set_row(
                         t,
                         "Max retries",
+                        Some("How many times a failed segment is retried before the job fails."),
                         stepper(
                             t,
                             &st.max_retries,
@@ -1179,9 +1158,10 @@ fn downloads_section(st: &State) -> Element<'_, Msg> {
                             Msg::MaxRetries
                         )
                     ),
-                    inline_input(
+                    set_row(
                         t,
                         "Fixed retries before backoff",
+                        Some("Early attempts reuse the same wait; later ones back off."),
                         stepper(
                             t,
                             &st.fixed_retries,
@@ -1191,47 +1171,50 @@ fn downloads_section(st: &State) -> Element<'_, Msg> {
                             Msg::FixedRetries
                         )
                     ),
-                    inline_input(
+                    set_row(
                         t,
                         "Wait between retries",
+                        None,
                         TextInput::new(&st.retry_wait)
                             .width(Length::Fixed(120.0))
                             .on_input(Msg::RetryWait)
                             .view(t)
                     ),
-                    toggle_row(
-                        t,
-                        "Use server-provided last-modified time",
-                        st.s.use_server_time,
-                        Msg::UseServerTime
-                    ),
                 ]
-                .spacing(theme::space::S3)
-                .into()
             ),
-            section_card(
+            set_section(
                 t,
-                "trash-2",
+                "Files",
+                vec![toggle_row(
+                    t,
+                    "Use server-provided last-modified time",
+                    Some("Stamp saved files with the time the server reports."),
+                    st.s.use_server_time,
+                    Msg::UseServerTime
+                )]
+            ),
+            set_section(
+                t,
                 "Remove behavior",
-                column![
+                vec![
                     toggle_row(
                         t,
-                        "Confirm before removing incomplete downloads",
+                        "Confirm removing incomplete downloads",
+                        Some("Ask before discarding a job that has not finished."),
                         st.s.remove_confirm_incomplete,
                         Msg::ConfirmIncomplete
                     ),
                     toggle_row(
                         t,
-                        "Confirm before removing completed downloads",
+                        "Confirm removing completed downloads",
+                        Some("Ask before clearing a finished job from the list."),
                         st.s.remove_confirm_completed,
                         Msg::ConfirmCompleted
                     ),
                 ]
-                .spacing(theme::space::S3)
-                .into()
             ),
         ]
-        .spacing(theme::space::S3)
+        .spacing(SECTION_GAP)
         .into(),
     )
 }
@@ -1275,13 +1258,7 @@ fn cat_tint(t: &Tokens, cat: Category) -> iced::Color {
 /// (no extraction engine).
 fn categories_section(st: &State) -> Element<'_, Msg> {
     let t = &st.tokens;
-    let mut cards = column![
-        text("Categories auto-sort by extension. Expand a card to edit extensions, save folder and default queue.")
-            .font(theme::BODY)
-            .size(12.0)
-            .color(t.fg_3),
-    ]
-    .spacing(theme::space::S2);
+    let mut cards = column![].spacing(theme::space::S2);
 
     for (cat, exts) in &st.cat_exts {
         let cat = *cat;
@@ -1431,7 +1408,7 @@ fn categories_section(st: &State) -> Element<'_, Msg> {
     pane(
         t,
         Section::Categories,
-        section_card(t, "folder", "Categories", cards.into()),
+        set_group(t, "Categories", cards.into()),
     )
 }
 
@@ -1442,20 +1419,21 @@ fn network_section(st: &State) -> Element<'_, Msg> {
         t,
         Section::Network,
         column![
-            section_card(
+            set_section(
                 t,
-                "activity",
-                "Network",
-                column![
+                "Connections",
+                vec![
                     toggle_row(
                         t,
-                        "Determine connections per file automatically (by file size)",
+                        "Automatic connections per file",
+                        Some("Pick the segment count from the file size instead of a fixed value."),
                         st.s.max_connections.is_none(),
                         Msg::AutoConnections
                     ),
-                    inline_input(
+                    set_row(
                         t,
                         "Concurrent downloads",
+                        Some("How many jobs run at the same time."),
                         stepper(
                             t,
                             &st.concurrent,
@@ -1465,48 +1443,56 @@ fn network_section(st: &State) -> Element<'_, Msg> {
                             Msg::Concurrent
                         )
                     ),
-                    inline_input(
+                    set_row(
                         t,
-                        "Speed limit (B/s — blank for unlimited)",
+                        "Speed limit",
+                        Some("Bytes per second across all downloads. Blank means unlimited."),
                         TextInput::new(&st.speed_limit)
                             .width(Length::Fixed(140.0))
                             .on_input(Msg::SpeedLimit)
                             .view(t)
                     ),
-                    inline_input(
-                        t,
-                        "Proxy URL",
-                        TextInput::new(&st.proxy)
-                            .width(Length::Fill)
-                            .on_input(Msg::Proxy)
-                            .view(t)
-                    ),
-                    inline_input(
+                    set_row(
                         t,
                         "Connect timeout",
+                        Some("How long to wait for a server to answer before giving up."),
                         TextInput::new(&st.connect_timeout)
                             .width(Length::Fixed(100.0))
                             .on_input(Msg::ConnectTimeout)
                             .view(t)
                     ),
+                ]
+            ),
+            set_section(
+                t,
+                "Proxy & TLS",
+                vec![
+                    set_row_stack(
+                        t,
+                        "Proxy URL",
+                        Some("Routes every request. Blank connects directly."),
+                        TextInput::new(&st.proxy)
+                            .width(Length::Fill)
+                            .on_input(Msg::Proxy)
+                            .view(t)
+                    ),
                     toggle_row(
                         t,
-                        "Accept invalid TLS certificates (dangerous)",
+                        "Accept invalid TLS certificates",
+                        Some("Dangerous — disables certificate verification for every host."),
                         st.s.accept_invalid_certs,
                         Msg::InvalidCerts
                     ),
                 ]
-                .spacing(theme::space::S3)
-                .into()
             ),
-            section_card(
+            set_section(
                 t,
-                "user",
                 "Identity",
-                column![
-                    inline_input(
+                vec![
+                    set_row_stack(
                         t,
                         "Custom User-Agent",
+                        Some("Sent with every request. Blank uses the oxdm default."),
                         TextInput::new(&st.user_agent)
                             .width(Length::Fill)
                             .on_input(Msg::UserAgent)
@@ -1515,12 +1501,14 @@ fn network_section(st: &State) -> Element<'_, Msg> {
                     toggle_row(
                         t,
                         "Randomize User-Agent per request",
+                        None,
                         st.s.randomize_user_agent,
                         Msg::RandomUa
                     ),
-                    label_input(
+                    set_row_stack(
                         t,
-                        "custom headers",
+                        "Custom headers",
+                        Some("One Name: value pair per line."),
                         text_editor::TextEditor::new(&st.custom_headers)
                             .font(theme::MONO)
                             .size(12.0)
@@ -1540,11 +1528,9 @@ fn network_section(st: &State) -> Element<'_, Msg> {
                             .into()
                     ),
                 ]
-                .spacing(theme::space::S3)
-                .into()
             ),
         ]
-        .spacing(theme::space::S3)
+        .spacing(SECTION_GAP)
         .into(),
     )
 }
@@ -1559,22 +1545,23 @@ fn browser_section(st: &State) -> Element<'_, Msg> {
     pane(
         t,
         Section::Browser,
-        section_card(
+        set_section(
             t,
-            "puzzle",
             "Browser integration",
-            column![
-                inline_input(
+            vec![
+                set_row(
                     t,
                     "IPC port",
+                    Some("Local port the browser extension connects to."),
                     TextInput::new(&st.ipc_port)
                         .width(Length::Fixed(100.0))
                         .on_input(Msg::IpcPort)
-                        .view(t)
+                        .view(t),
                 ),
-                label_input(
+                set_row_stack(
                     t,
-                    "pairing code",
+                    "Pairing code",
+                    Some("Paste this into the extension to authorize it."),
                     row![
                         container(
                             text(st.s.ext_token.clone())
@@ -1608,22 +1595,21 @@ fn browser_section(st: &State) -> Element<'_, Msg> {
                     ]
                     .spacing(theme::space::S2)
                     .align_y(Alignment::Center)
-                    .into()
+                    .into(),
                 ),
-                label_input(
+                set_row_stack(
                     t,
-                    "conflict while dialog hidden",
+                    "Conflict while the dialog is hidden",
+                    Some("What happens when a capture arrives with no visible window."),
                     combo(
                         t,
                         vec!["auto_popup".to_owned(), "notify_and_park".to_owned()],
                         Some(conflict.to_owned()),
                         Msg::ConflictHidden,
                         Length::Fill,
-                    )
+                    ),
                 ),
-            ]
-            .spacing(theme::space::S3)
-            .into(),
+            ],
         ),
     )
 }
@@ -1633,24 +1619,23 @@ fn notifications_section(st: &State) -> Element<'_, Msg> {
     pane(
         t,
         Section::Notifications,
-        section_card(
-        t,
-        "bell",
-        "Notifications",
-        column![
-            toggle_row(
-                t,
-                "Show download-complete dialog when a download finishes",
-                st.s.show_complete_dialog,
-                Msg::ShowCompleteDialog
-            ),
-            text("System notifications follow your queue's on-finish hooks (see Queues & scheduling).")
-                .font(theme::BODY)
-                .size(11.0)
-                .color(t.fg_3),
-        ]
-        .spacing(theme::space::S2)
-        .into(),
+        set_section(
+            t,
+            "Notifications",
+            vec![
+                toggle_row(
+                    t,
+                    "Show download-complete dialog",
+                    Some("Opens a summary window when a download finishes."),
+                    st.s.show_complete_dialog,
+                    Msg::ShowCompleteDialog,
+                ),
+                set_note(
+                    t,
+                    "System notifications follow your queue's on-finish hooks (see Queues & \
+                     scheduling).",
+                ),
+            ],
         ),
     )
 }
@@ -1662,13 +1647,13 @@ fn advanced_section(st: &State) -> Element<'_, Msg> {
         t,
         Section::Advanced,
         column![
-            section_card(
+            set_section(
                 t,
-                "palette",
                 "Theme overrides",
-                label_input(
+                vec![set_row_stack(
                     t,
-                    "overrides — accent / bg / text (one per line)",
+                    "Overrides",
+                    Some("One accent / bg / text override per line."),
                     text_editor::TextEditor::new(&st.theme_overrides)
                         .font(theme::MONO)
                         .size(12.0)
@@ -1686,24 +1671,24 @@ fn advanced_section(st: &State) -> Element<'_, Msg> {
                             selection: t3.selection_bg(),
                         })
                         .into()
-                )
+                )]
             ),
-            section_card(
+            set_section(
                 t,
-                "cloud-upload",
                 "Updates",
-                inline_input(
+                vec![set_row_stack(
                     t,
                     "Update feed URL",
+                    Some("Checked for new oxdm releases."),
                     TextInput::new(&st.update_feed)
                         .width(Length::Fill)
                         .on_input(Msg::UpdateFeed)
                         .view(t)
-                )
+                )]
             ),
             danger_section(st),
         ]
-        .spacing(theme::space::S3)
+        .spacing(SECTION_GAP)
         .into(),
     )
 }
@@ -1712,49 +1697,23 @@ fn advanced_section(st: &State) -> Element<'_, Msg> {
 /// tokens follow the download-window completion warning).
 fn danger_section(st: &State) -> Element<'_, Msg> {
     let t = &st.tokens;
-    let t2 = *t;
-    container(
-        column![
-            row![
-                icons::icon("triangle-alert", 14.0, t.status_danger),
-                text("Danger zone")
-                    .font(theme::BODY_BOLD)
-                    .size(13.0)
-                    .color(t.status_danger),
-            ]
-            .spacing(theme::space::S2)
-            .align_y(Alignment::Center),
-            text(
-                "Reset oxdm backs up and clears the database — all jobs, queues and \
-                 settings. Downloaded files stay on disk. The daemon exits and must be \
-                 relaunched.",
-            )
-            .font(theme::BODY)
-            .size(12.0)
-            .color(t.fg_2),
-            row![
-                iced::widget::Space::new().width(Length::Fill),
-                Btn::new("Reset oxdm…")
-                    .danger_filled()
-                    .icon("rotate-cw")
-                    .on_press(Msg::ResetDbAsk)
-                    .view(t),
-            ],
-        ]
-        .spacing(theme::space::S3),
+    set_section_danger(
+        t,
+        "Danger zone",
+        vec![set_row(
+            t,
+            "Reset oxdm",
+            Some(
+                "Backs up and clears the database — all jobs, queues and settings. \
+                 Downloaded files stay on disk. The daemon exits and must be relaunched.",
+            ),
+            Btn::new("Reset oxdm…")
+                .danger_filled()
+                .icon("rotate-cw")
+                .on_press(Msg::ResetDbAsk)
+                .view(t),
+        )],
     )
-    .width(Length::Fill)
-    .padding(theme::space::S4)
-    .style(move |_| container::Style {
-        background: Some(t2.status_danger_bg.into()),
-        border: iced::Border {
-            color: t2.status_danger,
-            width: 1.0,
-            radius: theme::surface::RADIUS.into(),
-        },
-        ..Default::default()
-    })
-    .into()
 }
 
 /// Confirm overlay for the danger Reset (pattern: queues delete_overlay;
@@ -1840,23 +1799,28 @@ fn about_section(st: &State) -> Element<'_, Msg> {
     pane(
         t,
         Section::About,
-        section_card(
+        set_group(
             t,
-            "info",
             "About oxdm",
-            column![
-                text("oxdm").font(theme::DISPLAY).size(22.0).color(t.fg_1),
-                text(format!("Version {}", env!("CARGO_PKG_VERSION")))
-                    .font(theme::MONO)
-                    .size(11.0)
-                    .color(t.fg_2),
-                text("A focused, native download manager.")
-                    .font(theme::BODY)
-                    .size(12.0)
-                    .color(t.fg_3),
-            ]
-            .spacing(theme::space::S1)
-            .into(),
+            card(
+                t,
+                theme::space::S5,
+                column![
+                    text("oxdm").font(theme::DISPLAY).size(22.0).color(t.fg_1),
+                    text(format!("Version {}", env!("CARGO_PKG_VERSION")))
+                        .font(theme::MONO)
+                        .size(11.0)
+                        .color(t.fg_2),
+                    text("A focused, native download manager.")
+                        .font(theme::BODY)
+                        .size(12.0)
+                        .color(t.fg_3),
+                ]
+                .spacing(theme::space::S1)
+                .align_x(Alignment::Center)
+                .width(Length::Fill)
+                .into(),
+            ),
         ),
     )
 }

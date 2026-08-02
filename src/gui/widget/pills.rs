@@ -262,6 +262,6 @@ pub fn field_label<'a, M: 'a>(t: &Tokens, label: &str) -> Element<'a, M> {
 /// letter-spacing; interleave U+2009 (thin space) sparingly? No —
 /// that breaks copy/selection. Plain uppercase reads close enough at
 /// 10–11px with Jakarta SemiBold.
-fn spaced_upper(s: &str) -> String {
+pub(crate) fn spaced_upper(s: &str) -> String {
     s.to_uppercase()
 }
