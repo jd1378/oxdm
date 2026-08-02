@@ -16,6 +16,8 @@ use crate::gui::widget::button::{Btn, BtnSize};
 const TRACK_W: f32 = 36.0;
 const TRACK_H: f32 = 20.0;
 const KNOB_PAD: f32 = 2.0;
+/// `box-shadow: 0 1px …` — the thumb's shadow sits one pixel below it.
+const SHADOW_OFFSET_Y: f32 = 1.0;
 
 /// Pill switch 36×20, white knob 16, clay track when on. The knob
 /// slides and the track cross-fades over `motion::FAST`.
@@ -111,16 +113,23 @@ impl<M> canvas::Program<M> for Switch {
 
         let knob = size.height - 2.0 * KNOB_PAD;
         let travel = size.width - size.height;
-        frame.fill(
-            &canvas::Path::circle(
-                Point::new(
-                    KNOB_PAD + knob / 2.0 + self.progress * travel,
-                    size.height / 2.0,
-                ),
-                knob / 2.0,
-            ),
-            self.knob,
+        let center = Point::new(
+            KNOB_PAD + knob / 2.0 + self.progress * travel,
+            size.height / 2.0,
         );
+
+        // Design `.s-toggle .thumb`: `box-shadow: 0 1px 2px rgba(0,0,0,.25)`.
+        // `canvas::Frame` has no blur, so this is the knob re-filled one
+        // pixel lower — the opaque thumb then covers all of it but a 1px
+        // crescent along the bottom. The literal 2px blur radius reads as
+        // a smudge at this size; the crescent is the part that carries
+        // the depth cue.
+        frame.fill(
+            &canvas::Path::circle(Point::new(center.x, center.y + SHADOW_OFFSET_Y), knob / 2.0),
+            with_alpha(Color::BLACK, 0.25 * self.knob.a),
+        );
+
+        frame.fill(&canvas::Path::circle(center, knob / 2.0), self.knob);
 
         vec![frame.into_geometry()]
     }
