@@ -21,7 +21,7 @@ pub use controls::{
 pub use ellipsis::ellipsized;
 pub use inputs::{FileInput, PasswordInput, TextInput, search_field};
 pub use pills::{
-    ProgressTone, dot, eyebrow, field_label, inline_progress, pill_count, pill_progress,
+    ProgressTone, chip, dot, eyebrow, field_label, inline_progress, pill_count, pill_progress,
     status_dot, swatch,
 };
 pub use settings::{

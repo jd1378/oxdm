@@ -1650,24 +1650,7 @@ fn checksums_tab(st: &State) -> Element<'_, Msg> {
         .spacing(theme::space::S1)
         .align_y(Alignment::Center);
         for algo in Algo::ALL {
-            addrow = addrow.push(
-                container(
-                    text(algo.label())
-                        .font(theme::MONO)
-                        .size(10.0)
-                        .color(t.fg_3),
-                )
-                .padding([2.0, 6.0])
-                .style(move |_| container::Style {
-                    background: Some(t2.bg_sunken.into()),
-                    border: iced::Border {
-                        color: t2.border_subtle,
-                        width: 1.0,
-                        radius: theme::radius::XS.into(),
-                    },
-                    ..Default::default()
-                }),
-            );
+            addrow = addrow.push(crate::gui::widget::chip(t, algo.label()));
         }
         col = col.push(addrow);
     }

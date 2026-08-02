@@ -7,6 +7,39 @@ use iced::{Alignment, Border, Color, Element, Length, Point, Rectangle, Size};
 use crate::gui::color::with_alpha;
 use crate::gui::theme::{self, Tokens};
 
+/// Label chip (design `.prop-cs-algochip`): mono label on a sunken,
+/// 1px-bordered rounded rect. Used for read-only enumerations such as
+/// the supported-checksum list.
+pub fn chip<'a, M: 'a>(t: &Tokens, label: impl Into<String>) -> Element<'a, M> {
+    let t = *t;
+    container(
+        text(label.into())
+            .font(theme::MONO)
+            .size(CHIP_TEXT)
+            // Pin the line box to the font size. iced's default line
+            // height reserves descender room that an all-caps label
+            // never uses, so the glyphs sit above the chip's centre.
+            .line_height(text::LineHeight::Absolute(CHIP_TEXT.into()))
+            .color(t.fg_3),
+    )
+    .padding([CHIP_PAD_Y, CHIP_PAD_X])
+    .style(move |_| container::Style {
+        background: Some(t.bg_sunken.into()),
+        border: Border {
+            color: t.border_subtle,
+            width: 1.0,
+            radius: theme::radius::XS.into(),
+        },
+        snap: true,
+        ..Default::default()
+    })
+    .into()
+}
+
+const CHIP_TEXT: f32 = 10.0;
+const CHIP_PAD_Y: f32 = 2.0;
+const CHIP_PAD_X: f32 = 6.0;
+
 /// Count badge: 16px pill, mono(10), 6px x-pad, min width 16.
 pub fn pill_count<'a, M: 'a>(n: u64, fg: Color, bg: Color) -> Element<'a, M> {
     container(text(n.to_string()).font(theme::MONO).size(10.0).color(fg))
