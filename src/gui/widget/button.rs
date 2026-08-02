@@ -57,6 +57,16 @@ impl BtnSize {
     }
 }
 
+/// `.radio-pill .on` colours — `(bg, fg, border)`. tokens.css remaps
+/// clay-50/200/700 to warm dark tints under the dark theme so the
+/// active pill doesn't punch a bright hole.
+fn pill_on(t: &Tokens) -> (Color, Color, Color) {
+    match t.theme {
+        theme::ResolvedTheme::Dark => (clay::DARK_C50, clay::DARK_C700, clay::DARK_C200),
+        _ => (clay::C50, clay::C700, clay::C200),
+    }
+}
+
 fn darken(c: Color, t: f32) -> Color {
     mix(c, Color::BLACK, t)
 }
@@ -70,6 +80,10 @@ pub struct Btn<'a, M> {
     enabled: bool,
     selected: bool,
     accent: bool,
+    /// Render the *selected* state as the design's `.radio-pill .on`
+    /// clay tint instead of the generic sunken + brand border. Used by
+    /// `segmented`, so a one-of-N row reads the same everywhere.
+    pill: bool,
     /// Ghost/Toolbar button that escalates to the danger tone (rust
     /// text + rust-50 bg) on hover only — borderless/neutral at idle.
     /// Mirrors design `.tb-btn.danger`. Ignored by other variants.
@@ -92,6 +106,7 @@ impl<'a, M: Clone + 'a> Btn<'a, M> {
             enabled: true,
             selected: false,
             accent: false,
+            pill: false,
             danger_hover: false,
             min_width: None,
             fill_width: false,
@@ -150,6 +165,10 @@ impl<'a, M: Clone + 'a> Btn<'a, M> {
         self.accent = accent;
         self
     }
+    pub fn pill(mut self) -> Self {
+        self.pill = true;
+        self
+    }
     /// Borderless ghost/toolbar button that turns rust on hover only
     /// (design `.tb-btn.danger`). Apply on a `.toolbar()`/`.ghost()` button.
     pub fn danger_hover(mut self) -> Self {
@@ -200,7 +219,11 @@ impl<'a, M: Clone + 'a> Btn<'a, M> {
             BtnVariant::Primary => t.action_primary_fg,
             BtnVariant::Secondary => {
                 if self.selected {
-                    t.action_primary
+                    if self.pill {
+                        pill_on(t).1
+                    } else {
+                        t.action_primary
+                    }
                 } else {
                     t.fg_1
                 }
@@ -244,7 +267,12 @@ impl<'a, M: Clone + 'a> Btn<'a, M> {
             }
             BtnVariant::Secondary => {
                 if self.selected {
-                    (Some(t.bg_sunken), Some(t.border_brand))
+                    if self.pill {
+                        let (bg, _, border) = pill_on(t);
+                        (Some(bg), Some(border))
+                    } else {
+                        (Some(t.bg_sunken), Some(t.border_brand))
+                    }
                 } else {
                     let bg = match status {
                         Hovered => mix(t.bg_raised, t.bg_sunken, 0.5),
@@ -365,6 +393,7 @@ impl<'a, M: Clone + 'a> Btn<'a, M> {
         let enabled = self.enabled;
         let selected = self.selected;
         let accent = self.accent;
+        let pill = self.pill;
         let danger_hover = self.danger_hover;
         let style_proto = Btn::<M> {
             label: String::new(),
@@ -375,6 +404,7 @@ impl<'a, M: Clone + 'a> Btn<'a, M> {
             enabled,
             selected,
             accent,
+            pill,
             danger_hover,
             min_width: None,
             fill_width: false,

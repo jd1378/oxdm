@@ -185,6 +185,7 @@ pub fn segmented<'a, M: Clone + 'a>(
     for (i, (label, icon)) in options.iter().enumerate() {
         let mut b = Btn::new(*label)
             .secondary()
+            .pill()
             .size(size)
             .selected(i == selected)
             .on_press(msg(i));
