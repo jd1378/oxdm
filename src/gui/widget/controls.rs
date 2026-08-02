@@ -1,15 +1,32 @@
 //! Toggle (pill switch), checkbox, combo (pick_list), segmented
 //! group, number stepper — styled to the design system.
 
-use iced::widget::{checkbox as iced_checkbox, container, pick_list, row, text, toggler};
-use iced::{Alignment, Border, Color, Element, Length};
+use iced::widget::{button, canvas, checkbox as iced_checkbox, container, pick_list, row, text};
+use iced::{Alignment, Border, Color, Element, Length, Point, Rectangle, Shadow, Size};
+use iced_anim::animation_builder;
 
-use crate::gui::color::with_alpha;
+use crate::gui::color::{mix, with_alpha};
 use crate::gui::icons;
 use crate::gui::theme::{self, Tokens};
 use crate::gui::widget::button::{Btn, BtnSize};
 
-/// Pill switch 36×20, white knob 16, clay track when on.
+/// Switch geometry, carried over verbatim from the `toggler` this used
+/// to wrap (`toggler` laid out `2 * size` by `size` and inset the knob
+/// by `round(padding_ratio * height)`), so the swap is pixel-neutral.
+const TRACK_W: f32 = 40.0;
+const TRACK_H: f32 = 20.0;
+const KNOB_PAD: f32 = 2.0;
+
+/// Pill switch 40×20, white knob 16, clay track when on. The knob
+/// slides and the track cross-fades over `motion::FAST`.
+///
+/// Hand-rolled rather than `iced::widget::toggler` because `toggler`
+/// draws the knob at one of two fixed offsets keyed off `is_toggled`,
+/// with no interpolation hook. Drawn on a `canvas` rather than as
+/// nested containers so the throw is a *paint* change: a laid-out knob
+/// offset would force `AnimationBuilder::animates_layout`, and iced
+/// warns ("More than 3 consecutive RedrawRequested events produced
+/// layout invalidation") once per frame for the whole throw.
 pub fn toggle<'a, M: Clone + 'a>(
     t: &Tokens,
     on: bool,
@@ -17,30 +34,93 @@ pub fn toggle<'a, M: Clone + 'a>(
     on_toggle: impl Fn(bool) -> M + 'a,
 ) -> Element<'a, M> {
     let t = *t;
-    let mut tg = toggler(on).size(20.0).style(move |_th, status| {
-        let disabled = matches!(status, toggler::Status::Disabled { .. });
-        let alpha = if disabled { 0.5 } else { 1.0 };
-        let (track, track_border) = if on {
-            (t.action_primary, t.action_primary_press)
-        } else {
-            (t.bg_sunken, t.border_default)
-        };
-        toggler::Style {
-            background: with_alpha(track, alpha).into(),
-            background_border_width: 1.0,
-            background_border_color: with_alpha(track_border, alpha),
-            foreground: with_alpha(Color::WHITE, alpha).into(),
-            foreground_border_width: 0.0,
-            foreground_border_color: Color::TRANSPARENT,
-            text_color: None,
-            border_radius: None,
-            padding_ratio: 2.0 / 20.0,
-        }
-    });
-    if enabled {
-        tg = tg.on_toggle(on_toggle);
+    let alpha = if enabled { 1.0 } else { 0.5 };
+    // Resolved once: the builder closure re-runs per animation frame,
+    // and `on_toggle` is only `Fn(bool) -> M`, not `Copy`.
+    let press = enabled.then(|| on_toggle(!on));
+
+    animation_builder(if on { 1.0f32 } else { 0.0 }, move |p| {
+        let pill = canvas(Switch {
+            progress: p,
+            track: with_alpha(mix(t.bg_sunken, t.action_primary, p), alpha),
+            track_border: with_alpha(mix(t.border_default, t.action_primary_press, p), alpha),
+            knob: with_alpha(Color::WHITE, alpha),
+        })
+        .width(Length::Fixed(TRACK_W))
+        .height(Length::Fixed(TRACK_H));
+
+        button(pill)
+            .padding(0)
+            .on_press_maybe(press.clone())
+            .style(|_th, _status| button::Style {
+                background: None,
+                text_color: Color::TRANSPARENT,
+                border: Border::default(),
+                shadow: Shadow::default(),
+                snap: true,
+            })
+            .into()
+    })
+    .animation(theme::motion::control())
+    .disabled(t.reduce_motion)
+    .into()
+}
+
+/// The switch face at a given throw `progress` in `[0, 1]`.
+struct Switch {
+    progress: f32,
+    track: Color,
+    track_border: Color,
+    knob: Color,
+}
+
+impl<M> canvas::Program<M> for Switch {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &iced::Renderer,
+        _theme: &iced::Theme,
+        bounds: Rectangle,
+        _cursor: iced::mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let size = bounds.size();
+        let radius = size.height / 2.0;
+
+        frame.fill(
+            &canvas::Path::rounded_rectangle(Point::ORIGIN, size, radius.into()),
+            self.track,
+        );
+        // Inset by half the stroke width so the 1px border lands inside
+        // the track instead of straddling its edge.
+        frame.stroke(
+            &canvas::Path::rounded_rectangle(
+                Point::new(0.5, 0.5),
+                Size::new(size.width - 1.0, size.height - 1.0),
+                (radius - 0.5).into(),
+            ),
+            canvas::Stroke::default()
+                .with_color(self.track_border)
+                .with_width(1.0),
+        );
+
+        let knob = size.height - 2.0 * KNOB_PAD;
+        let travel = size.width - size.height;
+        frame.fill(
+            &canvas::Path::circle(
+                Point::new(
+                    KNOB_PAD + knob / 2.0 + self.progress * travel,
+                    size.height / 2.0,
+                ),
+                knob / 2.0,
+            ),
+            self.knob,
+        );
+
+        vec![frame.into_geometry()]
     }
-    tg.into()
 }
 
 /// 18px checkbox, radius 4, clay fill when checked, white tick.

@@ -47,6 +47,11 @@ single-instance = "0.3"
 image = { version = "0.25", default-features = false, features = ["png"] }
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
 iced = { version = "0.14", default-features = false, features = ["tiny-skia", "wayland", "x11", "tokio", "canvas", "svg", "image", "advanced"] }
+# Pinned exactly: 0.3.1 is the audited revision (source reviewed — no
+# `unsafe`, no I/O, no build script; only deps are `iced_core` /
+# `iced_widget`, which are already in-tree via `iced`). Re-audit before
+# bumping. Transitive versions are pinned by Cargo.lock.
+iced_anim = { version = "=0.3.1", default-features = false, features = ["widgets"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"

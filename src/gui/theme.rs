@@ -119,6 +119,14 @@ where
 pub struct Tokens {
     pub theme: ResolvedTheme,
 
+    /// Mirror of `Settings.reduce_motion` (W6). Not a design token, but
+    /// it rides with them: it gates rendering exactly like one, and
+    /// `Tokens` is already the bundle every widget helper receives, so
+    /// the alternative is a second `bool` on 30+ call sites.
+    /// `Tokens::light/dark/warm` default it to `false`; the real value
+    /// arrives via [`Tokens::from_settings`].
+    pub reduce_motion: bool,
+
     pub fg_1: Color,
     pub fg_2: Color,
     pub fg_3: Color,
@@ -184,6 +192,7 @@ impl Tokens {
     pub fn light() -> Self {
         Self {
             theme: ResolvedTheme::Light,
+            reduce_motion: false,
             fg_1: gray::G800,
             fg_2: gray::G500,
             fg_3: gray::G400,
@@ -239,6 +248,7 @@ impl Tokens {
     pub fn warm() -> Self {
         Self {
             theme: ResolvedTheme::Warm,
+            reduce_motion: false,
             fg_1: earth::E800,
             fg_2: earth::E600,
             fg_3: hex(0x8A8278),
@@ -295,6 +305,7 @@ impl Tokens {
         // dark warm tints, clay-700 inverts to light clay for paired text.
         Self {
             theme: ResolvedTheme::Dark,
+            reduce_motion: false,
             fg_1: hex(0xF0EEE8),
             fg_2: hex(0xB8B5AC),
             fg_3: hex(0x8A8780),
@@ -361,6 +372,7 @@ impl Tokens {
             ResolvedTheme::Dark => Tokens::dark(),
             ResolvedTheme::Warm => Tokens::warm(),
         };
+        t.reduce_motion = settings.reduce_motion;
         if let Some(accent) = settings.theme_overrides.get("accent")
             && let Some(c) = parse_color(accent)
         {
@@ -512,6 +524,25 @@ pub mod motion {
     pub const FAST: f32 = 0.14;
     pub const BASE: f32 = 0.22;
     pub const SLOW: f32 = 0.36;
+
+    /// The house easing `--ease-out-soft: cubic-bezier(0.22, 1, 0.36, 1)`
+    /// as an `iced_anim` curve. `Bezier::new` precomputes its polynomial
+    /// coefficients and is not `const`, hence a function.
+    pub fn ease_out_soft() -> iced_anim::transition::Curve {
+        iced_anim::transition::Curve::Bezier(iced_anim::transition::bezier::Bezier::new(
+            0.22, 1.0, 0.36, 1.0,
+        ))
+    }
+
+    /// The shared control transition: house easing over [`FAST`],
+    /// reversible so a pointer that leaves mid-fade — or a switch thrown
+    /// twice in a row — runs the curve backwards instead of restarting
+    /// from the value it happened to be at.
+    pub fn control() -> iced_anim::Easing {
+        iced_anim::Easing::new(ease_out_soft())
+            .with_duration(std::time::Duration::from_secs_f32(FAST))
+            .reversible(true)
+    }
 
     /// Approximation of CSS `cubic-bezier(0.22, 1, 0.36, 1)`. Input
     /// clamped to `[0, 1]`. Equivalent to `1 - (1 - t)^3`.

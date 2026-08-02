@@ -4,6 +4,7 @@
 
 use iced::widget::{button, container, row, text};
 use iced::{Alignment, Border, Color, Element, Length, Shadow};
+use iced_anim::widget::button as anim_button;
 
 use crate::gui::color::{clay, mix};
 use crate::gui::icons;
@@ -462,6 +463,26 @@ impl<'a, M: Clone + 'a> Btn<'a, M> {
             Some(w) => Length::Fixed(w),
             None => width,
         };
+
+        // The filled variants are the only ones whose idle background is
+        // `Some(..)` in every status, which is what `iced_anim` needs to
+        // interpolate: it treats `None -> Some(color)` as a variant change
+        // and snaps. Ghost/toolbar/danger idle to a transparent (`None`)
+        // fill, so animating them would only add a widget indirection for
+        // a transition that still pops.
+        let animated = matches!(self.variant, BtnVariant::Primary) && !t.reduce_motion;
+        if animated {
+            let mut btn = anim_button(content)
+                .height(Length::Fixed(height))
+                .width(width)
+                .padding([0.0, pad_x])
+                .style(move |_theme, status| style_proto.style(&t, status))
+                .animation(theme::motion::control());
+            if self.enabled {
+                btn = btn.on_press_maybe(self.on_press);
+            }
+            return btn.into();
+        }
 
         let mut btn = button(content)
             .height(Length::Fixed(height))
