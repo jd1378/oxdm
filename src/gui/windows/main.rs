@@ -177,6 +177,8 @@ pub enum Msg {
     /// arrives before the old row's exit. An id-less exit would clear
     /// the highlight that had just been set.
     RowUnhovered(JobId),
+    SectionHovered(u8),
+    SectionUnhovered(u8),
     // Pulse clock for the queue live-dot (gated on !reduce_motion)
     AnimTick,
     // Browser-extensions overlay store link
@@ -305,6 +307,10 @@ pub struct Main {
     pub collapsed_sections: HashSet<u8>,
     pub maximized: bool,
     pub context_menu: Option<JobId>,
+    /// Sidebar section head under the pointer. The design only reveals
+    /// the section's "+" on hover (`.sec-head:hover .add { opacity: 1 }`),
+    /// and a view cannot read hover status, so track it.
+    pub hovered_section: Option<u8>,
     /// Row under the pointer, for the design's `tr:hover` background.
     /// iced containers have no hover status, so the table row tracks it
     /// explicitly via `mouse_area` enter/exit.
@@ -369,6 +375,7 @@ impl Main {
             collapsed_sections: HashSet::new(),
             maximized: false,
             context_menu: None,
+            hovered_section: None,
             hovered_row: None,
             overlay: Overlay::None,
             about: AboutState::default(),
@@ -772,6 +779,18 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             } else {
                 act(async move { client.open_download_window(id).await })
             }
+        }
+        Msg::SectionHovered(idx) => {
+            m.hovered_section = Some(idx);
+            Task::none()
+        }
+        Msg::SectionUnhovered(idx) => {
+            // Same ownership rule as the table rows: a newer enter for
+            // another head must win regardless of message order.
+            if m.hovered_section == Some(idx) {
+                m.hovered_section = None;
+            }
+            Task::none()
         }
         Msg::RowHovered(id) => {
             m.hovered_row = Some(id);
@@ -1856,6 +1875,9 @@ fn sidebar_row<'a>(
     count: Option<u64>,
     active: bool,
     height: f32,
+    // `indent`: design `.nav-item.indent` — the category rows under
+    // "All downloads" hang off it, so their content starts 22px in.
+    indent: bool,
     msg: Msg,
 ) -> Element<'a, Msg> {
     let t2 = *t;
@@ -1894,7 +1916,7 @@ fn sidebar_row<'a>(
     .width(Length::Fill)
     .height(Length::Fixed(height))
     .padding(iced::Padding {
-        left: 12.0,
+        left: if indent { NAV_INDENT } else { NAV_PAD_X },
         right: 10.0,
         ..Default::default()
     })
@@ -1924,11 +1946,38 @@ fn sidebar_row<'a>(
     .into()
 }
 
+/// Design `.nav-item { padding: 5px 10px }` / `.indent { padding-left: 22px }`.
+const NAV_PAD_X: f32 = 10.0;
+const NAV_INDENT: f32 = 22.0;
+/// Design `.sec-head`: 700 10px, `letter-spacing: 0.1em`, uppercase.
+const SEC_HEAD_SIZE: f32 = 10.0;
+const SEC_HEAD_TRACKING: f32 = SEC_HEAD_SIZE * 0.1;
+
+/// Uppercase label with letter-spacing. iced's `text` has no tracking,
+/// so lay the glyphs out one per cell — fine for the three short,
+/// static section labels, and the only way to honour the design's
+/// `letter-spacing: 0.1em`.
+fn tracked_caps<'a>(label: &str, size: f32, tracking: f32, color: iced::Color) -> Element<'a, Msg> {
+    let mut r = row![].spacing(tracking).align_y(Alignment::Center);
+    for ch in label.to_uppercase().chars() {
+        r = r.push(
+            text(ch.to_string())
+                .font(theme::BODY_BOLD)
+                .size(size)
+                .color(color),
+        );
+    }
+    r.into()
+}
+
 fn section_header<'a>(
     t: &Tokens,
     label: &'a str,
     idx: u8,
     open: bool,
+    // `hovered`: the design keeps the section's "+" at `opacity: 0`
+    // until the pointer is over the head.
+    hovered: bool,
     add: Option<Msg>,
 ) -> Element<'a, Msg> {
     let chev = if open {
@@ -1939,17 +1988,14 @@ fn section_header<'a>(
     let t2 = *t;
     let mut head = row![
         icons::icon(chev, 14.0, color::with_alpha(t.fg_3, 0.85)),
-        text(label.to_uppercase())
-            .font(theme::BODY_BOLD)
-            .size(10.0)
-            .color(t.fg_3),
+        tracked_caps(label, SEC_HEAD_SIZE, SEC_HEAD_TRACKING, t.fg_3),
     ]
     .spacing(6.0)
     .align_y(Alignment::Center);
     // Section "+" add affordance (design: Queues header opens the
     // Queue dialog). Nested button captures its own click so the
     // surrounding toggle mouse_area doesn't also fire.
-    if let Some(add_msg) = add {
+    if let Some(add_msg) = add.filter(|_| hovered) {
         head = head
             .push(iced::widget::Space::new().width(Length::Fill))
             .push(
@@ -1982,6 +2028,8 @@ fn section_header<'a>(
             }),
     )
     .on_press(Msg::ToggleSection(idx))
+    .on_enter(Msg::SectionHovered(idx))
+    .on_exit(Msg::SectionUnhovered(idx))
     .interaction(iced::mouse::Interaction::Pointer)
     .into()
 }
@@ -1997,7 +2045,14 @@ fn sidebar(m: &Main) -> Element<'_, Msg> {
 
     // CATEGORIES
     let cats_open = !m.collapsed_sections.contains(&0);
-    col = col.push(section_header(t, "Categories", 0, cats_open, None));
+    col = col.push(section_header(
+        t,
+        "Categories",
+        0,
+        cats_open,
+        m.hovered_section == Some(0),
+        None,
+    ));
     if cats_open {
         let all_active = m.filter == SidebarFilter::All;
         col = col.push(sidebar_row(
@@ -2007,6 +2062,7 @@ fn sidebar(m: &Main) -> Element<'_, Msg> {
             Some(m.cat_count(None)),
             all_active,
             rh,
+            false,
             Msg::SetFilter(SidebarFilter::All),
         ));
         for (cat, icon, label) in [
@@ -2025,6 +2081,7 @@ fn sidebar(m: &Main) -> Element<'_, Msg> {
                 Some(m.cat_count(Some(cat))),
                 active,
                 rh,
+                true,
                 Msg::SetFilter(SidebarFilter::Category(cat)),
             ));
         }
@@ -2037,6 +2094,7 @@ fn sidebar(m: &Main) -> Element<'_, Msg> {
         "Queues",
         1,
         queues_open,
+        m.hovered_section == Some(1),
         Some(Msg::Tool(ToolAction::Scheduler)),
     ));
     if queues_open {
@@ -2067,6 +2125,7 @@ fn sidebar(m: &Main) -> Element<'_, Msg> {
                 Some(count),
                 active,
                 rh,
+                false,
                 Msg::SetFilter(SidebarFilter::Queue(q.id)),
             ));
         }
@@ -2074,7 +2133,14 @@ fn sidebar(m: &Main) -> Element<'_, Msg> {
 
     // TOOLS
     let tools_open = !m.collapsed_sections.contains(&2);
-    col = col.push(section_header(t, "Tools", 2, tools_open, None));
+    col = col.push(section_header(
+        t,
+        "Tools",
+        2,
+        tools_open,
+        m.hovered_section == Some(2),
+        None,
+    ));
     if tools_open {
         for (action, icon, label) in [
             (ToolAction::Scheduler, "calendar", "Scheduler"),
@@ -2090,6 +2156,7 @@ fn sidebar(m: &Main) -> Element<'_, Msg> {
                 None,
                 false,
                 rh,
+                false,
                 Msg::Tool(action),
             ));
         }
