@@ -21,6 +21,15 @@ pub const COLS: usize = 7;
 pub struct ColumnsState {
     pub widths: [f32; COLS],
     pub hidden: [bool; COLS],
+    /// Left-to-right display order as column indices. Separate from
+    /// `widths`/`hidden`, which stay indexed by column so a reorder
+    /// never has to rewrite them.
+    #[serde(default = "identity_order")]
+    pub order: [usize; COLS],
+}
+
+fn identity_order() -> [usize; COLS] {
+    std::array::from_fn(|i| i)
 }
 
 /// `SortColumn::Name` — the one column that can never be hidden.
@@ -56,6 +65,7 @@ impl Default for ColumnsState {
         Self {
             widths: [TYPE_W, 420.0, 90.0, 280.0, 100.0, 90.0, 130.0],
             hidden: [false; COLS],
+            order: identity_order(),
         }
     }
 }
@@ -71,6 +81,21 @@ impl ColumnsState {
     }
     pub fn set_width(&mut self, idx: usize, w: f32) {
         self.widths[idx] = w.max(COL_MIN[idx]);
+    }
+    /// Move the column at display position `from` to position `to`,
+    /// sliding the columns in between over. Positions index `order`,
+    /// not columns.
+    pub fn reorder(&mut self, from: usize, to: usize) {
+        if from >= COLS || to >= COLS || from == to {
+            return;
+        }
+        let col = self.order[from];
+        if from < to {
+            self.order.copy_within(from + 1..=to, from);
+        } else {
+            self.order.copy_within(to..from, to + 1);
+        }
+        self.order[to] = col;
     }
     pub fn is_visible(&self, idx: usize) -> bool {
         !self.hidden[idx]
@@ -93,14 +118,35 @@ fn prefs_path() -> Option<std::path::PathBuf> {
     Some(dirs::config_dir()?.join("oxdm").join("ui-prefs.json"))
 }
 
+impl ColumnsState {
+    /// A hand-edited or truncated `order` must not drop or double a
+    /// column — every index has to appear exactly once.
+    fn order_is_sane(&self) -> bool {
+        let mut seen = [false; COLS];
+        for &i in &self.order {
+            if i >= COLS || seen[i] {
+                return false;
+            }
+            seen[i] = true;
+        }
+        true
+    }
+}
+
 pub fn load() -> UiPrefs {
     let Some(path) = prefs_path() else {
         return UiPrefs::default();
     };
-    std::fs::read(&path)
+    let mut prefs: UiPrefs = std::fs::read(&path)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if let Some(cols) = &mut prefs.columns
+        && !cols.order_is_sane()
+    {
+        cols.order = identity_order();
+    }
+    prefs
 }
 
 pub fn save(prefs: &UiPrefs) {

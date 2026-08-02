@@ -131,6 +131,7 @@ pub enum Msg {
     TableScrolled(f32),
     WindowResized(f32, f32),
     ColResizeStart(SortColumn),
+    ColMoveStart(SortColumn),
     HeaderRightClick,
     ColToggle(SortColumn),
     // About overlay
@@ -341,6 +342,10 @@ pub struct Main {
     pub columns: crate::gui::ui_prefs::ColumnsState,
     /// Active header drag: (column, cursor x at start, width at start).
     pub col_drag: Option<(SortColumn, f32, f32)>,
+    /// Header being dragged to a new position: `(column, press x)`.
+    /// Until the pointer travels `COL_MOVE_SLOP` this is still a click,
+    /// so the release sorts instead of reordering.
+    pub col_move: Option<(SortColumn, f32)>,
     pub col_handle_hover: Option<SortColumn>,
     /// Horizontal scroll offset of the table body (mirrored on every
     /// `TableScrolled`); corrects the resize guideline x.
@@ -400,6 +405,7 @@ impl Main {
             resize_gen: 0,
             columns: crate::gui::ui_prefs::load().columns.unwrap_or_default(),
             col_drag: None,
+            col_move: None,
             col_handle_hover: None,
             table_scroll_x: 0.0,
             columns_menu: false,
@@ -866,6 +872,26 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             if m.col_drag.take().is_some() {
                 crate::gui::ui_prefs::save_columns(&m.columns);
             }
+            if let Some((col, press_x)) = m.col_move.take() {
+                if (m.cursor.0 - press_x).abs() < COL_MOVE_SLOP {
+                    // The pointer never left the header cell: a plain
+                    // click, so sort (same toggle as `Msg::SetSort`).
+                    if m.sort.0 == col {
+                        m.sort.1 = !m.sort.1;
+                    } else {
+                        m.sort = (col, matches!(col, SortColumn::Date));
+                    }
+                    return Task::none();
+                }
+                if let (Some(from), Some(to)) = (col_position(m, col), col_drop_slot(m)) {
+                    m.columns.reorder(from, to);
+                    crate::gui::ui_prefs::save_columns(&m.columns);
+                }
+            }
+            Task::none()
+        }
+        Msg::ColMoveStart(col) => {
+            m.col_move = Some((col, m.cursor.0));
             Task::none()
         }
         Msg::ColResizeStart(col) => {
@@ -2361,26 +2387,75 @@ fn header_cell<'a>(m: &Main, label: &'a str, col: SortColumn, width: f32) -> Ele
     // boundary (design `.col-resizer { right: -8px; width: 16px }`),
     // which flow layout cannot express. They are overlaid by
     // `header_grips` instead, so the cell owns its full width.
+    let dragged = matches!(m.col_move, Some((c, press_x)) if c == col
+        && (m.cursor.0 - press_x).abs() >= COL_MOVE_SLOP);
+    let t2 = m.tokens;
     mouse_area(
         container(col_header_sortable(
             &m.tokens,
             label,
             active_col == col,
             desc,
-            Msg::SetSort(col),
+            Msg::ColMoveStart(col),
         ))
         .width(Length::Fixed(width))
         .padding([0.0, theme::space::S2])
         .align_y(Alignment::Center)
-        .height(Length::Fixed(HEADER_H)),
+        .height(Length::Fixed(HEADER_H))
+        // The header being carried dims, so it is obvious which one the
+        // drop marker belongs to.
+        .style(move |_| container::Style {
+            background: dragged.then(|| t2.bg_sunken.into()),
+            ..Default::default()
+        }),
     )
-    // The whole cell sorts, not just the label: `col_header_sortable`
-    // shrink-wraps its hit area to the text, so clicking the empty part
-    // of a header did nothing. The inner area handles (and captures)
-    // presses over the text, so this never double-toggles.
-    .on_press(Msg::SetSort(col))
+    // The whole cell is the handle, not just the text:
+    // `col_header_sortable` shrink-wraps its hit area, so pressing the
+    // empty part of a header did nothing. The inner area handles (and
+    // captures) presses over the text, so this never fires twice.
+    // Press starts a potential reorder; the release decides whether the
+    // gesture was a click (sort) or a drag (move).
+    .on_press(Msg::ColMoveStart(col))
     .on_right_press(Msg::HeaderRightClick)
     .interaction(iced::mouse::Interaction::Pointer)
+    .into()
+}
+
+/// Insertion marker for a header being dragged to a new position: a
+/// clay rule at the boundary the column would land on. Empty (and
+/// therefore invisible) when no reorder is in flight.
+fn drop_marker(m: &Main) -> Element<'_, Msg> {
+    let dragging = matches!(m.col_move, Some((_, press_x))
+        if (m.cursor.0 - press_x).abs() >= COL_MOVE_SLOP);
+    let Some(slot) = dragging.then(|| col_drop_slot(m)).flatten() else {
+        return iced::widget::Space::new().into();
+    };
+    // Left edge of the slot, in the header's own (scrolled) space.
+    let mut x = 0.0;
+    for col in visible_cols(m) {
+        if col_position(m, col) == Some(slot) {
+            break;
+        }
+        x += m.columns.width(col as usize);
+    }
+    let x = x - m.table_scroll_x;
+    if x < 0.0 {
+        return iced::widget::Space::new().into();
+    }
+    container(
+        container(iced::widget::Space::new())
+            .width(Length::Fixed(GRIP_W_ACTIVE))
+            .height(Length::Fixed(HEADER_H))
+            .style(|_| container::Style {
+                background: Some(color::clay::C500.into()),
+                ..Default::default()
+            }),
+    )
+    .padding(iced::Padding {
+        left: (x - GRIP_W_ACTIVE / 2.0).max(0.0),
+        ..Default::default()
+    })
+    .height(Length::Fixed(HEADER_H))
     .into()
 }
 
@@ -2395,10 +2470,7 @@ fn header_grips(m: &Main) -> Element<'_, Msg> {
     let t2 = m.tokens;
     let mut strip = row![].align_y(Alignment::Center);
     let mut first = true;
-    for (col, _) in TABLE_COLS {
-        if !m.columns.is_visible(col as usize) {
-            continue;
-        }
+    for col in visible_cols(m) {
         let width = m.columns.width(col as usize);
         // Gap from the previous grip's right edge to this grip's left
         // edge: the first is measured from the header's left edge.
@@ -2454,39 +2526,100 @@ fn header_grips(m: &Main) -> Element<'_, Msg> {
     strip.height(Length::Fixed(HEADER_H)).into()
 }
 
-const TABLE_COLS: [(SortColumn, &str); crate::gui::ui_prefs::COLS] = [
-    (SortColumn::Type, "Type"),
-    (SortColumn::Name, "Name"),
-    (SortColumn::Size, "Size"),
-    (SortColumn::Status, "Status"),
-    (SortColumn::Speed, "Speed"),
-    (SortColumn::Eta, "Time left"),
-    (SortColumn::Date, "Date added"),
+/// Column labels, indexed by `SortColumn as usize` — display order
+/// lives in `ColumnsState::order`, which the user can drag around.
+const COL_LABELS: [&str; crate::gui::ui_prefs::COLS] = [
+    "Type",
+    "Name",
+    "Size",
+    "Status",
+    "Speed",
+    "Time left",
+    "Date added",
 ];
+
+const COL_BY_INDEX: [SortColumn; crate::gui::ui_prefs::COLS] = [
+    SortColumn::Type,
+    SortColumn::Name,
+    SortColumn::Size,
+    SortColumn::Status,
+    SortColumn::Speed,
+    SortColumn::Eta,
+    SortColumn::Date,
+];
+
+/// How far the pointer must travel across a header before the gesture
+/// stops being a click-to-sort and becomes a drag-to-reorder.
+const COL_MOVE_SLOP: f32 = 5.0;
+
+/// Display position of `col` among the visible columns.
+fn col_position(m: &Main, col: SortColumn) -> Option<usize> {
+    m.columns.order.iter().position(|&i| COL_BY_INDEX[i] == col)
+}
+
+/// Position the dragged header would land in, from the cursor: the slot
+/// whose midpoint the pointer has passed. `None` while the pointer is
+/// outside the table.
+fn col_drop_slot(m: &Main) -> Option<usize> {
+    // Cursor is window-space; the header starts after the sidebar and
+    // scrolls horizontally with the body.
+    let x = m.cursor.0 - theme::size::SIDEBAR_W + m.table_scroll_x;
+    if x < 0.0 {
+        return None;
+    }
+    let mut edge = 0.0;
+    for col in visible_cols(m) {
+        let w = m.columns.width(col as usize);
+        if x < edge + w / 2.0 {
+            return col_position(m, col);
+        }
+        edge += w;
+    }
+    visible_cols(m)
+        .last()
+        .copied()
+        .and_then(|c| col_position(m, c))
+}
+
+/// Columns in display order, skipping hidden ones.
+fn visible_cols(m: &Main) -> Vec<SortColumn> {
+    m.columns
+        .order
+        .iter()
+        .map(|&i| COL_BY_INDEX[i])
+        .filter(|c| m.columns.is_visible(*c as usize))
+        .collect()
+}
 
 fn table(m: &Main) -> Element<'_, Msg> {
     let t = &m.tokens;
     let mut header_row = row![];
-    for (col, label) in TABLE_COLS {
-        if !m.columns.is_visible(col as usize) {
-            continue;
-        }
-        header_row = header_row.push(header_cell(m, label, col, m.columns.width(col as usize)));
+    for col in visible_cols(m) {
+        header_row = header_row.push(header_cell(
+            m,
+            COL_LABELS[col as usize],
+            col,
+            m.columns.width(col as usize),
+        ));
     }
     // Header scrolls horizontally in lockstep with the body (synced
     // via TableScrolled -> scroll_to); its own scrollbar is hidden.
     let header = container(
         mouse_area(
-            scrollable(iced::widget::stack![header_row, header_grips(m)])
-                .id(iced::widget::Id::new("tbl-header"))
-                .direction(scrollable::Direction::Horizontal(
-                    scrollable::Scrollbar::new()
-                        .width(0.0)
-                        .scroller_width(0.0)
-                        .margin(0.0),
-                ))
-                .width(Length::Fill)
-                .height(Length::Fixed(HEADER_H)),
+            scrollable(iced::widget::stack![
+                header_row,
+                header_grips(m),
+                drop_marker(m)
+            ])
+            .id(iced::widget::Id::new("tbl-header"))
+            .direction(scrollable::Direction::Horizontal(
+                scrollable::Scrollbar::new()
+                    .width(0.0)
+                    .scroller_width(0.0)
+                    .margin(0.0),
+            ))
+            .width(Length::Fill)
+            .height(Length::Fixed(HEADER_H)),
         )
         .on_right_press(Msg::HeaderRightClick),
     )
@@ -2563,10 +2696,7 @@ fn table(m: &Main) -> Element<'_, Msg> {
 /// is scrolled out of view to the left (or the column is hidden).
 fn drag_guideline_x(m: &Main, dragged: SortColumn) -> Option<f32> {
     let mut x = 0.0;
-    for (col, _) in TABLE_COLS {
-        if !m.columns.is_visible(col as usize) {
-            continue;
-        }
+    for col in visible_cols(m) {
         x += m.columns.width(col as usize);
         if col == dragged {
             let x = x - m.table_scroll_x;
@@ -2780,26 +2910,21 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
     };
 
     let mut cells = row![].align_y(Alignment::Center).height(Length::Fill);
-    let vis = |c: SortColumn| m.columns.is_visible(c as usize);
-    // Same order as `TABLE_COLS`.
-    if vis(SortColumn::Type) {
-        cells = cells.push(type_cell);
-    }
-    cells = cells.push(name_cell);
-    if vis(SortColumn::Size) {
-        cells = cells.push(size_cell);
-    }
-    if vis(SortColumn::Status) {
-        cells = cells.push(status_cell);
-    }
-    if vis(SortColumn::Speed) {
-        cells = cells.push(speed_cell);
-    }
-    if vis(SortColumn::Eta) {
-        cells = cells.push(eta_cell);
-    }
-    if vis(SortColumn::Date) {
-        cells = cells.push(date_cell);
+    // Cells are built up front, then pushed in the user's column order;
+    // `Option::take` hands each one out exactly once.
+    let mut by_col: [Option<Element<'_, Msg>>; crate::gui::ui_prefs::COLS] = [
+        Some(type_cell),
+        Some(name_cell.into()),
+        Some(size_cell),
+        Some(status_cell),
+        Some(speed_cell),
+        Some(eta_cell),
+        Some(date_cell),
+    ];
+    for col in visible_cols(m) {
+        if let Some(cell) = by_col[col as usize].take() {
+            cells = cells.push(cell);
+        }
     }
 
     // NOTE: width must be Shrink — Fill resolves to zero inside the
@@ -2824,10 +2949,9 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
     // 1px bottom row separator (design `.tr` border-subtle hairline).
     // Fixed width = sum of visible columns so it tracks the Shrink row
     // (a Fill hairline would collapse in the unbounded scrollable).
-    let total_w: f32 = TABLE_COLS
-        .iter()
-        .filter(|(c, _)| m.columns.is_visible(*c as usize))
-        .map(|(c, _)| m.columns.width(*c as usize))
+    let total_w: f32 = visible_cols(m)
+        .into_iter()
+        .map(|c| m.columns.width(c as usize))
         .sum();
     let separator = container(iced::widget::Space::new())
         .width(Length::Fixed(total_w))
@@ -3323,7 +3447,8 @@ fn columns_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, 
         hairline(t.border_subtle),
     ]
     .width(Length::Fixed(180.0));
-    for (col, label) in TABLE_COLS {
+    for col in m.columns.order.map(|i| COL_BY_INDEX[i]) {
+        let label = COL_LABELS[col as usize];
         let enabled = col != SortColumn::Name;
         items = items.push(
             container(crate::gui::widget::checkbox(
