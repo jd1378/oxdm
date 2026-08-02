@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use iced::widget::{button, column, container, mouse_area, row, scrollable, text};
+use iced::widget::{button, column, container, mouse_area, row, text};
 use iced::{Alignment, Element, Length, Subscription, Task};
 
 use crate::domain::{
@@ -1328,7 +1328,7 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
             .on_press(Msg::AddQueue)
             .view(t),
     );
-    let sidebar = container(scrollable(list).height(Length::Fill))
+    let sidebar = container(crate::gui::widget::vscroll(list).height(Length::Fill))
         .width(Length::Fixed(LIST_W))
         .height(Length::Fill)
         .style(move |_| container::Style {
