@@ -67,13 +67,12 @@ const GRIP_W_IDLE: f32 = 1.0;
 const GRIP_W_ACTIVE: f32 = 3.0;
 const GRIP_ACTIVE_RATIO: f32 = 0.7;
 
-// Name-cell ext pill (design `.fname` ext tag): 28×22, radius 4, mono
-// 700 ~9px, category-tinted; 10px gap to the title stack.
+// Type-column ext pill (design `.fname` ext tag): 28×22, radius 4, mono
+// 700 ~9px, category-tinted.
 const EXT_PILL_W: f32 = 28.0;
 const EXT_PILL_H: f32 = 22.0;
 const EXT_PILL_RADIUS: f32 = 4.0;
 const EXT_PILL_FONT: f32 = 9.0;
-const NAME_PILL_GAP: f32 = 10.0;
 
 // Column-resize guideline (design §4 `ResizableHeader`: "dragging →
 // clay-500 grip + a full-height clay-300 guideline"): a 1px clay-300
@@ -96,6 +95,8 @@ pub enum Tab {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortColumn {
+    /// File type — the extension pill. Fixed width, not resizable.
+    Type,
     Name,
     Size,
     Status,
@@ -555,6 +556,7 @@ impl Main {
                     ea.cmp(&eb)
                 }
                 SortColumn::Date => a.created_at.cmp(&b.created_at),
+                SortColumn::Type => file_ext(a).cmp(&file_ext(b)),
             };
             if desc { ord.reverse() } else { ord }
         });
@@ -2423,32 +2425,37 @@ fn header_grips(m: &Main) -> Element<'_, Msg> {
         } else {
             (GRIP_W_IDLE, HEADER_H, t2.border_subtle)
         };
-        strip = strip.push(
-            mouse_area(
-                container(
-                    container(iced::widget::Space::new())
-                        .width(Length::Fixed(line_w))
-                        .height(Length::Fixed(line_h))
-                        .style(move |_| container::Style {
-                            background: Some(line_color.into()),
-                            ..Default::default()
-                        }),
-                )
-                .width(Length::Fixed(RESIZE_HANDLE_W))
-                .height(Length::Fixed(HEADER_H))
-                .align_x(Alignment::Center)
-                .align_y(Alignment::Center),
+        // Type is fixed-width: its grip still draws and lights up on
+        // hover — a missing handle in the run reads as a rendering bug —
+        // it just never starts a drag.
+        let mut grip = mouse_area(
+            container(
+                container(iced::widget::Space::new())
+                    .width(Length::Fixed(line_w))
+                    .height(Length::Fixed(line_h))
+                    .style(move |_| container::Style {
+                        background: Some(line_color.into()),
+                        ..Default::default()
+                    }),
             )
-            .on_press(Msg::ColResizeStart(col))
-            .on_enter(Msg::ColHandleHover(col, true))
-            .on_exit(Msg::ColHandleHover(col, false))
-            .interaction(iced::mouse::Interaction::ResizingHorizontally),
-        );
+            .width(Length::Fixed(RESIZE_HANDLE_W))
+            .height(Length::Fixed(HEADER_H))
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center),
+        )
+        .on_enter(Msg::ColHandleHover(col, true))
+        .on_exit(Msg::ColHandleHover(col, false))
+        .interaction(iced::mouse::Interaction::ResizingHorizontally);
+        if col != SortColumn::Type {
+            grip = grip.on_press(Msg::ColResizeStart(col));
+        }
+        strip = strip.push(grip);
     }
     strip.height(Length::Fixed(HEADER_H)).into()
 }
 
-const TABLE_COLS: [(SortColumn, &str); 6] = [
+const TABLE_COLS: [(SortColumn, &str); crate::gui::ui_prefs::COLS] = [
+    (SortColumn::Type, "Type"),
     (SortColumn::Name, "Name"),
     (SortColumn::Size, "Size"),
     (SortColumn::Status, "Status"),
@@ -2599,6 +2606,16 @@ fn empty_state(m: &Main) -> Element<'_, Msg> {
     .into()
 }
 
+/// Uppercase extension shown in the type pill, and the Type column's
+/// sort key. Files with no extension group under "FILE".
+fn file_ext(job: &crate::domain::Job) -> String {
+    let name = job.filename.clone().unwrap_or_else(|| job.url.to_string());
+    std::path::PathBuf::from(&name)
+        .extension()
+        .map(|e| e.to_string_lossy().to_uppercase())
+        .unwrap_or_else(|| "FILE".into())
+}
+
 fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
     let t = &m.tokens;
     let id = job.id;
@@ -2610,11 +2627,10 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
     let name = job.filename.clone().unwrap_or_else(|| job.url.to_string());
     let host = job.url.host_str().unwrap_or("").to_owned();
 
-    // Category-tinted ext pill (design `.fname` tag), before the title.
-    let ext = std::path::PathBuf::from(&name)
-        .extension()
-        .map(|e| e.to_string_lossy().to_uppercase())
-        .unwrap_or_else(|| "FILE".into());
+    // Category-tinted ext pill (design `.fname` tag). It sits in its own
+    // Type column so it can be hidden like any other, rather than being
+    // welded to the Name cell.
+    let ext = file_ext(job);
     let cat = cat_color(t, job.category);
     let pill_bg = color::mix(t.bg_surface, cat, 0.20);
     let ext_pill = container(
@@ -2638,17 +2654,24 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
         ..Default::default()
     });
 
+    // No horizontal padding: the pill is centred, so padding would only
+    // stop the column narrowing past 28 + 2 x 8 and clip the pill
+    // instead — the column's width should be free to be whatever
+    // `TYPE_W` says.
+    let type_cell: Element<'_, Msg> = container(ext_pill)
+        .width(Length::Fixed(m.columns.width(SortColumn::Type as usize)))
+        .align_x(Alignment::Center)
+        .align_y(Alignment::Center)
+        .height(Length::Fill)
+        .clip(true)
+        .into();
+
     let name_cell = container(
-        row![
-            ext_pill,
-            column![
-                crate::gui::widget::ellipsized(name, theme::BODY_BOLD, 13.0, t.fg_1),
-                crate::gui::widget::ellipsized(host, theme::MONO, 10.0, t.fg_3),
-            ]
-            .spacing(2.0),
+        column![
+            crate::gui::widget::ellipsized(name, theme::BODY_BOLD, 13.0, t.fg_1),
+            crate::gui::widget::ellipsized(host, theme::MONO, 10.0, t.fg_3),
         ]
-        .spacing(NAME_PILL_GAP)
-        .align_y(Alignment::Center),
+        .spacing(2.0),
     )
     .width(Length::Fixed(m.columns.width(SortColumn::Name as usize)))
     .clip(true)
@@ -2758,6 +2781,10 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
 
     let mut cells = row![].align_y(Alignment::Center).height(Length::Fill);
     let vis = |c: SortColumn| m.columns.is_visible(c as usize);
+    // Same order as `TABLE_COLS`.
+    if vis(SortColumn::Type) {
+        cells = cells.push(type_cell);
+    }
     cells = cells.push(name_cell);
     if vis(SortColumn::Size) {
         cells = cells.push(size_cell);

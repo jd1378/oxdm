@@ -11,14 +11,20 @@ pub struct UiPrefs {
     pub columns: Option<ColumnsState>,
 }
 
+/// Number of table columns = `windows::main::SortColumn` variants.
+pub const COLS: usize = 7;
+
 /// Main-table column widths + visibility, indexed by
-/// `windows::main::SortColumn as usize` (Name..Date). Same wire shape
-/// as the egui-era struct so existing ui-prefs.json files load.
+/// `windows::main::SortColumn as usize` (Type, Name, Size, Status,
+/// Speed, Eta, Date).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ColumnsState {
-    pub widths: [f32; 6],
-    pub hidden: [bool; 6],
+    pub widths: [f32; COLS],
+    pub hidden: [bool; COLS],
 }
+
+/// `SortColumn::Name` — the one column that can never be hidden.
+const NAME_IDX: usize = 1;
 
 /// Minimum table column width. The design's `ResizableHeader` says 60px,
 /// but its headers are plain text; ours reserve room for the sort
@@ -26,31 +32,52 @@ pub struct ColumnsState {
 /// arrival.
 pub const COL_MIN_W: f32 = 75.0;
 
+/// The Type column is not resizable and holds one fixed-width pill, so
+/// its width is set by the header rather than the content: "TYPE" at
+/// 11px is ~30px inside 8px of padding either side, and the 28px pill
+/// needs 44. The sort chevron only appears while sorting *by* type, and
+/// the header ellipsizes to make room for it then, so it does not have
+/// to be reserved.
+pub const TYPE_W: f32 = 58.0;
+
+/// `SortColumn::Type` — fixed width, so it ignores any persisted value.
+const TYPE_IDX: usize = 0;
+
+/// Per-column minimum, indexed like `widths`.
+const COL_MIN: [f32; COLS] = [
+    TYPE_W, COL_MIN_W, COL_MIN_W, COL_MIN_W, COL_MIN_W, COL_MIN_W, COL_MIN_W,
+];
+
 impl Default for ColumnsState {
     fn default() -> Self {
-        // Order = SortColumn (Name, Size, Status, Speed, Eta, Date).
-        // Design defaults: name 420, size 90, status 280, speed 100,
-        // eta 90, date 130.
+        // Order = SortColumn (Type, Name, Size, Status, Speed, Eta,
+        // Date). Design defaults: name 420, size 90, status 280,
+        // speed 100, eta 90, date 130; Type is ours (the ext pill).
         Self {
-            widths: [420.0, 90.0, 280.0, 100.0, 90.0, 130.0],
-            hidden: [false; 6],
+            widths: [TYPE_W, 420.0, 90.0, 280.0, 100.0, 90.0, 130.0],
+            hidden: [false; COLS],
         }
     }
 }
 
 impl ColumnsState {
     pub fn width(&self, idx: usize) -> f32 {
-        self.widths[idx].max(COL_MIN_W)
+        if idx == TYPE_IDX {
+            // Not resizable: a stored value would silently outrank the
+            // constant and make changing it look like a no-op.
+            return TYPE_W;
+        }
+        self.widths[idx].max(COL_MIN[idx])
     }
     pub fn set_width(&mut self, idx: usize, w: f32) {
-        self.widths[idx] = w.max(COL_MIN_W);
+        self.widths[idx] = w.max(COL_MIN[idx]);
     }
     pub fn is_visible(&self, idx: usize) -> bool {
         !self.hidden[idx]
     }
-    /// Name (idx 0) is always visible.
+    /// Name is always visible.
     pub fn toggle(&mut self, idx: usize) {
-        if idx != 0 {
+        if idx != NAME_IDX {
             self.hidden[idx] = !self.hidden[idx];
         }
     }
