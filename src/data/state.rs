@@ -1103,7 +1103,7 @@ impl AppState {
         // single-instance abstract socket — that fd would pin the
         // binding alive and force the replacement into
         // `AlreadyRunning` mode.
-        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let exe = crate::platform::current_exe().map_err(|e| e.to_string())?;
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(200));
             let mut cmd = std::process::Command::new(&exe);

@@ -111,7 +111,7 @@ fn try_spawn(kind: crate::ipc_local::protocol::GuiKind, args: &[&str]) -> bool {
     if matches!(s.pending.get(&kind), Some(SpawnState::Spawning)) {
         return false;
     }
-    let exe = match std::env::current_exe() {
+    let exe = match crate::platform::current_exe() {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!(error = %e, "current_exe");

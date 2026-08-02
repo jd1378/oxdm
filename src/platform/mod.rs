@@ -263,10 +263,67 @@ pub fn set_autostart(enabled: bool) -> Result<(), String> {
     }
 }
 
-/// `pre_exec` hook closing fds ≥ 3 in spawned subprocesses (daemon /
-/// GUI windows) so inherited sockets don't leak across exec on Unix.
+/// The running executable's path, usable for re-spawning ourselves.
+///
+/// Plain [`std::env::current_exe`] is not: it reads `/proc/self/exe`,
+/// and once the binary has been replaced on disk — an in-place update,
+/// or a rebuild while the daemon is running — the kernel reports the
+/// original path with a literal `" (deleted)"` appended. Spawning that
+/// path fails with `ENOENT`, so a long-running daemon loses the ability
+/// to open any window until it is restarted.
+///
+/// When that happens the replacement usually sits at the original path,
+/// so fall back to the suffix-stripped path — but only when the
+/// suffixed one is really gone and the stripped one is really there,
+/// so a file genuinely named `"… (deleted)"` is left alone.
+pub fn current_exe() -> std::io::Result<std::path::PathBuf> {
+    Ok(undelete_exe_path(std::env::current_exe()?))
+}
+
+/// The path half of [`current_exe`], split out so it is testable without
+/// replacing the test binary on disk.
+fn undelete_exe_path(exe: std::path::PathBuf) -> std::path::PathBuf {
+    const DELETED: &str = " (deleted)";
+    if exe.exists() {
+        return exe;
+    }
+    exe.file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.strip_suffix(DELETED))
+        .map(|n| exe.with_file_name(n))
+        .filter(|live| live.exists())
+        .unwrap_or(exe)
+}
+
+/// Highest descriptor number the child bothers to inspect. Descriptors
+/// are handed out lowest-free-first, so a process holding a few dozen
+/// files never reaches this; it only bounds the scan when `RLIMIT_NOFILE`
+/// is enormous (or unlimited), where walking the real ceiling would mean
+/// millions of `fcntl` calls between `fork` and `exec`.
+#[cfg(unix)]
+const MAX_FD_SCAN: libc::c_int = 4096;
+
+/// `pre_exec` hook closing inherited fds ≥ 3 in spawned subprocesses
+/// (daemon / GUI windows) so sockets don't leak across exec on Unix.
 /// No-op on non-Unix platforms — Windows handles use explicit
 /// `bInheritHandle = FALSE` by default.
+///
+/// Descriptors already marked `FD_CLOEXEC` are left alone. The kernel
+/// drops those at `exec` anyway, and one of them is the pipe `std` keeps
+/// open to report a failed `exec` back to the parent. Closing that pipe
+/// (which a blanket `close_range(3, ..)` does) breaks spawning twice
+/// over: the parent reads EOF, concludes the exec succeeded and returns
+/// `Ok(child)` for a window that will never appear, and the child's
+/// attempt to write its errno into the closed fd trips
+/// `fatal runtime error: assertion failed: output.write(&bytes).is_ok()`
+/// and aborts. What actually needs dropping is the opposite set — the
+/// descriptors *without* `FD_CLOEXEC`, such as the single-instance
+/// socket, whose binding an inheriting child would pin alive.
+///
+/// The closure runs in the forked child, so it may only make syscalls:
+/// no allocation, no locks. `std` always takes the `fork` + `exec` path
+/// once any `pre_exec` hook is registered, so the child's descriptor
+/// table is already a private copy and needs no `CLOSE_RANGE_UNSHARE`.
 #[allow(unused_variables)]
 pub fn attach_close_high_fds(cmd: &mut std::process::Command) {
     #[cfg(unix)]
@@ -274,7 +331,18 @@ pub fn attach_close_high_fds(cmd: &mut std::process::Command) {
         use std::os::unix::process::CommandExt;
         unsafe {
             cmd.pre_exec(|| {
-                let _ = libc::close_range(3, libc::c_uint::MAX, libc::CLOSE_RANGE_UNSHARE as i32);
+                let mut lim: libc::rlimit = std::mem::zeroed();
+                let max = if libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) == 0 {
+                    (lim.rlim_cur.min(MAX_FD_SCAN as libc::rlim_t)) as libc::c_int
+                } else {
+                    MAX_FD_SCAN
+                };
+                for fd in 3..max {
+                    let flags = libc::fcntl(fd, libc::F_GETFD);
+                    if flags >= 0 && flags & libc::FD_CLOEXEC == 0 {
+                        libc::close(fd);
+                    }
+                }
                 Ok(())
             });
         }
@@ -319,6 +387,44 @@ mod tests {
 
         write_xdg_autostart(&dir, exe, false).unwrap();
         assert!(!dir.join("oxdm.desktop").exists());
+    }
+
+    /// A binary replaced on disk (in-place update, or a rebuild while
+    /// the daemon runs) makes `/proc/self/exe` report `"… (deleted)"`,
+    /// which no longer spawns. Callers re-spawning oxdm need the live
+    /// path that took its place.
+    #[test]
+    fn undelete_exe_path_recovers_a_replaced_binary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let live = tmp.path().join("oxdm");
+        std::fs::write(&live, b"").unwrap();
+
+        assert_eq!(undelete_exe_path(tmp.path().join("oxdm (deleted)")), live);
+        // An existing path is returned untouched, suffix or not.
+        assert_eq!(undelete_exe_path(live.clone()), live);
+        let odd = tmp.path().join("real (deleted)");
+        std::fs::write(&odd, b"").unwrap();
+        assert_eq!(undelete_exe_path(odd.clone()), odd);
+        // Nothing to fall back to: hand the original back so the caller
+        // reports the real spawn error rather than a silent wrong path.
+        let gone = tmp.path().join("absent (deleted)");
+        assert_eq!(undelete_exe_path(gone.clone()), gone);
+    }
+
+    /// A blanket `close_range(3, ..)` in the `pre_exec` hook also closed
+    /// the pipe `std` reports a failed `exec` on, so the parent read EOF,
+    /// reported `Ok(child)` for a process that never started, and the
+    /// child aborted with `fatal runtime error: assertion failed:
+    /// output.write(&bytes).is_ok()`. A failed spawn must surface as
+    /// `Err` so the caller can log it and fall back.
+    #[test]
+    fn close_high_fds_keeps_the_exec_error_pipe_open() {
+        let mut cmd = std::process::Command::new("/nonexistent/oxdm-spawn-probe");
+        attach_close_high_fds(&mut cmd);
+        let err = cmd
+            .spawn()
+            .expect_err("spawning a missing binary must fail");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
     }
 
     #[test]
