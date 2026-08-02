@@ -352,11 +352,13 @@ pub struct Main {
     /// Header being dragged to a new position: `(column, press x)`.
     /// Until the pointer travels `COL_MOVE_SLOP` this is still a click,
     /// so the release sorts instead of reordering.
-    /// `(column, press x, grab offset)`. The grab offset — how far into
-    /// the cell the press landed — is captured once: recomputing it from
-    /// the live layout would move the ghost every time the preview
-    /// reorders underneath it.
+    /// `(column, press x, last x)` — the last x is what gives the drag
+    /// its direction.
     pub col_move: Option<(SortColumn, f32, f32)>,
+    /// How far into the cell the press landed, captured once: recomputing
+    /// it from the live layout would move the ghost every time the
+    /// preview reorders underneath it.
+    pub col_grab: f32,
     pub col_handle_hover: Option<SortColumn>,
     /// Horizontal scroll offset of the table body (mirrored on every
     /// `TableScrolled`); corrects the resize guideline x.
@@ -417,6 +419,7 @@ impl Main {
             columns: crate::gui::ui_prefs::load().columns.unwrap_or_default(),
             col_drag: None,
             col_move: None,
+            col_grab: 0.0,
             col_preview: None,
             col_handle_hover: None,
             table_scroll_x: 0.0,
@@ -878,10 +881,16 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             if let Some((col, start_x, start_w)) = m.col_drag {
                 m.columns.set_width(col as usize, start_w + (x - start_x));
             }
-            if let Some((col, press_x, _)) = m.col_move
+            if let Some((col, press_x, last_x)) = m.col_move
                 && (x - press_x).abs() >= COL_MOVE_SLOP
             {
-                drag_step(m, col);
+                // Direction decides which threshold applies, so a
+                // sub-pixel wobble must not flip it.
+                let dx = x - last_x;
+                if dx.abs() >= DRAG_DIR_DEADBAND {
+                    m.col_move = Some((col, press_x, x));
+                    drag_step(m, col, dx > 0.0);
+                }
             }
             Task::none()
         }
@@ -932,8 +941,8 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                 left += m.columns.width(c as usize);
             }
             let cell_x = theme::size::SIDEBAR_W + left - m.table_scroll_x;
-            let grab = (m.cursor.0 - cell_x).clamp(0.0, m.columns.width(col as usize));
-            m.col_move = Some((col, m.cursor.0, grab));
+            m.col_grab = (m.cursor.0 - cell_x).clamp(0.0, m.columns.width(col as usize));
+            m.col_move = Some((col, m.cursor.0, m.cursor.0));
             m.col_preview = Some(m.columns.order);
             // A grip left highlighted under the pointer would keep
             // glowing for the whole drag.
@@ -2480,9 +2489,10 @@ fn header_cell<'a>(m: &Main, label: &'a str, col: SortColumn, width: f32) -> Ele
 /// Positioned in window space (not the header's), hence a layer over
 /// the whole body rather than one inside the header's scrollable.
 fn header_ghost<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg> {
-    let Some((col, press_x, grab)) = m.col_move else {
+    let Some((col, press_x, _)) = m.col_move else {
         return base;
     };
+    let grab = m.col_grab;
     if (m.cursor.0 - press_x).abs() < COL_MOVE_SLOP {
         return base;
     }
@@ -2621,6 +2631,8 @@ const COL_BY_INDEX: [SortColumn; crate::gui::ui_prefs::COLS] = [
 /// How far the pointer must travel across a header before the gesture
 /// stops being a click-to-sort and becomes a drag-to-reorder.
 const COL_MOVE_SLOP: f32 = 5.0;
+/// Pointer travel needed before a reorder drag changes direction.
+const DRAG_DIR_DEADBAND: f32 = 3.0;
 /// Opacity of the dragged-header ghost.
 const GHOST_ALPHA: f32 = 0.5;
 
@@ -2636,42 +2648,65 @@ const GHOST_ALPHA: f32 = 0.5;
 /// comparison uses the pointer rather than the ghost's centre, so the
 /// swap happens where the user is looking instead of half a column
 /// ahead of it.
-fn drag_step(m: &mut Main, col: SortColumn) {
+fn drag_step(m: &mut Main, col: SortColumn, forward: bool) {
     let x = m.cursor.0 - theme::size::SIDEBAR_W + m.table_scroll_x;
 
-    // Walk the preview as it is drawn — the dragged column included, so
-    // the midpoints are the ones on screen. Measuring the other columns
-    // packed together instead puts every midpoint right of the dragged
-    // slot one column-width too far left, which is why the rule only
-    // ever felt right on the way back.
+    // Walk the preview as it is drawn — the dragged column included —
+    // so the thresholds are the edges on screen. Measuring the other
+    // columns packed together puts everything right of the dragged slot
+    // one column-width too far left.
     let cols = header_cols(m);
-    let others: Vec<SortColumn> = cols.iter().copied().filter(|c| *c != col).collect();
-    let mut target = others.len();
-    let mut passed = 0usize;
+    let mut spans: Vec<(SortColumn, f32, f32)> = Vec::with_capacity(cols.len());
     let mut edge = 0.0;
     for c in &cols {
         let w = m.columns.width(*c as usize);
-        if *c == col {
-            // The dragged column still takes up room in the row.
-            edge += w;
-            continue;
-        }
-        if x < edge + w / 2.0 {
-            target = passed;
-            break;
-        }
+        spans.push((*c, edge, w));
         edge += w;
-        passed += 1;
+    }
+    let Some(cur) = spans.iter().position(|(c, _, _)| *c == col) else {
+        return;
+    };
+
+    // Asymmetric thresholds, by request: going forward a column steps
+    // aside as soon as the pointer enters it, which keeps the drag
+    // feeling immediate; coming back it holds until the pointer passes
+    // its middle, so the column just vacated does not snap back the
+    // instant the pointer twitches.
+    let mut slot = cur;
+    if forward {
+        for (i, (_, left, _)) in spans.iter().enumerate().skip(cur + 1) {
+            if x >= *left {
+                slot = i;
+            } else {
+                break;
+            }
+        }
+    } else {
+        for i in (0..cur).rev() {
+            let (_, left, w) = spans[i];
+            if x < left + w / 2.0 {
+                slot = i;
+            } else {
+                break;
+            }
+        }
+    }
+    if slot == cur {
+        return;
     }
 
-    // Rebuild the preview: the others in order, dragged spliced in at
-    // `target`. Hidden columns ride along with the visible neighbour
-    // they currently follow.
+    // Splice the dragged column into its new slot. Removing it first
+    // shifts everything after it left by one, which is exactly what
+    // makes `slot` the right insertion index in both directions.
+    let mut seq = cols;
+    seq.remove(cur);
+    let anchor = seq.get(slot).copied();
+
+    // Hidden columns ride along with the visible neighbour they follow.
     let mut order: Vec<usize> = m.col_preview.unwrap_or(m.columns.order).to_vec();
     order.retain(|&i| COL_BY_INDEX[i] != col);
-    let at = others
-        .get(target)
-        .and_then(|a| order.iter().position(|&i| COL_BY_INDEX[i] == *a))
+    let at = anchor
+        .and_then(|a| order.iter().position(|&i| COL_BY_INDEX[i] == a))
         .unwrap_or(order.len());
     order.insert(at, col as usize);
     if let Ok(order) = <[usize; crate::gui::ui_prefs::COLS]>::try_from(order) {
