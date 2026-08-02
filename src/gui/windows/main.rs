@@ -2093,7 +2093,7 @@ fn sidebar(m: &Main) -> Element<'_, Msg> {
     }
 
     let t2 = *t;
-    container(scrollable(col).height(Length::Fill))
+    container(crate::gui::widget::vscroll(col).height(Length::Fill))
         .width(Length::Fixed(theme::size::SIDEBAR_W))
         .height(Length::Fill)
         .style(move |_| container::Style {
