@@ -866,6 +866,11 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             if let Some((col, start_x, start_w)) = m.col_drag {
                 m.columns.set_width(col as usize, start_w + (x - start_x));
             }
+            if let Some((col, press_x)) = m.col_move
+                && (x - press_x).abs() >= COL_MOVE_SLOP
+            {
+                drag_step(m, col);
+            }
             Task::none()
         }
         Msg::MouseReleased => {
@@ -883,10 +888,10 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                     }
                     return Task::none();
                 }
-                if let Some(boundary) = col_drop_boundary(m) {
-                    apply_col_drop(m, col, boundary);
-                    crate::gui::ui_prefs::save_columns(&m.columns);
-                }
+                // The order already followed the pointer; nothing to
+                // apply on release but the save.
+                let _ = col;
+                crate::gui::ui_prefs::save_columns(&m.columns);
             }
             Task::none()
         }
@@ -2478,36 +2483,6 @@ fn header_ghost<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg> {
     .into()
 }
 
-/// Insertion marker for a header being dragged: a clay rule in the gap
-/// the column would land in. Empty (and therefore invisible) when no
-/// reorder is in flight.
-fn drop_marker(m: &Main) -> Element<'_, Msg> {
-    let dragging = matches!(m.col_move, Some((_, press_x))
-        if (m.cursor.0 - press_x).abs() >= COL_MOVE_SLOP);
-    let Some(boundary) = dragging.then(|| col_drop_boundary(m)).flatten() else {
-        return iced::widget::Space::new().into();
-    };
-    let x = boundary_x(m, boundary);
-    if x < 0.0 {
-        return iced::widget::Space::new().into();
-    }
-    container(
-        container(iced::widget::Space::new())
-            .width(Length::Fixed(GRIP_W_ACTIVE))
-            .height(Length::Fixed(HEADER_H))
-            .style(|_| container::Style {
-                background: Some(color::clay::C500.into()),
-                ..Default::default()
-            }),
-    )
-    .padding(iced::Padding {
-        left: (x - GRIP_W_ACTIVE / 2.0).max(0.0),
-        ..Default::default()
-    })
-    .height(Length::Fixed(HEADER_H))
-    .into()
-}
-
 /// Resize grips, overlaid on the header row and centered on each column
 /// boundary (design `.col-resizer`: centered hit area, grip centered in
 /// it, and the drag guideline at its center). Laid out as spacers +
@@ -2603,38 +2578,31 @@ const COL_MOVE_SLOP: f32 = 5.0;
 /// Opacity of the dragged-header ghost.
 const GHOST_ALPHA: f32 = 0.5;
 
-/// Boundary the drop would land on, counted in *visible* columns:
-/// `0` = before the first, `n` = after the last. This is the gap the
-/// marker draws in, which is also where the column ends up — naming a
-/// column and a side instead lets the two disagree, which is how the
-/// marker came to sit on the wrong edge when moving right.
-fn col_drop_boundary(m: &Main) -> Option<usize> {
-    // Cursor is window-space; the header starts after the sidebar and
-    // scrolls horizontally with the body.
+/// Nudge the dragged column one place when the pointer leaves the cell
+/// it currently occupies — the behaviour Chrome's tabs and the big data
+/// grids use. The table reorders live under the pointer, so there is no
+/// separate marker that can promise a move the release then declines.
+///
+/// Swapping on the dragged cell's own edges (rather than a neighbour's
+/// midpoint) is what keeps it stable: after the swap the pointer sits
+/// inside the cell's new bounds, so it cannot immediately swap back.
+fn drag_step(m: &mut Main, col: SortColumn) {
     let x = m.cursor.0 - theme::size::SIDEBAR_W + m.table_scroll_x;
-    if x < 0.0 {
-        return None;
-    }
     let cols = visible_cols(m);
-    let mut edge = 0.0;
-    for (i, col) in cols.iter().enumerate() {
-        let w = m.columns.width(*col as usize);
-        if x < edge + w / 2.0 {
-            return Some(i);
-        }
-        edge += w;
+    let Some(cur) = cols.iter().position(|c| *c == col) else {
+        return;
+    };
+    let left: f32 = cols
+        .iter()
+        .take(cur)
+        .map(|c| m.columns.width(*c as usize))
+        .sum();
+    let right = left + m.columns.width(col as usize);
+    if x < left && cur > 0 {
+        apply_col_drop(m, col, cur - 1);
+    } else if x > right && cur + 1 < cols.len() {
+        apply_col_drop(m, col, cur + 2);
     }
-    Some(cols.len())
-}
-
-/// x of a visible-column boundary in the header's own (scrolled) space.
-fn boundary_x(m: &Main, boundary: usize) -> f32 {
-    visible_cols(m)
-        .into_iter()
-        .take(boundary)
-        .map(|c| m.columns.width(c as usize))
-        .sum::<f32>()
-        - m.table_scroll_x
 }
 
 /// Move `col` into the gap at `boundary`, keeping hidden columns where
@@ -2694,20 +2662,16 @@ fn table(m: &Main) -> Element<'_, Msg> {
     // via TableScrolled -> scroll_to); its own scrollbar is hidden.
     let header = container(
         mouse_area(
-            scrollable(iced::widget::stack![
-                header_row,
-                header_grips(m),
-                drop_marker(m)
-            ])
-            .id(iced::widget::Id::new("tbl-header"))
-            .direction(scrollable::Direction::Horizontal(
-                scrollable::Scrollbar::new()
-                    .width(0.0)
-                    .scroller_width(0.0)
-                    .margin(0.0),
-            ))
-            .width(Length::Fill)
-            .height(Length::Fixed(HEADER_H)),
+            scrollable(iced::widget::stack![header_row, header_grips(m)])
+                .id(iced::widget::Id::new("tbl-header"))
+                .direction(scrollable::Direction::Horizontal(
+                    scrollable::Scrollbar::new()
+                        .width(0.0)
+                        .scroller_width(0.0)
+                        .margin(0.0),
+                ))
+                .width(Length::Fill)
+                .height(Length::Fixed(HEADER_H)),
         )
         .on_right_press(Msg::HeaderRightClick),
     )
