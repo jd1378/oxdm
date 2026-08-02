@@ -24,11 +24,11 @@ pub fn chip<'a, M: 'a>(t: &Tokens, label: impl Into<String>) -> Element<'a, M> {
     )
     .padding([CHIP_PAD_Y, CHIP_PAD_X])
     .style(move |_| container::Style {
-        background: Some(t.bg_sunken.into()),
+        background: Some(t.bg_page.into()),
         border: Border {
             color: t.border_subtle,
             width: 1.0,
-            radius: theme::radius::XS.into(),
+            radius: CHIP_RADIUS.into(),
         },
         snap: true,
         ..Default::default()
@@ -36,9 +36,17 @@ pub fn chip<'a, M: 'a>(t: &Tokens, label: impl Into<String>) -> Element<'a, M> {
     .into()
 }
 
-const CHIP_TEXT: f32 = 10.0;
-const CHIP_PAD_Y: f32 = 2.0;
+/// `.prop-cs-algochip`: mono 9.5px, 6px x-padding, 4px radius — a
+/// rounded rect, not a pill (`radius::XS` reads as a pill at this
+/// height).
+///
+/// The design's 2px y-padding sits around a full line box; pinning the
+/// box to the glyphs (see `chip`) removes that leading, so the padding
+/// absorbs it to keep the chip the height the design draws.
+const CHIP_TEXT: f32 = 9.5;
+const CHIP_PAD_Y: f32 = 3.5;
 const CHIP_PAD_X: f32 = 6.0;
+const CHIP_RADIUS: f32 = 4.0;
 
 /// Count badge: 16px pill, mono(10), 6px x-pad, min width 16.
 pub fn pill_count<'a, M: 'a>(n: u64, fg: Color, bg: Color) -> Element<'a, M> {
