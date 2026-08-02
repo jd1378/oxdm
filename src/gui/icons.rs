@@ -62,11 +62,11 @@ fn handle(name: &str) -> svg::Handle {
 
 /// Icon tinted with a fixed color.
 pub fn icon<'a, M: 'a>(name: &str, size: f32, color: Color) -> Element<'a, M> {
-    svg(handle(name))
-        .width(Length::Fixed(size))
-        .height(Length::Fixed(size))
-        .style(move |_theme, _status| svg::Style { color: Some(color) })
-        .into()
+    Element::new(SnappedIcon {
+        handle: handle(name),
+        size,
+        tint: Tint::Fixed(color),
+    })
 }
 
 /// Icon that swaps tint when the pointer is over **the icon itself**.
@@ -77,16 +77,11 @@ pub fn icon<'a, M: 'a>(name: &str, size: f32, color: Color) -> Element<'a, M> {
 /// label beside it. Prefer [`icon_current`] there; this is for icons
 /// that really are their own hit target.
 pub fn icon_dyn<'a, M: 'a>(name: &str, size: f32, idle: Color, hovered: Color) -> Element<'a, M> {
-    svg(handle(name))
-        .width(Length::Fixed(size))
-        .height(Length::Fixed(size))
-        .style(move |_theme, status| svg::Style {
-            color: Some(match status {
-                svg::Status::Idle => idle,
-                svg::Status::Hovered => hovered,
-            }),
-        })
-        .into()
+    Element::new(SnappedIcon {
+        handle: handle(name),
+        size,
+        tint: Tint::Hover { idle, hovered },
+    })
 }
 
 /// Icon painted in the **inherited** foreground color — the CSS
@@ -100,18 +95,35 @@ pub fn icon_dyn<'a, M: 'a>(name: &str, size: f32, idle: Color, hovered: Color) -
 /// one element covers every status of every interactive ancestor with
 /// no hover state to track.
 pub fn icon_current<'a, M: 'a>(name: &str, size: f32) -> Element<'a, M> {
-    Element::new(CurrentColorIcon {
+    Element::new(SnappedIcon {
         handle: handle(name),
         size,
+        tint: Tint::Current,
     })
 }
 
-struct CurrentColorIcon {
-    handle: svg::Handle,
-    size: f32,
+/// How a [`SnappedIcon`] picks its color.
+enum Tint {
+    /// One fixed color.
+    Fixed(Color),
+    /// Swaps on hover over the glyph's own bounds — the stock `svg`
+    /// widget's `Status` semantics.
+    Hover { idle: Color, hovered: Color },
+    /// Inherit the ancestor's `text_color` (CSS `currentColor`).
+    Current,
 }
 
-impl<M, R> iced::advanced::Widget<M, iced::Theme, R> for CurrentColorIcon
+/// Every icon goes through this widget so the glyph always lands on the
+/// pixel grid: Lucide strokes are ~1.3px at the design's sizes, and a
+/// fractional origin splits one across two pixel columns, which reads as
+/// a faded glyph rather than a soft one.
+struct SnappedIcon {
+    handle: svg::Handle,
+    size: f32,
+    tint: Tint,
+}
+
+impl<M, R> iced::advanced::Widget<M, iced::Theme, R> for SnappedIcon
 where
     R: iced::advanced::svg::Renderer,
 {
@@ -139,7 +151,7 @@ where
         _theme: &iced::Theme,
         style: &iced::advanced::renderer::Style,
         layout: iced::advanced::Layout<'_>,
-        _cursor: iced::advanced::mouse::Cursor,
+        cursor: iced::advanced::mouse::Cursor,
         viewport: &iced::Rectangle,
     ) {
         // Round onto the pixel grid: layout centring routinely lands a
@@ -152,8 +164,19 @@ where
             y: b.y.round(),
             ..b
         };
+        let color = match self.tint {
+            Tint::Fixed(color) => color,
+            Tint::Hover { idle, hovered } => {
+                if cursor.is_over(bounds) {
+                    hovered
+                } else {
+                    idle
+                }
+            }
+            Tint::Current => style.text_color,
+        };
         renderer.draw_svg(
-            iced::advanced::svg::Svg::new(self.handle.clone()).color(style.text_color),
+            iced::advanced::svg::Svg::new(self.handle.clone()).color(color),
             bounds,
             *viewport,
         );
