@@ -959,6 +959,8 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
 const PANE_HEAD_TITLE_SIZE: f32 = 22.0;
 /// `.s-pane-head` muted description line (body, fg_3).
 const PANE_HEAD_DESC_SIZE: f32 = 13.0;
+const PANE_HEAD_TITLE_LINE: f32 = 28.0;
+const PANE_HEAD_DESC_LINE: f32 = 18.0;
 
 /// `NumberStepper` clamps. Retry counts allow zero; the saved value still
 /// flows through the existing string mirror + `Save` parse.
@@ -971,14 +973,23 @@ const CONCURRENT_MAX: i64 = 20;
 /// Per-pane head (`.s-pane-head`): Fraunces h2 title + muted description
 /// line + a 1px bottom rule.
 fn pane_head<'a>(t: &Tokens, title: &str, desc: &str) -> Element<'a, Msg> {
+    // Absolute (integer) line heights keep the rule on a whole pixel:
+    // font-derived heights are fractional, and a 1px rect straddling
+    // two rows is painted as a soft 2px band.
     column![
         text(title.to_owned())
             .font(theme::DISPLAY)
             .size(PANE_HEAD_TITLE_SIZE)
+            .line_height(iced::widget::text::LineHeight::Absolute(
+                PANE_HEAD_TITLE_LINE.into()
+            ))
             .color(t.fg_1),
         text(desc.to_owned())
             .font(theme::BODY)
             .size(PANE_HEAD_DESC_SIZE)
+            .line_height(iced::widget::text::LineHeight::Absolute(
+                PANE_HEAD_DESC_LINE.into()
+            ))
             .color(t.fg_3),
         hairline(t.border_subtle),
     ]
