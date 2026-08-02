@@ -79,6 +79,31 @@ pub struct Settings {
     /// so users can opt out individual jobs while keeping the global on.
     #[serde(default = "yes_default")]
     pub show_complete_dialog: bool,
+    /// System notification when a download completes. Independent of
+    /// `show_complete_dialog`: the dialog is a window that wants
+    /// attention, the notification only reports.
+    #[serde(default = "yes_default")]
+    pub notify_complete: bool,
+    /// If true, a failed download surfaces the per-job window on its
+    /// error view. A download parked by a conflict is not a failure and
+    /// keeps its own flow.
+    #[serde(default = "yes_default")]
+    pub show_failed_dialog: bool,
+    /// System notification when a download fails.
+    #[serde(default = "yes_default")]
+    pub notify_failed: bool,
+    /// System notification when every job in a queue reaches a terminal
+    /// phase. Queue completion has no dialog — the queue window and the
+    /// tray already carry the state.
+    #[serde(default = "yes_default")]
+    pub notify_queue_finished: bool,
+    /// Update-available surfaces. Both are inert for now: the updater
+    /// only checks on demand from the About dialog, so nothing raises
+    /// these events and the settings rows stay disabled.
+    #[serde(default)]
+    pub show_update_dialog: bool,
+    #[serde(default)]
+    pub notify_update: bool,
     /// Auto-update feed URL. Empty disables update checks. Feed is a
     /// JSON document of shape `{ "version": "x.y.z", "url": "...", "notes": "..." }`.
     #[serde(default)]
@@ -288,6 +313,12 @@ impl Default for Settings {
             start_at_login: false,
             start_to_tray: false,
             show_complete_dialog: true,
+            notify_complete: true,
+            show_failed_dialog: true,
+            notify_failed: true,
+            notify_queue_finished: true,
+            show_update_dialog: false,
+            notify_update: false,
             update_feed_url: String::new(),
             theme: Theme::System,
             reduce_motion: false,

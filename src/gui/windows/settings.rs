@@ -62,7 +62,7 @@ impl Section {
             }
             Section::Network => "Connections, bandwidth, proxy, and request identity.",
             Section::Browser => "Pair the browser extension and resolve capture conflicts.",
-            Section::Notifications => "What oxdm tells you when a download finishes.",
+            Section::Notifications => "What oxdm tells you, and how, for each event.",
             Section::Advanced => "Theme overrides, the update feed, and reset.",
             Section::About => "Version and project information.",
         }
@@ -171,6 +171,10 @@ pub enum Msg {
     ConflictHidden(String),
     // Notifications
     ShowCompleteDialog(bool),
+    NotifyComplete(bool),
+    ShowFailedDialog(bool),
+    NotifyFailed(bool),
+    NotifyQueueFinished(bool),
     // Advanced
     ThemeOverrides(text_editor::Action),
     UpdateFeed(String),
@@ -578,6 +582,22 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             st.s.show_complete_dialog = v;
             Task::none()
         }
+        Msg::NotifyComplete(v) => {
+            st.s.notify_complete = v;
+            Task::none()
+        }
+        Msg::ShowFailedDialog(v) => {
+            st.s.show_failed_dialog = v;
+            Task::none()
+        }
+        Msg::NotifyFailed(v) => {
+            st.s.notify_failed = v;
+            Task::none()
+        }
+        Msg::NotifyQueueFinished(v) => {
+            st.s.notify_queue_finished = v;
+            Task::none()
+        }
         Msg::ThemeOverrides(a) => {
             st.theme_overrides.perform(a);
             Task::none()
@@ -659,7 +679,15 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                     st.s.ipc_port = orig.ipc_port;
                     st.s.conflict_while_hidden = orig.conflict_while_hidden;
                 }
-                Section::Notifications => st.s.show_complete_dialog = orig.show_complete_dialog,
+                Section::Notifications => {
+                    st.s.show_complete_dialog = orig.show_complete_dialog;
+                    st.s.notify_complete = orig.notify_complete;
+                    st.s.show_failed_dialog = orig.show_failed_dialog;
+                    st.s.notify_failed = orig.notify_failed;
+                    st.s.notify_queue_finished = orig.notify_queue_finished;
+                    st.s.show_update_dialog = orig.show_update_dialog;
+                    st.s.notify_update = orig.notify_update;
+                }
                 Section::Advanced | Section::About => {}
             }
             mirror(st);
@@ -1007,7 +1035,20 @@ fn toggle_row<'a>(
     on: bool,
     msg: impl Fn(bool) -> Msg + 'a,
 ) -> Element<'a, Msg> {
-    set_row(t, label, hint, toggle(t, on, true, msg))
+    toggle_row_enabled(t, label, hint, on, true, msg)
+}
+
+/// `toggle_row` for a setting that exists but cannot be changed yet —
+/// the switch reads at half opacity and swallows presses.
+fn toggle_row_enabled<'a>(
+    t: &Tokens,
+    label: &'a str,
+    hint: Option<&'a str>,
+    on: bool,
+    enabled: bool,
+    msg: impl Fn(bool) -> Msg + 'a,
+) -> Element<'a, Msg> {
+    set_row(t, label, hint, toggle(t, on, enabled, msg))
 }
 
 /// Bounded numeric `.set-row` control: a `NumberStepper` whose value reads
@@ -1619,24 +1660,96 @@ fn notifications_section(st: &State) -> Element<'_, Msg> {
     pane(
         t,
         Section::Notifications,
-        set_section(
-            t,
-            "Notifications",
-            vec![
-                toggle_row(
-                    t,
-                    "Show download-complete dialog",
-                    Some("Opens a summary window when a download finishes."),
-                    st.s.show_complete_dialog,
-                    Msg::ShowCompleteDialog,
-                ),
-                set_note(
-                    t,
-                    "System notifications follow your queue's on-finish hooks (see Queues & \
-                     scheduling).",
-                ),
-            ],
-        ),
+        column![
+            set_section(
+                t,
+                "Download complete",
+                vec![
+                    toggle_row(
+                        t,
+                        "Show dialog",
+                        Some("Opens the job's window with a summary and what to do next."),
+                        st.s.show_complete_dialog,
+                        Msg::ShowCompleteDialog,
+                    ),
+                    toggle_row(
+                        t,
+                        "System notification",
+                        Some("Reports the finished file without taking focus."),
+                        st.s.notify_complete,
+                        Msg::NotifyComplete,
+                    ),
+                ],
+            ),
+            set_section(
+                t,
+                "Download failed",
+                vec![
+                    toggle_row(
+                        t,
+                        "Show dialog",
+                        Some("Opens the job's window on the error, where you can retry."),
+                        st.s.show_failed_dialog,
+                        Msg::ShowFailedDialog,
+                    ),
+                    toggle_row(
+                        t,
+                        "System notification",
+                        Some("Reports the failure without taking focus."),
+                        st.s.notify_failed,
+                        Msg::NotifyFailed,
+                    ),
+                ],
+            ),
+            set_section(
+                t,
+                "Queue finished",
+                vec![
+                    toggle_row(
+                        t,
+                        "System notification",
+                        Some("Fires when every download in a queue has finished."),
+                        st.s.notify_queue_finished,
+                        Msg::NotifyQueueFinished,
+                    ),
+                    set_note(
+                        t,
+                        "A finished queue has no dialog. For an action instead of a report — \
+                         run a command, sleep, shut down — use the queue's on-finish hooks in \
+                         Queues & scheduling.",
+                    ),
+                ],
+            ),
+            set_section(
+                t,
+                "New version available",
+                vec![
+                    toggle_row_enabled(
+                        t,
+                        "Show dialog",
+                        None,
+                        st.s.show_update_dialog,
+                        false,
+                        |_| Msg::Noop,
+                    ),
+                    toggle_row_enabled(
+                        t,
+                        "System notification",
+                        None,
+                        st.s.notify_update,
+                        false,
+                        |_| Msg::Noop,
+                    ),
+                    set_note(
+                        t,
+                        "Unavailable: oxdm only checks for updates when you ask it to, from \
+                         About. Nothing raises this event yet.",
+                    ),
+                ],
+            ),
+        ]
+        .spacing(SECTION_GAP)
+        .into(),
     )
 }
 

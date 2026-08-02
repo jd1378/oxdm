@@ -3,6 +3,10 @@
 //! Subscribes `DomainEvent::JobCompleted` and applies each job's
 //! `OnCompletion` preferences. The "show dialog" flag suppresses every
 //! other automatic action — same UX as IDM.
+//!
+//! Also raises the per-job window when a download *fails*, which has no
+//! per-job preferences to honour: the window is the only place that
+//! shows the error and offers a retry.
 
 use std::process::Command;
 use std::sync::Arc;
@@ -14,6 +18,15 @@ pub fn spawn(state: Arc<AppState>) {
     tokio::spawn(async move {
         let mut rx = state.subscribe();
         while let Ok(ev) = rx.recv().await {
+            if let DomainEvent::JobFailed { id, error } = &ev {
+                // A conflict parks the job pending an answer and has its
+                // own dialog; only real failures raise this one.
+                let conflict = matches!(error, crate::domain::JobError::ConflictPending(_));
+                if !conflict && state.settings().await.show_failed_dialog {
+                    crate::daemon::tray::spawn_download_gui(*id);
+                }
+                continue;
+            }
             if let DomainEvent::JobCompleted { id, .. } = ev {
                 let Some(entry) = state.job_entry(id).await else {
                     continue;

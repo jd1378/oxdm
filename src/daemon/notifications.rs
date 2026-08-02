@@ -1,9 +1,13 @@
 //! System-notification bridge.
 //!
 //! Subscribes to `DomainEvent` and surfaces lifecycle terminals
-//! (Completed / Failed / parked Conflict) as desktop notifications.
-//! Tray + queue UI surface the same info; notifications matter most
-//! when the window is hidden.
+//! (Completed / Failed / parked Conflict / finished queue) as desktop
+//! notifications. Tray + queue UI surface the same info; notifications
+//! matter most when the window is hidden.
+//!
+//! Each event is opt-out from Settings → Notifications. A conflict is
+//! not covered: it is a question for the user, not a report, and the
+//! download stays parked until it is answered.
 //!
 //! `notify-rust` is fire-and-forget on Linux/Mac; on Windows it
 //! requires an AppUserModelID — we set one matching the binary name.
@@ -18,6 +22,9 @@ pub fn spawn(state: Arc<AppState>) {
         while let Ok(ev) = rx.recv().await {
             match ev {
                 DomainEvent::JobCompleted { path, .. } => {
+                    if !state.settings().await.notify_complete {
+                        continue;
+                    }
                     let body = format!(
                         "Saved to {}",
                         path.file_name()
@@ -27,11 +34,28 @@ pub fn spawn(state: Arc<AppState>) {
                     notify("Download complete", &body);
                 }
                 DomainEvent::JobFailed { error, .. } => {
-                    let title = match &error {
-                        crate::domain::JobError::ConflictPending(_) => "Download paused",
-                        _ => "Download failed",
+                    let conflict = matches!(error, crate::domain::JobError::ConflictPending(_));
+                    if !conflict && !state.settings().await.notify_failed {
+                        continue;
+                    }
+                    let title = if conflict {
+                        "Download paused"
+                    } else {
+                        "Download failed"
                     };
                     notify(title, &error.to_string());
+                }
+                DomainEvent::QueueFinished { id } => {
+                    if !state.settings().await.notify_queue_finished {
+                        continue;
+                    }
+                    let Some(queue) = state.queue(id).await else {
+                        continue;
+                    };
+                    notify(
+                        "Queue finished",
+                        &format!("Every download in {} is done.", queue.name),
+                    );
                 }
                 _ => {}
             }
