@@ -342,6 +342,11 @@ pub struct Main {
     pub columns: crate::gui::ui_prefs::ColumnsState,
     /// Active header drag: (column, cursor x at start, width at start).
     pub col_drag: Option<(SortColumn, f32, f32)>,
+    /// Column order the header row previews while a drag is in flight.
+    /// The body keeps rendering the committed order until release —
+    /// re-laying every row on each pointer move is the expensive half of
+    /// a reorder, and the header alone carries the feedback.
+    pub col_preview: Option<[usize; crate::gui::ui_prefs::COLS]>,
     /// Header being dragged to a new position: `(column, press x)`.
     /// Until the pointer travels `COL_MOVE_SLOP` this is still a click,
     /// so the release sorts instead of reordering.
@@ -406,6 +411,7 @@ impl Main {
             columns: crate::gui::ui_prefs::load().columns.unwrap_or_default(),
             col_drag: None,
             col_move: None,
+            col_preview: None,
             col_handle_hover: None,
             table_scroll_x: 0.0,
             columns_menu: false,
@@ -888,15 +894,23 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                     }
                     return Task::none();
                 }
-                // The order already followed the pointer; nothing to
-                // apply on release but the save.
+                // The header previewed the new order; commit it to the
+                // table now, which is the only point the body re-lays
+                // out.
                 let _ = col;
+                if let Some(order) = m.col_preview.take() {
+                    m.columns.order = order;
+                }
                 crate::gui::ui_prefs::save_columns(&m.columns);
             }
             Task::none()
         }
         Msg::ColMoveStart(col) => {
             m.col_move = Some((col, m.cursor.0));
+            m.col_preview = Some(m.columns.order);
+            // A grip left highlighted under the pointer would keep
+            // glowing for the whole drag.
+            m.col_handle_hover = None;
             Task::none()
         }
         Msg::ColResizeStart(col) => {
@@ -2445,7 +2459,7 @@ fn header_ghost<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg> {
     // Keep the grab point under the cursor: the offset from the cell's
     // left edge to where the press landed.
     let mut left = 0.0;
-    for c in visible_cols(m) {
+    for c in header_cols(m) {
         if c == col {
             break;
         }
@@ -2494,7 +2508,7 @@ fn header_grips(m: &Main) -> Element<'_, Msg> {
     let t2 = m.tokens;
     let mut strip = row![].align_y(Alignment::Center);
     let mut first = true;
-    for col in visible_cols(m) {
+    for col in header_cols(m) {
         let width = m.columns.width(col as usize);
         // Gap from the previous grip's right edge to this grip's left
         // edge: the first is measured from the header's left edge.
@@ -2509,7 +2523,11 @@ fn header_grips(m: &Main) -> Element<'_, Msg> {
         // Design `ResizableHeader`: 1px quiet idle, 3px clay-400 at ~70%
         // height on hover, 3px clay-500 full height while dragging.
         let dragging = matches!(m.col_drag, Some((c, _, _)) if c == col);
-        let hovering = m.col_handle_hover == Some(col);
+        // A header being carried must not light up (or grab) the grips it
+        // passes over: the pointer is busy, and a highlight left behind
+        // it sticks for the rest of the drag.
+        let moving = m.col_move.is_some();
+        let hovering = !moving && m.col_handle_hover == Some(col);
         let (line_w, line_h, line_color) = if dragging {
             (GRIP_W_ACTIVE, HEADER_H, color::clay::C500)
         } else if hovering {
@@ -2539,11 +2557,18 @@ fn header_grips(m: &Main) -> Element<'_, Msg> {
             .align_x(Alignment::Center)
             .align_y(Alignment::Center),
         )
-        .on_enter(Msg::ColHandleHover(col, true))
-        .on_exit(Msg::ColHandleHover(col, false))
-        .interaction(iced::mouse::Interaction::ResizingHorizontally);
-        if col != SortColumn::Type {
-            grip = grip.on_press(Msg::ColResizeStart(col));
+        .interaction(if moving {
+            iced::mouse::Interaction::Idle
+        } else {
+            iced::mouse::Interaction::ResizingHorizontally
+        });
+        if !moving {
+            grip = grip
+                .on_enter(Msg::ColHandleHover(col, true))
+                .on_exit(Msg::ColHandleHover(col, false));
+            if col != SortColumn::Type {
+                grip = grip.on_press(Msg::ColResizeStart(col));
+            }
         }
         strip = strip.push(grip);
     }
@@ -2588,7 +2613,7 @@ const GHOST_ALPHA: f32 = 0.5;
 /// inside the cell's new bounds, so it cannot immediately swap back.
 fn drag_step(m: &mut Main, col: SortColumn) {
     let x = m.cursor.0 - theme::size::SIDEBAR_W + m.table_scroll_x;
-    let cols = visible_cols(m);
+    let cols = header_cols(m);
     let Some(cur) = cols.iter().position(|c| *c == col) else {
         return;
     };
@@ -2608,7 +2633,7 @@ fn drag_step(m: &mut Main, col: SortColumn) {
 /// Move `col` into the gap at `boundary`, keeping hidden columns where
 /// they are relative to their visible neighbours.
 fn apply_col_drop(m: &mut Main, col: SortColumn, boundary: usize) {
-    let vis = visible_cols(m);
+    let vis = header_cols(m);
     let Some(from) = vis.iter().position(|c| *c == col) else {
         return;
     };
@@ -2626,21 +2651,30 @@ fn apply_col_drop(m: &mut Main, col: SortColumn, boundary: usize) {
     after.remove(from);
     let anchor = after.get(to).copied();
 
-    let mut order: Vec<usize> = m.columns.order.to_vec();
+    let mut order: Vec<usize> = m.col_preview.unwrap_or(m.columns.order).to_vec();
     order.retain(|&i| COL_BY_INDEX[i] != col);
     let at = anchor
         .and_then(|a| order.iter().position(|&i| COL_BY_INDEX[i] == a))
         .unwrap_or(order.len());
     order.insert(at, col as usize);
     if let Ok(order) = <[usize; crate::gui::ui_prefs::COLS]>::try_from(order) {
-        m.columns.order = order;
+        m.col_preview = Some(order);
     }
 }
 
-/// Columns in display order, skipping hidden ones.
+/// Committed column order, skipping hidden ones — what the body draws.
 fn visible_cols(m: &Main) -> Vec<SortColumn> {
-    m.columns
-        .order
+    visible_in(m, m.columns.order)
+}
+
+/// What the *header* draws: the drag preview while one is in flight,
+/// otherwise the committed order.
+fn header_cols(m: &Main) -> Vec<SortColumn> {
+    visible_in(m, m.col_preview.unwrap_or(m.columns.order))
+}
+
+fn visible_in(m: &Main, order: [usize; crate::gui::ui_prefs::COLS]) -> Vec<SortColumn> {
+    order
         .iter()
         .map(|&i| COL_BY_INDEX[i])
         .filter(|c| m.columns.is_visible(*c as usize))
@@ -2650,7 +2684,7 @@ fn visible_cols(m: &Main) -> Vec<SortColumn> {
 fn table(m: &Main) -> Element<'_, Msg> {
     let t = &m.tokens;
     let mut header_row = row![];
-    for col in visible_cols(m) {
+    for col in header_cols(m) {
         header_row = header_row.push(header_cell(
             m,
             COL_LABELS[col as usize],
