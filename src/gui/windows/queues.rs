@@ -35,9 +35,10 @@ const CONC_PILL_PAD_X: f32 = 14.0;
 /// download; no design max, so cap at a sane parallelism ceiling.
 const CONC_MIN: i64 = 1;
 const CONC_MAX: i64 = 16;
-/// Value the custom stepper shows before an explicit count is set
-/// (non-preset, so it reads as a distinct "custom" choice).
-const CONC_DEFAULT: i64 = 4;
+/// Concurrency a queue gets when it has none of its own — new queues,
+/// and rows persisted back when `Queue::max_concurrent` was still the
+/// old inherit-the-global `None`. Matches `Settings`' own default.
+const CONC_FALLBACK: usize = 3;
 /// Queue color button (design `.q-color-btn`: 24px square, 6px radius,
 /// 2px border; hover border brightens to fg-3).
 const COLOR_BTN: f32 = 24.0;
@@ -212,7 +213,7 @@ pub enum Msg {
     ColorClose,
     ColorPick([u8; 3]),
     ColorHex(String),
-    Concurrency(Option<usize>),
+    Concurrency(usize),
     Sched(SchedKind),
     SchedStart(String),
     SchedDay(u8, bool),
@@ -260,7 +261,7 @@ pub struct State {
     selected: Option<QueueId>,
 
     name: String,
-    max_concurrent: Option<usize>,
+    max_concurrent: usize,
     sched: SchedKind,
     sched_start: String,
     sched_days: WeekDayMask,
@@ -326,7 +327,7 @@ impl State {
         self.color = q.color;
         self.color_hex = q.color.map(hex_string).unwrap_or_default();
         self.color_open = false;
-        self.max_concurrent = q.max_concurrent;
+        self.max_concurrent = q.max_concurrent.unwrap_or(CONC_FALLBACK);
         self.sched = match q.schedule {
             QueueSchedule::Manual => SchedKind::Manual,
             QueueSchedule::Daily { .. } => SchedKind::Recurring,
@@ -404,7 +405,7 @@ impl State {
         let mut q = self.selected_queue()?.clone();
         q.name = self.name.trim().to_owned();
         q.color = self.color;
-        q.max_concurrent = self.max_concurrent;
+        q.max_concurrent = Some(self.max_concurrent);
         q.schedule = match self.sched {
             SchedKind::Manual => QueueSchedule::Manual,
             SchedKind::Condition => QueueSchedule::Condition(CondSet {
@@ -493,7 +494,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 selected: queues.first().map(|q| q.id),
                 queues,
                 name: String::new(),
-                max_concurrent: None,
+                max_concurrent: CONC_FALLBACK,
                 sched: SchedKind::Manual,
                 sched_start: String::new(),
                 sched_days: WeekDayMask(0x7F),
@@ -1363,7 +1364,7 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
     let mut list = column![].spacing(2.0).padding(QL_PAD);
     for q in &st.queues {
         let active = Some(q.id) == st.selected;
-        let count = q.max_concurrent.unwrap_or(0);
+        let count = q.max_concurrent.unwrap_or(CONC_FALLBACK);
         list = list.push(
             button(
                 row![
@@ -1468,27 +1469,16 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
                 .size(12.0)
                 .color(t.fg_3),
             row![
-                // "Auto" = inherit the global concurrency (value `None`);
-                // kept explicitly selectable so a queue can be set back
-                // to inherit after a concrete count was chosen.
-                conc_pill(t, "Auto", conc.is_none(), Msg::Concurrency(None)),
-                conc_pill(t, "1x", conc == Some(1), Msg::Concurrency(Some(1))),
-                conc_pill(t, "2x", conc == Some(2), Msg::Concurrency(Some(2))),
-                conc_pill(t, "3x", conc == Some(3), Msg::Concurrency(Some(3))),
-                conc_pill(t, "5x", conc == Some(5), Msg::Concurrency(Some(5))),
-                conc_pill(t, "8x", conc == Some(8), Msg::Concurrency(Some(8))),
-                // "Custom" pill → inline stepper, reusing the existing
-                // `Concurrency(Some(_))` message for an arbitrary count.
-                // Disabled (neutral) while Auto is active so it never
-                // implies a concrete value for an inheriting queue.
-                number_stepper(
-                    t,
-                    conc.map(|c| c as i64).unwrap_or(CONC_DEFAULT),
-                    CONC_MIN,
-                    CONC_MAX,
-                    conc.is_some(),
-                    |n| Msg::Concurrency(Some(n as usize)),
-                ),
+                conc_pill(t, "1x", conc == 1, Msg::Concurrency(1)),
+                conc_pill(t, "2x", conc == 2, Msg::Concurrency(2)),
+                conc_pill(t, "3x", conc == 3, Msg::Concurrency(3)),
+                conc_pill(t, "5x", conc == 5, Msg::Concurrency(5)),
+                conc_pill(t, "8x", conc == 8, Msg::Concurrency(8)),
+                // "Custom" stepper → any count the presets don't cover,
+                // through the same message.
+                number_stepper(t, conc as i64, CONC_MIN, CONC_MAX, true, |n| {
+                    Msg::Concurrency(n as usize)
+                },),
             ]
             .spacing(4.0)
             .align_y(Alignment::Center),
