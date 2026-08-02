@@ -177,6 +177,11 @@ pub enum Msg {
     /// arrives before the old row's exit. An id-less exit would clear
     /// the highlight that had just been set.
     RowUnhovered(JobId),
+    /// The debounce for resize generation `n` elapsed.
+    ResizeSettled(u64),
+    /// Resize settled: `(width, height, maximized)`. Only a
+    /// non-maximized size is worth remembering.
+    WindowSizeSettled(f32, f32, bool),
     SectionHovered(u8),
     SectionUnhovered(u8),
     // Pulse clock for the queue live-dot (gated on !reduce_motion)
@@ -326,7 +331,12 @@ pub struct Main {
     /// must not follow the moving mouse.
     pub menu_anchor: (f32, f32),
     pub win_size: (f32, f32),
-    pub last_size_save: Option<std::time::Instant>,
+    /// Bumped on every resize event; a settle callback only persists if
+    /// it still owns the latest generation. Throttling instead of
+    /// debouncing dropped the *final* size of any drag shorter than the
+    /// throttle window, so the app remembered a mid-drag size — or, for
+    /// a quick drag, the size it started from.
+    pub resize_gen: u64,
     pub columns: crate::gui::ui_prefs::ColumnsState,
     /// Active header drag: (column, cursor x at start, width at start).
     pub col_drag: Option<(SortColumn, f32, f32)>,
@@ -386,7 +396,7 @@ impl Main {
             cursor: (0.0, 0.0),
             menu_anchor: (0.0, 0.0),
             win_size: (0.0, 0.0),
-            last_size_save: None,
+            resize_gen: 0,
             columns: crate::gui::ui_prefs::load().columns.unwrap_or_default(),
             col_drag: None,
             col_handle_hover: None,
@@ -883,6 +893,15 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             m.menu_anchor = m.cursor;
             Task::none()
         }
+        Msg::WindowSizeSettled(w, h, maximized) => {
+            if !maximized {
+                crate::gui::ui_prefs::save_window(crate::gui::ui_prefs::WindowPrefs {
+                    width: w,
+                    height: h,
+                });
+            }
+            Task::none()
+        }
         Msg::ColToggle(col) => {
             m.columns.toggle(col as usize);
             crate::gui::ui_prefs::save_columns(&m.columns);
@@ -890,19 +909,30 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
         }
         Msg::WindowResized(w, h) => {
             m.win_size = (w, h);
+            m.resize_gen = m.resize_gen.wrapping_add(1);
+            let generation = m.resize_gen;
             let clamp =
                 chrome::enforce_min_size(iced::Size::new(w, h), iced::Size::new(820.0, 520.0));
-            let due = m
-                .last_size_save
-                .is_none_or(|t| t.elapsed().as_millis() > 1000);
-            if due {
-                m.last_size_save = Some(std::time::Instant::now());
-                crate::gui::ui_prefs::save_window(crate::gui::ui_prefs::WindowPrefs {
-                    width: w,
-                    height: h,
-                });
+            let settle = Task::perform(
+                async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(RESIZE_SETTLE_MS)).await;
+                },
+                move |()| Msg::ResizeSettled(generation),
+            );
+            Task::batch([clamp, settle])
+        }
+        Msg::ResizeSettled(generation) => {
+            if generation != m.resize_gen {
+                return Task::none(); // a later resize superseded this one
             }
-            clamp
+            let (w, h) = m.win_size;
+            // Ask the window whether this is its maximized size before
+            // persisting: `launch_main` restores whatever is saved, so
+            // storing a maximized geometry makes every later launch open
+            // filling the screen.
+            iced::window::latest()
+                .and_then(iced::window::is_maximized)
+                .map(move |maximized| Msg::WindowSizeSettled(w, h, maximized))
         }
         Msg::AboutCheckUpdate => {
             m.about.update = UpdateUi::Checking;
@@ -1969,6 +1999,11 @@ fn tracked_caps<'a>(label: &str, size: f32, tracking: f32, color: iced::Color) -
     }
     r.into()
 }
+
+/// Quiet period after the last resize event before the size is
+/// persisted — long enough to cover a drag, short enough to survive a
+/// close right afterwards.
+const RESIZE_SETTLE_MS: u64 = 400;
 
 fn section_header<'a>(
     t: &Tokens,
