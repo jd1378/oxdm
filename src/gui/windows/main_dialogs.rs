@@ -4,14 +4,14 @@
 //! the main view (the egui app used child viewports; one process =
 //! in-window overlays here).
 
-use iced::widget::{column, container, mouse_area, row, scrollable, text};
+use iced::widget::{column, container, mouse_area, row, text};
 use iced::{Alignment, Element, Length};
 
 use crate::data::ConflictKind;
 use crate::domain::HostSetting;
 use crate::gui::theme::{self, Tokens};
 use crate::gui::widget::{
-    Btn, BtnSize, PasswordInput, TextInput, checkbox, hairline, section_card,
+    Btn, BtnSize, PasswordInput, TextInput, checkbox, hairline, section_card, vscroll,
 };
 use crate::gui::{color, icons};
 
@@ -399,7 +399,7 @@ pub fn host_settings<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg
 
     let sidebar = column![
         crate::gui::widget::search_field(t, &st.search, "Search hosts…", 200.0, Msg::HostSearch),
-        scrollable(list).height(Length::Fixed(280.0)),
+        vscroll(list).height(Length::Fixed(280.0)),
         row![
             Btn::new("Add host")
                 .ghost()
@@ -564,7 +564,7 @@ pub fn host_settings<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg
         hairline(t.border_subtle),
         row![
             sidebar,
-            scrollable(editor)
+            vscroll(editor)
                 .height(Length::Fixed(360.0))
                 .width(Length::Fill)
         ]
@@ -1098,7 +1098,7 @@ fn extensions_dialog<'a>(
     }
     let card = card
         .push(hero)
-        .push(scrollable(list).height(Length::Fixed(264.0)))
+        .push(vscroll(list).height(Length::Fixed(264.0)))
         .push(privacy)
         .push(footer);
 
