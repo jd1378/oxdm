@@ -2955,13 +2955,12 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
         ..Default::default()
     });
 
-    // No horizontal padding: the pill is centred, so padding would only
-    // stop the column narrowing past 28 + 2 x 8 and clip the pill
-    // instead — the column's width should be free to be whatever
-    // `TYPE_W` says.
+    // Every column starts at the same left edge, the ext pill included,
+    // so the table reads as one column of content per header.
     let type_cell: Element<'_, Msg> = container(ext_pill)
         .width(Length::Fixed(m.columns.width(SortColumn::Type as usize)))
-        .align_x(Alignment::Center)
+        .padding([0.0, theme::space::S2])
+        .align_x(Alignment::Start)
         .align_y(Alignment::Center)
         .height(Length::Fill)
         .clip(true)
@@ -2989,7 +2988,7 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
             t.fg_2,
         ),
         Length::Fixed(m.columns.width(SortColumn::Size as usize)),
-        Alignment::End, // design: numeric columns right-align
+        Alignment::Start,
     );
 
     // Status cell shows a progress bar whenever there is progress worth
@@ -3040,7 +3039,7 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
             t.fg_2,
         ),
         Length::Fixed(m.columns.width(SortColumn::Speed as usize)),
-        Alignment::End,
+        Alignment::Start,
     );
 
     let eta_cell = cell(
@@ -3051,7 +3050,7 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
             t.fg_2,
         ),
         Length::Fixed(m.columns.width(SortColumn::Eta as usize)),
-        Alignment::End,
+        Alignment::Start,
     );
 
     let date_cell = cell(
@@ -3062,7 +3061,7 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
             t.fg_3,
         ),
         Length::Fixed(m.columns.width(SortColumn::Date as usize)),
-        Alignment::End,
+        Alignment::Start,
     );
 
     // Design `.dl-table tbody tr`: selected → clay-50, selected+hover →
