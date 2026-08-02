@@ -404,6 +404,7 @@ pub fn host_settings<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg
             Btn::new("Add host")
                 .ghost()
                 .icon("plus")
+                .size(BtnSize::Sm)
                 .on_press(Msg::HostAdd)
                 .view(t),
             Btn::new("Delete")

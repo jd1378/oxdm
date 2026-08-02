@@ -278,7 +278,15 @@ impl<'a, M: Clone + 'a> Btn<'a, M> {
                 if self.selected {
                     (Some(t.bg_sunken), Some(t.border_brand))
                 } else {
-                    (None, None)
+                    // Design button table: "transparent / fg-2 / hover
+                    // sunken + fg-1". Only the text half was here, so a
+                    // ghost button read as inert next to a toolbar one.
+                    let bg = match status {
+                        Hovered => Some(t.bg_sunken),
+                        Pressed => Some(darken(t.bg_sunken, 0.06)),
+                        _ => None,
+                    };
+                    (bg, None)
                 }
             }
             BtnVariant::Danger => {
