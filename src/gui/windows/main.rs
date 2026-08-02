@@ -2639,16 +2639,29 @@ const GHOST_ALPHA: f32 = 0.5;
 fn drag_step(m: &mut Main, col: SortColumn) {
     let x = m.cursor.0 - theme::size::SIDEBAR_W + m.table_scroll_x;
 
-    let others: Vec<SortColumn> = header_cols(m).into_iter().filter(|c| *c != col).collect();
+    // Walk the preview as it is drawn — the dragged column included, so
+    // the midpoints are the ones on screen. Measuring the other columns
+    // packed together instead puts every midpoint right of the dragged
+    // slot one column-width too far left, which is why the rule only
+    // ever felt right on the way back.
+    let cols = header_cols(m);
+    let others: Vec<SortColumn> = cols.iter().copied().filter(|c| *c != col).collect();
     let mut target = others.len();
+    let mut passed = 0usize;
     let mut edge = 0.0;
-    for (i, c) in others.iter().enumerate() {
+    for c in &cols {
         let w = m.columns.width(*c as usize);
+        if *c == col {
+            // The dragged column still takes up room in the row.
+            edge += w;
+            continue;
+        }
         if x < edge + w / 2.0 {
-            target = i;
+            target = passed;
             break;
         }
         edge += w;
+        passed += 1;
     }
 
     // Rebuild the preview: the others in order, dragged spliced in at
