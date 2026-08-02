@@ -7,16 +7,19 @@ use serde::{Deserialize, Serialize};
 pub struct UiPrefs {
     #[serde(default)]
     pub window: Option<WindowPrefs>,
-    #[serde(default)]
+    /// Dropped when it cannot be read: the arrays are fixed-length, so a
+    /// file from a build with a different column set fails to parse, and
+    /// a stale table layout must not cost the user their window size.
+    #[serde(default, deserialize_with = "columns_or_none")]
     pub columns: Option<ColumnsState>,
 }
 
 /// Number of table columns = `windows::main::SortColumn` variants.
-pub const COLS: usize = 7;
+pub const COLS: usize = 6;
 
 /// Main-table column widths + visibility, indexed by
-/// `windows::main::SortColumn as usize` (Type, Name, Size, Status,
-/// Speed, Eta, Date).
+/// `windows::main::SortColumn as usize` (Name, Size, Status, Speed,
+/// Eta, Date).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ColumnsState {
     pub widths: [f32; COLS],
@@ -28,12 +31,20 @@ pub struct ColumnsState {
     pub order: [usize; COLS],
 }
 
+fn columns_or_none<'de, D>(d: D) -> Result<Option<ColumnsState>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(raw).ok())
+}
+
 fn identity_order() -> [usize; COLS] {
     std::array::from_fn(|i| i)
 }
 
 /// `SortColumn::Name` — the one column that can never be hidden.
-const NAME_IDX: usize = 1;
+const NAME_IDX: usize = 0;
 
 /// Minimum table column width. The design's `ResizableHeader` says 60px,
 /// but its headers are plain text; ours reserve room for the sort
@@ -41,29 +52,15 @@ const NAME_IDX: usize = 1;
 /// arrival.
 pub const COL_MIN_W: f32 = 75.0;
 
-/// The Type column is not resizable and holds one fixed-width pill, so
-/// its width is set by the header rather than the content: "TYPE" at
-/// 11px is ~30px inside 8px of padding either side, and the 28px pill
-/// needs 44. The sort chevron only appears while sorting *by* type, and
-/// the header ellipsizes to make room for it then, so it does not have
-/// to be reserved.
-pub const TYPE_W: f32 = 58.0;
-
-/// `SortColumn::Type` — fixed width, so it ignores any persisted value.
-const TYPE_IDX: usize = 0;
-
 /// Per-column minimum, indexed like `widths`.
-const COL_MIN: [f32; COLS] = [
-    TYPE_W, COL_MIN_W, COL_MIN_W, COL_MIN_W, COL_MIN_W, COL_MIN_W, COL_MIN_W,
-];
+const COL_MIN: [f32; COLS] = [COL_MIN_W; COLS];
 
 impl Default for ColumnsState {
     fn default() -> Self {
-        // Order = SortColumn (Type, Name, Size, Status, Speed, Eta,
-        // Date). Design defaults: name 420, size 90, status 280,
-        // speed 100, eta 90, date 130; Type is ours (the ext pill).
+        // Order = SortColumn (Name, Size, Status, Speed, Eta, Date),
+        // at the design's default widths.
         Self {
-            widths: [TYPE_W, 420.0, 90.0, 280.0, 100.0, 90.0, 130.0],
+            widths: [420.0, 90.0, 280.0, 100.0, 90.0, 130.0],
             hidden: [false; COLS],
             order: identity_order(),
         }
@@ -72,11 +69,6 @@ impl Default for ColumnsState {
 
 impl ColumnsState {
     pub fn width(&self, idx: usize) -> f32 {
-        if idx == TYPE_IDX {
-            // Not resizable: a stored value would silently outrank the
-            // constant and make changing it look like a no-op.
-            return TYPE_W;
-        }
         self.widths[idx].max(COL_MIN[idx])
     }
     pub fn set_width(&mut self, idx: usize, w: f32) {

@@ -72,10 +72,6 @@ const GRIP_ACTIVE_RATIO: f32 = 0.7;
 
 // Type-column ext pill (design `.fname` ext tag): 28×22, radius 4, mono
 // 700 ~9px, category-tinted.
-const EXT_PILL_W: f32 = 28.0;
-const EXT_PILL_H: f32 = 22.0;
-const EXT_PILL_RADIUS: f32 = 4.0;
-const EXT_PILL_FONT: f32 = 9.0;
 
 // Column-resize guideline (design §4 `ResizableHeader`: "dragging →
 // clay-500 grip + a full-height clay-300 guideline"): a 1px clay-300
@@ -98,8 +94,6 @@ pub enum Tab {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortColumn {
-    /// File type — the extension pill. Fixed width, not resizable.
-    Type,
     Name,
     Size,
     Status,
@@ -579,7 +573,6 @@ impl Main {
                     ea.cmp(&eb)
                 }
                 SortColumn::Date => a.created_at.cmp(&b.created_at),
-                SortColumn::Type => file_ext(a).cmp(&file_ext(b)),
             };
             if desc { ord.reverse() } else { ord }
         });
@@ -2626,9 +2619,7 @@ fn header_grips(m: &Main) -> Element<'_, Msg> {
             grip = grip
                 .on_enter(Msg::ColHandleHover(col, true))
                 .on_exit(Msg::ColHandleHover(col, false));
-            if col != SortColumn::Type {
-                grip = grip.on_press(Msg::ColResizeStart(col));
-            }
+            grip = grip.on_press(Msg::ColResizeStart(col));
         }
         strip = strip.push(grip);
     }
@@ -2637,18 +2628,10 @@ fn header_grips(m: &Main) -> Element<'_, Msg> {
 
 /// Column labels, indexed by `SortColumn as usize` — display order
 /// lives in `ColumnsState::order`, which the user can drag around.
-const COL_LABELS: [&str; crate::gui::ui_prefs::COLS] = [
-    "Type",
-    "Name",
-    "Size",
-    "Status",
-    "Speed",
-    "Time left",
-    "Date added",
-];
+const COL_LABELS: [&str; crate::gui::ui_prefs::COLS] =
+    ["Name", "Size", "Status", "Speed", "Time left", "Date added"];
 
 const COL_BY_INDEX: [SortColumn; crate::gui::ui_prefs::COLS] = [
-    SortColumn::Type,
     SortColumn::Name,
     SortColumn::Size,
     SortColumn::Status,
@@ -2937,16 +2920,6 @@ fn empty_state(m: &Main) -> Element<'_, Msg> {
     .into()
 }
 
-/// Uppercase extension shown in the type pill, and the Type column's
-/// sort key. Files with no extension group under "FILE".
-fn file_ext(job: &crate::domain::Job) -> String {
-    let name = job.filename.clone().unwrap_or_else(|| job.url.to_string());
-    std::path::PathBuf::from(&name)
-        .extension()
-        .map(|e| e.to_string_lossy().to_uppercase())
-        .unwrap_or_else(|| "FILE".into())
-}
-
 fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
     let t = &m.tokens;
     let id = job.id;
@@ -2957,44 +2930,6 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
 
     let name = job.filename.clone().unwrap_or_else(|| job.url.to_string());
     let host = job.url.host_str().unwrap_or("").to_owned();
-
-    // Category-tinted ext pill (design `.fname` tag). It sits in its own
-    // Type column so it can be hidden like any other, rather than being
-    // welded to the Name cell.
-    let ext = file_ext(job);
-    let cat = cat_color(t, job.category);
-    let pill_bg = color::mix(t.bg_surface, cat, 0.20);
-    let ext_pill = container(
-        text(ext)
-            .font(theme::MONO_BOLD)
-            .size(EXT_PILL_FONT)
-            .color(cat)
-            .wrapping(iced::widget::text::Wrapping::None),
-    )
-    .width(Length::Fixed(EXT_PILL_W))
-    .height(Length::Fixed(EXT_PILL_H))
-    .clip(true)
-    .align_x(Alignment::Center)
-    .align_y(Alignment::Center)
-    .style(move |_| container::Style {
-        background: Some(pill_bg.into()),
-        border: iced::Border {
-            radius: EXT_PILL_RADIUS.into(),
-            ..Default::default()
-        },
-        ..Default::default()
-    });
-
-    // Every column starts at the same left edge, the ext pill included,
-    // so the table reads as one column of content per header.
-    let type_cell: Element<'_, Msg> = container(ext_pill)
-        .width(Length::Fixed(m.columns.width(SortColumn::Type as usize)))
-        .padding([0.0, theme::space::S2])
-        .align_x(Alignment::Start)
-        .align_y(Alignment::Center)
-        .height(Length::Fill)
-        .clip(true)
-        .into();
 
     let name_cell = container(
         column![
@@ -3113,7 +3048,6 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
     // Cells are built up front, then pushed in the user's column order;
     // `Option::take` hands each one out exactly once.
     let mut by_col: [Option<Element<'_, Msg>>; crate::gui::ui_prefs::COLS] = [
-        Some(type_cell),
         Some(name_cell.into()),
         Some(size_cell),
         Some(status_cell),
@@ -3172,20 +3106,6 @@ fn cell(content: Element<'_, Msg>, width: Length, align: Alignment) -> Element<'
         .align_y(Alignment::Center)
         .height(Length::Fill)
         .into()
-}
-
-/// Category accent color for the Name-cell ext pill (mirrors the
-/// sidebar/category tints in `download.rs`).
-fn cat_color(t: &Tokens, cat: Category) -> iced::Color {
-    match cat {
-        Category::Compressed => t.cat_compressed,
-        Category::Programs => t.cat_programs,
-        Category::Videos => t.cat_videos,
-        Category::Music => t.cat_music,
-        Category::Pictures => t.cat_pictures,
-        Category::Documents => t.cat_documents,
-        Category::Other => t.fg_3,
-    }
 }
 
 fn phase_style(t: &Tokens, phase: Phase) -> (iced::Color, String) {
