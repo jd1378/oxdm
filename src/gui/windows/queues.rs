@@ -805,6 +805,9 @@ fn splash<'a>(msg: String) -> Element<'a, Msg> {
         .into()
 }
 
+/// Schedule / on-finish option. Same `.radio-pill` grammar as the
+/// concurrency presets — the mock (`queue-dialog.jsx`) gives all three
+/// rows the same class, so their selected states must match.
 fn seg_btn<'a>(
     t: &Tokens,
     label: &'a str,
@@ -812,19 +815,25 @@ fn seg_btn<'a>(
     selected: bool,
     msg: Msg,
 ) -> Element<'a, Msg> {
-    let mut b = Btn::new(label).secondary().selected(selected).on_press(msg);
-    if let Some(icon) = icon {
-        b = b.icon(icon);
-    }
-    b.view(t)
+    radio_pill(t, label, icon, selected, msg)
 }
 
-/// Concurrency preset pill. Idle/hover mirror a `secondary` button so
-/// it reads identically to the other preset rows, but the *selected*
-/// state uses the design's `.radio-pill .on` clay tint (clay-50 bg /
-/// clay-700 text / clay-200 border) instead of the generic
-/// secondary-selected (sunken + brand border). See T1-QUEUES.
+/// Concurrency preset pill (label only).
 fn conc_pill<'a>(t: &Tokens, label: &'a str, selected: bool, msg: Msg) -> Element<'a, Msg> {
+    radio_pill(t, label, None, selected, msg)
+}
+
+/// Design `.radio-pill`: sunken rounded rect that idles/hovers like a
+/// `secondary` button, but whose *selected* state is the clay tint
+/// (clay-50 bg / clay-700 text / clay-200 border) rather than the
+/// generic secondary-selected (sunken + brand border). See T1-QUEUES.
+fn radio_pill<'a>(
+    t: &Tokens,
+    label: &'a str,
+    icon: Option<&'a str>,
+    selected: bool,
+    msg: Msg,
+) -> Element<'a, Msg> {
     let t2 = *t;
     // tokens.css remaps clay-50/200/700 to dark warm tints under the
     // dark theme so the active pill doesn't punch a bright hole.
@@ -836,9 +845,24 @@ fn conc_pill<'a>(t: &Tokens, label: &'a str, selected: bool, msg: Msg) -> Elemen
         ),
         _ => (color::clay::C50, color::clay::C700, color::clay::C200),
     };
-    let content = container(text(label).font(theme::BODY_BOLD).size(CONC_PILL_FONT))
+    let fg = if selected { on_fg } else { t.fg_1 };
+    let label = text(label).font(theme::BODY_BOLD).size(CONC_PILL_FONT);
+    // `button` paints the label from its own style; the icon carries
+    // its colour itself, so it has to be told the same one.
+    let content: Element<'a, Msg> = match icon {
+        Some(name) => container(
+            row![icons::icon(name, 14.0, fg), label]
+                .spacing(6.0)
+                .align_y(Alignment::Center),
+        )
         .center_x(Length::Fill)
-        .center_y(Length::Fill);
+        .center_y(Length::Fill)
+        .into(),
+        None => container(label)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .into(),
+    };
     button(content)
         .height(Length::Fixed(theme::control::H_MD))
         .padding([0.0, CONC_PILL_PAD_X])
@@ -865,7 +889,7 @@ fn conc_pill<'a>(t: &Tokens, label: &'a str, selected: bool, msg: Msg) -> Elemen
             };
             iced::widget::button::Style {
                 background: Some(bg.into()),
-                text_color: t2.fg_1,
+                text_color: fg,
                 border: iced::Border {
                     color: t2.border_default,
                     width: 1.0,
