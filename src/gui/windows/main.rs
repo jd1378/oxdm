@@ -9,7 +9,7 @@ use iced::widget::{column, container, mouse_area, row, scrollable, text};
 use iced::{Alignment, Element, Length, Subscription, Task};
 
 use super::main_dialogs::{self, AboutState, HostState, RemoveState, UpdateUi};
-use crate::domain::{Category, Density, JobId, Phase, QueueId};
+use crate::domain::{Category, JobId, Phase, QueueId};
 use crate::gui::chrome::{self, WindowControl, titlebar};
 use crate::gui::format::{format_bytes, format_eta, format_speed};
 use crate::gui::ipc::DaemonSignal;
@@ -26,19 +26,16 @@ use crate::ipc_local::protocol::{Event, JobCounters, SnapshotData};
 const RESIZE_HANDLE_W: f32 = 6.0;
 const HEADER_H: f32 = 22.0;
 
-// Row heights per UI `Density` (design `--density`). Comfortable keeps
-// the roomy default; Compact tightens the vertical rhythm. Applied to
-// the jobs-table row and the sidebar/list nav rows only.
 /// 1px hairline under every row (design `.tr`), so the pitch a virtual
 /// list counts in is the row plus this.
 const ROW_SEPARATOR_H: f32 = 1.0;
 /// Rows built above and below the viewport, so a flick has something to
 /// show before the next scroll event lands.
 const ROW_OVERSCAN: usize = 6;
-const ROW_H_COMFORTABLE: f32 = 48.0;
-const ROW_H_COMPACT: f32 = 40.0;
-const SIDEBAR_ROW_H_COMFORTABLE: f32 = 26.0;
-const SIDEBAR_ROW_H_COMPACT: f32 = 22.0;
+/// Jobs-table row height (design `.tr`).
+const ROW_H: f32 = 48.0;
+/// Sidebar / list-nav row height (design `.nav-item`).
+const SIDEBAR_ROW_H: f32 = 26.0;
 
 // Queue live-dot (design `.q-live-dot`): a small moss dot shown next to
 // a queue's color chip while that queue has ≥1 running job.
@@ -448,22 +445,6 @@ impl Main {
             prev_job_count: snap.jobs.len(),
             welcome_shown: false,
             snap,
-        }
-    }
-
-    /// Table row height for the active UI density.
-    fn row_h(&self) -> f32 {
-        match self.snap.settings.ui_density {
-            Density::Comfortable => ROW_H_COMFORTABLE,
-            Density::Compact => ROW_H_COMPACT,
-        }
-    }
-
-    /// Sidebar/list nav row height for the active UI density.
-    fn sidebar_row_h(&self) -> f32 {
-        match self.snap.settings.ui_density {
-            Density::Comfortable => SIDEBAR_ROW_H_COMFORTABLE,
-            Density::Compact => SIDEBAR_ROW_H_COMPACT,
         }
     }
 
@@ -2179,7 +2160,7 @@ fn section_header<'a>(
 
 fn sidebar(m: &Main) -> Element<'_, Msg> {
     let t = &m.tokens;
-    let rh = m.sidebar_row_h();
+    let rh = SIDEBAR_ROW_H;
     let live = m.live_queues();
     let pa = pulse_alpha(m);
     let mut col = column![]
@@ -2791,7 +2772,7 @@ fn table(m: &Main) -> Element<'_, Msg> {
         // sparing iced ~10k widgets to lay out and diff per frame — the
         // difference between a 20ms frame and a multi-second one on a
         // table that size.
-        let pitch = m.row_h() + ROW_SEPARATOR_H;
+        let pitch = ROW_H + ROW_SEPARATOR_H;
         // Until the first scroll event the viewport height is unknown;
         // the window is a safe over-estimate (it can only be smaller).
         let viewport_h = if m.table_viewport_h > 0.0 {
@@ -3120,7 +3101,7 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
     // NOTE: width must be Shrink — Fill resolves to zero inside the
     // horizontally-unbounded table scrollable and collapses the row.
     let row_el = container(cells)
-        .height(Length::Fixed(m.row_h()))
+        .height(Length::Fixed(ROW_H))
         .width(Length::Shrink)
         .style(move |_| container::Style {
             background: bg(hovered).map(Into::into),

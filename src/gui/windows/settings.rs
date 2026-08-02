@@ -9,7 +9,7 @@ use std::time::Duration;
 use iced::widget::{column, container, mouse_area, row, text, text_editor};
 use iced::{Alignment, Element, Length, Subscription, Task};
 
-use crate::domain::{Category, Density, Queue, QueueId, Settings, Theme as AppTheme};
+use crate::domain::{Category, Queue, QueueId, Settings, Theme as AppTheme};
 use crate::gui::chrome::{self, WindowControl, titlebar};
 use crate::gui::color;
 use crate::gui::icons;
@@ -131,7 +131,6 @@ pub enum Msg {
     SetSection(Section),
     // General
     SetTheme(String),
-    SetDensity(Density),
     ReduceMotion(bool),
     DownloadDir(String),
     BrowseDownloadDir,
@@ -417,10 +416,6 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             st.tokens = Tokens::from_settings(&st.s);
             Task::none()
         }
-        Msg::SetDensity(v) => {
-            st.s.ui_density = v;
-            Task::none()
-        }
         Msg::ReduceMotion(v) => {
             st.s.reduce_motion = v;
             Task::none()
@@ -629,7 +624,6 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             match st.section {
                 Section::General => {
                     st.s.theme = orig.theme;
-                    st.s.ui_density = orig.ui_density;
                     st.s.reduce_motion = orig.reduce_motion;
                     st.s.download_dir = orig.download_dir;
                     st.s.work_dir = orig.work_dir;
@@ -1070,12 +1064,6 @@ fn general_section(st: &State) -> Element<'_, Msg> {
         AppTheme::Warm => 2,
         AppTheme::Dark => 3,
     };
-    // `.s-seg` density segments, mirroring the Theme control: writes back
-    // to `Settings.ui_density` via `Msg::SetDensity`, persisted on Save.
-    let density_idx = match st.s.ui_density {
-        Density::Comfortable => 0,
-        Density::Compact => 1,
-    };
     pane(
         t,
         Section::General,
@@ -1108,28 +1096,6 @@ fn general_section(st: &State) -> Element<'_, Msg> {
                                 .to_owned()
                             ),
                         )
-                    ),
-                    label_input(
-                        t,
-                        "density",
-                        column![
-                            segmented(
-                                t,
-                                &[("Comfortable", None), ("Compact", None)],
-                                density_idx,
-                                BtnSize::Md,
-                                |i| Msg::SetDensity(match i {
-                                    1 => Density::Compact,
-                                    _ => Density::Comfortable,
-                                }),
-                            ),
-                            text("Comfortable spacing or compact rows.")
-                                .font(theme::BODY)
-                                .size(12.0)
-                                .color(t.fg_3),
-                        ]
-                        .spacing(theme::space::S1 + 2.0)
-                        .into()
                     ),
                     toggle_row(
                         t,
