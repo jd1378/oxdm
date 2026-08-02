@@ -82,21 +82,6 @@ impl ColumnsState {
     pub fn set_width(&mut self, idx: usize, w: f32) {
         self.widths[idx] = w.max(COL_MIN[idx]);
     }
-    /// Move the column at display position `from` to position `to`,
-    /// sliding the columns in between over. Positions index `order`,
-    /// not columns.
-    pub fn reorder(&mut self, from: usize, to: usize) {
-        if from >= COLS || to >= COLS || from == to {
-            return;
-        }
-        let col = self.order[from];
-        if from < to {
-            self.order.copy_within(from + 1..=to, from);
-        } else {
-            self.order.copy_within(to..from, to + 1);
-        }
-        self.order[to] = col;
-    }
     pub fn is_visible(&self, idx: usize) -> bool {
         !self.hidden[idx]
     }

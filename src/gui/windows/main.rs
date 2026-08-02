@@ -883,8 +883,8 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                     }
                     return Task::none();
                 }
-                if let (Some(from), Some(to)) = (col_position(m, col), col_drop_slot(m)) {
-                    m.columns.reorder(from, to);
+                if let Some(boundary) = col_drop_boundary(m) {
+                    apply_col_drop(m, col, boundary);
                     crate::gui::ui_prefs::save_columns(&m.columns);
                 }
             }
@@ -1775,6 +1775,7 @@ fn main_view(m: &Main) -> Element<'_, Msg> {
     } else {
         toast_layer(m, with_drag)
     };
+    let with_toasts = header_ghost(m, with_toasts);
 
     let content = container(column![
         titlebar::titlebar(t, "oxdm", m.maximized, Msg::Window),
@@ -2421,24 +2422,72 @@ fn header_cell<'a>(m: &Main, label: &'a str, col: SortColumn, width: f32) -> Ele
     .into()
 }
 
-/// Insertion marker for a header being dragged to a new position: a
-/// clay rule at the boundary the column would land on. Empty (and
-/// therefore invisible) when no reorder is in flight.
+/// Ghost of the header being dragged: a translucent copy of the cell
+/// that follows the pointer anywhere in the window, so the gesture
+/// reads as carrying the column rather than only pointing at a slot.
+/// Positioned in window space (not the header's), hence a layer over
+/// the whole body rather than one inside the header's scrollable.
+fn header_ghost<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg> {
+    let Some((col, press_x)) = m.col_move else {
+        return base;
+    };
+    if (m.cursor.0 - press_x).abs() < COL_MOVE_SLOP {
+        return base;
+    }
+    let t = m.tokens;
+    let width = m.columns.width(col as usize);
+
+    // Keep the grab point under the cursor: the offset from the cell's
+    // left edge to where the press landed.
+    let mut left = 0.0;
+    for c in visible_cols(m) {
+        if c == col {
+            break;
+        }
+        left += m.columns.width(c as usize);
+    }
+    let cell_x = theme::size::SIDEBAR_W + left - m.table_scroll_x;
+    let grab = (press_x - cell_x).clamp(0.0, width);
+
+    let ghost = container(
+        text(COL_LABELS[col as usize].to_uppercase())
+            .font(theme::BODY_BOLD)
+            .size(11.0)
+            .color(color::with_alpha(t.fg_1, GHOST_ALPHA))
+            .wrapping(iced::widget::text::Wrapping::None),
+    )
+    .width(Length::Fixed(width))
+    .height(Length::Fixed(HEADER_H))
+    .padding([0.0, theme::space::S2])
+    .align_y(Alignment::Center)
+    .style(move |_| container::Style {
+        background: Some(color::with_alpha(t.bg_raised, GHOST_ALPHA).into()),
+        ..Default::default()
+    });
+
+    iced::widget::stack![
+        base,
+        container(iced::widget::opaque(ghost)).padding(iced::Padding {
+            left: (m.cursor.0 - grab).max(0.0),
+            // The layer starts below the titlebar, so window-space y has
+            // to lose that; centre the ghost on the pointer.
+            top: (m.cursor.1 - titlebar::HEIGHT - 1.0 - HEADER_H / 2.0).max(0.0),
+            ..Default::default()
+        }),
+    ]
+    .into()
+}
+
+/// Insertion marker for a header being dragged: a clay rule in the gap
+/// the column would land in. Empty (and therefore invisible) when no
+/// reorder is in flight.
 fn drop_marker(m: &Main) -> Element<'_, Msg> {
     let dragging = matches!(m.col_move, Some((_, press_x))
         if (m.cursor.0 - press_x).abs() >= COL_MOVE_SLOP);
-    let Some(slot) = dragging.then(|| col_drop_slot(m)).flatten() else {
+    let Some(boundary) = dragging.then(|| col_drop_boundary(m)).flatten() else {
         return iced::widget::Space::new().into();
     };
-    // Left edge of the slot, in the header's own (scrolled) space.
-    let mut x = 0.0;
-    for col in visible_cols(m) {
-        if col_position(m, col) == Some(slot) {
-            break;
-        }
-        x += m.columns.width(col as usize);
-    }
-    let x = x - m.table_scroll_x;
+    let x = boundary_x(m, boundary);
     if x < 0.0 {
         return iced::widget::Space::new().into();
     }
@@ -2551,34 +2600,73 @@ const COL_BY_INDEX: [SortColumn; crate::gui::ui_prefs::COLS] = [
 /// How far the pointer must travel across a header before the gesture
 /// stops being a click-to-sort and becomes a drag-to-reorder.
 const COL_MOVE_SLOP: f32 = 5.0;
+/// Opacity of the dragged-header ghost.
+const GHOST_ALPHA: f32 = 0.5;
 
-/// Display position of `col` among the visible columns.
-fn col_position(m: &Main, col: SortColumn) -> Option<usize> {
-    m.columns.order.iter().position(|&i| COL_BY_INDEX[i] == col)
-}
-
-/// Position the dragged header would land in, from the cursor: the slot
-/// whose midpoint the pointer has passed. `None` while the pointer is
-/// outside the table.
-fn col_drop_slot(m: &Main) -> Option<usize> {
+/// Boundary the drop would land on, counted in *visible* columns:
+/// `0` = before the first, `n` = after the last. This is the gap the
+/// marker draws in, which is also where the column ends up — naming a
+/// column and a side instead lets the two disagree, which is how the
+/// marker came to sit on the wrong edge when moving right.
+fn col_drop_boundary(m: &Main) -> Option<usize> {
     // Cursor is window-space; the header starts after the sidebar and
     // scrolls horizontally with the body.
     let x = m.cursor.0 - theme::size::SIDEBAR_W + m.table_scroll_x;
     if x < 0.0 {
         return None;
     }
+    let cols = visible_cols(m);
     let mut edge = 0.0;
-    for col in visible_cols(m) {
-        let w = m.columns.width(col as usize);
+    for (i, col) in cols.iter().enumerate() {
+        let w = m.columns.width(*col as usize);
         if x < edge + w / 2.0 {
-            return col_position(m, col);
+            return Some(i);
         }
         edge += w;
     }
+    Some(cols.len())
+}
+
+/// x of a visible-column boundary in the header's own (scrolled) space.
+fn boundary_x(m: &Main, boundary: usize) -> f32 {
     visible_cols(m)
-        .last()
-        .copied()
-        .and_then(|c| col_position(m, c))
+        .into_iter()
+        .take(boundary)
+        .map(|c| m.columns.width(c as usize))
+        .sum::<f32>()
+        - m.table_scroll_x
+}
+
+/// Move `col` into the gap at `boundary`, keeping hidden columns where
+/// they are relative to their visible neighbours.
+fn apply_col_drop(m: &mut Main, col: SortColumn, boundary: usize) {
+    let vis = visible_cols(m);
+    let Some(from) = vis.iter().position(|c| *c == col) else {
+        return;
+    };
+    // Removing the dragged column closes its own gap, so a boundary to
+    // its right shifts one place left.
+    let to = if boundary > from {
+        boundary - 1
+    } else {
+        boundary
+    };
+    if to == from {
+        return;
+    }
+    let mut after = vis;
+    after.remove(from);
+    let anchor = after.get(to).copied();
+
+    let mut order: Vec<usize> = m.columns.order.to_vec();
+    order.retain(|&i| COL_BY_INDEX[i] != col);
+    let at = anchor
+        .and_then(|a| order.iter().position(|&i| COL_BY_INDEX[i] == a))
+        .unwrap_or(order.len());
+    order.insert(at, col as usize);
+    if let Ok(order) = <[usize; crate::gui::ui_prefs::COLS]>::try_from(order) {
+        m.columns.order = order;
+    }
 }
 
 /// Columns in display order, skipping hidden ones.
