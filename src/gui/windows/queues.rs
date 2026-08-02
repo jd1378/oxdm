@@ -1270,63 +1270,114 @@ fn cond_card<'a>(
         .into()
 }
 
+/// Design `.ql` padding (8px 6px) and `.qitem` metrics (7px 10px,
+/// 500 12.5px), with `.add-q`'s 600 11.5px label.
+const QL_PAD: iced::Padding = iced::Padding {
+    top: 8.0,
+    bottom: 8.0,
+    left: 6.0,
+    right: 6.0,
+};
+const QITEM_PAD: iced::Padding = iced::Padding {
+    top: 7.0,
+    bottom: 7.0,
+    left: 10.0,
+    right: 10.0,
+};
+const QITEM_FONT: f32 = 12.5;
+const ADD_Q_FONT: f32 = 11.5;
+/// `.dotc`: 8px rounded square (radius 2), not a circle.
+const SWATCH: f32 = 8.0;
+
+fn swatch<'a>(color: iced::Color) -> Element<'a, Msg> {
+    container(iced::widget::Space::new())
+        .width(Length::Fixed(SWATCH))
+        .height(Length::Fixed(SWATCH))
+        .style(move |_| container::Style {
+            background: Some(color.into()),
+            border: iced::Border {
+                radius: 2.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .into()
+}
+
+/// `.qitem`: transparent by default; `.on` and `:hover` both lift onto
+/// `bg-surface` with `fg-1`, and only `.on` carries the 1px ring.
+fn qitem_style(t: &Tokens, active: bool, status: iced::widget::button::Status) -> button::Style {
+    use iced::widget::button::Status::*;
+    let hovered = matches!(status, Hovered | Pressed);
+    let lifted = active || hovered;
+    button::Style {
+        background: lifted.then(|| t.bg_surface.into()),
+        text_color: if lifted { t.fg_1 } else { t.fg_2 },
+        border: iced::Border {
+            color: if active {
+                t.border_default
+            } else {
+                iced::Color::TRANSPARENT
+            },
+            width: 1.0,
+            radius: 5.0.into(),
+        },
+        shadow: iced::Shadow::default(),
+        snap: true,
+    }
+}
+
 fn ready_view(st: &State) -> Element<'_, Msg> {
     let t = &st.tokens;
     let t2 = *t;
 
-    // Left: queue list.
-    let mut list = column![]
-        .spacing(theme::space::S2)
-        .padding(theme::space::S3);
+    // Left: queue list (design `.ql`): flat rows on the sidebar, only
+    // the selected — or hovered — one lifting onto a surface card.
+    // Cards on every row (the previous look) turned the list into a
+    // stack of tiles and left no room for a hover state.
+    let mut list = column![].spacing(2.0).padding(QL_PAD);
     for q in &st.queues {
         let active = Some(q.id) == st.selected;
         let count = q.max_concurrent.unwrap_or(0);
         list = list.push(
-            mouse_area(
-                container(
-                    row![
-                        crate::gui::widget::dot(8.0, t.queue_color(q)),
-                        text(q.name.clone())
-                            .font(theme::BODY_MEDIUM)
-                            .size(13.0)
-                            .color(t.fg_1),
-                        iced::widget::Space::new().width(Length::Fill),
-                        text(format!("{count}\u{00d7}"))
-                            .font(theme::MONO)
-                            .size(11.0)
-                            .color(t.fg_3),
-                    ]
-                    .spacing(theme::space::S2)
-                    .align_y(Alignment::Center),
-                )
-                .width(Length::Fill)
-                .height(Length::Fixed(44.0))
-                .align_y(Alignment::Center)
-                .padding([0.0, theme::space::S3])
-                .style(move |_| container::Style {
-                    background: Some(t2.bg_surface.into()),
-                    border: iced::Border {
-                        color: if active {
-                            t2.border_brand
-                        } else {
-                            t2.border_subtle
-                        },
-                        width: 1.0,
-                        radius: theme::radius::SM.into(),
-                    },
-                    ..Default::default()
-                }),
+            button(
+                row![
+                    // `.dotc` is an 8px rounded *square*, not a dot.
+                    swatch(t.queue_color(q)),
+                    text(q.name.clone())
+                        .font(theme::BODY_MEDIUM)
+                        .size(QITEM_FONT),
+                    iced::widget::Space::new().width(Length::Fill),
+                    text(format!("{count}\u{00d7}"))
+                        .font(theme::MONO)
+                        .size(10.0)
+                        .color(if active { t.fg_2 } else { t.fg_3 }),
+                ]
+                .spacing(theme::space::S2)
+                .align_y(Alignment::Center),
             )
+            .width(Length::Fill)
+            .padding(QITEM_PAD)
             .on_press(Msg::Select(q.id))
-            .interaction(iced::mouse::Interaction::Pointer),
+            .style(move |_th, status| qitem_style(&t2, active, status)),
         );
     }
     list = list.push(
-        Btn::new("Add queue")
-            .ghost()
-            .icon("plus")
-            .on_press(Msg::AddQueue)
-            .view(t),
+        button(
+            row![
+                icons::icon("plus", 13.0, t.action_primary),
+                text("Add queue")
+                    .font(theme::BODY_BOLD)
+                    .size(ADD_Q_FONT)
+                    .color(t.action_primary),
+            ]
+            .spacing(6.0)
+            .align_y(Alignment::Center),
+        )
+        .width(Length::Fill)
+        .padding(QITEM_PAD)
+        .on_press(Msg::AddQueue)
+        .style(move |_th, status| qitem_style(&t2, false, status)),
     );
     let sidebar = container(crate::gui::widget::vscroll(list).height(Length::Fill))
         .width(Length::Fixed(LIST_W))
