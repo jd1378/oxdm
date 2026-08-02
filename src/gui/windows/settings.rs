@@ -54,8 +54,8 @@ impl Section {
     /// (design `.s-pane-head`).
     fn desc(self) -> &'static str {
         match self {
-            Section::General => "Appearance, storage locations, and startup behavior.",
-            Section::Downloads => "Retry behavior and removal confirmations.",
+            Section::General => "Startup behavior and appearance.",
+            Section::Downloads => "Where files land, retry behavior, and removal confirmations.",
             Section::Categories => {
                 "Categories auto-sort downloads by file extension. \
                  Edit save folders and detected types."
@@ -1052,6 +1052,26 @@ fn general_section(st: &State) -> Element<'_, Msg> {
         column![
             set_section(
                 t,
+                "Startup",
+                vec![
+                    toggle_row(
+                        t,
+                        "Launch at login",
+                        Some("Start oxdm automatically when you log in."),
+                        st.s.start_at_login,
+                        Msg::StartAtLogin
+                    ),
+                    toggle_row(
+                        t,
+                        "Start to tray",
+                        Some("Boot without opening the main window."),
+                        st.s.start_to_tray,
+                        Msg::StartToTray
+                    ),
+                ]
+            ),
+            set_section(
+                t,
                 "Appearance",
                 vec![
                     set_row(
@@ -1088,6 +1108,18 @@ fn general_section(st: &State) -> Element<'_, Msg> {
                     ),
                 ]
             ),
+        ]
+        .spacing(SECTION_GAP)
+        .into(),
+    )
+}
+
+fn downloads_section(st: &State) -> Element<'_, Msg> {
+    let t = &st.tokens;
+    pane(
+        t,
+        Section::Downloads,
+        column![
             set_section(
                 t,
                 "Storage",
@@ -1109,38 +1141,6 @@ fn general_section(st: &State) -> Element<'_, Msg> {
                     ),
                 ]
             ),
-            set_section(
-                t,
-                "Startup",
-                vec![
-                    toggle_row(
-                        t,
-                        "Launch at login",
-                        Some("Start oxdm automatically when you log in."),
-                        st.s.start_at_login,
-                        Msg::StartAtLogin
-                    ),
-                    toggle_row(
-                        t,
-                        "Start to tray",
-                        Some("Boot without opening the main window."),
-                        st.s.start_to_tray,
-                        Msg::StartToTray
-                    ),
-                ]
-            ),
-        ]
-        .spacing(SECTION_GAP)
-        .into(),
-    )
-}
-
-fn downloads_section(st: &State) -> Element<'_, Msg> {
-    let t = &st.tokens;
-    pane(
-        t,
-        Section::Downloads,
-        column![
             set_section(
                 t,
                 "Retries",
