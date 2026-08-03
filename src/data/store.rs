@@ -10,9 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tokio::task::spawn_blocking;
 
-use crate::domain::{
-    HostSetting, Job, JobId, Phase, Queue, QueueHook, QueueId, QueueSchedule, Settings,
-};
+use crate::domain::{Job, JobId, Phase, Queue, QueueHook, QueueId, QueueSchedule, Settings};
 
 /// Schema version. Bump on every breaking change. Migrations are a
 /// match on the read-back version; tiny enough to keep DIY.
@@ -135,14 +133,7 @@ impl Store {
                  CREATE INDEX IF NOT EXISTS idx_jobs_queue ON jobs(queue_id, queue_position);
                  CREATE INDEX IF NOT EXISTS idx_jobs_filename
                    ON jobs(filename) WHERE filename IS NOT NULL;
-                 CREATE TABLE IF NOT EXISTS host_settings (
-                     host                TEXT PRIMARY KEY,
-                     speed_limit         INTEGER,
-                     thread_count        INTEGER,
-                     username            TEXT,
-                     has_password        INTEGER NOT NULL DEFAULT 0,
-                     default_user_agent  TEXT
-                 );",
+",
                 )?;
                 let v: Option<i32> = conn
                     .query_row("SELECT version FROM schema_version LIMIT 1", [], |r| {
@@ -393,68 +384,6 @@ impl Store {
                 "DELETE FROM queues WHERE id = ?1 AND builtin = 0",
                 params![id_str],
             )
-        })
-        .await
-        .map_err(StoreError::Sql)?;
-        Ok(())
-    }
-
-    // ── host settings ─────────────────────────────────────────────────
-
-    pub async fn list_host_settings(&self) -> Result<Vec<HostSetting>, StoreError> {
-        self.with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT host, speed_limit, thread_count, username, has_password, \
-                        default_user_agent FROM host_settings ORDER BY host ASC",
-            )?;
-            let iter = stmt.query_map([], |row| {
-                Ok(HostSetting {
-                    host: row.get(0)?,
-                    speed_limit: row.get::<_, Option<i64>>(1)?.map(|v| v as u64),
-                    thread_count: row.get::<_, Option<i64>>(2)?.map(|v| v as u64),
-                    username: row.get(3)?,
-                    has_password: row.get::<_, i64>(4)? != 0,
-                    default_user_agent: row.get(5)?,
-                })
-            })?;
-            iter.collect::<Result<Vec<_>, _>>()
-        })
-        .await
-        .map_err(StoreError::Sql)
-    }
-
-    pub async fn upsert_host_setting(&self, h: &HostSetting) -> Result<(), StoreError> {
-        let row = h.clone();
-        self.with_conn(move |conn| {
-            conn.execute(
-                "INSERT INTO host_settings \
-                   (host, speed_limit, thread_count, username, has_password, default_user_agent) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
-                 ON CONFLICT(host) DO UPDATE SET \
-                    speed_limit=excluded.speed_limit, \
-                    thread_count=excluded.thread_count, \
-                    username=excluded.username, \
-                    has_password=excluded.has_password, \
-                    default_user_agent=excluded.default_user_agent",
-                params![
-                    HostSetting::host_key(&row.host),
-                    row.speed_limit.map(|v| v as i64),
-                    row.thread_count.map(|v| v as i64),
-                    row.username,
-                    row.has_password as i64,
-                    row.default_user_agent,
-                ],
-            )
-        })
-        .await
-        .map_err(StoreError::Sql)?;
-        Ok(())
-    }
-
-    pub async fn delete_host_setting(&self, host: &str) -> Result<(), StoreError> {
-        let key = HostSetting::host_key(host);
-        self.with_conn(move |conn| {
-            conn.execute("DELETE FROM host_settings WHERE host = ?1", params![key])
         })
         .await
         .map_err(StoreError::Sql)?;

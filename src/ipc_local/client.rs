@@ -20,9 +20,7 @@ use super::protocol::{
     Reply, Request, SameDownloadRes, SnapshotData, SubFilter,
 };
 use crate::data::{ProbeResult, RemoveOpts, UpdateInfo};
-use crate::domain::{
-    Advanced, Checksum, HostSetting, JobError, JobId, OnCompletion, Queue, QueueId, Settings,
-};
+use crate::domain::{Advanced, Checksum, JobError, JobId, OnCompletion, Queue, QueueId, Settings};
 
 type Pending = std::collections::HashMap<u64, oneshot::Sender<Reply>>;
 
@@ -187,18 +185,6 @@ impl Client {
         }
     }
 
-    pub async fn host_list(&self) -> Result<Vec<HostSetting>, String> {
-        match self
-            .request(Request::HostList)
-            .await
-            .map_err(|e| e.to_string())?
-        {
-            Reply::HostList(v) => Ok(v),
-            Reply::Err(e) => Err(e),
-            _ => unreachable!("host list reply"),
-        }
-    }
-
     pub async fn add_job(&self, req: AddJobReq) -> Result<JobId, String> {
         self.expect_added(Request::AddJob(req)).await
     }
@@ -274,12 +260,6 @@ impl Client {
     pub async fn regenerate_ext_token(&self) -> Result<(), String> {
         self.expect_ok(Request::RegenerateExtToken).await
     }
-    pub async fn upsert_host(&self, h: HostSetting) -> Result<(), String> {
-        self.expect_ok(Request::UpsertHost(h)).await
-    }
-    pub async fn delete_host(&self, host: String) -> Result<(), String> {
-        self.expect_ok(Request::DeleteHost(host)).await
-    }
     pub async fn secrets_status(&self) -> Result<bool, String> {
         match self
             .request(Request::SecretsStatus)
@@ -329,27 +309,6 @@ impl Client {
             }),
             Reply::Err(e) => Err(e),
             _ => unreachable!("job secrets reply"),
-        }
-    }
-
-    /// `Some` stores the secret, `None` deletes it.
-    pub async fn set_host_password(
-        &self,
-        host: String,
-        secret: Option<String>,
-    ) -> Result<(), String> {
-        self.expect_ok(Request::SetHostPassword(host, secret)).await
-    }
-
-    pub async fn host_password(&self, host: String) -> Result<Option<String>, String> {
-        match self
-            .request(Request::HostPassword(host))
-            .await
-            .map_err(|e| e.to_string())?
-        {
-            Reply::HostPassword(v) => Ok(v),
-            Reply::Err(e) => Err(e),
-            _ => unreachable!("host password reply"),
         }
     }
 

@@ -27,8 +27,8 @@ use crate::data::runner::{JobRunner, LiveBridge, PartCounters};
 use crate::data::store::{Store, default_db_path};
 use crate::data::update_channel::{NoopUpdateChannel, UpdateChannel};
 use crate::domain::{
-    CaptureRequest, Category, ConflictWhileHidden, HostSetting, Job, JobError, JobId, JobStatus,
-    LiveCounters, Phase, Queue, QueueId, Settings, classify,
+    CaptureRequest, Category, ConflictWhileHidden, Job, JobError, JobId, JobStatus, LiveCounters,
+    Phase, Queue, QueueId, Settings, classify,
 };
 
 /// In-memory record per job. Lives in `AppState::jobs`.
@@ -232,7 +232,6 @@ pub struct AppState {
     /// this avoids hitting SQLite on every UI refresh.
     queues: RwLock<IndexMap<QueueId, Queue>>,
     /// In-memory cache of host overrides keyed by lowercased host.
-    host_settings: RwLock<IndexMap<String, HostSetting>>,
     /// Queues currently in "active" state — at least one job has been
     /// started by `start_queue` and no `QueueFinished` event has fired
     /// yet. Used to gate `QueueStarted` / `QueueFinished` emission so
@@ -344,12 +343,6 @@ impl AppState {
             queues.insert(q.id, q);
         }
 
-        let host_list = store.list_host_settings().await.unwrap_or_default();
-        let mut host_settings = IndexMap::new();
-        for h in host_list {
-            host_settings.insert(HostSetting::host_key(&h.host), h);
-        }
-
         let (tx, _rx) = broadcast::channel(1024);
         let token = settings.ext_token.clone();
         let power = Arc::new(crate::data::power::PowerGuard::new(tx.clone()));
@@ -367,7 +360,6 @@ impl AppState {
             hidden_jobs: RwLock::new(std::collections::HashSet::new()),
             main_queue_id,
             queues: RwLock::new(queues),
-            host_settings: RwLock::new(host_settings),
             active_queues: RwLock::new(std::collections::HashSet::new()),
             conflict_queue: RwLock::new(std::collections::VecDeque::new()),
             master_key: RwLock::new(master_key),
@@ -622,53 +614,6 @@ impl AppState {
                 .events
                 .send(DomainEvent::QueueFinished { id: queue_id });
         }
-    }
-
-    // ── host settings ────────────────────────────────────────────────
-
-    pub async fn host_settings_snapshot(&self) -> Vec<HostSetting> {
-        self.host_settings.read().await.values().cloned().collect()
-    }
-
-    pub async fn host_settings_for(&self, url: &url::Url) -> Option<HostSetting> {
-        let host = url.host_str()?;
-        self.host_settings
-            .read()
-            .await
-            .get(&HostSetting::host_key(host))
-            .cloned()
-    }
-
-    pub async fn upsert_host_setting(self: &Arc<Self>, h: HostSetting) -> Result<(), String> {
-        self.store
-            .upsert_host_setting(&h)
-            .await
-            .map_err(|e| e.to_string())?;
-        self.host_settings
-            .write()
-            .await
-            .insert(HostSetting::host_key(&h.host), h);
-        let _ = self.events.send(DomainEvent::HostSettingsChanged);
-        Ok(())
-    }
-
-    pub async fn delete_host_setting(self: &Arc<Self>, host: &str) -> Result<(), String> {
-        self.store
-            .delete_host_setting(host)
-            .await
-            .map_err(|e| e.to_string())?;
-        // The row is gone; leaving its keyring entry behind would strand
-        // a credential no UI can reach. Best-effort — a locked keyring
-        // must not block the delete.
-        if let Err(e) = crate::data::keyring::delete_password(host) {
-            tracing::warn!(host, error = %e, "could not delete host password from the keyring");
-        }
-        self.host_settings
-            .write()
-            .await
-            .shift_remove(&HostSetting::host_key(host));
-        let _ = self.events.send(DomainEvent::HostSettingsChanged);
-        Ok(())
     }
 
     /// Queue + start a hidden artifact download for self-update. Reuses
@@ -1617,33 +1562,11 @@ impl AppState {
             !interactive && settings.conflict_while_hidden == ConflictWhileHidden::NotifyAndPark;
 
         // Effective settings overlay:
-        //   global Settings → per-host overrides → per-job overrides.
+        //   global Settings → per-job overrides.
         // When any layer changes the manager-level config, build a
         // fresh `DownloadManager` off a settings copy — odl applies
         // `speed_limit` / `max_connections` / `user_agent` per Manager,
         // not per call.
-        let host_override = self.host_settings_for(&entry.job.url).await;
-        // Resolve credentials: username from DB, password from OS keyring
-        // (sentinel `has_password` decides whether to look it up).
-        let host_credentials: Option<(String, Option<String>)> = host_override
-            .as_ref()
-            .and_then(|h| h.username.as_ref().map(|u| (u.clone(), h.has_password)))
-            .map(|(u, has_pw)| {
-                let pw = if has_pw {
-                    let host = entry.job.url.host_str().unwrap_or("").to_string();
-                    match crate::data::keyring::get_password(&host) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            tracing::warn!(host = %host, error = %e, "keyring read failed");
-                            None
-                        }
-                    }
-                } else {
-                    None
-                };
-                (u, pw)
-            });
-        let _ = host_credentials; // odl integration of basic auth lands with milestone 12.
         let session_override = entry.session_speed_override.load(Ordering::Acquire);
         let job_override = entry.job.speed_limit_override;
         let effective_speed = if session_override != 0 {
@@ -1651,12 +1574,8 @@ impl AppState {
         } else if let Some(o) = job_override {
             Some(o)
         } else {
-            host_override.as_ref().and_then(|h| h.speed_limit)
+            settings.speed_limit
         };
-        let host_threads = host_override.as_ref().and_then(|h| h.thread_count);
-        let host_ua = host_override
-            .as_ref()
-            .and_then(|h| h.default_user_agent.clone());
 
         // Per-job headers captured from the browser extension (or
         // CLI). Merge into the per-run config so odl sends them on
@@ -1670,20 +1589,11 @@ impl AppState {
             .find(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
             .map(|(_, v)| v.clone());
 
-        let needs_rebuild = effective_speed != settings.speed_limit
-            || host_threads.is_some()
-            || host_ua.is_some()
-            || !job_headers.is_empty()
-            || job_ua.is_some();
+        let needs_rebuild =
+            effective_speed != settings.speed_limit || !job_headers.is_empty() || job_ua.is_some();
         let runner_manager = if needs_rebuild {
             let mut s = settings.clone();
             s.speed_limit = effective_speed;
-            if let Some(t) = host_threads {
-                s.max_connections = Some(t);
-            }
-            if let Some(ua) = host_ua {
-                s.user_agent = Some(ua);
-            }
             for (k, v) in job_headers.iter() {
                 if k.eq_ignore_ascii_case("user-agent") {
                     continue;

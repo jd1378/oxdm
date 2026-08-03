@@ -82,8 +82,6 @@ pub enum DomainEvent {
     },
     /// The pending power action was cancelled before its deadline.
     ShutdownCancelled,
-    /// Host overrides mutated. UI re-snapshots the per-host list.
-    HostSettingsChanged,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

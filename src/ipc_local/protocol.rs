@@ -13,8 +13,8 @@ use crate::data::RemoveOpts;
 use crate::data::UpdateInfo;
 use crate::data::UpdaterEvent;
 use crate::domain::{
-    Advanced, Category, Checksum, CondKind, HostSetting, Job, JobError, JobId, OnCompletion, Phase,
-    PowerAction, Queue, QueueId, Settings,
+    Advanced, Category, Checksum, CondKind, Job, JobError, JobId, OnCompletion, Phase, PowerAction,
+    Queue, QueueId, Settings,
 };
 
 /// Top-level frame on the wire. Each frame is one length-prefixed
@@ -88,9 +88,6 @@ pub enum Request {
     Snapshot,
     /// A single job's state as needed by the per-download window.
     JobEntry(JobId),
-    /// Just the host-settings list; main window refreshes via this on
-    /// the Per Host Settings dialog open.
-    HostList,
 
     // ── job lifecycle ──────────────────────────────────────────────
     AddJob(AddJobReq),
@@ -131,17 +128,6 @@ pub enum Request {
     /// `Box<T>` serializes identically to `T` — wire shape unchanged.
     UpdateSettings(Box<Settings>),
     RegenerateExtToken,
-    UpsertHost(HostSetting),
-    DeleteHost(String),
-    /// Look up the OS-keyring password for a host. `Reply::HostPassword`
-    /// carries `Some(secret)` when one is stored, `None` when no entry
-    /// exists. The reply travels over the per-user local socket — same
-    /// trust boundary as the keyring itself.
-    HostPassword(String),
-    /// Store (`Some`) or delete (`None`) the OS-keyring password for a
-    /// host. The GUI never receives the secret back except through
-    /// `HostPassword`, so this is the only way to change it.
-    SetHostPassword(String, Option<String>),
     /// Inspect the daemon's secrets-encryption state. Used by the GUI
     /// at boot to decide whether to surface the "master key missing"
     /// wipe-confirmation dialog. Reply is `Reply::SecretsStatus`.
@@ -337,8 +323,6 @@ pub enum Reply {
     JobEntry(Option<JobEntryView>),
     JobAdded(JobId),
     JobIdOpt(Option<JobId>),
-    HostList(Vec<HostSetting>),
-    HostPassword(Option<String>),
     /// Structured probe outcome: the error side carries the full
     /// `JobError` so the Add dialog can render a typed error panel
     /// instead of a flattened string.
@@ -368,7 +352,6 @@ pub enum Event {
     QueuesChanged,
     SettingsChanged,
     ActiveQueuesChanged,
-    HostListChanged,
     ConflictChanged,
     JobCompleted {
         id: JobId,

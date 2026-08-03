@@ -317,6 +317,10 @@ fn pending_settings(st: &State) -> Settings {
         s.ipc_port = v;
     }
     s.update_feed_url = st.update_feed.trim().to_owned();
+    // Only genuine overrides are stored. The panes show every category's
+    // resolved extensions and folder, so writing those back verbatim
+    // would turn "same as default" into a saved override — and, until
+    // saved, into a change the user never made.
     s.category_extensions = st
         .cat_exts
         .iter()
@@ -329,12 +333,13 @@ fn pending_settings(st: &State) -> Settings {
                     .collect::<Vec<_>>(),
             )
         })
+        .filter(|(c, exts)| exts.as_slice() != c.default_extensions())
         .collect();
     s.category_folders = st
         .cat_folders
         .iter()
-        .filter(|(_, dir)| !dir.trim().is_empty())
         .map(|(c, dir)| (*c, std::path::PathBuf::from(dir.trim())))
+        .filter(|(c, dir)| !dir.as_os_str().is_empty() && *dir != s.download_dir.join(c.label()))
         .collect();
     s.category_queues = st
         .cat_queues
@@ -1121,6 +1126,7 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
             .view(t),
         );
     }
+    // Advanced and About have nothing resettable.
     if !matches!(st.section, Section::Advanced | Section::About) {
         right = right.push(
             Btn::new(format!("Reset {}", st.section.label()))

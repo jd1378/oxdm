@@ -326,7 +326,6 @@ fn map_domain_event(filter: SubFilter, ev: DomainEvent) -> Option<Event> {
             Some(Event::ActiveQueuesChanged)
         }
         DomainEvent::QueuesChanged => Some(Event::QueuesChanged),
-        DomainEvent::HostSettingsChanged => Some(Event::HostListChanged),
         DomainEvent::ShutdownPending {
             action,
             deadline_ms,
@@ -447,7 +446,6 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
                 session_speed_override: entry.session_speed_override.load(AtomicOrd::Acquire),
             }))
         }
-        Request::HostList => Reply::HostList(state.host_settings_snapshot().await),
         Request::AddJob(AddJobReq {
             url,
             save_dir,
@@ -561,28 +559,6 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
             Ok(_) => Reply::Ok,
             Err(e) => Reply::Err(e),
         },
-        Request::UpsertHost(h) => match state.upsert_host_setting(h).await {
-            Ok(()) => Reply::Ok,
-            Err(e) => Reply::Err(e),
-        },
-        Request::DeleteHost(host) => match state.delete_host_setting(&host).await {
-            Ok(()) => Reply::Ok,
-            Err(e) => Reply::Err(e),
-        },
-        Request::HostPassword(host) => match crate::data::keyring::get_password(&host) {
-            Ok(v) => Reply::HostPassword(v),
-            Err(e) => Reply::Err(e),
-        },
-        Request::SetHostPassword(host, secret) => {
-            let r = match secret {
-                Some(pw) => crate::data::keyring::set_password(&host, &pw),
-                None => crate::data::keyring::delete_password(&host),
-            };
-            match r {
-                Ok(()) => Reply::Ok,
-                Err(e) => Reply::Err(e),
-            }
-        }
         Request::SecretsStatus => Reply::SecretsStatus {
             locked: state.is_secrets_locked().await,
         },

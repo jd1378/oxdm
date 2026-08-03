@@ -45,9 +45,12 @@ const PILL_WRAP_GAP: f32 = 4.0;
 /// download; no design max, so cap at a sane parallelism ceiling.
 const CONC_MIN: i64 = 1;
 const CONC_MAX: i64 = 16;
-/// A queue with no concurrency of its own runs at the global setting, so
-/// that is what the editor shows — displaying a hardcoded number here
-/// would misreport every inheriting queue the moment the global moved.
+/// Concurrency a queue gets when it carries none of its own — a queue
+/// from before the field was written. `Settings`' own limit is a
+/// separate thing: a cap across every queue at once, not a per-queue
+/// default.
+const CONC_FALLBACK: usize = Queue::DEFAULT_CONCURRENT;
+/// A per-queue limit at or above this reads as "don't cap this queue".
 const CONC_UNLIMITED: usize = crate::domain::settings::UNLIMITED_CONCURRENT;
 /// Queue color button (design `.q-color-btn`: 24px square, 6px radius,
 /// 2px border; hover border brightens to fg-3).
@@ -309,9 +312,6 @@ pub struct State {
 
     confirm_delete: bool,
     shot: Option<Shot>,
-    /// `Settings::max_concurrent_downloads` — what a queue without its
-    /// own limit runs at.
-    global_concurrent: usize,
     /// How many fields of the selected queue differ from what is saved.
     dirty: usize,
 }
@@ -344,7 +344,7 @@ impl State {
         self.color = q.color;
         self.color_hex = q.color.map(hex_string).unwrap_or_default();
         self.color_open = false;
-        self.max_concurrent = q.max_concurrent.unwrap_or(self.global_concurrent);
+        self.max_concurrent = q.max_concurrent.unwrap_or(CONC_FALLBACK);
         self.sched = match q.schedule {
             QueueSchedule::Manual => SchedKind::Manual,
             QueueSchedule::Daily { .. } => SchedKind::Recurring,
@@ -422,11 +422,7 @@ impl State {
         let mut q = self.selected_queue()?.clone();
         q.name = self.name.trim().to_owned();
         q.color = self.color;
-        // Matching the global means "inherit", which is what the queue
-        // already says — writing the number instead would show up as a
-        // change the user never made.
-        q.max_concurrent =
-            (self.max_concurrent != self.global_concurrent).then_some(self.max_concurrent);
+        q.max_concurrent = Some(self.max_concurrent);
         q.schedule = match self.sched {
             SchedKind::Manual => QueueSchedule::Manual,
             SchedKind::Condition => QueueSchedule::Condition(CondSet {
@@ -515,7 +511,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 selected: queues.first().map(|q| q.id),
                 queues,
                 name: String::new(),
-                max_concurrent: settings.max_concurrent_downloads,
+                max_concurrent: CONC_FALLBACK,
                 sched: SchedKind::Manual,
                 sched_start: String::new(),
                 sched_days: WeekDayMask(0x7F),
@@ -540,7 +536,6 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 win_size: (0.0, 0.0),
                 confirm_delete: false,
                 shot: Shot::from_env(),
-                global_concurrent: settings.max_concurrent_downloads,
                 dirty: 0,
                 client,
             };
@@ -1457,7 +1452,7 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
     let mut list = column![].spacing(2.0).padding(QL_PAD);
     for q in &st.queues {
         let active = Some(q.id) == st.selected;
-        let count = q.max_concurrent.unwrap_or(st.global_concurrent);
+        let count = q.max_concurrent.unwrap_or(CONC_FALLBACK);
         list = list.push(
             button(
                 row![

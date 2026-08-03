@@ -56,6 +56,11 @@ pub struct Queue {
 impl Queue {
     pub const MAIN_NAME: &'static str = "Main";
 
+    /// Downloads a queue runs at once unless it is told otherwise. Its
+    /// own number, not a share of `Settings::max_concurrent_downloads` —
+    /// that one caps every queue together.
+    pub const DEFAULT_CONCURRENT: usize = 3;
+
     pub fn new_main() -> Self {
         Self {
             id: QueueId::new(),
@@ -65,7 +70,7 @@ impl Queue {
             schedule: QueueSchedule::Manual,
             on_start: Vec::new(),
             on_finish: Vec::new(),
-            max_concurrent: None,
+            max_concurrent: Some(Self::DEFAULT_CONCURRENT),
             stop_on_error: false,
             color: None,
         }

@@ -4,7 +4,6 @@ pub mod advanced;
 pub mod capture;
 pub mod category;
 pub mod checksum;
-pub mod host_setting;
 pub mod job;
 pub mod queue;
 pub mod settings;
@@ -13,7 +12,6 @@ pub use advanced::{Advanced, AuthAdv, AuthScheme, CustomHeader, ProxyAdv, ProxyM
 pub use capture::CaptureRequest;
 pub use category::{Category, classify};
 pub use checksum::{Algo, Checksum, CsSource, CsStatus};
-pub use host_setting::HostSetting;
 pub use job::{
     CapturedResponse, Job, JobError, JobId, JobSnapshot, JobStatus, LiveCounters, OnCompletion,
     Phase, PowerAction, ResponseHeader, SHUTDOWN_GRACE_SECS, ShutdownAction, SpeedSample,

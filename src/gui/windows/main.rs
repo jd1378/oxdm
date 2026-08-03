@@ -8,7 +8,7 @@ use std::sync::Arc;
 use iced::widget::{column, container, mouse_area, row, scrollable, text};
 use iced::{Alignment, Element, Length, Subscription, Task};
 
-use super::main_dialogs::{self, AboutState, HostState, RemoveState, UpdateUi};
+use super::main_dialogs::{self, AboutState, RemoveState, UpdateUi};
 use crate::domain::{Category, JobId, Phase, QueueId};
 use crate::gui::chrome::{self, WindowControl, titlebar};
 use crate::gui::format::{format_bytes, format_eta, format_speed};
@@ -147,23 +147,6 @@ pub enum Msg {
     AboutDownloadUpdate,
     AboutRepository,
     AboutDonate,
-    // Host settings overlay
-    HostsLoaded(Vec<crate::domain::HostSetting>),
-    HostSearch(String),
-    HostSelect(String),
-    HostAdd,
-    HostDelete,
-    HostHost(String),
-    HostSpeedEnabled(bool),
-    HostSpeedKbs(String),
-    HostThreads(String),
-    HostUsername(String),
-    HostPassword(String),
-    /// Explicit "delete the stored keyring password for this host".
-    HostPasswordClear,
-    HostReveal(bool),
-    HostUserAgent(String),
-    HostSave,
     // Remove overlay
     RemoveAs(RemoveKind),
     RemoveDeleteOnDisk(bool),
@@ -228,7 +211,6 @@ pub enum ToolAction {
     Scheduler,
     Settings,
     BrowserExtension,
-    PerHost,
     About,
 }
 
@@ -291,7 +273,6 @@ pub enum Overlay {
     None,
     Context,
     About,
-    Host,
     Remove,
     BrowserExtensions,
     /// First-run welcome variant of the browser-extensions dialog
@@ -331,7 +312,6 @@ pub struct Main {
     pub hovered_row: Option<JobId>,
     pub overlay: Overlay,
     pub about: AboutState,
-    pub host: HostState,
     pub remove: Option<RemoveState>,
     pub db_error: Option<String>,
     pub modifiers: iced::keyboard::Modifiers,
@@ -421,7 +401,6 @@ impl Main {
             hovered_row: None,
             overlay: Overlay::None,
             about: AboutState::default(),
-            host: HostState::default(),
             remove: None,
             db_error: None,
             modifiers: iced::keyboard::Modifiers::default(),
@@ -1071,141 +1050,6 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             crate::platform::open_url("https://github.com/sponsors/jd1378");
             Task::none()
         }
-        Msg::HostsLoaded(hosts) => {
-            m.host.hosts = hosts;
-            Task::none()
-        }
-        Msg::HostSearch(v) => {
-            m.host.search = v;
-            Task::none()
-        }
-        Msg::HostSelect(host) => {
-            if let Some(h) = m.host.hosts.iter().find(|h| h.host == host).cloned() {
-                m.host.hydrate(&h);
-            }
-            Task::none()
-        }
-        Msg::HostAdd => {
-            let hosts = std::mem::take(&mut m.host.hosts);
-            let search = std::mem::take(&mut m.host.search);
-            m.host = HostState {
-                hosts,
-                search,
-                adding: true,
-                ..Default::default()
-            };
-            Task::none()
-        }
-        Msg::HostDelete => {
-            let Some(host) = m.host.selected.clone() else {
-                return Task::none();
-            };
-            m.host.hosts.retain(|h| h.host != host);
-            let reload = m.host.hosts.clone();
-            m.host = HostState {
-                hosts: reload,
-                ..Default::default()
-            };
-            let client = m.client.clone();
-            Task::perform(async move { client.delete_host(host).await }, |_| Msg::Noop)
-        }
-        Msg::HostHost(v) => {
-            m.host.host = v;
-            Task::none()
-        }
-        Msg::HostSpeedEnabled(v) => {
-            m.host.speed_enabled = v;
-            Task::none()
-        }
-        Msg::HostSpeedKbs(v) => {
-            m.host.speed_kbs = v;
-            Task::none()
-        }
-        Msg::HostThreads(v) => {
-            m.host.threads = v;
-            Task::none()
-        }
-        Msg::HostUsername(v) => {
-            m.host.username = v;
-            Task::none()
-        }
-        Msg::HostPassword(v) => {
-            m.host.password = v;
-            m.host.password_edited = true;
-            Task::none()
-        }
-        Msg::HostPasswordClear => {
-            m.host.password.clear();
-            m.host.password_edited = true;
-            Task::none()
-        }
-        Msg::HostReveal(v) => {
-            m.host.password_revealed = v;
-            Task::none()
-        }
-        Msg::HostUserAgent(v) => {
-            m.host.user_agent = v;
-            Task::none()
-        }
-        Msg::HostSave => {
-            let setting = m.host.build();
-            let old = m.host.selected.clone();
-            let client = m.client.clone();
-            // `password` is a scratch buffer: empty means "keep the
-            // stored secret" unless the field was actually touched.
-            let secret = m
-                .host
-                .password_edited
-                .then(|| (!m.host.password.is_empty()).then(|| m.host.password.clone()));
-            // The row now exists under this name: leaving the form in
-            // add mode would make a second Save insert it again, and a
-            // stale `selected` would make it look like a rename.
-            m.host.selected = Some(setting.host.clone());
-            m.host.adding = false;
-            m.host.password.clear();
-            m.host.password_edited = false;
-            m.host.had_password = setting.has_password;
-            Task::perform(
-                async move {
-                    let host = setting.host.clone();
-                    let renamed = old.as_ref().is_some_and(|o| *o != host);
-                    // Carry an untouched secret across a rename, before
-                    // `delete_host` drops the old keyring entry.
-                    let carried = match (renamed, &secret) {
-                        (true, None) => client
-                            .host_password(old.clone().unwrap_or_default())
-                            .await
-                            .ok()
-                            .flatten(),
-                        _ => None,
-                    };
-                    // Keyring first: `has_password` on the row is a
-                    // promise the keyring has to keep, so a failed write
-                    // must abort before the row claims otherwise.
-                    // Explicit edit wins; a rename only moves what was
-                    // already stored.
-                    match (secret, carried) {
-                        (Some(new), _) => client.set_host_password(host.clone(), new).await?,
-                        (None, Some(pw)) => client.set_host_password(host, Some(pw)).await?,
-                        (None, None) => {}
-                    }
-                    if let Some(old) = old
-                        && renamed
-                    {
-                        let _ = client.delete_host(old).await;
-                    }
-                    client.upsert_host(setting).await?;
-                    client.host_list().await
-                },
-                |r| match r {
-                    Ok(hosts) => Msg::HostsLoaded(hosts),
-                    // A keyring write can fail (locked keychain, no
-                    // Secret Service). Staying silent would leave the
-                    // row claiming a password that was never stored.
-                    Err(e) => Msg::Toast(ToastSeverity::Error, format!("Host not saved: {e}")),
-                },
-            )
-        }
         Msg::RemoveAs(kind) => {
             m.context_menu = None;
             request_remove(m, kind)
@@ -1483,15 +1327,6 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                 ToolAction::BrowserExtension => {
                     m.overlay = Overlay::BrowserExtensions;
                     Task::none()
-                }
-                ToolAction::PerHost => {
-                    m.overlay = Overlay::Host;
-                    m.host = HostState::default();
-                    let client = m.client.clone();
-                    Task::perform(async move { client.host_list().await }, |r| match r {
-                        Ok(hosts) => Msg::HostsLoaded(hosts),
-                        Err(_) => Msg::Noop,
-                    })
                 }
                 ToolAction::About => {
                     m.overlay = Overlay::About;
@@ -1851,7 +1686,6 @@ fn main_view(m: &Main) -> Element<'_, Msg> {
     } else {
         match m.overlay {
             Overlay::About => main_dialogs::about(m, base),
-            Overlay::Host => main_dialogs::host_settings(m, base),
             Overlay::Remove => main_dialogs::remove_confirm(m, base),
             Overlay::BrowserExtensions => main_dialogs::browser_extensions(m, base),
             Overlay::Welcome => main_dialogs::welcome(m, base),
@@ -2297,7 +2131,6 @@ fn sidebar(m: &Main) -> Element<'_, Msg> {
             (ToolAction::Scheduler, "calendar", "Scheduler"),
             (ToolAction::Settings, "settings", "Settings"),
             (ToolAction::BrowserExtension, "puzzle", "Browser extension"),
-            (ToolAction::PerHost, "globe", "Per host settings"),
             (ToolAction::About, "info", "About"),
         ] {
             col = col.push(sidebar_row(
