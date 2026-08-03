@@ -25,6 +25,7 @@ pub use pills::{
     status_dot, swatch,
 };
 pub use settings::{
-    SECTION_GAP, set_group, set_note, set_row, set_row_stack, set_section, set_section_danger,
+    SECTION_GAP, set_group, set_note, set_row, set_row_panel, set_row_stack, set_rows, set_section,
+    set_section_danger,
 };
 pub use striped::{RateChart, rate_chart, striped_progress};

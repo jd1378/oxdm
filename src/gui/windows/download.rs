@@ -24,14 +24,23 @@ use crate::gui::widget::error_panel::{
 };
 use crate::gui::widget::{
     Btn, BtnSize, RateChart, TabBtn, TextInput, card, checkbox, collapsible_card, combo, hairline,
-    number_stepper, pill_progress, rate_chart, segmented, sibling, status_dot, striped_progress,
-    toggle,
+    number_stepper, pill_progress, rate_chart, segmented, set_row, set_row_panel, set_rows,
+    sibling, status_dot, striped_progress, toggle,
 };
 use crate::gui::windows::add::footer;
 use crate::ipc_local::Client;
 use crate::ipc_local::protocol::{Event, JobEntryView};
 
 const CHART_SAMPLES: usize = 120;
+
+// --- Window geometry -------------------------------------------------
+/// The window opens at its floor height: the tab bodies scroll, so extra
+/// launch height only ever showed empty surface.
+const WIN_W: f32 = 540.0;
+const WIN_MIN_W: f32 = 530.0;
+/// Floor height, minus the bottom gap that moved inside the scroll port
+/// and so no longer has to be reserved by the frame.
+const WIN_MIN_H: f32 = 418.0 - theme::space::S4;
 
 // --- Speed tab (design §3.3 "Speed" pane) ----------------------------
 /// Max parallel connections stepper bounds — mirrors the runner's
@@ -44,6 +53,11 @@ const BYTES_PER_KB: u64 = 1024;
 const KB_PER_MB: u64 = 1024;
 /// Width of the speed-limit value input (KB/s ‖ MB/s numeric field).
 const LIMIT_INPUT_W: f32 = 80.0;
+/// Idle time after the last keystroke before the typed limit is pushed
+/// to the daemon. Longer than the Add window's URL-probe debounce: a
+/// half-typed limit is a *live* throttle on a running transfer, so it
+/// is worth waiting until the user has clearly stopped typing.
+const LIMIT_DEBOUNCE_MS: u64 = 700;
 /// Dashed quick-preset pills (design `.qp`), values in KB/s.
 const SPEED_PRESETS_KBS: &[(&str, u64)] = &[
     ("64 KB/s", 64),
@@ -98,18 +112,20 @@ pub enum Msg {
     // Speed tab form
     UseLimiter(bool),
     LimitKbs(String),
+    /// The typed limit stopped changing `LIMIT_DEBOUNCE_MS` ago —
+    /// carries the edit generation it was scheduled for.
+    LimitSettled(u64),
     LimitUnit(bool),  // false = KB/s, true = MB/s
     SpeedPreset(u64), // quick-set value, in KB/s
     RememberLimit(bool),
     MaxConn(String),
-    ApplySpeed,
+    ApplyConns,
     // Completion tab form
     NotifyDone(bool),
     ExitDone(bool),
     PowerEnabled(bool),
     PowerAction(String),
     Disconnect(bool),
-    ApplyCompletion,
     // Footer / complete view
     PauseResume,
     Cancel,
@@ -156,9 +172,22 @@ pub struct State {
     limit_kbs: String,
     limit_unit_mb: bool,
     remember_limit: bool,
+    /// Bumped on every edit of `limit_kbs`; a settle timer only applies
+    /// its value if it is still the newest edit when it fires.
+    limit_edit: u64,
     max_conn: String,
+    /// Connection count the daemon is already running with. The Apply
+    /// button only lights up while `max_conn` differs from it, so the
+    /// button reads as "apply *this*" rather than as the whole tab's
+    /// commit (the speed limit beside it applies live).
+    applied_conn: Option<u64>,
 
     on_completion: OnCompletion,
+    /// Which power action the picker shows, independent of whether the
+    /// switch has armed it. Kept out of `on_completion.shutdown` so
+    /// choosing an action can never be what turns it on.
+    power_choice: ShutdownAction,
+    power_force: bool,
 
     /// Hash the user pasted into the completed-view ChecksumBox to
     /// compare against the job's saved checksum (verify, not compute).
@@ -194,6 +223,67 @@ impl State {
             _ => 0.0,
         }
     }
+}
+
+/// The connection count `max_conn` currently asks for: blank (or a
+/// value outside the runner's cap) means auto, i.e. `None`.
+fn conn_selection(max_conn: &str) -> Option<u64> {
+    max_conn
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|n| (MAX_CONN_MIN as u64..=MAX_CONN_MAX as u64).contains(n))
+}
+
+/// Push the speed limit to the daemon. The limit has no Apply of its
+/// own — it takes effect the moment it changes, because unlike the
+/// connection count it needs no segment reconnect to land.
+fn apply_limit(st: &State) -> Task<Msg> {
+    let unit = if st.limit_unit_mb {
+        BYTES_PER_KB * KB_PER_MB
+    } else {
+        BYTES_PER_KB
+    };
+    let bps = if st.use_limiter {
+        // A blank or half-typed field is mid-edit, not a request for
+        // "unlimited": leave the running limit alone until it parses.
+        match st.limit_kbs.trim().parse::<u64>() {
+            Ok(v) if v > 0 => Some(v * unit),
+            _ => return Task::none(),
+        }
+    } else {
+        None
+    };
+    let client = st.client.clone();
+    let id = st.id;
+    let persist = st.remember_limit;
+    Task::perform(
+        async move {
+            if persist {
+                client.set_persistent_speed_limit(id, bps).await
+            } else {
+                // "Remember" off means no stored override, so clear any
+                // earlier one instead of leaving it to outlive the
+                // session limit we set next.
+                client.set_persistent_speed_limit(id, None).await?;
+                client.set_session_speed_limit(id, bps).await
+            }
+        },
+        |_| Msg::Noop,
+    )
+}
+
+/// Push the completion prefs to the daemon. Like the speed limit these
+/// apply on change: they are only read when the job finishes, so there
+/// is nothing to reconnect and nothing an Apply step would protect.
+fn apply_completion(st: &State) -> Task<Msg> {
+    let client = st.client.clone();
+    let id = st.id;
+    let prefs = st.on_completion.clone();
+    Task::perform(
+        async move { client.set_on_completion(id, prefs).await },
+        |_| Msg::Noop,
+    )
 }
 
 fn job_id_arg() -> Option<JobId> {
@@ -253,11 +343,15 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                     .unwrap_or_else(|| "100".to_owned()),
                 limit_unit_mb: false,
                 remember_limit: limit.is_some(),
+                limit_edit: 0,
                 max_conn: entry
                     .job
                     .max_connections
                     .map(|n| n.to_string())
                     .unwrap_or_default(),
+                applied_conn: entry.job.max_connections,
+                power_choice: on_completion.shutdown.unwrap_or(POWER_DEFAULT),
+                power_force: on_completion.force_shutdown,
                 on_completion,
                 cs_paste: String::new(),
                 cs_compute: CsCompute::Idle,
@@ -344,15 +438,30 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
         }
         Msg::UseLimiter(v) => {
             st.use_limiter = v;
-            Task::none()
+            apply_limit(st)
         }
         Msg::LimitKbs(v) => {
             st.limit_kbs = v;
-            Task::none()
+            st.limit_edit += 1;
+            let edit = st.limit_edit;
+            Task::perform(
+                async move {
+                    tokio::time::sleep(Duration::from_millis(LIMIT_DEBOUNCE_MS)).await;
+                    edit
+                },
+                Msg::LimitSettled,
+            )
+        }
+        Msg::LimitSettled(edit) => {
+            if edit == st.limit_edit {
+                apply_limit(st)
+            } else {
+                Task::none()
+            }
         }
         Msg::LimitUnit(mb) => {
             st.limit_unit_mb = mb;
-            Task::none()
+            apply_limit(st)
         }
         Msg::SpeedPreset(kbs) => {
             st.use_limiter = true;
@@ -364,82 +473,60 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                 st.limit_unit_mb = false;
                 st.limit_kbs = kbs.to_string();
             }
-            Task::none()
+            // A preset *is* the finished edit — retire any settle timer
+            // still pending from typing, so it cannot re-fire behind it.
+            st.limit_edit += 1;
+            apply_limit(st)
         }
         Msg::RememberLimit(v) => {
             st.remember_limit = v;
-            Task::none()
+            apply_limit(st)
         }
         Msg::MaxConn(v) => {
             st.max_conn = v;
             Task::none()
         }
-        Msg::ApplySpeed => {
+        Msg::ApplyConns => {
             let client = st.client.clone();
             let id = st.id;
-            // Value field is in the selected unit (KB/s or MB/s); convert
-            // to bytes/sec for the daemon. KB/s stays `* 1024` (unchanged).
-            let unit = if st.limit_unit_mb {
-                BYTES_PER_KB * KB_PER_MB
-            } else {
-                BYTES_PER_KB
-            };
-            let bps = st
-                .use_limiter
-                .then(|| st.limit_kbs.trim().parse::<u64>().ok().map(|v| v * unit))
-                .flatten();
-            let persist = st.remember_limit;
-            let conns = st
-                .max_conn
-                .trim()
-                .parse::<u64>()
-                .ok()
-                .filter(|n| (1..=16).contains(n));
+            let conns = conn_selection(&st.max_conn);
+            st.applied_conn = conns;
             Task::perform(
-                async move {
-                    if persist {
-                        client.set_persistent_speed_limit(id, bps).await?;
-                    } else {
-                        client.set_session_speed_limit(id, bps).await?;
-                    }
-                    client.set_max_connections(id, conns).await
-                },
+                async move { client.set_max_connections(id, conns).await },
                 |_| Msg::Noop,
             )
         }
         Msg::NotifyDone(v) => {
             st.on_completion.show_dialog = v;
-            Task::none()
+            apply_completion(st)
         }
         Msg::ExitDone(v) => {
             st.on_completion.exit_app = v;
-            Task::none()
+            apply_completion(st)
         }
         Msg::PowerEnabled(v) => {
-            st.on_completion.shutdown = v.then_some(ShutdownAction::ShutDown);
-            if !v {
-                st.on_completion.force_shutdown = false;
-            }
-            Task::none()
+            // The switch is the only thing that arms the action; it
+            // commits whatever the picker is showing.
+            st.on_completion.shutdown = v.then_some(st.power_choice);
+            st.on_completion.force_shutdown = v && st.power_force;
+            apply_completion(st)
         }
         Msg::PowerAction(s) => {
             let (action, force) = parse_power_label(&s);
-            st.on_completion.shutdown = Some(action);
-            st.on_completion.force_shutdown = force;
+            st.power_choice = action;
+            st.power_force = force;
+            // Re-point an already-armed action, but never arm a disarmed
+            // one: picking from a list is not consent to power off.
+            if st.on_completion.shutdown.is_some() {
+                st.on_completion.shutdown = Some(action);
+                st.on_completion.force_shutdown = force;
+                return apply_completion(st);
+            }
             Task::none()
         }
         Msg::Disconnect(v) => {
             st.on_completion.disconnect = v;
-            Task::none()
-        }
-        Msg::ApplyCompletion => {
-            let client = st.client.clone();
-            let id = st.id;
-            let prefs = st.on_completion.clone();
-            Task::perform(
-                async move { client.set_on_completion(id, prefs).await },
-                |_| Msg::Noop,
-            )
+            apply_completion(st)
         }
         Msg::PauseResume => {
             let client = st.client.clone();
@@ -493,7 +580,7 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             Task::none()
         }
         Msg::WinResized(w, h) => {
-            chrome::enforce_min_size(iced::Size::new(w, h), iced::Size::new(530.0, 418.0))
+            chrome::enforce_min_size(iced::Size::new(w, h), iced::Size::new(WIN_MIN_W, WIN_MIN_H))
         }
         Msg::ShotTick => {
             if let Some(shot) = &mut st.shot
@@ -788,6 +875,19 @@ fn running_view(st: &State) -> Element<'_, Msg> {
             Tab::Speed => speed_tab(st),
             Tab::OnCompletion => completion_tab(st),
         };
+        // Both gaps around the tab body ride *inside* the scroll port,
+        // as leading/trailing spacers. As outer spacing/padding they
+        // would be dead bands the content slides behind; scrolled with
+        // the content they read as breathing room at each end.
+        // Both ends use the same `S3` the tab bodies put between their
+        // own cards, so scrolled-home the last card sits off the footer
+        // hairline by exactly one inter-card gap.
+        let tab_body: Element<'_, Msg> = column![
+            iced::widget::Space::new().height(theme::space::S3),
+            tab_body,
+            iced::widget::Space::new().height(theme::space::S3),
+        ]
+        .into();
 
         column![
             // Tabs + hairline as one unspaced group so the active
@@ -795,7 +895,6 @@ fn running_view(st: &State) -> Element<'_, Msg> {
             sibling(column![tabs, hairline(t.border_subtle)].into()),
             crate::gui::widget::vscroll(tab_body).height(Length::Fill),
         ]
-        .spacing(theme::space::S3)
         .into()
     };
 
@@ -857,9 +956,12 @@ fn running_view(st: &State) -> Element<'_, Msg> {
             titlebar::titlebar(t, &name, false, Msg::Window),
             hairline(t.border_subtle),
             container(hero)
+                // No bottom pad: the tab body already scrolls, so its
+                // last row should meet the footer hairline instead of
+                // leaving a dead band above it.
                 .padding(iced::Padding {
                     top: theme::space::S4,
-                    bottom: theme::space::S4,
+                    bottom: 0.0,
                     left: theme::space::S4,
                     right: theme::space::S4 - crate::gui::widget::SCROLL_GUTTER,
                 })
@@ -1198,15 +1300,6 @@ fn speed_tab(st: &State) -> Element<'_, Msg> {
     let t = &st.tokens;
     let limited = st.use_limiter;
 
-    // Chip-toggle Unlimited / Limit-to (design `.chip-toggle`).
-    let limiter_chips = segmented(
-        t,
-        &[("Unlimited", None), ("Limit to", None)],
-        if limited { 1 } else { 0 },
-        BtnSize::Sm,
-        |i| Msg::UseLimiter(i == 1),
-    );
-
     // value field + KB/s ‖ MB/s unit-toggle. `Md` so the toggle is the
     // input's height — a shorter button beside a field reads as floating
     // rather than as part of the same control.
@@ -1218,9 +1311,11 @@ fn speed_tab(st: &State) -> Element<'_, Msg> {
         |i| Msg::LimitUnit(i == 1),
     );
     let value_row = row![
+        // Editable even while the limiter is off — the value is the
+        // limit you *would* apply, and `apply_limit` sends nothing until
+        // the switch is on.
         TextInput::new(&st.limit_kbs)
             .width(Length::Fixed(LIMIT_INPUT_W))
-            .enabled(limited)
             .on_input(Msg::LimitKbs)
             .view(t),
         unit_toggle,
@@ -1229,10 +1324,10 @@ fn speed_tab(st: &State) -> Element<'_, Msg> {
     .align_y(Alignment::Center);
 
     // Dashed quick-preset pills (design `.qp`). iced/tiny-skia can't
-    // dash a border, so these read as small outlined pills.
-    let mut presets = row![text("Quick set").font(theme::BODY).size(12.0).color(t.fg_3)]
-        .spacing(theme::space::S2)
-        .align_y(Alignment::Center);
+    // dash a border, so these read as small outlined pills. They stay
+    // live while the limiter is off — pressing one *is* the request to
+    // limit, and `SpeedPreset` flips the switch on.
+    let mut presets = row![].spacing(theme::space::S2).align_y(Alignment::Center);
     for (label, kbs) in SPEED_PRESETS_KBS {
         presets = presets.push(
             Btn::new(*label)
@@ -1243,32 +1338,10 @@ fn speed_tab(st: &State) -> Element<'_, Msg> {
         );
     }
 
-    let limit_row = row![
-        text("Speed limit")
-            .font(theme::BODY)
-            .size(13.0)
-            .color(t.fg_1)
-            .width(Length::Fill),
-        limiter_chips,
-    ]
-    .spacing(theme::space::S3)
-    .align_y(Alignment::Center);
-
-    let mut body = column![limit_row].spacing(theme::space::S3);
-    if limited {
-        body = body.push(value_row).push(presets).push(toggle_row(
-            t,
-            "Remember for this file",
-            st.remember_limit,
-            true,
-            Msg::RememberLimit,
-        ));
-    }
-
     // Blank `max_conn` = auto (daemon picks); a non-empty value is an
     // explicit 1–16 override. The Auto/Custom chip-toggle makes the
-    // auto state visible and re-selectable; ApplySpeed wiring (blank ⇒
-    // `conns = None` ⇒ auto) is unchanged.
+    // auto state visible and re-selectable. `Md` matches the stepper's
+    // height so the three controls sit on one baseline.
     let conn_auto = st.max_conn.trim().is_empty();
     let conn_val = st
         .max_conn
@@ -1280,7 +1353,7 @@ fn speed_tab(st: &State) -> Element<'_, Msg> {
         t,
         &[("Auto", None), ("Custom", None)],
         if conn_auto { 0 } else { 1 },
-        BtnSize::Sm,
+        BtnSize::Md,
         |i| {
             if i == 0 {
                 Msg::MaxConn(String::new())
@@ -1302,53 +1375,43 @@ fn speed_tab(st: &State) -> Element<'_, Msg> {
             |n| Msg::MaxConn(n.to_string()),
         ));
     }
-    let conn_row = row![
-        column![
-            text("Max parallel connections")
-                .font(theme::BODY)
-                .size(13.0)
-                .color(t.fg_1),
-            text("Auto lets oxdm choose; applying reconnects active segments.")
-                .font(theme::BODY)
-                .size(11.0)
-                .color(t.fg_3),
-        ]
-        .spacing(2.0)
-        .width(Length::Fill),
-        conn_controls,
-    ]
-    .spacing(theme::space::S3)
-    .align_y(Alignment::Center);
-
-    let body = body.push(hairline(t.border_subtle)).push(conn_row).push(
+    // Apply rides in the same row as the control it commits, and stays
+    // dead until that control actually differs from what the daemon is
+    // running — so it can never read as the tab's global save.
+    conn_controls = conn_controls.push(
         Btn::new("Apply")
             .primary()
-            .size(BtnSize::Sm)
-            .on_press(Msg::ApplySpeed)
+            .size(BtnSize::Md)
+            .enabled(conn_selection(&st.max_conn) != st.applied_conn)
+            .on_press(Msg::ApplyConns)
             .view(t),
     );
-    card(t, theme::space::S3, body.into())
-}
 
-/// Settings-style toggle row: label (+optional hint) left, switch right.
-fn toggle_row<'a>(
-    t: &Tokens,
-    label: &'a str,
-    on: bool,
-    enabled: bool,
-    msg: impl Fn(bool) -> Msg + 'a,
-) -> Element<'a, Msg> {
-    row![
-        text(label)
-            .font(theme::BODY)
-            .size(13.0)
-            .color(if enabled { t.fg_1 } else { t.fg_3 })
-            .width(Length::Fill),
-        toggle(t, on, enabled, msg),
-    ]
-    .spacing(theme::space::S3)
-    .align_y(Alignment::Center)
-    .into()
+    set_rows(
+        t,
+        vec![
+            set_row(
+                t,
+                "Max parallel connections",
+                Some("Auto lets oxdm choose; applying reconnects active segments."),
+                conn_controls.into(),
+            ),
+            set_row(
+                t,
+                "Speed limit",
+                Some("Cap this job's throughput. Takes effect as you change it."),
+                toggle(t, limited, true, Msg::UseLimiter),
+            ),
+            set_row(t, "Limit to", None, value_row.into()),
+            set_row(t, "Quick set", None, presets.into()),
+            set_row(
+                t,
+                "Remember for this file",
+                Some("Keep the limit after this session ends."),
+                toggle(t, st.remember_limit, limited, Msg::RememberLimit),
+            ),
+        ],
+    )
 }
 
 /// Windows' `shutdown /f` closes open applications without letting them
@@ -1359,6 +1422,9 @@ fn toggle_row<'a>(
 /// forced form (`shutdown /h` rejects `/f`).
 const FORCE_SUFFIX: &str = " (force)";
 const POWER_FORCEABLE: bool = cfg!(target_os = "windows");
+/// What the picker offers before the user has chosen — the least
+/// destructive of the three, so an accidental arm costs the least.
+const POWER_DEFAULT: ShutdownAction = ShutdownAction::Sleep;
 
 fn power_options() -> Vec<String> {
     let mut out = Vec::with_capacity(5);
@@ -1400,16 +1466,13 @@ fn completion_tab(st: &State) -> Element<'_, Msg> {
     let oc = &st.on_completion;
     let power_on = oc.shutdown.is_some();
 
-    let power_row = row![
-        text("Power action")
-            .font(theme::BODY)
-            .size(13.0)
-            .color(t.fg_1)
-            .width(Length::Fill),
+    // Picker + switch share the row: the switch arms the action, the
+    // picker says which one, and neither reads without the other.
+    let power_controls = row![
         combo(
             t,
             power_options(),
-            oc.shutdown.map(|a| power_label(a, oc.force_shutdown)),
+            Some(power_label(st.power_choice, st.power_force)),
             Msg::PowerAction,
             Length::Fixed(if POWER_FORCEABLE { 176.0 } else { 140.0 }),
         ),
@@ -1418,37 +1481,40 @@ fn completion_tab(st: &State) -> Element<'_, Msg> {
     .spacing(theme::space::S3)
     .align_y(Alignment::Center);
 
-    let mut body = column![
-        toggle_row(
+    let mut rows = vec![
+        set_row(
             t,
             "Show notification when done",
-            oc.show_dialog,
-            true,
-            Msg::NotifyDone
+            Some("Open the completion dialog instead of acting unattended."),
+            toggle(t, oc.show_dialog, true, Msg::NotifyDone),
         ),
-        toggle_row(t, "Exit oxdm when done", oc.exit_app, true, Msg::ExitDone),
-        power_row,
-        toggle_row(
+        set_row(
             t,
-            "Disconnect from network when done",
-            oc.disconnect,
-            !power_on,
-            Msg::Disconnect
+            "Exit oxdm when done",
+            None,
+            toggle(t, oc.exit_app, true, Msg::ExitDone),
         ),
-    ]
-    .spacing(theme::space::S3);
-
+        set_row(
+            t,
+            "Power action",
+            Some("Runs after a 60-second cancellable countdown."),
+            power_controls.into(),
+        ),
+    ];
+    // The warning sits directly under the power row, inside the group:
+    // it is the consequence of what was just armed, so it reads as part
+    // of that control rather than as a banner over the whole pane.
     if let Some(warn) = completion_warn(st) {
-        body = body.push(warn);
+        rows.push(set_row_panel(warn));
     }
-    body = body.push(
-        Btn::new("Apply")
-            .primary()
-            .size(BtnSize::Sm)
-            .on_press(Msg::ApplyCompletion)
-            .view(t),
-    );
-    card(t, theme::space::S3, body.into())
+    rows.push(set_row(
+        t,
+        "Disconnect from network when done",
+        Some("Superseded by a power action when one is set."),
+        toggle(t, oc.disconnect, !power_on, Msg::Disconnect),
+    ));
+
+    set_rows(t, rows)
 }
 
 /// Destructive-action warning panel (design `.pane-warn`, rust). Lists
@@ -2176,8 +2242,8 @@ pub fn launch_download(_id: JobId) {
         .default_font(theme::BODY)
         .antialiasing(true)
         .window(chrome::window_settings(
-            iced::Size::new(540.0, 460.0),
-            iced::Size::new(530.0, 418.0),
+            iced::Size::new(WIN_W, WIN_MIN_H),
+            iced::Size::new(WIN_MIN_W, WIN_MIN_H),
         ));
     for f in theme::fonts::ALL {
         app = app.font(*f);

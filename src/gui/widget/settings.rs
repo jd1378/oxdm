@@ -75,6 +75,16 @@ pub fn set_row_stack<'a, M: 'a>(
     .into()
 }
 
+/// A row whose content spans the full width, on the same padding grid
+/// as the labelled rows. For panels that belong inside a group but
+/// carry their own surface (e.g. a warning about the row above).
+pub fn set_row_panel<'a, M: 'a>(content: Element<'a, M>) -> Element<'a, M> {
+    container(content)
+        .width(Length::Fill)
+        .padding(Padding::from([ROW_PAD_Y, ROW_PAD_X]))
+        .into()
+}
+
 /// A row that is only prose (footnotes under a group of settings).
 pub fn set_note<'a, M: 'a>(t: &Tokens, note: &str) -> Element<'a, M> {
     container(
@@ -132,6 +142,12 @@ pub fn set_section_danger<'a, M: 'a>(
     section(t, title, t.status_danger, border, rows)
 }
 
+/// The `.rows` surface on its own, with no eyebrow header. For a pane
+/// short enough that a header would only name what the rows already say.
+pub fn set_rows<'a, M: 'a>(t: &Tokens, rows: Vec<Element<'a, M>>) -> Element<'a, M> {
+    rows_surface(t, t.border_subtle, rows)
+}
+
 /// Header + arbitrary body, with no rows surface. For groups whose body
 /// already carries its own surfaces (e.g. the category accordions).
 pub fn set_group<'a, M: 'a>(t: &Tokens, title: &str, body: Element<'a, M>) -> Element<'a, M> {
@@ -148,6 +164,17 @@ fn section<'a, M: 'a>(
     border_color: Color,
     rows: Vec<Element<'a, M>>,
 ) -> Element<'a, M> {
+    column![head(title, head_color), rows_surface(t, border_color, rows)]
+        .spacing(HEAD_GAP)
+        .width(Length::Fill)
+        .into()
+}
+
+fn rows_surface<'a, M: 'a>(
+    t: &Tokens,
+    border_color: Color,
+    rows: Vec<Element<'a, M>>,
+) -> Element<'a, M> {
     let t2 = *t;
     let mut body = column![].width(Length::Fill);
     for (i, r) in rows.into_iter().enumerate() {
@@ -156,7 +183,7 @@ fn section<'a, M: 'a>(
         }
         body = body.push(r);
     }
-    let surface = container(body)
+    container(body)
         .width(Length::Fill)
         .style(move |_| container::Style {
             background: Some(t2.bg_surface.into()),
@@ -166,10 +193,7 @@ fn section<'a, M: 'a>(
                 radius: theme::surface::RADIUS.into(),
             },
             ..Default::default()
-        });
-    column![head(title, head_color), surface]
-        .spacing(HEAD_GAP)
-        .width(Length::Fill)
+        })
         .into()
 }
 
