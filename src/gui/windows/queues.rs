@@ -910,6 +910,13 @@ fn radio_pill<'a>(
             .into(),
         None => label.into(),
     };
+    // Shrink horizontally (design `.radio-pill` hugs its label) but fill
+    // the fixed height, so the label centres in the pill instead of
+    // sitting against its top edge.
+    let content: Element<'a, Msg> = container(content)
+        .height(Length::Fill)
+        .align_y(Alignment::Center)
+        .into();
     button(content)
         .height(Length::Fixed(theme::control::H_MD))
         .padding([0.0, CONC_PILL_PAD_X])
