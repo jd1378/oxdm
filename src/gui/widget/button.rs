@@ -266,8 +266,11 @@ impl<'a, M: Clone + 'a> Btn<'a, M> {
                         _ => t.fg_2,
                     }
                 } else if self.accent {
+                    // clay-400 → clay-500 under the pointer in light and
+                    // warm; the dark palette's own accent pair in dark.
                     match status {
-                        Pressed => darken(t.action_primary, 0.10),
+                        Hovered => t.action_primary_press,
+                        Pressed => darken(t.action_primary_press, 0.10),
                         _ => t.action_primary,
                     }
                 } else {

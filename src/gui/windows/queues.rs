@@ -256,6 +256,7 @@ pub enum Msg {
     ShotTick,
     Shot(iced::window::Screenshot),
     Themed(Box<Tokens>),
+    Discard,
     Noop,
 }
 
@@ -308,6 +309,8 @@ pub struct State {
 
     confirm_delete: bool,
     shot: Option<Shot>,
+    /// How many fields of the selected queue differ from what is saved.
+    dirty: usize,
 }
 
 /// `#RRGGBB` for the hex mirror.
@@ -530,6 +533,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 win_size: (0.0, 0.0),
                 confirm_delete: false,
                 shot: Shot::from_env(),
+                dirty: 0,
                 client,
             };
             st.hydrate();
@@ -550,7 +554,23 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
     }
 }
 
+/// Count of fields the editor would change on the selected queue,
+/// refreshed after every message so the footer never diffs during a
+/// render.
+fn refresh_dirty(st: &mut State) {
+    st.dirty = match (st.selected_queue(), st.build_queue()) {
+        (Some(saved), Some(edited)) => crate::gui::diff::count_changes(saved, &edited),
+        _ => 0,
+    };
+}
+
 fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
+    let task = update_ready_inner(st, msg);
+    refresh_dirty(st);
+    task
+}
+
+fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
     match msg {
         Msg::Queues(qs) => {
             st.queues = qs;
@@ -787,6 +807,12 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
         // sitting is the normal case, and closing after each would make
         // the user reopen it every time.
         Msg::Saved(_) => Task::none(),
+        // Back to the saved queue: `hydrate` is the same load the editor
+        // does when a queue is selected.
+        Msg::Discard => {
+            st.hydrate();
+            Task::none()
+        }
         Msg::Cancel => iced::exit(),
         Msg::WinResized(w, h) => {
             st.win_size = (w, h);
@@ -1744,14 +1770,35 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
     )
     .height(Length::Fill);
 
+    let mut right = row![].spacing(theme::space::S2).align_y(Alignment::Center);
+    if st.dirty > 0 {
+        right = right.push(
+            Btn::new(format!(
+                "Discard {} change{}",
+                st.dirty,
+                if st.dirty == 1 { "" } else { "s" }
+            ))
+            .ghost()
+            .accent(true)
+            .icon("rotate-cw")
+            .on_press(Msg::Discard)
+            .view(t),
+        );
+    }
     let footer_el = crate::gui::windows::add::footer(
         t,
         Btn::new("Cancel").ghost().on_press(Msg::Cancel).view(t),
-        Btn::new("Apply")
-            .primary()
-            .icon("check")
-            .on_press(Msg::Save)
-            .view(t),
+        right
+            .push(
+                Btn::new("Apply")
+                    .primary()
+                    .icon("check")
+                    // Nothing to write when nothing differs.
+                    .enabled(st.dirty > 0)
+                    .on_press(Msg::Save)
+                    .view(t),
+            )
+            .into(),
     );
 
     let body: Element<'_, Msg> = column![

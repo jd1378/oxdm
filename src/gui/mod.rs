@@ -8,6 +8,7 @@ pub mod app_icon;
 pub mod chrome;
 pub mod clipboard;
 pub mod color;
+pub mod diff;
 pub mod format;
 pub mod icons;
 pub mod ipc;

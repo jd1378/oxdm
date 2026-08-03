@@ -131,6 +131,7 @@ pub enum Msg {
     OpenFolder,
     CloseWin,
     Apply,
+    Discard,
     Applied(Result<(), String>),
     WinResized(f32, f32),
     ShotTick,
@@ -198,6 +199,9 @@ pub struct State {
     cs_verify_error: Option<String>,
 
     dirty: bool,
+    /// How many settings differ from the saved job — the Discard
+    /// button's label. Recomputed wherever `dirty` is set.
+    dirty_count: usize,
     /// URL / save-path changed → `SetJobSource` on Apply.
     dirty_source: bool,
     /// Custom headers / cookies changed → `UpdateJobLocation` on Apply
@@ -265,6 +269,75 @@ pub fn boot() -> (App, Task<Msg>) {
             Msg::Connected,
         ),
     )
+}
+
+/// The `Advanced` bundle this form would send. Shared by Apply and the
+/// change count so the footer cannot disagree with what applying writes.
+fn pending_advanced(st: &State) -> crate::domain::Advanced {
+    // Advanced bundle. The daemon strips the secret fields into
+    // the encrypted columns (guardian F1) and moves a non-empty
+    // Basic username onto legacy `Job.auth_user` (F2). Empty
+    // secret inputs mean "keep the stored secret".
+    let mut adv = st.adv.clone();
+    adv.proxy.mode = st.proxy_mode;
+    adv.proxy.host = st.proxy_host.trim().to_owned();
+    adv.proxy.port = st.proxy_port.trim().to_owned();
+    adv.proxy.auth_enabled = st.proxy_auth;
+    adv.proxy.username = st.proxy_user.trim().to_owned();
+    adv.proxy.password = st.proxy_pass.clone();
+    // Emptying a field that held a stored secret is the only way
+    // to delete it; leaving it untouched still means "keep".
+    adv.proxy.clear_password = st.proxy_pass_edited && st.proxy_pass.is_empty();
+    adv.proxy.remote_dns = st.remote_dns;
+    // Emptying a secret field that held a stored value is the
+    // only way to delete it; untouched still means "keep".
+    adv.auth.clear_secret = st.auth_secret_edited
+        && match st.auth_scheme {
+            AuthScheme::Bearer => st.auth_token.is_empty(),
+            _ => st.auth_pass.is_empty(),
+        };
+    adv.clear_cookie_jar = st.cookies_edited && st.cookies.text().trim().is_empty();
+    adv.auth.scheme = st.auth_scheme;
+    adv.auth.username = st.auth_user.trim().to_owned();
+    adv.auth.password = st.auth_pass.clone();
+    adv.auth.token = st.auth_token.clone();
+    adv.cookies_enabled = st.cookies_enabled;
+    adv.cookie_jar = st.cookies.text();
+    adv
+}
+
+/// How many of the job's settings this form would change. The secret
+/// fields count when freshly typed: an empty one means "keep", so it is
+/// not a change, which is exactly what `pending_advanced` encodes.
+fn count_changes(st: &State) -> usize {
+    let job = &st.entry.job;
+    let mut n = crate::gui::diff::count_changes(&job.advanced, &pending_advanced(st));
+    if st.url.trim() != job.url.as_str() {
+        n += 1;
+    }
+    let saved_path = job.save_dir.join(job.filename.as_deref().unwrap_or(""));
+    if std::path::Path::new(st.save_path.trim()) != saved_path {
+        n += 1;
+    }
+    let headers: Vec<(String, String)> = st
+        .headers
+        .iter()
+        .filter(|(k, _)| !k.trim().is_empty())
+        .map(|(k, v)| (k.trim().to_owned(), v.clone()))
+        .collect();
+    if headers
+        != job
+            .headers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect::<Vec<_>>()
+    {
+        n += 1;
+    }
+    if st.checksums != job.checksums {
+        n += 1;
+    }
+    n
 }
 
 fn hydrate(st: &mut State) {
@@ -357,6 +430,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 cs_verifying: None,
                 cs_verify_error: None,
                 dirty: false,
+                dirty_count: 0,
                 dirty_source: false,
                 dirty_overlay: false,
                 error: None,
@@ -384,7 +458,11 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
 }
 
 fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
-    let mark = |st: &mut State| st.dirty = true;
+    // Staged edits await Apply; the count drives the Discard label.
+    let mark = |st: &mut State| {
+        st.dirty = true;
+        st.dirty_count = count_changes(st);
+    };
     match msg {
         Msg::Entry(e) => {
             st.entry = *e;
@@ -731,6 +809,14 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             Task::none()
         }
         Msg::CloseWin => iced::exit(),
+        Msg::Discard => {
+            hydrate(st);
+            st.dirty = false;
+            st.dirty_source = false;
+            st.dirty_overlay = false;
+            st.dirty_count = 0;
+            Task::none()
+        }
         Msg::Apply => {
             if st.locked() || st.proxy_invalid() {
                 return Task::none();
@@ -749,36 +835,7 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                 p.file_name().map(|n| n.to_string_lossy().into_owned()),
             );
 
-            // Advanced bundle. The daemon strips the secret fields into
-            // the encrypted columns (guardian F1) and moves a non-empty
-            // Basic username onto legacy `Job.auth_user` (F2). Empty
-            // secret inputs mean "keep the stored secret".
-            let mut adv = st.adv.clone();
-            adv.proxy.mode = st.proxy_mode;
-            adv.proxy.host = st.proxy_host.trim().to_owned();
-            adv.proxy.port = st.proxy_port.trim().to_owned();
-            adv.proxy.auth_enabled = st.proxy_auth;
-            adv.proxy.username = st.proxy_user.trim().to_owned();
-            adv.proxy.password = st.proxy_pass.clone();
-            // Emptying a field that held a stored secret is the only way
-            // to delete it; leaving it untouched still means "keep".
-            adv.proxy.clear_password = st.proxy_pass_edited && st.proxy_pass.is_empty();
-            adv.proxy.remote_dns = st.remote_dns;
-            // Emptying a secret field that held a stored value is the
-            // only way to delete it; untouched still means "keep".
-            adv.auth.clear_secret = st.auth_secret_edited
-                && match st.auth_scheme {
-                    AuthScheme::Bearer => st.auth_token.is_empty(),
-                    _ => st.auth_pass.is_empty(),
-                };
-            adv.clear_cookie_jar = st.cookies_edited && st.cookies.text().trim().is_empty();
-            adv.auth.scheme = st.auth_scheme;
-            adv.auth.username = st.auth_user.trim().to_owned();
-            adv.auth.password = st.auth_pass.clone();
-            adv.auth.token = st.auth_token.clone();
-            adv.cookies_enabled = st.cookies_enabled;
-            adv.cookie_jar = st.cookies.text();
-
+            let adv = pending_advanced(st);
             // Header/cookie edits need `UpdateJobLocation` — the only
             // IPC that persists `Job.headers` + `enc_cookies`. It
             // re-encrypts secrets from its payload, so it carries any
@@ -848,6 +905,7 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
         Msg::Applied(Err(e)) => {
             st.error = Some(e);
             st.dirty = true;
+            st.dirty_count = count_changes(st);
             Task::none()
         }
         Msg::WinResized(w, h) => {
@@ -1103,6 +1161,18 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
             if st.dirty {
                 // clay "● unsaved" dirty-dot — staged edits await Apply.
                 right = right.push(status_dot(t.action_primary, "unsaved", 11.0));
+                right = right.push(
+                    Btn::new(format!(
+                        "Discard {} change{}",
+                        st.dirty_count.max(1),
+                        if st.dirty_count == 1 { "" } else { "s" }
+                    ))
+                    .ghost()
+                    .accent(true)
+                    .icon("rotate-cw")
+                    .on_press(Msg::Discard)
+                    .view(t),
+                );
             }
             right
                 .push(Btn::new("Close").ghost().on_press(Msg::CloseWin).view(t))

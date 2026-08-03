@@ -196,6 +196,7 @@ pub enum Msg {
     KeyPressed(iced::keyboard::Key),
     // Footer
     ResetSection,
+    Discard,
     Save,
     Saved(Result<(), String>),
     Cancel,
@@ -265,6 +266,100 @@ pub struct State {
     custom_headers: text_editor::Content,
     theme_overrides: text_editor::Content,
     shot: Option<Shot>,
+    /// How many settings differ from what is saved. Drives the footer's
+    /// Discard button; recomputed in `update_ready`.
+    dirty: usize,
+}
+
+/// The settings this form would save: `st.s` with every string mirror
+/// folded back in. Shared by Apply and the change count, so the button
+/// can never disagree with what applying would write.
+fn pending_settings(st: &State) -> Settings {
+    let mut s = st.s.clone();
+    s.download_dir = std::path::PathBuf::from(st.download_dir.trim());
+    s.work_dir = std::path::PathBuf::from(st.work_dir.trim());
+    if let Ok(v) = st.max_retries.trim().parse() {
+        s.max_retries = v;
+    }
+    if let Ok(v) = st.fixed_retries.trim().parse() {
+        s.n_fixed_retries = v;
+    }
+    if let Ok(v) = humantime::parse_duration(st.retry_wait.trim()) {
+        s.wait_between_retries = v;
+    }
+    if let Ok(v) = st.concurrent.trim().parse() {
+        s.max_concurrent_downloads = v;
+    }
+    s.speed_limit = st.limit_on.then(|| {
+        let unit = if st.limit_unit_mb {
+            BYTES_PER_MB
+        } else {
+            BYTES_PER_KB
+        };
+        st.limit_value.trim().parse::<u64>().unwrap_or(0) * unit
+    });
+    s.proxy = ProxyAdv {
+        mode: PROXY_MODES[st.proxy_mode].1,
+        host: st.proxy_host.trim().to_owned(),
+        port: st.proxy_port.trim().to_owned(),
+        auth_enabled: st.proxy_auth,
+        username: st.proxy_user.trim().to_owned(),
+        // Only speak about the password when the user touched
+        // it: empty-and-edited deletes, empty-and-untouched
+        // keeps whatever is stored.
+        password: st.proxy_pass.clone(),
+        clear_password: st.proxy_pass_edited && st.proxy_pass.is_empty(),
+        ..s.proxy.clone()
+    };
+    s.connect_timeout = humantime::parse_duration(st.connect_timeout.trim()).ok();
+    s.user_agent = (!st.user_agent.trim().is_empty()).then(|| st.user_agent.trim().to_owned());
+    if let Ok(v) = st.ipc_port.trim().parse() {
+        s.ipc_port = v;
+    }
+    s.update_feed_url = st.update_feed.trim().to_owned();
+    s.category_extensions = st
+        .cat_exts
+        .iter()
+        .map(|(c, txt)| {
+            (
+                *c,
+                txt.split(',')
+                    .map(|e| e.trim().to_lowercase())
+                    .filter(|e| !e.is_empty())
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    s.category_folders = st
+        .cat_folders
+        .iter()
+        .filter(|(_, dir)| !dir.trim().is_empty())
+        .map(|(c, dir)| (*c, std::path::PathBuf::from(dir.trim())))
+        .collect();
+    s.category_queues = st
+        .cat_queues
+        .iter()
+        .filter_map(|(c, q)| q.map(|q| (*c, q)))
+        .collect();
+    s.headers = st
+        .custom_headers
+        .text()
+        .lines()
+        .filter_map(|l| {
+            let (k, v) = l.split_once(':')?;
+            Some((k.trim().to_owned(), v.trim().to_owned()))
+        })
+        .collect();
+    s.theme_overrides = st
+        .theme_overrides
+        .text()
+        .lines()
+        .filter_map(|l| {
+            let (k, v) = l.split_once(':')?;
+            Some((k.trim().to_owned(), v.trim().to_owned()))
+        })
+        .collect();
+    s
 }
 
 fn mirror(st: &mut State) {
@@ -423,6 +518,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 custom_headers: text_editor::Content::new(),
                 theme_overrides: text_editor::Content::new(),
                 shot: Shot::from_env(),
+                dirty: 0,
                 client,
             };
             mirror(&mut st);
@@ -443,7 +539,19 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
     }
 }
 
+/// Count of settings this form would change, refreshed after every
+/// message so the footer never has to diff during a render.
+fn refresh_dirty(st: &mut State) {
+    st.dirty = crate::gui::diff::count_changes(&st.original, &pending_settings(st));
+}
+
 fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
+    let task = update_ready_inner(st, msg);
+    refresh_dirty(st);
+    task
+}
+
+fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
     match msg {
         Msg::Daemon(DaemonSignal::Lost) => iced::exit(),
         Msg::Daemon(DaemonSignal::Event(Event::Close)) => iced::exit(),
@@ -818,92 +926,7 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             Task::none()
         }
         Msg::Save => {
-            // fold string mirrors into Settings
-            let mut s = st.s.clone();
-            s.download_dir = std::path::PathBuf::from(st.download_dir.trim());
-            s.work_dir = std::path::PathBuf::from(st.work_dir.trim());
-            if let Ok(v) = st.max_retries.trim().parse() {
-                s.max_retries = v;
-            }
-            if let Ok(v) = st.fixed_retries.trim().parse() {
-                s.n_fixed_retries = v;
-            }
-            if let Ok(v) = humantime::parse_duration(st.retry_wait.trim()) {
-                s.wait_between_retries = v;
-            }
-            if let Ok(v) = st.concurrent.trim().parse() {
-                s.max_concurrent_downloads = v;
-            }
-            s.speed_limit = st.limit_on.then(|| {
-                let unit = if st.limit_unit_mb {
-                    BYTES_PER_MB
-                } else {
-                    BYTES_PER_KB
-                };
-                st.limit_value.trim().parse::<u64>().unwrap_or(0) * unit
-            });
-            s.proxy = ProxyAdv {
-                mode: PROXY_MODES[st.proxy_mode].1,
-                host: st.proxy_host.trim().to_owned(),
-                port: st.proxy_port.trim().to_owned(),
-                auth_enabled: st.proxy_auth,
-                username: st.proxy_user.trim().to_owned(),
-                // Only speak about the password when the user touched
-                // it: empty-and-edited deletes, empty-and-untouched
-                // keeps whatever is stored.
-                password: st.proxy_pass.clone(),
-                clear_password: st.proxy_pass_edited && st.proxy_pass.is_empty(),
-                ..s.proxy.clone()
-            };
-            s.connect_timeout = humantime::parse_duration(st.connect_timeout.trim()).ok();
-            s.user_agent =
-                (!st.user_agent.trim().is_empty()).then(|| st.user_agent.trim().to_owned());
-            if let Ok(v) = st.ipc_port.trim().parse() {
-                s.ipc_port = v;
-            }
-            s.update_feed_url = st.update_feed.trim().to_owned();
-            s.category_extensions = st
-                .cat_exts
-                .iter()
-                .map(|(c, txt)| {
-                    (
-                        *c,
-                        txt.split(',')
-                            .map(|e| e.trim().to_lowercase())
-                            .filter(|e| !e.is_empty())
-                            .collect::<Vec<_>>(),
-                    )
-                })
-                .collect();
-            s.category_folders = st
-                .cat_folders
-                .iter()
-                .filter(|(_, dir)| !dir.trim().is_empty())
-                .map(|(c, dir)| (*c, std::path::PathBuf::from(dir.trim())))
-                .collect();
-            s.category_queues = st
-                .cat_queues
-                .iter()
-                .filter_map(|(c, q)| q.map(|q| (*c, q)))
-                .collect();
-            s.headers = st
-                .custom_headers
-                .text()
-                .lines()
-                .filter_map(|l| {
-                    let (k, v) = l.split_once(':')?;
-                    Some((k.trim().to_owned(), v.trim().to_owned()))
-                })
-                .collect();
-            s.theme_overrides = st
-                .theme_overrides
-                .text()
-                .lines()
-                .filter_map(|l| {
-                    let (k, v) = l.split_once(':')?;
-                    Some((k.trim().to_owned(), v.trim().to_owned()))
-                })
-                .collect();
+            let s = pending_settings(st);
             // Keep `st.s` in step with what was sent: the mirrors were
             // just folded in, and `original` is rebased off it on ack.
             st.s = s.clone();
@@ -917,6 +940,11 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             Task::none()
         }
         Msg::Saved(Err(_)) => Task::none(),
+        Msg::Discard => {
+            st.s = st.original.clone();
+            mirror(st);
+            Task::none()
+        }
         Msg::Cancel => iced::exit(),
         Msg::WinResized(w, h) => {
             chrome::enforce_min_size(iced::Size::new(w, h), iced::Size::new(640.0, 558.0))
@@ -1073,10 +1101,26 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
                 .view(t),
         );
     }
+    if st.dirty > 0 {
+        right = right.push(
+            Btn::new(format!(
+                "Discard {} change{}",
+                st.dirty,
+                if st.dirty == 1 { "" } else { "s" }
+            ))
+            .ghost()
+            .accent(true)
+            .icon("rotate-cw")
+            .on_press(Msg::Discard)
+            .view(t),
+        );
+    }
     right = right.push(
         Btn::new("Apply")
             .primary()
             .icon("save")
+            // Nothing to write when nothing differs.
+            .enabled(st.dirty > 0)
             .on_press(Msg::Save)
             .view(t),
     );
