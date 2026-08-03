@@ -39,6 +39,8 @@ const DAY_FONT: f32 = 11.0;
 const DAY_LINE: f32 = 12.0;
 const DAY_INK_NUDGE: f32 = 2.0;
 const CONC_PILL_PAD_X: f32 = 14.0;
+/// Gap between wrapped pill lines — the same 4px they use side by side.
+const PILL_WRAP_GAP: f32 = 4.0;
 /// Custom-concurrency stepper bounds. Min 1 keeps at least one active
 /// download; no design max, so cap at a sane parallelism ceiling.
 const CONC_MIN: i64 = 1;
@@ -896,19 +898,17 @@ fn radio_pill<'a>(
     let label = text(label).font(theme::BODY_BOLD).size(CONC_PILL_FONT);
     // `button` paints the label from its own style; the icon carries
     // its colour itself, so it has to be told the same one.
+    // Design `.radio-pill` is inline-flex: the pill hugs its label. A
+    // Fill-width content stretched each pill to share the row, which
+    // read fine until the row ran out of space — and a wrapping row
+    // gives a Fill child a line of its own, so every pill became a
+    // full-width band.
     let content: Element<'a, Msg> = match icon {
-        Some(name) => container(
-            row![icons::icon(name, 14.0, fg), label]
-                .spacing(6.0)
-                .align_y(Alignment::Center),
-        )
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
-        .into(),
-        None => container(label)
-            .center_x(Length::Fill)
-            .center_y(Length::Fill)
+        Some(name) => row![icons::icon(name, 14.0, fg), label]
+            .spacing(6.0)
+            .align_y(Alignment::Center)
             .into(),
+        None => label.into(),
     };
     button(content)
         .height(Length::Fixed(theme::control::H_MD))
@@ -1533,7 +1533,9 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
                 },),
             ]
             .spacing(4.0)
-            .align_y(Alignment::Center),
+            .align_y(Alignment::Center)
+            .wrap()
+            .vertical_spacing(PILL_WRAP_GAP),
         ]
         .spacing(theme::space::S3)
         .into(),
@@ -1575,7 +1577,10 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
             Msg::Sched(SchedKind::Condition),
         ));
     }
-    let mut sched_col = column![sched_pills].spacing(theme::space::S3);
+    // Narrow the window and the row wraps onto another line rather than
+    // pushing its last pills out through the card's edge.
+    let mut sched_col =
+        column![sched_pills.wrap().vertical_spacing(PILL_WRAP_GAP)].spacing(theme::space::S3);
     match st.sched {
         SchedKind::Recurring => {
             let mut days = row![].spacing(theme::space::S1);
@@ -1693,7 +1698,9 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
                 Msg::Finish(FinishKind::Shutdown)
             ),
         ]
-        .spacing(4.0),
+        .spacing(4.0)
+        .wrap()
+        .vertical_spacing(PILL_WRAP_GAP),
         row![seg_btn(
             t,
             "Run command",
