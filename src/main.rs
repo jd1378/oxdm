@@ -94,6 +94,9 @@ fn main() {
             Some("power") => {
                 oxdm::gui::windows::power::launch_power();
             }
+            Some("about") => {
+                oxdm::gui::windows::about::launch_about();
+            }
             Some("batch") => {
                 let Some(path) = args.next() else {
                     eprintln!("oxdm gui batch <staged-json-path>");
@@ -135,6 +138,7 @@ fn print_help() {
     println!("    oxdm gui settings         Run the Settings window");
     println!("    oxdm gui queues           Run the Queues & scheduling window");
     println!("    oxdm gui batch <PATH>     Run the batch-capture triage dialog");
+    println!("    oxdm gui about            Run the About window");
     println!("    oxdm --tray               Start daemon hidden (no main window)");
     println!("    oxdm --quit               Tell the running daemon to exit");
     println!("    oxdm --version            Print version");

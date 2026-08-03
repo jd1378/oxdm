@@ -272,6 +272,14 @@ pub fn spawn_queues_gui() {
     );
 }
 
+/// About window.
+pub fn spawn_about_gui() {
+    evict_and_spawn(
+        crate::ipc_local::protocol::GuiKind::About,
+        &["gui", "about"],
+    );
+}
+
 /// Shutdown/sleep grace-countdown window. Spawned by the daemon's
 /// power-prompt listener when a destructive power action arms.
 pub fn spawn_power_gui() {

@@ -447,6 +447,9 @@ impl Client {
     pub async fn open_queues_window(&self) -> Result<(), String> {
         self.expect_ok(Request::OpenQueuesWindow).await
     }
+    pub async fn open_about_window(&self) -> Result<(), String> {
+        self.expect_ok(Request::OpenAboutWindow).await
+    }
     pub async fn open_add_window(
         &self,
         edit_id: Option<JobId>,

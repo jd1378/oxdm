@@ -8,7 +8,7 @@ use std::sync::Arc;
 use iced::widget::{column, container, mouse_area, row, scrollable, text};
 use iced::{Alignment, Element, Length, Subscription, Task};
 
-use super::main_dialogs::{self, AboutState, RemoveState, UpdateUi};
+use super::main_dialogs::{self, RemoveState};
 use crate::domain::{Category, JobId, Phase, QueueId};
 use crate::gui::chrome::{self, WindowControl, titlebar};
 use crate::gui::format::{format_bytes, format_eta, format_speed};
@@ -141,12 +141,6 @@ pub enum Msg {
     /// Status-bar disk button: reveal the in-flight cache folder.
     OpenWorkDir,
     ColToggle(SortColumn),
-    // About overlay
-    AboutCheckUpdate,
-    AboutChecked(Result<Option<crate::data::UpdateInfo>, String>),
-    AboutDownloadUpdate,
-    AboutRepository,
-    AboutDonate,
     // Remove overlay
     RemoveAs(RemoveKind),
     RemoveDeleteOnDisk(bool),
@@ -272,7 +266,6 @@ pub enum Overlay {
     #[default]
     None,
     Context,
-    About,
     Remove,
     BrowserExtensions,
     /// First-run welcome variant of the browser-extensions dialog
@@ -311,7 +304,6 @@ pub struct Main {
     /// explicitly via `mouse_area` enter/exit.
     pub hovered_row: Option<JobId>,
     pub overlay: Overlay,
-    pub about: AboutState,
     pub remove: Option<RemoveState>,
     pub db_error: Option<String>,
     pub modifiers: iced::keyboard::Modifiers,
@@ -400,7 +392,6 @@ impl Main {
             hovered_section: None,
             hovered_row: None,
             overlay: Overlay::None,
-            about: AboutState::default(),
             remove: None,
             db_error: None,
             modifiers: iced::keyboard::Modifiers::default(),
@@ -1011,45 +1002,6 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                 .and_then(iced::window::is_maximized)
                 .map(move |maximized| Msg::WindowSizeSettled(w, h, maximized))
         }
-        Msg::AboutCheckUpdate => {
-            m.about.update = UpdateUi::Checking;
-            let client = m.client.clone();
-            Task::perform(
-                async move { client.update_check().await },
-                Msg::AboutChecked,
-            )
-        }
-        Msg::AboutChecked(res) => {
-            m.about.update = match res {
-                Ok(Some(info)) => UpdateUi::Available(info),
-                Ok(None) => UpdateUi::UpToDate,
-                Err(e) => UpdateUi::Error(e),
-            };
-            Task::none()
-        }
-        Msg::AboutDownloadUpdate => {
-            if let UpdateUi::Available(info) = m.about.update.clone() {
-                m.about.update = UpdateUi::Downloading(info.version.clone());
-                let client = m.client.clone();
-                Task::perform(
-                    async move {
-                        let name = format!("oxdm-update-{}", info.version);
-                        client.add_update_job(info.url.clone(), Some(name)).await
-                    },
-                    |_| Msg::Noop,
-                )
-            } else {
-                Task::none()
-            }
-        }
-        Msg::AboutRepository => {
-            crate::platform::open_url("https://github.com/jd1378/oxdm");
-            Task::none()
-        }
-        Msg::AboutDonate => {
-            crate::platform::open_url("https://github.com/sponsors/jd1378");
-            Task::none()
-        }
         Msg::RemoveAs(kind) => {
             m.context_menu = None;
             request_remove(m, kind)
@@ -1328,11 +1280,7 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                     m.overlay = Overlay::BrowserExtensions;
                     Task::none()
                 }
-                ToolAction::About => {
-                    m.overlay = Overlay::About;
-                    m.about = AboutState::default();
-                    Task::none()
-                }
+                ToolAction::About => act(async move { client.open_about_window().await }),
             }
         }
         Msg::ShotTick => {
@@ -1685,7 +1633,6 @@ fn main_view(m: &Main) -> Element<'_, Msg> {
         main_dialogs::conflict(m, base)
     } else {
         match m.overlay {
-            Overlay::About => main_dialogs::about(m, base),
             Overlay::Remove => main_dialogs::remove_confirm(m, base),
             Overlay::BrowserExtensions => main_dialogs::browser_extensions(m, base),
             Overlay::Welcome => main_dialogs::welcome(m, base),

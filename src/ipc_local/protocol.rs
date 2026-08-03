@@ -68,6 +68,8 @@ pub enum GuiKind {
     /// the daemon when a destructive power action arms; offers instant
     /// Cancel / Confirm.
     Power,
+    /// About window (singleton): identity, update check, build facts.
+    About,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -210,6 +212,8 @@ pub enum Request {
     },
     /// Open or focus the Queues & scheduling window.
     OpenQueuesWindow,
+    /// Open or focus the About window.
+    OpenAboutWindow,
     /// Open or focus the Add Download window. `edit_id` carries the
     /// capture-review path; `prefill_url` is the clipboard-resolved
     /// URL the caller (main GUI) read on the user's behalf, since the

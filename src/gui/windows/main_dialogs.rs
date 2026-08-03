@@ -9,28 +9,12 @@ use iced::{Alignment, Element, Length};
 
 use crate::data::ConflictKind;
 use crate::gui::theme::{self, Tokens};
-use crate::gui::widget::{Btn, BtnSize, checkbox, section_card, vscroll};
+use crate::gui::widget::{Btn, BtnSize, checkbox, vscroll};
 use crate::gui::{color, icons};
 
 use super::main::{Main, Msg, RemoveKind};
 
 // ---------------------------------------------------------------- states
-
-#[derive(Default, Clone)]
-pub enum UpdateUi {
-    #[default]
-    Idle,
-    Checking,
-    UpToDate,
-    Available(crate::data::UpdateInfo),
-    Downloading(String),
-    Error(String),
-}
-
-#[derive(Default, Clone)]
-pub struct AboutState {
-    pub update: UpdateUi,
-}
 
 #[derive(Clone)]
 pub struct RemoveState {
@@ -109,168 +93,6 @@ fn title_row<'a>(t: &Tokens, title: &str) -> Element<'a, Msg> {
         .size(14.0)
         .color(t.fg_1)
         .into()
-}
-
-// ---------------------------------------------------------------- about
-
-pub fn about<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg> {
-    let t = &m.tokens;
-    let t2 = *t;
-    let st = &m.about;
-
-    let tile_bg = color::mix(t.bg_surface, t.action_primary, 0.20);
-    let identity = container(
-        row![
-            container(
-                text("OX")
-                    .font(theme::DISPLAY)
-                    .size(20.0)
-                    .color(t.action_primary)
-            )
-            .width(Length::Fixed(56.0))
-            .height(Length::Fixed(56.0))
-            .align_x(Alignment::Center)
-            .align_y(Alignment::Center)
-            .style(move |_| container::Style {
-                background: Some(tile_bg.into()),
-                border: iced::Border {
-                    radius: theme::radius::SM.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            }),
-            column![
-                text("oxdm").font(theme::DISPLAY).size(28.0).color(t.fg_1),
-                text("Open-source cross-platform download manager.")
-                    .font(theme::BODY)
-                    .size(13.0)
-                    .color(t.fg_2),
-                text(format!(
-                    "Built on the odl crate · v{}",
-                    env!("CARGO_PKG_VERSION")
-                ))
-                .font(theme::MONO)
-                .size(11.0)
-                .color(t.fg_3),
-            ]
-            .spacing(2.0),
-        ]
-        .spacing(theme::space::S3)
-        .align_y(Alignment::Center),
-    )
-    .width(Length::Fill)
-    .padding(theme::space::S3)
-    .style(move |_| container::Style {
-        background: Some(t2.bg_raised.into()),
-        border: iced::Border {
-            color: t2.border_subtle,
-            width: 1.0,
-            radius: theme::surface::RADIUS.into(),
-        },
-        ..Default::default()
-    });
-
-    let status: Element<'a, Msg> = match &st.update {
-        UpdateUi::Idle => text("Click \"Check for updates\" to look for a new release.")
-            .font(theme::BODY)
-            .size(12.0)
-            .color(t.fg_3)
-            .into(),
-        UpdateUi::Checking => text("Checking…")
-            .font(theme::BODY_BOLD)
-            .size(12.0)
-            .color(t.fg_2)
-            .into(),
-        UpdateUi::UpToDate => row![
-            icons::icon("circle-check", 14.0, t.status_success),
-            text("You're up to date.")
-                .font(theme::BODY_BOLD)
-                .size(12.0)
-                .color(t.status_success),
-        ]
-        .spacing(6.0)
-        .align_y(Alignment::Center)
-        .into(),
-        UpdateUi::Available(info) => column![
-            crate::gui::widget::eyebrow(t, "update available"),
-            text(format!("v{}", info.version))
-                .font(theme::DISPLAY)
-                .size(20.0)
-                .color(t.fg_1),
-            text(info.notes.clone().unwrap_or_default())
-                .font(theme::BODY)
-                .size(12.0)
-                .color(t.fg_2),
-            Btn::new("Download update")
-                .primary()
-                .icon("download")
-                .on_press(Msg::AboutDownloadUpdate)
-                .view(t),
-        ]
-        .spacing(theme::space::S2)
-        .into(),
-        UpdateUi::Downloading(v) => text(format!("Downloading v{v}…"))
-            .font(theme::BODY_BOLD)
-            .size(12.0)
-            .color(t.fg_2)
-            .into(),
-        UpdateUi::Error(e) => row![
-            icons::icon("circle-alert", 14.0, t.status_danger),
-            text(e.clone())
-                .font(theme::BODY_BOLD)
-                .size(12.0)
-                .color(t.status_danger),
-        ]
-        .spacing(6.0)
-        .align_y(Alignment::Center)
-        .into(),
-    };
-
-    let updates = section_card(
-        t,
-        "cloud-upload",
-        "Updates",
-        column![
-            Btn::new("Check for updates")
-                .secondary()
-                .size(BtnSize::Sm)
-                .icon("refresh-cw")
-                .on_press(Msg::AboutCheckUpdate)
-                .view(t),
-            status,
-        ]
-        .spacing(theme::space::S2)
-        .into(),
-    );
-
-    let card = column![
-        identity,
-        updates,
-        row![
-            Btn::new("Repository")
-                .toolbar()
-                .size(BtnSize::Sm)
-                .icon("globe")
-                .on_press(Msg::AboutRepository)
-                .view(t),
-            Btn::new("Donate")
-                .toolbar()
-                .size(BtnSize::Sm)
-                .icon("zap")
-                .on_press(Msg::AboutDonate)
-                .view(t),
-            iced::widget::Space::new().width(Length::Fill),
-            Btn::new("Close")
-                .ghost()
-                .on_press(Msg::CloseOverlay)
-                .view(t),
-        ]
-        .spacing(theme::space::S2)
-        .align_y(Alignment::Center),
-    ]
-    .spacing(theme::space::S3);
-
-    modal(t, base, card.into(), 500.0, Some(Msg::CloseOverlay))
 }
 
 // ---------------------------------------------------------------- remove

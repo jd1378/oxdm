@@ -724,6 +724,10 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
             crate::daemon::tray::spawn_queues_gui();
             Reply::Ok
         }
+        Request::OpenAboutWindow => {
+            crate::daemon::tray::spawn_about_gui();
+            Reply::Ok
+        }
         Request::OpenAddWindow {
             edit_id,
             prefill_url,
