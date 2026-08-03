@@ -491,10 +491,14 @@ pub fn will_send_headers(settings: &super::Settings, job: &Job) -> Vec<WillSendH
 
     // Base (global) headers, skipping keys the job overrides.
     for (k, v) in settings.headers.iter() {
-        if job.headers.contains_key(k) {
+        // Case-insensitively, as the wire resolves them: a job's
+        // `x-api-key` overrides a global `X-API-Key`.
+        if super::has_header(&job.headers, k) {
             continue;
         }
-        if (k == COOKIE_KEY && cookie_stored) || (k == AUTHORIZATION_KEY && auth_sent) {
+        if (super::header_name_eq(k, COOKIE_KEY) && cookie_stored)
+            || (super::header_name_eq(k, AUTHORIZATION_KEY) && auth_sent)
+        {
             continue; // replaced by the stored-secret row below
         }
         rows.push(WillSendHeader {
@@ -509,7 +513,9 @@ pub fn will_send_headers(settings: &super::Settings, job: &Job) -> Vec<WillSendH
     // replace same-name entries at run time, exactly like
     // `job_overlay_options` + `Credentials` do.
     for (k, v) in job.headers.iter() {
-        if (k == COOKIE_KEY && cookie_stored) || (k == AUTHORIZATION_KEY && auth_sent) {
+        if (super::header_name_eq(k, COOKIE_KEY) && cookie_stored)
+            || (super::header_name_eq(k, AUTHORIZATION_KEY) && auth_sent)
+        {
             continue;
         }
         rows.push(WillSendHeader {
@@ -552,6 +558,60 @@ pub fn will_send_headers(settings: &super::Settings, job: &Job) -> Vec<WillSendH
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_job() -> Job {
+        Job {
+            id: JobId::new(),
+            url: url::Url::parse("https://example.com/file.zip").unwrap(),
+            save_dir: std::path::PathBuf::from("/tmp/oxdm-test"),
+            filename: None,
+            referrer: None,
+            headers: indexmap::IndexMap::new(),
+            max_connections: None,
+            proxy: None,
+            auth_user: None,
+            enc_auth_password: None,
+            enc_proxy_password: None,
+            enc_cookies: None,
+            speed_limit_override: None,
+            queue_id: crate::domain::QueueId::new(),
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            finished_at: None,
+            retries: 0,
+            status: JobStatus::default(),
+            advanced: crate::domain::Advanced::default(),
+            checksums: Vec::new(),
+            category: Category::Other,
+            captured_response: None,
+        }
+    }
+
+    #[test]
+    fn will_send_hides_a_global_header_the_job_overrides_in_another_case() {
+        let mut settings = crate::domain::Settings::default();
+        settings
+            .headers
+            .insert("X-API-Key".to_owned(), "global".to_owned());
+        let mut headers = indexmap::IndexMap::new();
+        headers.insert("x-api-key".to_owned(), "per-job".to_owned());
+        let job = Job {
+            headers,
+            ..sample_job()
+        };
+
+        let rows = will_send_headers(&settings, &job);
+        let keys: Vec<&str> = rows
+            .iter()
+            .filter(|r| r.name.eq_ignore_ascii_case("x-api-key"))
+            .map(|r| r.value.as_str())
+            .collect();
+        assert_eq!(
+            keys,
+            vec!["per-job"],
+            "the preview must show what the wire sends: the override alone"
+        );
+    }
 
     #[test]
     fn on_completion_accepts_pre_rename_payload() {

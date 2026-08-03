@@ -87,15 +87,18 @@ pub fn job_overlay_options(
         // Merge per-job headers on top of global; the decrypted
         // cookie jar (never stored in `Job.headers`) is injected here
         // so it lives only in the per-run overlay.
+        // `upsert_header`, not `insert`: field names are
+        // case-insensitive, so a job's `x-api-key` has to replace a
+        // global `X-API-Key` here rather than ride alongside it.
         let mut merged = base.headers().cloned().unwrap_or_default();
         for (k, v) in job.headers.iter() {
-            merged.insert(k.clone(), v.clone());
+            crate::domain::upsert_header(&mut merged, k, v.clone());
         }
         if let Some(c) = cookies.filter(|s| !s.is_empty()) {
-            merged.insert("Cookie".into(), c.to_string());
+            crate::domain::upsert_header(&mut merged, "Cookie", c.to_string());
         }
         if let Some(v) = bearer {
-            merged.insert("Authorization".into(), v);
+            crate::domain::upsert_header(&mut merged, "Authorization", v);
         }
         b.headers(Some(merged));
     }
@@ -569,6 +572,43 @@ mod tests {
         job.advanced.auth.scheme = AuthScheme::Basic;
         let opts = job_overlay_options(&base, &job, None, None, Some("pw")).unwrap();
         assert!(opts.headers().is_none());
+    }
+
+    #[test]
+    fn overlay_job_header_replaces_a_differently_cased_global() {
+        // Field names are case-insensitive: the job's spelling must
+        // override the global entry, not append a second one that
+        // reqwest would fold away unpredictably.
+        let mut global = indexmap::IndexMap::new();
+        global.insert("X-API-Key".to_owned(), "global".to_owned());
+        let base = DownloadOptionsBuilder::default()
+            .headers(Some(global))
+            .build()
+            .unwrap();
+        let mut job = sample_job();
+        job.headers
+            .insert("x-api-key".to_owned(), "per-job".to_owned());
+
+        let opts = job_overlay_options(&base, &job, None, None, None).unwrap();
+        let headers = opts.headers().expect("headers");
+        assert_eq!(headers.len(), 1, "one header, not two spellings of one");
+        assert_eq!(headers["X-API-Key"], "per-job");
+    }
+
+    #[test]
+    fn overlay_stored_cookie_replaces_a_differently_cased_custom_one() {
+        let mut global = indexmap::IndexMap::new();
+        global.insert("cookie".to_owned(), "stale=1".to_owned());
+        let base = DownloadOptionsBuilder::default()
+            .headers(Some(global))
+            .build()
+            .unwrap();
+        let job = sample_job();
+
+        let opts = job_overlay_options(&base, &job, None, Some("fresh=2"), None).unwrap();
+        let headers = opts.headers().expect("headers");
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers["cookie"], "fresh=2");
     }
 
     /// Rebuild an instruction the way odl does on resume, so

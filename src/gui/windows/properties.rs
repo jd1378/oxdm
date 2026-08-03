@@ -848,12 +848,10 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             };
             let job = &st.entry.job;
             let edit = st.dirty_overlay.then(|| {
-                let mut headers = indexmap::IndexMap::new();
-                for (k, v) in &st.headers {
-                    if !k.trim().is_empty() {
-                        headers.insert(k.trim().to_owned(), v.clone());
-                    }
-                }
+                // Nameless rows are still being typed; case-duplicates
+                // fold onto the first spelling (`normalize_headers`), so
+                // what is stored is what the wire would resolve to.
+                let headers = crate::domain::normalize_headers(st.headers.iter().cloned());
                 crate::ipc_local::protocol::JobEdit {
                     url: url.clone(),
                     save_dir: save_dir.clone(),
