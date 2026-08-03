@@ -701,6 +701,22 @@ pub mod surface {
     pub const RADIUS: f32 = radius::SM;
 }
 
+/// Re-read the daemon's settings and hand the caller fresh [`Tokens`].
+///
+/// Every window is its own process, so a theme change reaches the others
+/// only as `Event::SettingsChanged` — without this they keep painting
+/// the palette they booted with.
+pub fn refresh_tokens<M: Send + 'static>(
+    client: std::sync::Arc<crate::ipc_local::Client>,
+    themed: fn(Tokens) -> M,
+    noop: M,
+) -> iced::Task<M> {
+    iced::Task::perform(async move { client.snapshot().await }, move |r| match r {
+        Ok(snap) => themed(Tokens::from_settings(&snap.settings)),
+        Err(_) => noop,
+    })
+}
+
 pub mod fonts {
     /// All bundled font binaries, registered via `application.font(..)`.
     pub static ALL: &[&[u8]] = &[

@@ -42,6 +42,7 @@ pub enum Msg {
     WinResized(f32, f32),
     ShotTick,
     Shot(iced::window::Screenshot),
+    Themed(Box<Tokens>),
     Noop,
 }
 
@@ -269,12 +270,23 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
         Msg::Cancel => iced::exit(),
         Msg::Daemon(crate::gui::ipc::DaemonSignal::Lost) => iced::exit(),
         Msg::Daemon(crate::gui::ipc::DaemonSignal::Event(ev)) => match ev {
+            crate::ipc_local::protocol::Event::SettingsChanged => {
+                crate::gui::theme::refresh_tokens(
+                    st.client.clone(),
+                    |t| Msg::Themed(Box::new(t)),
+                    Msg::Noop,
+                )
+            }
             crate::ipc_local::protocol::Event::Close => iced::exit(),
             crate::ipc_local::protocol::Event::Focus => {
                 iced::window::latest().and_then(iced::window::gain_focus)
             }
             _ => Task::none(),
         },
+        Msg::Themed(t) => {
+            st.tokens = *t;
+            Task::none()
+        }
         Msg::WinResized(w, h) => {
             chrome::enforce_min_size(iced::Size::new(w, h), iced::Size::new(520.0, 360.0))
         }

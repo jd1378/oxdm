@@ -202,6 +202,7 @@ pub enum Msg {
     WinResized(f32, f32),
     ShotTick,
     Shot(iced::window::Screenshot),
+    Themed(Box<Tokens>),
     Noop,
 }
 
@@ -453,7 +454,21 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                 Err(_) => Msg::Noop,
             })
         }
+        // Another window changed the theme. Only the palette is adopted:
+        // `st.s` is the user's unsaved edit buffer and must not be
+        // overwritten from under them.
+        Msg::Daemon(DaemonSignal::Event(Event::SettingsChanged)) => {
+            crate::gui::theme::refresh_tokens(
+                st.client.clone(),
+                |t| Msg::Themed(Box::new(t)),
+                Msg::Noop,
+            )
+        }
         Msg::Daemon(_) => Task::none(),
+        Msg::Themed(t) => {
+            st.tokens = *t;
+            Task::none()
+        }
         Msg::QueuesLoaded(qs) => {
             // Drop stale default-queue picks (queue deleted meanwhile);
             // the daemon ignores stale ids anyway — mirror that honestly.
@@ -1556,6 +1571,17 @@ fn downloads_section(st: &State) -> Element<'_, Msg> {
             ),
             set_section(
                 t,
+                "Files",
+                vec![toggle_row(
+                    t,
+                    "Use server-provided last-modified time",
+                    Some("Stamp saved files with the time the server reports."),
+                    st.s.use_server_time,
+                    Msg::UseServerTime
+                )]
+            ),
+            set_section(
+                t,
                 "Retries",
                 vec![
                     set_row(
@@ -1594,17 +1620,6 @@ fn downloads_section(st: &State) -> Element<'_, Msg> {
                             .view(t)
                     ),
                 ]
-            ),
-            set_section(
-                t,
-                "Files",
-                vec![toggle_row(
-                    t,
-                    "Use server-provided last-modified time",
-                    Some("Stamp saved files with the time the server reports."),
-                    st.s.use_server_time,
-                    Msg::UseServerTime
-                )]
             ),
             set_section(
                 t,
@@ -1751,6 +1766,21 @@ fn categories_section(st: &State) -> Element<'_, Msg> {
                 },
             ),
             text_color: t2.fg_1,
+            // The hover fill is a plain rect inside a rounded, bordered
+            // card, so it has to carry the card's corners itself — a
+            // square fill paints over them and the border with them.
+            // Open, the body continues below, so only the top corners
+            // round.
+            border: iced::Border {
+                radius: if open {
+                    iced::border::Radius::default()
+                        .top(theme::surface::RADIUS)
+                        .bottom(0.0)
+                } else {
+                    theme::surface::RADIUS.into()
+                },
+                ..Default::default()
+            },
             ..Default::default()
         });
 
@@ -1818,6 +1848,9 @@ fn categories_section(st: &State) -> Element<'_, Msg> {
         cards = cards.push(
             container(card)
                 .width(Length::Fill)
+                // Inset by the border so the header's hover fill cannot
+                // paint over it.
+                .padding(1.0)
                 .style(move |_| container::Style {
                     background: Some(t2.bg_raised.into()),
                     border: iced::Border {

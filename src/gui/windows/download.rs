@@ -128,6 +128,7 @@ pub enum Msg {
     WinResized(f32, f32),
     ShotTick,
     Shot(iced::window::Screenshot),
+    Themed(Box<Tokens>),
     Noop,
 }
 
@@ -295,7 +296,17 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                 }
                 Task::none()
             }
-            Event::JobsChanged | Event::SettingsChanged => refetch(st.client.clone(), st.id),
+            Event::JobsChanged => refetch(st.client.clone(), st.id),
+            // Settings carry the palette, so a theme change from another
+            // window has to land here too.
+            Event::SettingsChanged => Task::batch([
+                refetch(st.client.clone(), st.id),
+                crate::gui::theme::refresh_tokens(
+                    st.client.clone(),
+                    |t| Msg::Themed(Box::new(t)),
+                    Msg::Noop,
+                ),
+            ]),
             Event::Close => iced::exit(),
             Event::Focus => iced::window::latest().and_then(iced::window::gain_focus),
             _ => Task::none(),
@@ -476,6 +487,10 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                 },
                 |_| Msg::Noop,
             )
+        }
+        Msg::Themed(t) => {
+            st.tokens = *t;
+            Task::none()
         }
         Msg::WinResized(w, h) => {
             chrome::enforce_min_size(iced::Size::new(w, h), iced::Size::new(530.0, 418.0))

@@ -253,6 +253,7 @@ pub enum Msg {
     WinResized(f32, f32),
     ShotTick,
     Shot(iced::window::Screenshot),
+    Themed(Box<Tokens>),
     Noop,
 }
 
@@ -566,10 +567,19 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                     Err(_) => Msg::Noop,
                 })
             }
+            Event::SettingsChanged => crate::gui::theme::refresh_tokens(
+                st.client.clone(),
+                |t| Msg::Themed(Box::new(t)),
+                Msg::Noop,
+            ),
             Event::Close => iced::exit(),
             Event::Focus => iced::window::latest().and_then(iced::window::gain_focus),
             _ => Task::none(),
         },
+        Msg::Themed(t) => {
+            st.tokens = *t;
+            Task::none()
+        }
         Msg::Select(id) => {
             st.selected = Some(id);
             st.confirm_delete = false;

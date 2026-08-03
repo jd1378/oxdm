@@ -49,6 +49,7 @@ pub enum Msg {
     KeyPressed(iced::keyboard::Key),
     ShotTick,
     Shot(iced::window::Screenshot),
+    Themed(Box<Tokens>),
     Noop,
 }
 
@@ -143,6 +144,11 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                 st.deadline_ms = deadline_ms;
                 Task::none()
             }
+            Event::SettingsChanged => crate::gui::theme::refresh_tokens(
+                st.client.clone(),
+                |t| Msg::Themed(Box::new(t)),
+                Msg::Noop,
+            ),
             Event::Close => iced::exit(),
             Event::Focus => iced::window::latest().and_then(iced::window::gain_focus),
             _ => Task::none(),
@@ -193,6 +199,10 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             Some(shot) => shot.save_and_exit(s),
             None => Task::none(),
         },
+        Msg::Themed(t) => {
+            st.tokens = *t;
+            Task::none()
+        }
         Msg::Connected(_) | Msg::Window(_) | Msg::Noop => Task::none(),
     }
 }
