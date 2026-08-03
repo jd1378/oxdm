@@ -149,6 +149,9 @@ pub struct AddState {
     save_dirty: bool,
     /// User picked a queue — same rule.
     queue_dirty: bool,
+    /// The user picked the category by hand, so a later probe must not
+    /// reclassify over their choice.
+    category_dirty: bool,
 
     advanced_open: bool,
     adv_tab: AdvTab,
@@ -321,6 +324,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 segments: 8,
                 save_dirty: false,
                 queue_dirty: false,
+                category_dirty: false,
                 advanced_open: false,
                 adv_tab: AdvTab::Proxy,
                 proxy_kind: ProxyKind::None,
@@ -440,6 +444,13 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
             st.probed = None;
             st.error = None;
             st.probe_gen += 1;
+            // A new URL is a new file: drop the classification so the
+            // probe routes it by *its* extension. Without this, pasting
+            // a .mp4 over a .zip kept the zip's category, and with it
+            // the queue and folder that category prefilled.
+            if !st.category_dirty {
+                st.category = None;
+            }
             let valid = st
                 .url
                 .trim()
@@ -536,6 +547,7 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
                 .iter()
                 .copied()
                 .find(|c| c.label() == label);
+            st.category_dirty = true;
             if st.category != prev {
                 apply_category_prefill(st);
             }
