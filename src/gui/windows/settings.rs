@@ -419,6 +419,10 @@ fn copy_section(dst: &mut Settings, src: &Settings, section: Section) {
 }
 
 fn mirror(st: &mut State) {
+    // Whatever moved `st.s` wholesale — Reset, Discard, a reload — the
+    // preview follows it, the same way picking a theme repaints on the
+    // spot.
+    st.tokens = Tokens::from_settings(&st.s);
     let s = &st.s;
     st.download_dir = s.download_dir.display().to_string();
     st.work_dir = s.work_dir.display().to_string();
