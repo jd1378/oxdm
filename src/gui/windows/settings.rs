@@ -9,7 +9,7 @@ use std::time::Duration;
 use iced::widget::{column, container, mouse_area, row, text, text_editor};
 use iced::{Alignment, Element, Length, Subscription, Task};
 
-use crate::domain::{Category, Queue, QueueId, Settings, Theme as AppTheme};
+use crate::domain::{Category, ProxyAdv, ProxyMode, Queue, QueueId, Settings, Theme as AppTheme};
 use crate::gui::chrome::{self, WindowControl, titlebar};
 use crate::gui::color;
 use crate::gui::icons;
@@ -229,9 +229,8 @@ pub struct State {
     limit_on: bool,
     limit_value: String,
     limit_unit_mb: bool,
-    proxy: String,
-    /// Proxy picker parts. `proxy` stays the composed URL the daemon
-    /// stores; these are what the rows edit.
+    /// Proxy picker. The daemon stores these parts as they are; only
+    /// the port is mirrored as text, since it is typed.
     proxy_mode: usize,
     proxy_host: String,
     proxy_port: String,
@@ -284,14 +283,12 @@ fn mirror(st: &mut State) {
         v if st.limit_unit_mb => (v / BYTES_PER_MB).to_string(),
         v => (v / BYTES_PER_KB).to_string(),
     };
-    st.proxy = s.proxy.clone().unwrap_or_default();
-    let parts = split_proxy(&st.proxy);
-    st.proxy_mode = parts.mode;
-    st.proxy_host = parts.host;
-    st.proxy_port = parts.port;
+    st.proxy_mode = mode_index(s.proxy.mode);
+    st.proxy_host = s.proxy.host.clone();
+    st.proxy_port = s.proxy.port.clone();
     st.has_stored_proxy_pass = s.enc_proxy_password.is_some();
-    st.proxy_auth = !parts.user.is_empty() || st.has_stored_proxy_pass;
-    st.proxy_user = parts.user;
+    st.proxy_auth = s.proxy.auth_enabled;
+    st.proxy_user = s.proxy.username.clone();
     st.proxy_pass = String::new();
     st.proxy_pass_edited = false;
     st.connect_timeout = s
@@ -404,7 +401,6 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 limit_on: false,
                 limit_value: String::new(),
                 limit_unit_mb: false,
-                proxy: String::new(),
                 proxy_mode: 0,
                 proxy_host: String::new(),
                 proxy_port: String::new(),
@@ -619,17 +615,14 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
         }
         Msg::ProxyMode(i) => {
             st.proxy_mode = i;
-            recompose_proxy(st);
             Task::none()
         }
         Msg::ProxyHost(v) => {
             st.proxy_host = v;
-            recompose_proxy(st);
             Task::none()
         }
         Msg::ProxyPort(v) => {
             st.proxy_port = v.chars().filter(char::is_ascii_digit).collect();
-            recompose_proxy(st);
             Task::none()
         }
         Msg::ProxyAuth(v) => {
@@ -641,12 +634,10 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                 // the stored password, not just to hide the field.
                 st.proxy_pass_edited = true;
             }
-            recompose_proxy(st);
             Task::none()
         }
         Msg::ProxyUser(v) => {
             st.proxy_user = v;
-            recompose_proxy(st);
             Task::none()
         }
         Msg::ProxyPass(v) => {
@@ -836,7 +827,19 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                 };
                 st.limit_value.trim().parse::<u64>().unwrap_or(0) * unit
             });
-            s.proxy = (!st.proxy.trim().is_empty()).then(|| st.proxy.trim().to_owned());
+            s.proxy = ProxyAdv {
+                mode: PROXY_MODES[st.proxy_mode].1,
+                host: st.proxy_host.trim().to_owned(),
+                port: st.proxy_port.trim().to_owned(),
+                auth_enabled: st.proxy_auth,
+                username: st.proxy_user.trim().to_owned(),
+                // Only speak about the password when the user touched
+                // it: empty-and-edited deletes, empty-and-untouched
+                // keeps whatever is stored.
+                password: st.proxy_pass.clone(),
+                clear_password: st.proxy_pass_edited && st.proxy_pass.is_empty(),
+                ..s.proxy.clone()
+            };
             s.connect_timeout = humantime::parse_duration(st.connect_timeout.trim()).ok();
             s.user_agent =
                 (!st.user_agent.trim().is_empty()).then(|| st.user_agent.trim().to_owned());
@@ -844,10 +847,6 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                 s.ipc_port = v;
             }
             s.update_feed_url = st.update_feed.trim().to_owned();
-            // Only speak about the password when the user touched it:
-            // empty-and-edited deletes, empty-and-untouched keeps.
-            s.proxy_password = st.proxy_pass.clone();
-            s.clear_proxy_password = st.proxy_pass_edited && st.proxy_pass.is_empty();
             s.category_extensions = st
                 .cat_exts
                 .iter()
@@ -1324,110 +1323,23 @@ fn concurrent_picker<'a>(t: &Tokens, value: &str) -> Element<'a, Msg> {
     .into()
 }
 
-/// Global proxy modes. The per-job control in Properties opens with
-/// "Inherit", which has no meaning here — this *is* what a job inherits.
-/// "System" is the empty setting: reqwest then reads the standard proxy
-/// environment variables.
-const PROXY_MODES: &[(&str, Option<&str>)] = &[
-    ("System", None),
-    ("HTTP", None),
-    ("HTTPS", None),
-    ("SOCKS5", None),
+/// Global proxy modes and the `ProxyMode` each selects. "Inherit" is
+/// absent by design: this *is* what a job inherits. "System" means no
+/// explicit proxy, so reqwest reads the proxy environment variables.
+const PROXY_MODES: &[(&str, ProxyMode)] = &[
+    ("System", ProxyMode::System),
+    ("HTTP", ProxyMode::Http),
+    ("HTTPS", ProxyMode::Https),
+    ("SOCKS5", ProxyMode::Socks5),
 ];
-const PROXY_SCHEMES: [&str; 3] = ["http", "https", "socks5"];
 /// Width of the port field (matches the per-job `.prop-proxy-port`).
 const PROXY_PORT_W: f32 = 90.0;
 
-/// The `Settings::proxy` URL, taken apart for editing.
-struct ProxyParts {
-    /// Index into `PROXY_MODES`; 0 is System (no explicit proxy).
-    mode: usize,
-    host: String,
-    port: String,
-    user: String,
-}
-
-/// Split `scheme://[user:pass@]host[:port]`. Anything unparseable reads
-/// as System, which is what an empty value means too.
-fn split_proxy(url: &str) -> ProxyParts {
-    let none = || ProxyParts {
-        mode: 0,
-        host: String::new(),
-        port: String::new(),
-        user: String::new(),
-    };
-    let url = url.trim();
-    let Some((scheme, rest)) = url.split_once("://") else {
-        return none();
-    };
-    let Some(i) = PROXY_SCHEMES
+fn mode_index(mode: ProxyMode) -> usize {
+    PROXY_MODES
         .iter()
-        .position(|s| *s == scheme.to_lowercase())
-    else {
-        return none();
-    };
-    let rest = rest.trim_end_matches('/');
-    // Credentials may themselves contain '@' once encoded, so split at
-    // the LAST one: everything after it is the authority.
-    let (creds, authority) = match rest.rsplit_once('@') {
-        Some((c, a)) => (c, a),
-        None => ("", rest),
-    };
-    // A stored URL carries at most a username: the password lives in the
-    // secret store, so anything after a ':' here is discarded rather than
-    // shown back as if it were kept.
-    let user = decode(creds.split_once(':').map_or(creds, |(u, _)| u));
-    let (host, port) = match authority.rsplit_once(':') {
-        Some((h, p)) if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => (h, p),
-        _ => (authority, ""),
-    };
-    ProxyParts {
-        mode: i + 1,
-        host: host.to_owned(),
-        port: port.to_owned(),
-        user,
-    }
-}
-
-fn decode(s: &str) -> String {
-    percent_encoding::percent_decode_str(s)
-        .decode_utf8_lossy()
-        .into_owned()
-}
-
-/// Encode a credential for the userinfo slot: anything that would end
-/// the field early has to travel escaped.
-fn encode(s: &str) -> String {
-    const USERINFO: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
-        .remove(b'-')
-        .remove(b'.')
-        .remove(b'_')
-        .remove(b'~');
-    percent_encoding::utf8_percent_encode(s, USERINFO).to_string()
-}
-
-/// Rebuild the stored URL from the picker's parts. A mode without a host
-/// is not a proxy yet, so it stores empty rather than `http://`.
-fn recompose_proxy(st: &mut State) {
-    let host = st.proxy_host.trim();
-    st.proxy = if st.proxy_mode == 0 || host.is_empty() {
-        String::new()
-    } else {
-        let scheme = PROXY_SCHEMES[st.proxy_mode - 1];
-        // Username only: the password is a secret and goes to the daemon
-        // on its own field, which stores just the ciphertext.
-        let creds = if st.proxy_auth && !st.proxy_user.trim().is_empty() {
-            format!("{}@", encode(st.proxy_user.trim()))
-        } else {
-            String::new()
-        };
-        let port = st.proxy_port.trim();
-        if port.is_empty() {
-            format!("{scheme}://{creds}{host}")
-        } else {
-            format!("{scheme}://{creds}{host}:{port}")
-        }
-    };
+        .position(|(_, m)| *m == mode)
+        .unwrap_or(0)
 }
 
 /// Proxy rows: the same mode-then-server shape as the per-job control in
@@ -1441,7 +1353,16 @@ fn proxy_rows(st: &State) -> Vec<Element<'_, Msg>> {
             "Routes every download. System reads your proxy environment variables; \
              a job can still override this from its Properties.",
         ),
-        segmented(t, PROXY_MODES, st.proxy_mode, BtnSize::Sm, Msg::ProxyMode),
+        segmented(
+            t,
+            &PROXY_MODES
+                .iter()
+                .map(|(label, _)| (*label, None))
+                .collect::<Vec<_>>(),
+            st.proxy_mode,
+            BtnSize::Sm,
+            Msg::ProxyMode,
+        ),
     )];
     if st.proxy_mode > 0 {
         rows.push(set_row_stack(

@@ -1250,8 +1250,8 @@ impl AppState {
     pub async fn update_settings(&self, mut new: Settings) -> Result<(), String> {
         // The proxy password arrives in the clear and leaves as
         // ciphertext; the plaintext never reaches the settings table.
-        let typed = std::mem::take(&mut new.proxy_password);
-        let clear = std::mem::take(&mut new.clear_proxy_password);
+        let typed = std::mem::take(&mut new.proxy.password);
+        let clear = std::mem::take(&mut new.proxy.clear_password);
         new.enc_proxy_password = if clear {
             None
         } else if typed.is_empty() {

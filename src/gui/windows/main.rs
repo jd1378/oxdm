@@ -3238,10 +3238,16 @@ fn statusbar(m: &Main) -> Element<'_, Msg> {
             .size(11.0)
             .color(t.fg_3),
         sep(),
-        text(format!("max {max_x}\u{00d7}"))
-            .font(theme::MONO)
-            .size(11.0)
-            .color(t.fg_3),
+        // A queue inheriting the global "Unlimited" would otherwise
+        // print the ceiling that stands in for it.
+        text(if max_x >= crate::domain::settings::UNLIMITED_CONCURRENT {
+            "max \u{221e}".to_owned()
+        } else {
+            format!("max {max_x}\u{00d7}")
+        })
+        .font(theme::MONO)
+        .size(11.0)
+        .color(t.fg_3),
     ]
     .spacing(theme::space::S2)
     .align_y(Alignment::Center);
@@ -3259,13 +3265,13 @@ fn statusbar(m: &Main) -> Element<'_, Msg> {
         );
     }
 
-    let proxy_set = m
-        .snap
-        .settings
-        .proxy
-        .as_deref()
-        .map(str::trim)
-        .is_some_and(|s| !s.is_empty());
+    let proxy = &m.snap.settings.proxy;
+    let proxy_set = matches!(
+        proxy.mode,
+        crate::domain::ProxyMode::Http
+            | crate::domain::ProxyMode::Https
+            | crate::domain::ProxyMode::Socks5
+    ) && !proxy.host.trim().is_empty();
     let (proxy_icon, proxy_label) = if proxy_set {
         ("shield", "Proxied")
     } else {

@@ -30,6 +30,14 @@ const DAY_SQUARE: f32 = 28.0;
 /// Concurrency preset pill text + x-padding — matches a secondary
 /// `Md` button so the pills sit flush with the custom stepper.
 const CONC_PILL_FONT: f32 = 13.0;
+/// Day-grid initial (design `.day-grid .d`: 700 11px mono). The line
+/// box is pinned to an even height so centring it in the 28px square
+/// leaves whole pixels above and below — iced's default line height
+/// reserves descender room the capital never uses, which reads as the
+/// letter sitting high.
+const DAY_FONT: f32 = 11.0;
+const DAY_LINE: f32 = 12.0;
+const DAY_INK_NUDGE: f32 = 2.0;
 const CONC_PILL_PAD_X: f32 = 14.0;
 /// Custom-concurrency stepper bounds. Min 1 keeps at least one active
 /// download; no design max, so cap at a sane parallelism ceiling.
@@ -874,7 +882,7 @@ fn radio_pill<'a>(
         ),
         _ => (color::clay::C50, color::clay::C700, color::clay::C200),
     };
-    let fg = if selected { on_fg } else { t.fg_1 };
+    let fg = if selected { on_fg } else { t.fg_2 };
     let label = text(label).font(theme::BODY_BOLD).size(CONC_PILL_FONT);
     // `button` paints the label from its own style; the icon carries
     // its colour itself, so it has to be told the same one.
@@ -911,16 +919,22 @@ fn radio_pill<'a>(
                     ..Default::default()
                 };
             }
+            // Design `.radio-pill`: sunken in every idle state, with a
+            // transparent border reserving the selected pill's 1px so
+            // the row doesn't shift when a selection moves. Hover
+            // brightens the label, not the fill.
             let bg = match status {
-                Hovered => color::mix(t2.bg_raised, t2.bg_sunken, 0.5),
-                Pressed => t2.bg_sunken,
-                _ => t2.bg_raised,
+                Pressed => t2.bg_sunken_hover,
+                _ => t2.bg_sunken,
             };
             iced::widget::button::Style {
                 background: Some(bg.into()),
-                text_color: fg,
+                text_color: match status {
+                    Hovered | Pressed => t2.fg_1,
+                    _ => t2.fg_2,
+                },
                 border: iced::Border {
-                    color: t2.border_default,
+                    color: iced::Color::TRANSPARENT,
                     width: 1.0,
                     radius: theme::control::RADIUS.into(),
                 },
@@ -939,9 +953,25 @@ fn radio_pill<'a>(
 fn day_square<'a>(t: &Tokens, label: &str, on: bool, msg: Msg) -> Element<'a, Msg> {
     let t2 = *t;
     let initial = label.chars().next().unwrap_or(' ').to_string();
-    let content = container(text(initial).font(theme::BODY_BOLD).size(CONC_PILL_FONT))
-        .center_x(Length::Fill)
-        .center_y(Length::Fill);
+    let fg = if on { t2.action_primary_fg } else { t2.fg_3 };
+    // Design `.day-grid .d`: 700 11px mono.
+    let content = container(
+        text(initial)
+            .font(theme::MONO_BOLD)
+            .size(DAY_FONT)
+            .line_height(iced::widget::text::LineHeight::Absolute(DAY_LINE.into()))
+            .color(fg),
+    )
+    .center_x(Length::Fill)
+    .center_y(Length::Fill)
+    // The capital's ink sits one row above the line box's centre, so
+    // centring the box leaves the letter looking high. Two pixels of top
+    // padding move the centred box down by one — halved, like any other
+    // centring — which lands the ink dead centre in the square.
+    .padding(iced::Padding {
+        top: DAY_INK_NUDGE,
+        ..iced::Padding::ZERO
+    });
     button(content)
         .width(Length::Fixed(DAY_SQUARE))
         .height(Length::Fixed(DAY_SQUARE))
@@ -949,30 +979,27 @@ fn day_square<'a>(t: &Tokens, label: &str, on: bool, msg: Msg) -> Element<'a, Ms
         .on_press(msg)
         .style(move |_th, status| {
             use iced::widget::button::Status::*;
-            let (bg, fg, border) = if on {
-                // Literal clay, matching `BtnVariant::Primary` — the
-                // themed `action_primary` lightens to clay-300 in dark
-                // and drifted away from the primary buttons beside it.
-                let bg = match status {
+            // Literal clay, matching `BtnVariant::Primary` — the themed
+            // `action_primary` lightens to clay-300 in dark and drifted
+            // away from the primary buttons beside it.
+            let bg = if on {
+                match status {
                     Hovered => color::clay::C500,
                     Pressed => color::clay::C600,
                     _ => color::clay::C400,
-                };
-                (bg, t2.action_primary_fg, color::clay::C500)
+                }
             } else {
-                let bg = match status {
+                match status {
                     Hovered | Pressed => t2.bg_sunken_hover,
                     _ => t2.bg_sunken,
-                };
-                (bg, t2.fg_2, t2.border_default)
+                }
             };
             iced::widget::button::Style {
                 background: Some(bg.into()),
                 text_color: fg,
                 border: iced::Border {
-                    color: border,
-                    width: 1.0,
-                    radius: theme::radius::XS.into(),
+                    radius: theme::radius::CTRL.into(),
+                    ..Default::default()
                 },
                 shadow: iced::Shadow::default(),
                 ..Default::default()

@@ -43,12 +43,9 @@ pub fn settings_to_download_options(
         .n_fixed_retries(s.n_fixed_retries)
         .user_agent(s.user_agent.clone())
         .randomize_user_agent(s.randomize_user_agent)
-        // The stored URL carries at most a username; the password is
-        // merged in here, straight from the secret store.
-        .proxy(match (&s.proxy, proxy_password) {
-            (Some(url), pw) => Some(merge_proxy_password(url, pw)?),
-            (None, _) => None,
-        })
+        // Assembled here and nowhere else: the settings hold the parts,
+        // and the password comes straight from the secret store.
+        .proxy(global_proxy_url(s, proxy_password)?)
         .use_server_time(s.use_server_time)
         .accept_invalid_certs(s.accept_invalid_certs)
         .speed_limit(s.speed_limit)
@@ -155,6 +152,19 @@ fn apply_job_proxy(
 
 /// `scheme://[user[:pw]@]host:port` from the advanced proxy bundle.
 /// The `url` crate percent-encodes credentials for us.
+/// The global proxy as a URL, or `None` for System / an unconfigured
+/// one — reqwest then falls back to the proxy environment variables.
+fn global_proxy_url(s: &Settings, password: Option<&str>) -> Result<Option<String>, String> {
+    if !matches!(
+        s.proxy.mode,
+        ProxyMode::Http | ProxyMode::Https | ProxyMode::Socks5
+    ) || s.proxy.host.trim().is_empty()
+    {
+        return Ok(None);
+    }
+    synth_proxy_url(s.proxy.mode, &s.proxy, password).map(Some)
+}
+
 fn synth_proxy_url(
     mode: ProxyMode,
     adv: &ProxyAdv,
@@ -452,6 +462,35 @@ mod tests {
             matches!(&digests[0], HashDigest::SHA256(h, HashEncoding::Hex)
             if h == &SHA256_UPPER.to_ascii_lowercase())
         );
+    }
+
+    #[test]
+    fn global_proxy_assembles_from_parts_with_the_stored_secret() {
+        let mut s = Settings::default();
+        // System (the default) is "no explicit proxy" — environment wins.
+        assert_eq!(global_proxy_url(&s, None).unwrap(), None);
+
+        s.proxy = ProxyAdv {
+            mode: ProxyMode::Http,
+            host: "proxy.lan".into(),
+            port: "3128".into(),
+            auth_enabled: true,
+            username: "user".into(),
+            ..ProxyAdv::default()
+        };
+        // The password comes from the secret store, never from the parts.
+        assert_eq!(
+            global_proxy_url(&s, Some("s3cret")).unwrap().unwrap(),
+            "http://user:s3cret@proxy.lan:3128/"
+        );
+        assert_eq!(
+            global_proxy_url(&s, None).unwrap().unwrap(),
+            "http://user@proxy.lan:3128/"
+        );
+
+        // A mode chosen but no host yet is not a proxy.
+        s.proxy.host = String::new();
+        assert_eq!(global_proxy_url(&s, Some("s3cret")).unwrap(), None);
     }
 
     #[test]

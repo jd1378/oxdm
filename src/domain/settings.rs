@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::domain::{Category, QueueId};
+use crate::domain::{Category, ProxyAdv, ProxyMode, QueueId};
 
 /// oxdm-level settings. Wraps every `odl::config::Config` field plus
 /// UI-only preferences. The data layer translates this into an
@@ -33,19 +33,17 @@ pub struct Settings {
     pub n_fixed_retries: u32,
     pub user_agent: Option<String>,
     pub randomize_user_agent: bool,
-    pub proxy: Option<String>,
-    /// Proxy sign-in. The username rides in the `proxy` URL like any
-    /// other authority component; the password never does — it travels
-    /// once on `proxy_password` and only its ciphertext is kept, like a
-    /// job's own proxy secret.
+    /// Global proxy, in parts — the same shape a job's own proxy uses,
+    /// assembled into a URL only where it is handed to odl. Storing the
+    /// assembled URL instead would mean parsing it back apart for every
+    /// edit, and percent-decoding a username to show it in a field.
+    /// `ProxyAdv::password` is UI-side scratch: `update_settings` routes
+    /// it onto `enc_proxy_password` and never persists the plaintext.
+    #[serde(default = "default_proxy")]
+    pub proxy: ProxyAdv,
+    /// The proxy password, encrypted under the app's master key.
     #[serde(default)]
     pub enc_proxy_password: Option<String>,
-    /// Transient: GUI → daemon only. Empty means "leave the stored
-    /// secret alone", which is why clearing needs its own flag.
-    #[serde(skip)]
-    pub proxy_password: String,
-    #[serde(skip)]
-    pub clear_proxy_password: bool,
     pub use_server_time: bool,
     pub accept_invalid_certs: bool,
     pub speed_limit: Option<u64>,
@@ -247,6 +245,15 @@ pub enum ConflictWhileHidden {
 /// binds while the field stays an ordinary number.
 pub const UNLIMITED_CONCURRENT: usize = 9999;
 
+/// A global proxy has nothing to inherit from: unset means "System",
+/// which is reqwest reading the standard proxy environment variables.
+fn default_proxy() -> ProxyAdv {
+    ProxyAdv {
+        mode: ProxyMode::System,
+        ..ProxyAdv::default()
+    }
+}
+
 fn yes_default() -> bool {
     true
 }
@@ -332,10 +339,8 @@ impl Default for Settings {
             n_fixed_retries: 3,
             user_agent: None,
             randomize_user_agent: false,
-            proxy: None,
+            proxy: default_proxy(),
             enc_proxy_password: None,
-            proxy_password: String::new(),
-            clear_proxy_password: false,
             use_server_time: false,
             accept_invalid_certs: false,
             speed_limit: None,

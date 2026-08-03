@@ -1064,7 +1064,12 @@ mod tests {
         s.wait_between_retries = Duration::from_millis(1234);
         s.headers
             .insert("Authorization".into(), "Bearer xyz".into());
-        s.proxy = Some("http://localhost:8080".into());
+        s.proxy = crate::domain::ProxyAdv {
+            mode: crate::domain::ProxyMode::Http,
+            host: "localhost".into(),
+            port: "8080".into(),
+            ..Default::default()
+        };
         let videos_queue = crate::domain::QueueId::new();
         s.category_folders.insert(
             crate::domain::Category::Videos,
@@ -1088,7 +1093,9 @@ mod tests {
             reloaded.headers.get("Authorization").map(String::as_str),
             Some("Bearer xyz")
         );
-        assert_eq!(reloaded.proxy.as_deref(), Some("http://localhost:8080"));
+        assert_eq!(reloaded.proxy.host, "localhost");
+        assert_eq!(reloaded.proxy.port, "8080");
+        assert_eq!(reloaded.proxy.mode, crate::domain::ProxyMode::Http);
         assert_eq!(
             reloaded
                 .category_folders
