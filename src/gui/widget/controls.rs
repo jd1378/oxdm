@@ -366,6 +366,7 @@ pub fn number_stepper<'a, M: Clone + 'a>(
             .icon_only(name)
             .size(BtnSize::Md)
             .icon_size(14.0)
+            .hover_outline()
             .enabled(enabled_btn)
             .on_press_maybe(msg)
             .view(&t2)

@@ -98,6 +98,9 @@ pub struct Btn<'a, M> {
     /// text + rust-50 bg) on hover only — borderless/neutral at idle.
     /// Mirrors design `.tb-btn.danger`. Ignored by other variants.
     danger_hover: bool,
+    /// Draw a `border_default` outline while hovered, for borderless
+    /// variants that otherwise answer the pointer with a fill alone.
+    hover_outline: bool,
     min_width: Option<f32>,
     fill_width: bool,
     font_size: Option<f32>,
@@ -119,6 +122,7 @@ impl<'a, M: Clone + 'a> Btn<'a, M> {
             pill: false,
             tb_metrics: false,
             danger_hover: false,
+            hover_outline: false,
             min_width: None,
             fill_width: false,
             font_size: None,
@@ -170,6 +174,11 @@ impl<'a, M: Clone + 'a> Btn<'a, M> {
     }
     pub fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
+        self
+    }
+    /// Outline the button while the pointer is over it.
+    pub fn hover_outline(mut self) -> Self {
+        self.hover_outline = true;
         self
     }
     pub fn accent(mut self, accent: bool) -> Self {
@@ -357,6 +366,13 @@ impl<'a, M: Clone + 'a> Btn<'a, M> {
                 (Some(bg), None)
             }
         };
+        // Borderless variants get their outline only under the pointer,
+        // so the control reads as pressable without carrying a frame at
+        // rest. A variant that already has a border keeps its own.
+        let border_color = match (self.hover_outline, border_color, status) {
+            (true, None, Hovered | Pressed) => Some(t.border_default),
+            (_, other, _) => other,
+        };
         let (bg, border_color) = if disabled {
             (
                 bg.map(|c| mix(c, t.bg_page, 0.5)),
@@ -428,6 +444,7 @@ impl<'a, M: Clone + 'a> Btn<'a, M> {
         let accent = self.accent;
         let pill = self.pill;
         let danger_hover = self.danger_hover;
+        let hover_outline = self.hover_outline;
         let style_proto = Btn::<M> {
             label: String::new(),
             variant,
@@ -440,6 +457,7 @@ impl<'a, M: Clone + 'a> Btn<'a, M> {
             pill,
             tb_metrics: false,
             danger_hover,
+            hover_outline,
             min_width: None,
             fill_width: false,
             font_size: None,
