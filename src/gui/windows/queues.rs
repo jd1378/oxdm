@@ -45,10 +45,10 @@ const PILL_WRAP_GAP: f32 = 4.0;
 /// download; no design max, so cap at a sane parallelism ceiling.
 const CONC_MIN: i64 = 1;
 const CONC_MAX: i64 = 16;
-/// Concurrency a queue gets when it has none of its own — new queues,
-/// and rows persisted back when `Queue::max_concurrent` was still the
-/// old inherit-the-global `None`. Matches `Settings`' own default.
-const CONC_FALLBACK: usize = 3;
+/// A queue with no concurrency of its own runs at the global setting, so
+/// that is what the editor shows — displaying a hardcoded number here
+/// would misreport every inheriting queue the moment the global moved.
+const CONC_UNLIMITED: usize = crate::domain::settings::UNLIMITED_CONCURRENT;
 /// Queue color button (design `.q-color-btn`: 24px square, 6px radius,
 /// 2px border; hover border brightens to fg-3).
 const COLOR_BTN: f32 = 24.0;
@@ -309,6 +309,9 @@ pub struct State {
 
     confirm_delete: bool,
     shot: Option<Shot>,
+    /// `Settings::max_concurrent_downloads` — what a queue without its
+    /// own limit runs at.
+    global_concurrent: usize,
     /// How many fields of the selected queue differ from what is saved.
     dirty: usize,
 }
@@ -341,7 +344,7 @@ impl State {
         self.color = q.color;
         self.color_hex = q.color.map(hex_string).unwrap_or_default();
         self.color_open = false;
-        self.max_concurrent = q.max_concurrent.unwrap_or(CONC_FALLBACK);
+        self.max_concurrent = q.max_concurrent.unwrap_or(self.global_concurrent);
         self.sched = match q.schedule {
             QueueSchedule::Manual => SchedKind::Manual,
             QueueSchedule::Daily { .. } => SchedKind::Recurring,
@@ -419,7 +422,11 @@ impl State {
         let mut q = self.selected_queue()?.clone();
         q.name = self.name.trim().to_owned();
         q.color = self.color;
-        q.max_concurrent = Some(self.max_concurrent);
+        // Matching the global means "inherit", which is what the queue
+        // already says — writing the number instead would show up as a
+        // change the user never made.
+        q.max_concurrent =
+            (self.max_concurrent != self.global_concurrent).then_some(self.max_concurrent);
         q.schedule = match self.sched {
             SchedKind::Manual => QueueSchedule::Manual,
             SchedKind::Condition => QueueSchedule::Condition(CondSet {
@@ -508,7 +515,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 selected: queues.first().map(|q| q.id),
                 queues,
                 name: String::new(),
-                max_concurrent: CONC_FALLBACK,
+                max_concurrent: settings.max_concurrent_downloads,
                 sched: SchedKind::Manual,
                 sched_start: String::new(),
                 sched_days: WeekDayMask(0x7F),
@@ -533,6 +540,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 win_size: (0.0, 0.0),
                 confirm_delete: false,
                 shot: Shot::from_env(),
+                global_concurrent: settings.max_concurrent_downloads,
                 dirty: 0,
                 client,
             };
@@ -1449,7 +1457,7 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
     let mut list = column![].spacing(2.0).padding(QL_PAD);
     for q in &st.queues {
         let active = Some(q.id) == st.selected;
-        let count = q.max_concurrent.unwrap_or(CONC_FALLBACK);
+        let count = q.max_concurrent.unwrap_or(st.global_concurrent);
         list = list.push(
             button(
                 row![
@@ -1459,10 +1467,14 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
                         .font(theme::BODY_MEDIUM)
                         .size(QITEM_FONT),
                     iced::widget::Space::new().width(Length::Fill),
-                    text(format!("{count}\u{00d7}"))
-                        .font(theme::MONO)
-                        .size(10.0)
-                        .color(if active { t.fg_2 } else { t.fg_3 }),
+                    text(if count >= CONC_UNLIMITED {
+                        "\u{221e}".to_owned()
+                    } else {
+                        format!("{count}\u{00d7}")
+                    })
+                    .font(theme::MONO)
+                    .size(10.0)
+                    .color(if active { t.fg_2 } else { t.fg_3 }),
                 ]
                 .spacing(theme::space::S2)
                 .align_y(Alignment::Center),
@@ -1554,6 +1566,12 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
                 .size(12.0)
                 .color(t.fg_3),
             row![
+                conc_pill(
+                    t,
+                    "Unlimited",
+                    conc >= CONC_UNLIMITED,
+                    Msg::Concurrency(CONC_UNLIMITED)
+                ),
                 conc_pill(t, "1x", conc == 1, Msg::Concurrency(1)),
                 conc_pill(t, "2x", conc == 2, Msg::Concurrency(2)),
                 conc_pill(t, "3x", conc == 3, Msg::Concurrency(3)),
@@ -1561,9 +1579,17 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
                 conc_pill(t, "8x", conc == 8, Msg::Concurrency(8)),
                 // "Custom" stepper → any count the presets don't cover,
                 // through the same message.
-                number_stepper(t, conc as i64, CONC_MIN, CONC_MAX, true, |n| {
-                    Msg::Concurrency(n as usize)
-                },),
+                // The stepper only speaks in its own range; Unlimited (or
+                // a stale out-of-range value) shows as the ceiling rather
+                // than a number its buttons cannot reach.
+                number_stepper(
+                    t,
+                    (conc as i64).clamp(CONC_MIN, CONC_MAX),
+                    CONC_MIN,
+                    CONC_MAX,
+                    true,
+                    |n| Msg::Concurrency(n as usize),
+                ),
             ]
             .spacing(4.0)
             .align_y(Alignment::Center)
