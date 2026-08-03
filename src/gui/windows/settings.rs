@@ -362,6 +362,62 @@ fn pending_settings(st: &State) -> Settings {
     s
 }
 
+/// Copy one section's fields from `src` onto `dst`. The list lives here
+/// so "reset this section" cannot drift from what the section shows.
+fn copy_section(dst: &mut Settings, src: &Settings, section: Section) {
+    match section {
+        Section::General => {
+            dst.pause_on_metered = src.pause_on_metered;
+            dst.pause_on_low_battery = src.pause_on_low_battery;
+            dst.theme = src.theme;
+            dst.reduce_motion = src.reduce_motion;
+            dst.download_dir = src.download_dir.clone();
+            dst.work_dir = src.work_dir.clone();
+            dst.start_at_login = src.start_at_login;
+            dst.start_to_tray = src.start_to_tray;
+        }
+        Section::Downloads => {
+            dst.max_retries = src.max_retries;
+            dst.n_fixed_retries = src.n_fixed_retries;
+            dst.wait_between_retries = src.wait_between_retries;
+            dst.use_server_time = src.use_server_time;
+            dst.remove_confirm_incomplete = src.remove_confirm_incomplete;
+            dst.remove_confirm_completed = src.remove_confirm_completed;
+            dst.remove_confirm_clean = src.remove_confirm_clean;
+        }
+        Section::Categories => {
+            dst.category_extensions = src.category_extensions.clone();
+            dst.category_folders = src.category_folders.clone();
+            dst.category_queues = src.category_queues.clone();
+        }
+        Section::Network => {
+            dst.max_connections = src.max_connections;
+            dst.max_concurrent_downloads = src.max_concurrent_downloads;
+            dst.speed_limit = src.speed_limit;
+            dst.proxy = src.proxy.clone();
+            dst.connect_timeout = src.connect_timeout;
+            dst.accept_invalid_certs = src.accept_invalid_certs;
+            dst.user_agent = src.user_agent.clone();
+            dst.randomize_user_agent = src.randomize_user_agent;
+            dst.headers = src.headers.clone();
+        }
+        Section::Browser => {
+            dst.ipc_port = src.ipc_port;
+            dst.conflict_while_hidden = src.conflict_while_hidden;
+        }
+        Section::Notifications => {
+            dst.show_complete_dialog = src.show_complete_dialog;
+            dst.notify_complete = src.notify_complete;
+            dst.show_failed_dialog = src.show_failed_dialog;
+            dst.notify_failed = src.notify_failed;
+            dst.notify_queue_finished = src.notify_queue_finished;
+            dst.show_update_dialog = src.show_update_dialog;
+            dst.notify_update = src.notify_update;
+        }
+        Section::Advanced | Section::About => {}
+    }
+}
+
 fn mirror(st: &mut State) {
     let s = &st.s;
     st.download_dir = s.download_dir.display().to_string();
@@ -870,58 +926,11 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
             Task::none()
         }
         Msg::ResetSection => {
-            let orig = st.original.clone();
-            match st.section {
-                Section::General => {
-                    st.s.pause_on_metered = orig.pause_on_metered;
-                    st.s.pause_on_low_battery = orig.pause_on_low_battery;
-                    st.s.theme = orig.theme;
-                    st.s.reduce_motion = orig.reduce_motion;
-                    st.s.download_dir = orig.download_dir;
-                    st.s.work_dir = orig.work_dir;
-                    st.s.start_at_login = orig.start_at_login;
-                    st.s.start_to_tray = orig.start_to_tray;
-                }
-                Section::Downloads => {
-                    st.s.max_retries = orig.max_retries;
-                    st.s.n_fixed_retries = orig.n_fixed_retries;
-                    st.s.wait_between_retries = orig.wait_between_retries;
-                    st.s.use_server_time = orig.use_server_time;
-                    st.s.remove_confirm_incomplete = orig.remove_confirm_incomplete;
-                    st.s.remove_confirm_completed = orig.remove_confirm_completed;
-                    st.s.remove_confirm_clean = orig.remove_confirm_clean;
-                }
-                Section::Categories => {
-                    st.s.category_extensions = orig.category_extensions;
-                    st.s.category_folders = orig.category_folders;
-                    st.s.category_queues = orig.category_queues;
-                }
-                Section::Network => {
-                    st.s.max_connections = orig.max_connections;
-                    st.s.max_concurrent_downloads = orig.max_concurrent_downloads;
-                    st.s.speed_limit = orig.speed_limit;
-                    st.s.proxy = orig.proxy;
-                    st.s.connect_timeout = orig.connect_timeout;
-                    st.s.accept_invalid_certs = orig.accept_invalid_certs;
-                    st.s.user_agent = orig.user_agent;
-                    st.s.randomize_user_agent = orig.randomize_user_agent;
-                    st.s.headers = orig.headers;
-                }
-                Section::Browser => {
-                    st.s.ipc_port = orig.ipc_port;
-                    st.s.conflict_while_hidden = orig.conflict_while_hidden;
-                }
-                Section::Notifications => {
-                    st.s.show_complete_dialog = orig.show_complete_dialog;
-                    st.s.notify_complete = orig.notify_complete;
-                    st.s.show_failed_dialog = orig.show_failed_dialog;
-                    st.s.notify_failed = orig.notify_failed;
-                    st.s.notify_queue_finished = orig.notify_queue_finished;
-                    st.s.show_update_dialog = orig.show_update_dialog;
-                    st.s.notify_update = orig.notify_update;
-                }
-                Section::Advanced | Section::About => {}
-            }
+            // Back to oxdm's defaults, not to what is saved — reverting
+            // edits is what Discard is for. The defaults land as pending
+            // changes, so they can be reviewed, discarded, or applied
+            // like any other edit.
+            copy_section(&mut st.s, &Settings::default(), st.section);
             mirror(st);
             Task::none()
         }
@@ -1092,15 +1101,8 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
     };
 
     let mut right = row![].spacing(theme::space::S2).align_y(Alignment::Center);
-    if !matches!(st.section, Section::Advanced | Section::About) {
-        right = right.push(
-            Btn::new(format!("Reset {}", st.section.label()))
-                .ghost()
-                .icon("rotate-cw")
-                .on_press(Msg::ResetSection)
-                .view(t),
-        );
-    }
+    // Outermost, because it comes and goes: the row is right-aligned, so
+    // a button appearing to Reset's left leaves Reset and Apply put.
     if st.dirty > 0 {
         right = right.push(
             Btn::new(format!(
@@ -1113,6 +1115,15 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
             .icon("rotate-cw")
             .on_press(Msg::Discard)
             .view(t),
+        );
+    }
+    if !matches!(st.section, Section::Advanced | Section::About) {
+        right = right.push(
+            Btn::new(format!("Reset {}", st.section.label()))
+                .ghost()
+                .icon("rotate-cw")
+                .on_press(Msg::ResetSection)
+                .view(t),
         );
     }
     right = right.push(
