@@ -349,6 +349,12 @@ pub fn segmented<'a, M: Clone + 'a>(
 }
 
 /// `[-] value [+]` stepper, 88px default, mono value.
+/// Stepper value: mono 11px in a 12px line box, nudged down a pixel so
+/// the digits sit dead centre in the field.
+const STEPPER_FONT: f32 = 11.0;
+const STEPPER_LINE: f32 = 12.0;
+const STEPPER_INK_NUDGE: f32 = 2.0;
+
 pub fn number_stepper<'a, M: Clone + 'a>(
     t: &Tokens,
     value: i64,
@@ -378,13 +384,23 @@ pub fn number_stepper<'a, M: Clone + 'a>(
         container(
             text(value.to_string())
                 .font(theme::MONO)
-                .size(11.0)
+                .size(STEPPER_FONT)
+                // Even line box, so centring it in the even-height field
+                // lands on whole pixels.
+                .line_height(text::LineHeight::Absolute(STEPPER_LINE.into()))
                 .color(if enabled { t.fg_1 } else { t.fg_4 })
         )
         .width(Length::Fixed(32.0))
         .align_x(Alignment::Center)
         .align_y(Alignment::Center)
-        .height(Length::Fill),
+        .height(Length::Fill)
+        // The digits' ink sits a row above the line box's centre; two
+        // pixels of top padding are halved by the centring into the one
+        // that fixes it.
+        .padding(iced::Padding {
+            top: STEPPER_INK_NUDGE,
+            ..iced::Padding::ZERO
+        }),
         seg(arrow("plus", (value < max).then_some(value + 1), inc)),
     ]
     .align_y(Alignment::Center);
