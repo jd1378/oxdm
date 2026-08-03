@@ -1,12 +1,12 @@
 //! Settings window (`oxdm gui settings [--tab t] [--highlight-proxy]`):
 //! left section list (General / Downloads / Categories / Network /
-//! Browser / Notifications / Advanced / About), per-section cards,
+//! Browser / Notifications / Advanced), per-section cards,
 //! footer with Cancel / Reset-tab / Save.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use iced::widget::{column, container, mouse_area, row, text, text_editor};
+use iced::widget::{column, container, mouse_area, row, text};
 use iced::{Alignment, Element, Length, Subscription, Task};
 
 use crate::domain::{Category, ProxyAdv, ProxyMode, Queue, QueueId, Settings, Theme as AppTheme};
@@ -17,9 +17,9 @@ use crate::gui::ipc::DaemonSignal;
 use crate::gui::shot::Shot;
 use crate::gui::theme::{self, Tokens};
 use crate::gui::widget::{
-    Btn, BtnSize, FileInput, PasswordInput, SECTION_GAP, TextInput, card, combo, hairline,
-    number_stepper, segmented, set_group, set_note, set_row, set_row_stack, set_section,
-    set_section_danger, toggle,
+    Btn, BtnSize, FileInput, PasswordInput, SECTION_GAP, TextInput, combo, hairline,
+    number_stepper, segmented, set_group, set_note, set_row, set_row_panel, set_row_stack,
+    set_section, set_section_danger, toggle,
 };
 use crate::ipc_local::Client;
 use crate::ipc_local::protocol::Event;
@@ -33,11 +33,10 @@ pub enum Section {
     Browser,
     Notifications,
     Advanced,
-    About,
 }
 
 impl Section {
-    const ALL: [(Section, &'static str, &'static str); 8] = [
+    const ALL: [(Section, &'static str, &'static str); 7] = [
         (Section::General, "sliders-horizontal", "General"),
         (Section::Downloads, "download", "Downloads"),
         (Section::Categories, "folder", "Categories"),
@@ -45,7 +44,6 @@ impl Section {
         (Section::Browser, "puzzle", "Browser"),
         (Section::Notifications, "bell", "Notifications"),
         (Section::Advanced, "terminal", "Advanced"),
-        (Section::About, "info", "About"),
     ];
     fn label(self) -> &'static str {
         Self::ALL.iter().find(|(s, _, _)| *s == self).unwrap().2
@@ -63,8 +61,7 @@ impl Section {
             Section::Network => "Connections, bandwidth, proxy, and request identity.",
             Section::Browser => "Pair the browser extension and resolve capture conflicts.",
             Section::Notifications => "What oxdm tells you, and how, for each event.",
-            Section::Advanced => "Theme overrides, the update feed, and reset.",
-            Section::About => "Version and project information.",
+            Section::Advanced => "Reset oxdm to a clean database.",
         }
     }
 }
@@ -175,7 +172,10 @@ pub enum Msg {
     InvalidCerts(bool),
     UserAgent(String),
     RandomUa(bool),
-    CustomHeaders(text_editor::Action),
+    HeaderName(usize, String),
+    HeaderValue(usize, String),
+    HeaderRemove(usize),
+    HeaderAdd,
     // Browser
     IpcPort(String),
     CopyPairing,
@@ -188,8 +188,6 @@ pub enum Msg {
     NotifyFailed(bool),
     NotifyQueueFinished(bool),
     // Advanced
-    ThemeOverrides(text_editor::Action),
-    UpdateFeed(String),
     ResetDbAsk,
     ResetDbCancel,
     ResetDbConfirm,
@@ -248,7 +246,6 @@ pub struct State {
     connect_timeout: String,
     user_agent: String,
     ipc_port: String,
-    update_feed: String,
     cat_exts: Vec<(Category, String)>,
     /// Per-category save folder mirror (blank = inherit the default
     /// download folder; `Settings.category_folders`).
@@ -263,8 +260,9 @@ pub struct State {
     queues: Vec<Queue>,
     /// Reset-oxdm confirm overlay (Advanced danger section).
     confirm_reset: bool,
-    custom_headers: text_editor::Content,
-    theme_overrides: text_editor::Content,
+    /// Custom request headers as edited: name/value pairs in the order
+    /// shown, blanks included until the user fills or removes them.
+    custom_headers: Vec<(String, String)>,
     shot: Option<Shot>,
     /// How many settings differ from what is saved. Drives the footer's
     /// Discard button; recomputed in `update_ready`.
@@ -316,7 +314,6 @@ fn pending_settings(st: &State) -> Settings {
     if let Ok(v) = st.ipc_port.trim().parse() {
         s.ipc_port = v;
     }
-    s.update_feed_url = st.update_feed.trim().to_owned();
     // Only genuine overrides are stored. The panes show every category's
     // resolved extensions and folder, so writing those back verbatim
     // would turn "same as default" into a saved override — and, until
@@ -346,24 +343,10 @@ fn pending_settings(st: &State) -> Settings {
         .iter()
         .filter_map(|(c, q)| q.map(|q| (*c, q)))
         .collect();
-    s.headers = st
-        .custom_headers
-        .text()
-        .lines()
-        .filter_map(|l| {
-            let (k, v) = l.split_once(':')?;
-            Some((k.trim().to_owned(), v.trim().to_owned()))
-        })
-        .collect();
-    s.theme_overrides = st
-        .theme_overrides
-        .text()
-        .lines()
-        .filter_map(|l| {
-            let (k, v) = l.split_once(':')?;
-            Some((k.trim().to_owned(), v.trim().to_owned()))
-        })
-        .collect();
+    // Nameless rows are still being typed; case-duplicates fold onto
+    // the first spelling, so the stored map matches what the wire
+    // would resolve these to.
+    s.headers = crate::domain::normalize_headers(st.custom_headers.iter().cloned());
     s
 }
 
@@ -419,7 +402,7 @@ fn copy_section(dst: &mut Settings, src: &Settings, section: Section) {
             dst.show_update_dialog = src.show_update_dialog;
             dst.notify_update = src.notify_update;
         }
-        Section::Advanced | Section::About => {}
+        Section::Advanced => {}
     }
 }
 
@@ -481,7 +464,6 @@ fn mirror(st: &mut State) {
         .unwrap_or_default();
     st.user_agent = s.user_agent.clone().unwrap_or_default();
     st.ipc_port = s.ipc_port.to_string();
-    st.update_feed = s.update_feed_url.clone();
     st.cat_exts = Category::ALL_ASSIGNABLE
         .iter()
         .map(|c| {
@@ -513,20 +495,11 @@ fn mirror(st: &mut State) {
         .iter()
         .map(|c| (*c, s.category_queues.get(c).copied()))
         .collect();
-    let headers = s
+    st.custom_headers = s
         .headers
         .iter()
-        .map(|(k, v)| format!("{k}: {v}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    st.custom_headers = text_editor::Content::with_text(&headers);
-    let overrides = s
-        .theme_overrides
-        .iter()
-        .map(|(k, v)| format!("{k}: {v}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    st.theme_overrides = text_editor::Content::with_text(&overrides);
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
 }
 
 fn section_arg() -> Section {
@@ -540,7 +513,6 @@ fn section_arg() -> Section {
                 Some("browser") => Section::Browser,
                 Some("notifications") => Section::Notifications,
                 Some("advanced") => Section::Advanced,
-                Some("about") => Section::About,
                 _ => Section::General,
             };
         }
@@ -600,15 +572,13 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 connect_timeout: String::new(),
                 user_agent: String::new(),
                 ipc_port: String::new(),
-                update_feed: String::new(),
                 cat_exts: Vec::new(),
                 cat_folders: Vec::new(),
                 cat_queues: Vec::new(),
                 cat_open: None,
                 queues,
                 confirm_reset: false,
-                custom_headers: text_editor::Content::new(),
-                theme_overrides: text_editor::Content::new(),
+                custom_headers: Vec::new(),
                 shot: Shot::from_env(),
                 dirty: 0,
                 client,
@@ -880,8 +850,26 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
             st.s.randomize_user_agent = v;
             Task::none()
         }
-        Msg::CustomHeaders(a) => {
-            st.custom_headers.perform(a);
+        Msg::HeaderName(i, v) => {
+            if let Some(h) = st.custom_headers.get_mut(i) {
+                h.0 = v;
+            }
+            Task::none()
+        }
+        Msg::HeaderValue(i, v) => {
+            if let Some(h) = st.custom_headers.get_mut(i) {
+                h.1 = v;
+            }
+            Task::none()
+        }
+        Msg::HeaderRemove(i) => {
+            if i < st.custom_headers.len() {
+                st.custom_headers.remove(i);
+            }
+            Task::none()
+        }
+        Msg::HeaderAdd => {
+            st.custom_headers.push((String::new(), String::new()));
             Task::none()
         }
         Msg::IpcPort(v) => {
@@ -921,14 +909,6 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
         }
         Msg::NotifyQueueFinished(v) => {
             st.s.notify_queue_finished = v;
-            Task::none()
-        }
-        Msg::ThemeOverrides(a) => {
-            st.theme_overrides.perform(a);
-            Task::none()
-        }
-        Msg::UpdateFeed(v) => {
-            st.update_feed = v;
             Task::none()
         }
         Msg::ResetDbAsk => {
@@ -1137,7 +1117,6 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
         Section::Browser => browser_section(st),
         Section::Notifications => notifications_section(st),
         Section::Advanced => advanced_section(st),
-        Section::About => about_section(st),
     };
 
     let mut right = row![].spacing(theme::space::S2).align_y(Alignment::Center);
@@ -1157,8 +1136,8 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
             .view(t),
         );
     }
-    // Advanced and About have nothing resettable.
-    if !matches!(st.section, Section::Advanced | Section::About) {
+    // Advanced has nothing resettable.
+    if !matches!(st.section, Section::Advanced) {
         right = right.push(
             Btn::new(format!("Reset {}", st.section.label()))
                 .ghost()
@@ -1974,7 +1953,6 @@ fn categories_section(st: &State) -> Element<'_, Msg> {
 
 fn network_section(st: &State) -> Element<'_, Msg> {
     let t = &st.tokens;
-    let t3 = *t;
     pane(
         t,
         Section::Network,
@@ -2055,34 +2033,58 @@ fn network_section(st: &State) -> Element<'_, Msg> {
                         st.s.randomize_user_agent,
                         Msg::RandomUa
                     ),
-                    set_row_stack(
-                        t,
-                        "Custom headers",
-                        Some("One Name: value pair per line."),
-                        text_editor::TextEditor::new(&st.custom_headers)
-                            .font(theme::MONO)
-                            .size(12.0)
-                            .height(Length::Fixed(64.0))
-                            .on_action(Msg::CustomHeaders)
-                            .style(move |_th, _| text_editor::Style {
-                                background: t3.bg_raised.into(),
-                                border: iced::Border {
-                                    color: t3.border_subtle,
-                                    width: 1.0,
-                                    radius: theme::control::RADIUS.into(),
-                                },
-                                placeholder: t3.fg_4,
-                                value: t3.fg_1,
-                                selection: t3.selection_bg(),
-                            })
-                            .into()
-                    ),
                 ]
             ),
+            set_section(t, "Custom headers", header_rows(st)),
         ]
         .spacing(SECTION_GAP)
         .into(),
     )
+}
+
+/// Custom request headers, on the same name/value editor the Properties
+/// window's Headers tab uses — one row per header, plus an add button.
+/// Same job, same controls; a free-text `Name: value` blob here and a
+/// table there was two answers to one question.
+fn header_rows(st: &State) -> Vec<Element<'_, Msg>> {
+    let t = &st.tokens;
+    let mut rows: Vec<Element<'_, Msg>> = vec![set_note(
+        t,
+        "Sent alongside the defaults on every request. Useful for API keys, \
+         Origin overrides, or signed URLs.",
+    )];
+    for (i, (name, value)) in st.custom_headers.iter().enumerate() {
+        rows.push(set_row_panel(
+            row![
+                TextInput::new(name)
+                    .hint("Name")
+                    .on_input(move |v| Msg::HeaderName(i, v))
+                    .view(t),
+                TextInput::new(value)
+                    .hint("Value")
+                    .on_input(move |v| Msg::HeaderValue(i, v))
+                    .view(t),
+                Btn::new("")
+                    .toolbar()
+                    .icon_only("trash-2")
+                    .on_press(Msg::HeaderRemove(i))
+                    .view(t),
+            ]
+            .spacing(theme::space::S2)
+            .align_y(Alignment::Center)
+            .into(),
+        ));
+    }
+    rows.push(set_row_panel(
+        Btn::new("Add header")
+            .ghost()
+            .icon("plus")
+            .accent(true)
+            .font_size(11.0)
+            .on_press(Msg::HeaderAdd)
+            .view(t),
+    ));
+    rows
 }
 
 fn browser_section(st: &State) -> Element<'_, Msg> {
@@ -2264,55 +2266,7 @@ fn notifications_section(st: &State) -> Element<'_, Msg> {
 
 fn advanced_section(st: &State) -> Element<'_, Msg> {
     let t = &st.tokens;
-    let t3 = *t;
-    pane(
-        t,
-        Section::Advanced,
-        column![
-            set_section(
-                t,
-                "Theme overrides",
-                vec![set_row_stack(
-                    t,
-                    "Overrides",
-                    Some("One accent / bg / text override per line."),
-                    text_editor::TextEditor::new(&st.theme_overrides)
-                        .font(theme::MONO)
-                        .size(12.0)
-                        .height(Length::Fixed(64.0))
-                        .on_action(Msg::ThemeOverrides)
-                        .style(move |_th, _| text_editor::Style {
-                            background: t3.bg_raised.into(),
-                            border: iced::Border {
-                                color: t3.border_subtle,
-                                width: 1.0,
-                                radius: theme::control::RADIUS.into(),
-                            },
-                            placeholder: t3.fg_4,
-                            value: t3.fg_1,
-                            selection: t3.selection_bg(),
-                        })
-                        .into()
-                )]
-            ),
-            set_section(
-                t,
-                "Updates",
-                vec![set_row_stack(
-                    t,
-                    "Update feed URL",
-                    Some("Checked for new oxdm releases."),
-                    TextInput::new(&st.update_feed)
-                        .width(Length::Fill)
-                        .on_input(Msg::UpdateFeed)
-                        .view(t)
-                )]
-            ),
-            danger_section(st),
-        ]
-        .spacing(SECTION_GAP)
-        .into(),
-    )
+    pane(t, Section::Advanced, danger_section(st))
 }
 
 /// Rust-headed danger block (design §3.7 Advanced: own Reset section;
@@ -2414,37 +2368,6 @@ fn reset_overlay<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a, Msg> 
             .align_y(Alignment::Center),
     ]
     .into()
-}
-
-fn about_section(st: &State) -> Element<'_, Msg> {
-    let t = &st.tokens;
-    pane(
-        t,
-        Section::About,
-        set_group(
-            t,
-            "About oxdm",
-            card(
-                t,
-                theme::space::S5,
-                column![
-                    text("oxdm").font(theme::DISPLAY).size(22.0).color(t.fg_1),
-                    text(format!("Version {}", env!("CARGO_PKG_VERSION")))
-                        .font(theme::MONO)
-                        .size(11.0)
-                        .color(t.fg_2),
-                    text("A focused, native download manager.")
-                        .font(theme::BODY)
-                        .size(12.0)
-                        .color(t.fg_3),
-                ]
-                .spacing(theme::space::S1)
-                .align_x(Alignment::Center)
-                .width(Length::Fill)
-                .into(),
-            ),
-        ),
-    )
 }
 
 pub fn launch_settings() {
