@@ -1207,12 +1207,14 @@ fn speed_tab(st: &State) -> Element<'_, Msg> {
         |i| Msg::UseLimiter(i == 1),
     );
 
-    // value field + KB/s ‖ MB/s unit-toggle.
+    // value field + KB/s ‖ MB/s unit-toggle. `Md` so the toggle is the
+    // input's height — a shorter button beside a field reads as floating
+    // rather than as part of the same control.
     let unit_toggle = segmented(
         t,
         &[("KB/s", None), ("MB/s", None)],
         if st.limit_unit_mb { 1 } else { 0 },
-        BtnSize::Sm,
+        BtnSize::Md,
         |i| Msg::LimitUnit(i == 1),
     );
     let value_row = row![

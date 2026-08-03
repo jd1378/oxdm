@@ -1278,12 +1278,14 @@ const LIMIT_INPUT_W: f32 = 80.0;
 /// the same control the download window uses for one job.
 fn speed_limit_picker(st: &State) -> Element<'_, Msg> {
     let t = &st.tokens;
+    // Everything on this row is the input's height: the chips and the
+    // unit toggle read as one control with the field between them.
     row![
         segmented(
             t,
             &[("Unlimited", None), ("Limit to", None)],
             if st.limit_on { 1 } else { 0 },
-            BtnSize::Sm,
+            BtnSize::Md,
             |i| Msg::SpeedLimitOn(i == 1),
         ),
         TextInput::new(&st.limit_value)
@@ -1295,7 +1297,7 @@ fn speed_limit_picker(st: &State) -> Element<'_, Msg> {
             t,
             &[("KB/s", None), ("MB/s", None)],
             if st.limit_unit_mb { 1 } else { 0 },
-            BtnSize::Sm,
+            BtnSize::Md,
             |i| Msg::SpeedLimitUnit(i == 1),
         ),
     ]
