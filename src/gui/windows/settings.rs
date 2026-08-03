@@ -423,6 +423,29 @@ fn copy_section(dst: &mut Settings, src: &Settings, section: Section) {
     }
 }
 
+/// Keep only genuine category overrides. The panes show every category's
+/// resolved extensions and folder, so both sides of the change count
+/// have to agree on what "same as default" means — otherwise a stored
+/// value equal to its default reads as an edit the moment the window
+/// opens, and a shown default would be written back as an override.
+fn normalize_for_editing(s: &mut Settings) {
+    // The picker speaks in whole KB/s or MB/s, so a limit that is not a
+    // multiple of 1 KB/s cannot survive the round trip and would read as
+    // an edit. Round it to what the form can actually hold.
+    if let Some(bps) = s.speed_limit.filter(|v| *v > 0) {
+        s.speed_limit = Some((bps / BYTES_PER_KB).max(1) * BYTES_PER_KB);
+    }
+    drop_default_categories(s);
+}
+
+fn drop_default_categories(s: &mut Settings) {
+    let download_dir = s.download_dir.clone();
+    s.category_extensions
+        .retain(|c, exts| exts.as_slice() != c.default_extensions());
+    s.category_folders
+        .retain(|c, dir| !dir.as_os_str().is_empty() && *dir != download_dir.join(c.label()));
+}
+
 fn mirror(st: &mut State) {
     // Whatever moved `st.s` wholesale — Reset, Discard, a reload — the
     // preview follows it, the same way picking a theme repaints on the
@@ -547,7 +570,11 @@ pub fn boot() -> (App, Task<Msg>) {
 pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
     match msg {
         Msg::Connected(Ok(boxed)) => {
-            let (client, settings, queues) = *boxed;
+            let (client, mut settings, queues) = *boxed;
+            // A build before this rule may have stored categories that
+            // only restate their defaults; normalise on the way in so
+            // the form does not open already "changed".
+            normalize_for_editing(&mut settings);
             let mut st = State {
                 tokens: Tokens::from_settings(&settings),
                 section: section_arg(),
@@ -607,7 +634,11 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
 /// Count of settings this form would change, refreshed after every
 /// message so the footer never has to diff during a render.
 fn refresh_dirty(st: &mut State) {
-    st.dirty = crate::gui::diff::count_changes(&st.original, &pending_settings(st));
+    let changed = crate::gui::diff::changed_keys(&st.original, &pending_settings(st));
+    if !changed.is_empty() {
+        tracing::debug!(?changed, "settings differ from saved");
+    }
+    st.dirty = changed.len();
 }
 
 fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {

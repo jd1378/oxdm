@@ -13,14 +13,22 @@ use serde::Serialize;
 /// it. Values that fail to serialize count as unchanged — a diff is a
 /// hint for a button label, never a correctness boundary.
 pub fn count_changes<T: Serialize>(before: &T, after: &T) -> usize {
+    changed_keys(before, after).len()
+}
+
+/// The differing field names. A count alone cannot be debugged: when a
+/// form opens already "changed", this says which field failed to survive
+/// the trip through the editor.
+pub fn changed_keys<T: Serialize>(before: &T, after: &T) -> Vec<String> {
     let (Ok(serde_json::Value::Object(a)), Ok(serde_json::Value::Object(b))) =
         (serde_json::to_value(before), serde_json::to_value(after))
     else {
-        return 0;
+        return Vec::new();
     };
     a.iter()
         .filter(|(k, v)| b.get(*k).is_none_or(|other| other != *v))
-        .count()
+        .map(|(k, _)| k.clone())
+        .collect()
 }
 
 #[cfg(test)]
