@@ -922,19 +922,22 @@ fn radio_pill<'a>(
             // Design `.radio-pill`: sunken in every idle state, with a
             // transparent border reserving the selected pill's 1px so
             // the row doesn't shift when a selection moves. Hover
-            // brightens the label, not the fill.
+            // brightens the label and draws that reserved border in,
+            // rather than moving the fill.
+            let hovered = matches!(status, Hovered | Pressed);
             let bg = match status {
                 Pressed => t2.bg_sunken_hover,
                 _ => t2.bg_sunken,
             };
             iced::widget::button::Style {
                 background: Some(bg.into()),
-                text_color: match status {
-                    Hovered | Pressed => t2.fg_1,
-                    _ => t2.fg_2,
-                },
+                text_color: if hovered { t2.fg_1 } else { t2.fg_2 },
                 border: iced::Border {
-                    color: iced::Color::TRANSPARENT,
+                    color: if hovered {
+                        t2.border_default
+                    } else {
+                        iced::Color::TRANSPARENT
+                    },
                     width: 1.0,
                     radius: theme::control::RADIUS.into(),
                 },
