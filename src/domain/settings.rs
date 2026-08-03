@@ -34,6 +34,18 @@ pub struct Settings {
     pub user_agent: Option<String>,
     pub randomize_user_agent: bool,
     pub proxy: Option<String>,
+    /// Proxy sign-in. The username rides in the `proxy` URL like any
+    /// other authority component; the password never does — it travels
+    /// once on `proxy_password` and only its ciphertext is kept, like a
+    /// job's own proxy secret.
+    #[serde(default)]
+    pub enc_proxy_password: Option<String>,
+    /// Transient: GUI → daemon only. Empty means "leave the stored
+    /// secret alone", which is why clearing needs its own flag.
+    #[serde(skip)]
+    pub proxy_password: String,
+    #[serde(skip)]
+    pub clear_proxy_password: bool,
     pub use_server_time: bool,
     pub accept_invalid_certs: bool,
     pub speed_limit: Option<u64>,
@@ -71,6 +83,13 @@ pub struct Settings {
     /// they never saw listed.
     #[serde(default = "yes_default")]
     pub remove_confirm_clean: bool,
+    /// Pause running downloads while the connection is metered (cellular
+    /// or a phone hotspot), and resume them when it is not.
+    #[serde(default = "yes_default")]
+    pub pause_on_metered: bool,
+    /// Pause running downloads while the battery is low and discharging.
+    #[serde(default)]
+    pub pause_on_low_battery: bool,
     /// If true, app starts on system login (handled by platform code).
     pub start_at_login: bool,
     /// If true, launching the app starts hidden in the tray instead of
@@ -226,7 +245,7 @@ pub enum ConflictWhileHidden {
 /// "Unlimited" concurrent downloads. Not a sentinel the scheduler knows
 /// about — a ceiling no real queue reaches, so the limit simply never
 /// binds while the field stays an ordinary number.
-pub const UNLIMITED_CONCURRENT: usize = 999;
+pub const UNLIMITED_CONCURRENT: usize = 9999;
 
 fn yes_default() -> bool {
     true
@@ -314,6 +333,9 @@ impl Default for Settings {
             user_agent: None,
             randomize_user_agent: false,
             proxy: None,
+            enc_proxy_password: None,
+            proxy_password: String::new(),
+            clear_proxy_password: false,
             use_server_time: false,
             accept_invalid_certs: false,
             speed_limit: None,
@@ -325,6 +347,8 @@ impl Default for Settings {
             remove_confirm_incomplete: true,
             remove_confirm_completed: true,
             remove_confirm_clean: true,
+            pause_on_metered: true,
+            pause_on_low_battery: false,
             start_at_login: false,
             start_to_tray: false,
             show_complete_dialog: true,

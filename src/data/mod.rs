@@ -6,7 +6,7 @@
 //! [`runner::JobRunner`]; pause/cancel policy is hidden behind
 //! [`pause::PauseStrategy`].
 
-mod conditions;
+pub mod conditions;
 pub mod crypto;
 mod events;
 mod hooks;

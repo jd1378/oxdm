@@ -15,8 +15,11 @@ use crate::domain::{
     ProxyMode, ResponseHeader, Settings,
 };
 
-pub fn settings_to_odl_config(s: &Settings) -> Result<OdlConfig, String> {
-    let download = settings_to_download_options(s)?;
+pub fn settings_to_odl_config(
+    s: &Settings,
+    proxy_password: Option<&str>,
+) -> Result<OdlConfig, String> {
+    let download = settings_to_download_options(s, proxy_password)?;
     ConfigBuilder::default()
         .download_dir(s.download_dir.clone())
         .max_concurrent_downloads(s.max_concurrent_downloads)
@@ -25,7 +28,10 @@ pub fn settings_to_odl_config(s: &Settings) -> Result<OdlConfig, String> {
         .map_err(|e| e.to_string())
 }
 
-pub fn settings_to_download_options(s: &Settings) -> Result<DownloadOptions, String> {
+pub fn settings_to_download_options(
+    s: &Settings,
+    proxy_password: Option<&str>,
+) -> Result<DownloadOptions, String> {
     let mut b = DownloadOptionsBuilder::default();
     // `None` means "Determine automatically"; the per-job overlay set
     // by add_window (size-based suggest_segments) provides the real
@@ -37,7 +43,12 @@ pub fn settings_to_download_options(s: &Settings) -> Result<DownloadOptions, Str
         .n_fixed_retries(s.n_fixed_retries)
         .user_agent(s.user_agent.clone())
         .randomize_user_agent(s.randomize_user_agent)
-        .proxy(s.proxy.clone())
+        // The stored URL carries at most a username; the password is
+        // merged in here, straight from the secret store.
+        .proxy(match (&s.proxy, proxy_password) {
+            (Some(url), pw) => Some(merge_proxy_password(url, pw)?),
+            (None, _) => None,
+        })
         .use_server_time(s.use_server_time)
         .accept_invalid_certs(s.accept_invalid_certs)
         .speed_limit(s.speed_limit)

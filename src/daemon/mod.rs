@@ -17,6 +17,7 @@ use crate::ipc_local;
 use crate::single_instance::InstanceGuard;
 
 pub mod completion_actions;
+pub mod environment_guard;
 pub mod notifications;
 pub mod tray;
 
@@ -72,6 +73,7 @@ fn spawn_workers(
     }
     crate::ipc::manifest_check::spawn();
     notifications::spawn(state.clone());
+    environment_guard::spawn(state.clone());
     spawn_power_prompt(state.clone());
     completion_actions::spawn(state.clone());
     crate::data::spawn_hook_executor(state.clone());

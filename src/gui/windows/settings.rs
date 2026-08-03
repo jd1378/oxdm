@@ -54,7 +54,7 @@ impl Section {
     /// (design `.s-pane-head`).
     fn desc(self) -> &'static str {
         match self {
-            Section::General => "Startup behavior and appearance.",
+            Section::General => "Startup, appearance, and when to hold downloads back.",
             Section::Downloads => "Where files land, retry behavior, and removal confirmations.",
             Section::Categories => {
                 "Categories auto-sort downloads by file extension. \
@@ -149,6 +149,8 @@ pub enum Msg {
     ConfirmIncomplete(bool),
     ConfirmCompleted(bool),
     ConfirmClean(bool),
+    PauseOnMetered(bool),
+    PauseOnLowBattery(bool),
     // Categories
     CategoryToggle(Category),
     CategoryExts(Category, String),
@@ -236,6 +238,12 @@ pub struct State {
     proxy_auth: bool,
     proxy_user: String,
     proxy_pass: String,
+    /// Edited this session. Empty + edited means "delete the stored
+    /// secret"; empty + untouched leaves it alone, since the ciphertext
+    /// never round-trips into the form.
+    proxy_pass_edited: bool,
+    /// A password is stored for the proxy (shown as a placeholder).
+    has_stored_proxy_pass: bool,
     connect_timeout: String,
     user_agent: String,
     ipc_port: String,
@@ -281,9 +289,11 @@ fn mirror(st: &mut State) {
     st.proxy_mode = parts.mode;
     st.proxy_host = parts.host;
     st.proxy_port = parts.port;
-    st.proxy_auth = !parts.user.is_empty() || !parts.pass.is_empty();
+    st.has_stored_proxy_pass = s.enc_proxy_password.is_some();
+    st.proxy_auth = !parts.user.is_empty() || st.has_stored_proxy_pass;
     st.proxy_user = parts.user;
-    st.proxy_pass = parts.pass;
+    st.proxy_pass = String::new();
+    st.proxy_pass_edited = false;
     st.connect_timeout = s
         .connect_timeout
         .map(|d| humantime::format_duration(d).to_string())
@@ -401,6 +411,8 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 proxy_auth: false,
                 proxy_user: String::new(),
                 proxy_pass: String::new(),
+                proxy_pass_edited: false,
+                has_stored_proxy_pass: false,
                 connect_timeout: String::new(),
                 user_agent: String::new(),
                 ipc_port: String::new(),
@@ -533,6 +545,14 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             st.s.remove_confirm_clean = v;
             Task::none()
         }
+        Msg::PauseOnMetered(v) => {
+            st.s.pause_on_metered = v;
+            Task::none()
+        }
+        Msg::PauseOnLowBattery(v) => {
+            st.s.pause_on_low_battery = v;
+            Task::none()
+        }
         Msg::CategoryToggle(cat) => {
             st.cat_open = (st.cat_open != Some(cat)).then_some(cat);
             Task::none()
@@ -617,6 +637,9 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             if !v {
                 st.proxy_user.clear();
                 st.proxy_pass.clear();
+                // Turning sign-in off is an explicit request to forget
+                // the stored password, not just to hide the field.
+                st.proxy_pass_edited = true;
             }
             recompose_proxy(st);
             Task::none()
@@ -628,7 +651,7 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
         }
         Msg::ProxyPass(v) => {
             st.proxy_pass = v;
-            recompose_proxy(st);
+            st.proxy_pass_edited = true;
             Task::none()
         }
         Msg::ConnectTimeout(v) => {
@@ -736,6 +759,8 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             let orig = st.original.clone();
             match st.section {
                 Section::General => {
+                    st.s.pause_on_metered = orig.pause_on_metered;
+                    st.s.pause_on_low_battery = orig.pause_on_low_battery;
                     st.s.theme = orig.theme;
                     st.s.reduce_motion = orig.reduce_motion;
                     st.s.download_dir = orig.download_dir;
@@ -819,6 +844,10 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                 s.ipc_port = v;
             }
             s.update_feed_url = st.update_feed.trim().to_owned();
+            // Only speak about the password when the user touched it:
+            // empty-and-edited deletes, empty-and-untouched keeps.
+            s.proxy_password = st.proxy_pass.clone();
+            s.clear_proxy_password = st.proxy_pass_edited && st.proxy_pass.is_empty();
             s.category_extensions = st
                 .cat_exts
                 .iter()
@@ -1280,7 +1309,10 @@ fn concurrent_picker<'a>(t: &Tokens, value: &str) -> Element<'a, Msg> {
             .view(t),
         number_stepper(
             t,
-            if unlimited { CONCURRENT_MAX } else { v },
+            // The stepper only speaks in its own range: an Unlimited (or
+            // stale out-of-range) value shows as the ceiling rather than
+            // printing a number the buttons cannot reach.
+            v.clamp(CONCURRENT_MIN, CONCURRENT_MAX),
             CONCURRENT_MIN,
             CONCURRENT_MAX,
             true,
@@ -1313,7 +1345,6 @@ struct ProxyParts {
     host: String,
     port: String,
     user: String,
-    pass: String,
 }
 
 /// Split `scheme://[user:pass@]host[:port]`. Anything unparseable reads
@@ -1324,7 +1355,6 @@ fn split_proxy(url: &str) -> ProxyParts {
         host: String::new(),
         port: String::new(),
         user: String::new(),
-        pass: String::new(),
     };
     let url = url.trim();
     let Some((scheme, rest)) = url.split_once("://") else {
@@ -1343,10 +1373,10 @@ fn split_proxy(url: &str) -> ProxyParts {
         Some((c, a)) => (c, a),
         None => ("", rest),
     };
-    let (user, pass) = match creds.split_once(':') {
-        Some((u, p)) => (decode(u), decode(p)),
-        None => (decode(creds), String::new()),
-    };
+    // A stored URL carries at most a username: the password lives in the
+    // secret store, so anything after a ':' here is discarded rather than
+    // shown back as if it were kept.
+    let user = decode(creds.split_once(':').map_or(creds, |(u, _)| u));
     let (host, port) = match authority.rsplit_once(':') {
         Some((h, p)) if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => (h, p),
         _ => (authority, ""),
@@ -1356,7 +1386,6 @@ fn split_proxy(url: &str) -> ProxyParts {
         host: host.to_owned(),
         port: port.to_owned(),
         user,
-        pass,
     }
 }
 
@@ -1385,12 +1414,10 @@ fn recompose_proxy(st: &mut State) {
         String::new()
     } else {
         let scheme = PROXY_SCHEMES[st.proxy_mode - 1];
+        // Username only: the password is a secret and goes to the daemon
+        // on its own field, which stores just the ciphertext.
         let creds = if st.proxy_auth && !st.proxy_user.trim().is_empty() {
-            format!(
-                "{}:{}@",
-                encode(st.proxy_user.trim()),
-                encode(&st.proxy_pass)
-            )
+            format!("{}@", encode(st.proxy_user.trim()))
         } else {
             String::new()
         };
@@ -1440,10 +1467,7 @@ fn proxy_rows(st: &State) -> Vec<Element<'_, Msg>> {
         rows.push(toggle_row(
             t,
             "Proxy needs a sign-in",
-            Some(
-                "Stored in the proxy URL, in the settings database — unlike a job's own \
-                 proxy password, which is encrypted.",
-            ),
+            Some("The password is encrypted in the secret store, never in the proxy URL."),
             st.proxy_auth,
             Msg::ProxyAuth,
         ));
@@ -1459,7 +1483,11 @@ fn proxy_rows(st: &State) -> Vec<Element<'_, Msg>> {
                         .on_input(Msg::ProxyUser)
                         .view(t),
                     PasswordInput::new(&st.proxy_pass)
-                        .hint("password")
+                        .hint(if st.has_stored_proxy_pass && !st.proxy_pass_edited {
+                            "stored (encrypted)"
+                        } else {
+                            "password"
+                        })
                         .on_input(Msg::ProxyPass)
                         .view(t),
                 ]
@@ -1549,6 +1577,26 @@ fn general_section(st: &State) -> Element<'_, Msg> {
                         Some("Skip animations and transitions across the app."),
                         st.s.reduce_motion,
                         Msg::ReduceMotion
+                    ),
+                ]
+            ),
+            set_section(
+                t,
+                "Schedule-aware",
+                vec![
+                    toggle_row(
+                        t,
+                        "Pause on metered networks",
+                        Some("Stop downloads on cellular or a phone hotspot, and resume after."),
+                        st.s.pause_on_metered,
+                        Msg::PauseOnMetered
+                    ),
+                    toggle_row(
+                        t,
+                        "Pause when battery is low",
+                        Some("Below 20% and not plugged in."),
+                        st.s.pause_on_low_battery,
+                        Msg::PauseOnLowBattery
                     ),
                 ]
             ),

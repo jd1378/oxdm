@@ -204,6 +204,43 @@ fn on_ac_power() -> Option<bool> {
     None
 }
 
+/// Battery charge percentage, or `None` where there is no battery (or
+/// the kernel does not report one). Reads the first battery it finds:
+/// multi-battery laptops report a per-pack figure and the guard only
+/// needs "is the machine about to die".
+#[cfg(target_os = "linux")]
+pub fn battery_percent() -> Option<u8> {
+    let entries = std::fs::read_dir("/sys/class/power_supply").ok()?;
+    for entry in entries.flatten() {
+        let read = |file: &str| {
+            std::fs::read_to_string(entry.path().join(file))
+                .map(|s| s.trim().to_owned())
+                .unwrap_or_default()
+        };
+        if read("type") == "Battery"
+            && let Ok(pct) = read("capacity").parse::<u8>()
+        {
+            return Some(pct);
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn battery_percent() -> Option<u8> {
+    None
+}
+
+/// `on_ac_power`, for callers outside the scheduler.
+pub fn on_ac() -> Option<bool> {
+    on_ac_power()
+}
+
+/// `network_unmetered`, for callers outside the scheduler.
+pub async fn unmetered() -> Option<bool> {
+    network_unmetered().await
+}
+
 /// Session idle time via logind's caller-session object
 /// (`/org/freedesktop/login1/session/auto`): `IdleHint` false ⇒ ZERO,
 /// true ⇒ now − `IdleSinceHint` (µs, CLOCK_REALTIME). Sessions whose

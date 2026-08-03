@@ -314,7 +314,20 @@ impl AppState {
             }
         };
 
-        let manager = build_manager(&settings);
+        // Boot builds the manager before `AppState` exists, so decrypt
+        // inline with the key we just bootstrapped.
+        let boot_proxy_password = match (&master_key, &settings.enc_proxy_password) {
+            (Some(key), Some(blob)) => key
+                .decrypt(
+                    GLOBAL_SECRET_ID,
+                    crate::data::crypto::Field::ProxyPassword,
+                    blob,
+                )
+                .ok()
+                .flatten(),
+            _ => None,
+        };
+        let manager = build_manager(&settings, boot_proxy_password.as_deref());
         let stored_jobs = store.list_jobs().await.unwrap_or_default();
         let mut jobs = IndexMap::new();
         for j in stored_jobs {
@@ -1175,6 +1188,18 @@ impl AppState {
     /// Encrypt a per-job secret for at-rest storage. `None`/empty
     /// plaintext is a no-op (returns `Ok(None)` so callers can store
     /// NULL in the DB column).
+    /// Plaintext of the global proxy password, or `None` when unset or
+    /// undecryptable (Locked mode) — the proxy then goes out without
+    /// credentials and the server answers 407, which is legible.
+    async fn global_proxy_password(&self, s: &Settings) -> Option<String> {
+        self.decrypt_field(
+            GLOBAL_SECRET_ID,
+            crate::data::crypto::Field::ProxyPassword,
+            s.enc_proxy_password.as_deref(),
+        )
+        .await
+    }
+
     pub(crate) async fn encrypt_field(
         &self,
         id: JobId,
@@ -1223,6 +1248,24 @@ impl AppState {
     }
 
     pub async fn update_settings(&self, mut new: Settings) -> Result<(), String> {
+        // The proxy password arrives in the clear and leaves as
+        // ciphertext; the plaintext never reaches the settings table.
+        let typed = std::mem::take(&mut new.proxy_password);
+        let clear = std::mem::take(&mut new.clear_proxy_password);
+        new.enc_proxy_password = if clear {
+            None
+        } else if typed.is_empty() {
+            // Untouched field: keep whatever is already stored.
+            self.settings.read().await.enc_proxy_password.clone()
+        } else {
+            self.encrypt_field(
+                GLOBAL_SECRET_ID,
+                crate::data::crypto::Field::ProxyPassword,
+                Some(&typed),
+            )
+            .await
+            .map_err(|e| e.to_string())?
+        };
         // Autostart lives outside the DB (XDG autostart entry / launch
         // agent / Run key), so the flag has to be reconciled with the
         // OS whenever it flips. A failure there must not lose the rest
@@ -1240,7 +1283,8 @@ impl AppState {
             }
         }
 
-        let manager = build_manager(&new);
+        let proxy_password = self.global_proxy_password(&new).await;
+        let manager = build_manager(&new, proxy_password.as_deref());
         self.store
             .save_settings(&new)
             .await
@@ -1649,7 +1693,10 @@ impl AppState {
             if let Some(ua) = job_ua {
                 s.user_agent = Some(ua);
             }
-            Arc::new(build_manager(&s))
+            Arc::new(build_manager(
+                &s,
+                self.global_proxy_password(&s).await.as_deref(),
+            ))
         } else {
             manager
         };
@@ -2046,6 +2093,18 @@ impl AppState {
         }
     }
 
+    /// Ids of every job currently running. Used by supervisors that
+    /// need to act on the live set without holding the jobs lock.
+    pub async fn running_job_ids(&self) -> Vec<JobId> {
+        self.jobs
+            .read()
+            .await
+            .values()
+            .filter(|e| e.running.load(Ordering::Acquire))
+            .map(|e| e.job.id)
+            .collect()
+    }
+
     pub async fn pause_all(self: &Arc<Self>) {
         let ids: Vec<JobId> = self
             .jobs
@@ -2287,8 +2346,8 @@ pub fn decode_pairing_code(code: &str) -> Option<(u16, String)> {
     Some((port, token))
 }
 
-fn build_manager(settings: &Settings) -> DownloadManager {
-    match settings_to_odl_config(settings) {
+fn build_manager(settings: &Settings, proxy_password: Option<&str>) -> DownloadManager {
+    match settings_to_odl_config(settings, proxy_password) {
         Ok(cfg) => DownloadManager::new(cfg),
         Err(e) => {
             tracing::warn!(error = %e, "settings → odl config failed; using odl defaults");
@@ -2296,6 +2355,11 @@ fn build_manager(settings: &Settings) -> DownloadManager {
         }
     }
 }
+
+/// AAD identity for secrets that belong to the app rather than to a
+/// job. The nil UUID is never a real `JobId`, so a global ciphertext
+/// cannot be replayed as a job's and vice versa.
+const GLOBAL_SECRET_ID: JobId = JobId(uuid::Uuid::nil());
 
 /// `LiveBridge` impl that walks back to `AppState` via a weak ref.
 struct StateLiveBridge {

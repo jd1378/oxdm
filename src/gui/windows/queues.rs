@@ -932,8 +932,9 @@ fn radio_pill<'a>(
 }
 
 /// One square of the recurring-schedule day grid: a ~28px toggle
-/// button bearing the day initial. On → theme clay-400 accent fill /
-/// inverse text (design `.day-grid .d.on`); off → sunken square.
+/// button bearing the day initial. On → the primary button's own fill,
+/// border and hover ramp, so a selected day reads like every other
+/// primary control; off → sunken square.
 /// Preserves the per-day `Msg::SchedDay(bit, _)` toggle. See T2-QUEUES.
 fn day_square<'a>(t: &Tokens, label: &str, on: bool, msg: Msg) -> Element<'a, Msg> {
     let t2 = *t;
@@ -949,7 +950,15 @@ fn day_square<'a>(t: &Tokens, label: &str, on: bool, msg: Msg) -> Element<'a, Ms
         .style(move |_th, status| {
             use iced::widget::button::Status::*;
             let (bg, fg, border) = if on {
-                (t2.action_primary, t2.action_primary_fg, t2.action_primary)
+                // Literal clay, matching `BtnVariant::Primary` — the
+                // themed `action_primary` lightens to clay-300 in dark
+                // and drifted away from the primary buttons beside it.
+                let bg = match status {
+                    Hovered => color::clay::C500,
+                    Pressed => color::clay::C600,
+                    _ => color::clay::C400,
+                };
+                (bg, t2.action_primary_fg, color::clay::C500)
             } else {
                 let bg = match status {
                     Hovered | Pressed => t2.bg_sunken_hover,

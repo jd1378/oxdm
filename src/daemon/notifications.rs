@@ -64,5 +64,9 @@ pub fn spawn(state: Arc<AppState>) {
 }
 
 fn notify(summary: &str, body: &str) {
+    // Logged because the delivery itself is fire-and-forget: without
+    // this there is no way to tell "the setting suppressed it" from
+    // "the desktop dropped it".
+    tracing::debug!(summary, "notifying");
     crate::platform::show_notification(summary.to_owned(), body.to_owned());
 }
