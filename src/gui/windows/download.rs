@@ -737,10 +737,13 @@ fn header_card(st: &State) -> Element<'_, Msg> {
         .map(|e| e.to_string_lossy().to_uppercase())
         .unwrap_or_else(|| "FILE".into());
     let host = st.entry.job.url.host_str().unwrap_or("").to_owned();
+    // Nothing is said until evaluation answers: "checking" is the
+    // absence of an answer, and a subtitle that changes under the user
+    // costs more than the fact is worth.
     let resum = match st.entry.counters.is_resumable {
-        1 => "resumable",
-        -1 => "no resume",
-        _ => "checking",
+        1 => Some("resumable"),
+        -1 => Some("no resume"),
+        _ => None,
     };
     let cat_color = match st.entry.job.category {
         crate::domain::Category::Compressed => t.cat_compressed,
@@ -776,18 +779,24 @@ fn header_card(st: &State) -> Element<'_, Msg> {
             tile,
             column![
                 text(name).font(theme::BODY_BOLD).size(14.0).color(t.fg_1),
-                row![
-                    text(host).font(theme::MONO).size(11.0).color(t.fg_3),
-                    dotsep(),
-                    text(st.entry.job.category.label())
-                        .font(theme::BODY)
-                        .size(11.0)
-                        .color(t.fg_3),
-                    dotsep(),
-                    text(resum).font(theme::BODY).size(11.0).color(t.fg_3),
-                ]
-                .spacing(6.0)
-                .align_y(Alignment::Center),
+                {
+                    let mut meta = row![
+                        text(host).font(theme::MONO).size(11.0).color(t.fg_3),
+                        dotsep(),
+                        text(st.entry.job.category.label())
+                            .font(theme::BODY)
+                            .size(11.0)
+                            .color(t.fg_3),
+                    ]
+                    .spacing(6.0)
+                    .align_y(Alignment::Center);
+                    if let Some(resum) = resum {
+                        meta = meta
+                            .push(dotsep())
+                            .push(text(resum).font(theme::BODY).size(11.0).color(t.fg_3));
+                    }
+                    meta
+                },
             ]
             .spacing(4.0),
             iced::widget::Space::new().width(Length::Fill),
