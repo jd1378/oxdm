@@ -20,20 +20,9 @@ const ICON_TILE: f32 = 36.0;
 const ICON_TILE_RADIUS: f32 = 8.0;
 /// Mid-truncation width for long hex digests in mismatch panels.
 pub const HASH_TRUNCATE_CHARS: usize = 40;
-
-/// Error-code chip: 11px mono pinned to a line box its caps actually
-/// fill, padded back out to the height the design draws.
-const CODE_TEXT: f32 = 11.0;
-const CODE_LINE: f32 = 11.0;
-const CODE_PAD_Y: f32 = 4.0;
-const CODE_PAD_X: f32 = 8.0;
-/// Even with the line box pinned, the renderer leaves this much more
-/// room above the caps than below — 11px of box for 8px of ink, and the
-/// remainder does not split evenly. A row centres *boxes*, so without
-/// compensating the chip's caps sit low inside their chip and the label
-/// beside it sits low in the row. Both are lifted by the same amount:
-/// take it off the top padding and give it back at the bottom.
-const CODE_INK_LIFT: f32 = 2.0;
+/// Padding under the "Error code" label: the row centres it by its box,
+/// and its ink sits half of this below that box's centre.
+const LABEL_INK_LIFT: f32 = 2.0;
 
 /// Friendly title, leading icon, short code, and a static "things to
 /// check" hint for each `JobError` variant. The detail line uses the
@@ -581,45 +570,31 @@ fn panel_toned<'a, M: Clone + 'a>(
     }
 
     // Quiet monospace error-code footer (label + chip + copy).
-    //
-    // The chip's line box is pinned to the glyphs (as `pills::chip`
-    // does): iced's default line height reserves descender room that an
-    // all-caps code never uses, so centring the *box* against the label
-    // leaves the ink sitting high. Padding absorbs the difference.
-    let code_chip = container(
-        text(code)
-            .font(theme::MONO)
-            .size(CODE_TEXT)
-            .line_height(iced::widget::text::LineHeight::Absolute(CODE_LINE.into()))
-            .color(t2.fg_2),
-    )
-    .padding(iced::Padding {
-        top: CODE_PAD_Y - CODE_INK_LIFT,
-        right: CODE_PAD_X,
-        bottom: CODE_PAD_Y + CODE_INK_LIFT,
-        left: CODE_PAD_X,
-    })
-    .style(move |_| container::Style {
-        background: Some(t2.bg_sunken.into()),
-        border: iced::Border {
-            color: t2.border_subtle,
-            width: 1.0,
-            radius: theme::radius::XS.into(),
-        },
-        ..Default::default()
-    });
+    let code_chip = container(text(code).font(theme::MONO).size(11.0).color(t2.fg_2))
+        .padding([2.0, 8.0])
+        .style(move |_| container::Style {
+            background: Some(t2.bg_sunken.into()),
+            border: iced::Border {
+                color: t2.border_subtle,
+                width: 1.0,
+                radius: theme::radius::XS.into(),
+            },
+            ..Default::default()
+        });
     let code_footer = row![
-        // Same lift as the chip, applied as padding under the label so
-        // the row's centring moves its ink up by half of it.
+        // The chip's code is centred inside its chip; this label's ink
+        // is not centred inside *its* box — the body font reserves
+        // descender room that "Error code" never uses, so a row that
+        // centres boxes leaves the label sitting a pixel below the code
+        // beside it. Padding under the label lifts its ink by half that.
         container(
             text("Error code")
                 .font(theme::BODY)
-                .size(CODE_TEXT)
-                .line_height(iced::widget::text::LineHeight::Absolute(CODE_LINE.into()))
+                .size(11.0)
                 .color(t.fg_3),
         )
         .padding(iced::Padding {
-            bottom: CODE_INK_LIFT * 2.0,
+            bottom: LABEL_INK_LIFT,
             ..iced::Padding::ZERO
         }),
         code_chip,
