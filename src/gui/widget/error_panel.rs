@@ -22,15 +22,18 @@ const ICON_TILE_RADIUS: f32 = 8.0;
 pub const HASH_TRUNCATE_CHARS: usize = 40;
 
 /// Error-code chip: 11px mono pinned to a line box its caps actually
-/// fill, padded back out to the height the design draws. The padding is
-/// asymmetric by a pixel: an 11px line box leaves the caps half a pixel
-/// high inside it, and the label beside the chip is cap-height ink too,
-/// so the two only line up once that pixel moves to the top.
+/// fill, padded back out to the height the design draws.
 const CODE_TEXT: f32 = 11.0;
 const CODE_LINE: f32 = 11.0;
-const CODE_PAD_TOP: f32 = 5.0;
-const CODE_PAD_BOTTOM: f32 = 3.0;
+const CODE_PAD_Y: f32 = 4.0;
 const CODE_PAD_X: f32 = 8.0;
+/// Even with the line box pinned, the renderer leaves this much more
+/// room above the caps than below — 11px of box for 8px of ink, and the
+/// remainder does not split evenly. A row centres *boxes*, so without
+/// compensating the chip's caps sit low inside their chip and the label
+/// beside it sits low in the row. Both are lifted by the same amount:
+/// take it off the top padding and give it back at the bottom.
+const CODE_INK_LIFT: f32 = 2.0;
 
 /// Friendly title, leading icon, short code, and a static "things to
 /// check" hint for each `JobError` variant. The detail line uses the
@@ -591,9 +594,9 @@ fn panel_toned<'a, M: Clone + 'a>(
             .color(t2.fg_2),
     )
     .padding(iced::Padding {
-        top: CODE_PAD_TOP,
+        top: CODE_PAD_Y - CODE_INK_LIFT,
         right: CODE_PAD_X,
-        bottom: CODE_PAD_BOTTOM,
+        bottom: CODE_PAD_Y + CODE_INK_LIFT,
         left: CODE_PAD_X,
     })
     .style(move |_| container::Style {
@@ -606,10 +609,19 @@ fn panel_toned<'a, M: Clone + 'a>(
         ..Default::default()
     });
     let code_footer = row![
-        text("Error code")
-            .font(theme::BODY)
-            .size(11.0)
-            .color(t.fg_3),
+        // Same lift as the chip, applied as padding under the label so
+        // the row's centring moves its ink up by half of it.
+        container(
+            text("Error code")
+                .font(theme::BODY)
+                .size(CODE_TEXT)
+                .line_height(iced::widget::text::LineHeight::Absolute(CODE_LINE.into()))
+                .color(t.fg_3),
+        )
+        .padding(iced::Padding {
+            bottom: CODE_INK_LIFT * 2.0,
+            ..iced::Padding::ZERO
+        }),
         code_chip,
         iced::widget::Space::new().width(Length::Fill),
         Btn::new("Copy")

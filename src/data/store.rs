@@ -14,7 +14,7 @@ use crate::domain::{Job, JobId, Phase, Queue, QueueHook, QueueId, QueueSchedule,
 
 /// Schema version. Bump on every breaking change. Migrations are a
 /// match on the read-back version; tiny enough to keep DIY.
-const SCHEMA_VERSION: i32 = 4;
+const SCHEMA_VERSION: i32 = 5;
 
 /// Async-friendly handle around a blocking `rusqlite::Connection`.
 #[derive(Clone)]
@@ -128,6 +128,7 @@ impl Store {
                      finished_at           TEXT,
                      retries               INTEGER NOT NULL DEFAULT 0,
                      response_headers_json TEXT NOT NULL DEFAULT 'null',
+                     error_json            TEXT NOT NULL DEFAULT 'null',
                      FOREIGN KEY(queue_id) REFERENCES queues(id) ON DELETE RESTRICT
                  );
                  CREATE INDEX IF NOT EXISTS idx_jobs_queue ON jobs(queue_id, queue_position);
@@ -198,6 +199,19 @@ impl Store {
                         self.with_conn(|conn| {
                             conn.execute_batch(
                                 "ALTER TABLE jobs ADD COLUMN response_headers_json TEXT NOT NULL DEFAULT 'null';",
+                            )
+                        })
+                        .await
+                        .map_err(StoreError::Sql)?;
+                    }
+                    5 => {
+                        // v5: why the last run failed. `'null'`
+                        // hydrates to `status.error: None` — an
+                        // existing failed row simply has no reason
+                        // recorded, which is what it meant before.
+                        self.with_conn(|conn| {
+                            conn.execute_batch(
+                                "ALTER TABLE jobs ADD COLUMN error_json TEXT NOT NULL DEFAULT 'null';",
                             )
                         })
                         .await
@@ -472,7 +486,8 @@ impl Store {
                             downloaded, total, final_path, proxy, auth_user, \
                             auth_password_enc, proxy_password_enc, cookies_enc, \
                             advanced_json, checksums_json, category, \
-                            started_at, finished_at, retries, response_headers_json \
+                            started_at, finished_at, retries, response_headers_json, \
+                            error_json \
                      FROM jobs ORDER BY created_at ASC",
                 )?;
                 let iter = stmt.query_map([], |row| {
@@ -505,6 +520,7 @@ impl Store {
                         response_headers_json: row
                             .get::<_, String>(25)
                             .unwrap_or_else(|_| "null".into()),
+                        error_json: row.get::<_, String>(26).unwrap_or_else(|_| "null".into()),
                     })
                 })?;
                 iter.collect::<Result<Vec<_>, _>>()
@@ -525,8 +541,8 @@ impl Store {
                     downloaded, total, final_path, proxy, auth_user, \
                     auth_password_enc, proxy_password_enc, cookies_enc, \
                     advanced_json, checksums_json, category, \
-                    started_at, finished_at, retries, response_headers_json) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26) \
+                    started_at, finished_at, retries, response_headers_json, error_json) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27) \
                  ON CONFLICT(id) DO UPDATE SET \
                     url=excluded.url, save_dir=excluded.save_dir, \
                     filename=excluded.filename, referrer=excluded.referrer, \
@@ -549,7 +565,8 @@ impl Store {
                     started_at=excluded.started_at, \
                     finished_at=excluded.finished_at, \
                     retries=excluded.retries, \
-                    response_headers_json=excluded.response_headers_json",
+                    response_headers_json=excluded.response_headers_json, \
+                    error_json=excluded.error_json",
                 params![
                     row.id,
                     row.url,
@@ -577,6 +594,7 @@ impl Store {
                     row.finished_at,
                     row.retries,
                     row.response_headers_json,
+                    row.error_json,
                 ],
             )
         })
@@ -688,6 +706,10 @@ struct JobRow {
     finished_at: Option<String>,
     retries: i64,
     response_headers_json: String,
+    /// Why the last run failed, as JSON (`null` when it did not). The
+    /// phase alone says a job failed; this says what to tell the user
+    /// about it after a restart.
+    error_json: String,
 }
 
 struct QueueRow {
@@ -794,6 +816,8 @@ impl JobRow {
             retries: job.retries as i64,
             response_headers_json: serde_json::to_string(&job.captured_response)
                 .map_err(|e| StoreError::Other(e.to_string()))?,
+            error_json: serde_json::to_string(&job.status.error)
+                .map_err(|e| StoreError::Other(e.to_string()))?,
         })
     }
 
@@ -827,6 +851,10 @@ impl JobRow {
             downloaded: self.downloaded.max(0) as u64,
             total: self.total.map(|v| v.max(0) as u64),
             final_path: self.final_path.map(PathBuf::from),
+            // A blob written by an older build (or a hand-edited row)
+            // reads as "no reason recorded" rather than wedging the
+            // job; the next failure rewrites it.
+            error: serde_json::from_str(&self.error_json).unwrap_or_default(),
             ..crate::domain::JobStatus::default()
         };
 

@@ -64,6 +64,14 @@ pub struct JobEntry {
     pub parts: std::sync::RwLock<IndexMap<String, Arc<PartCounters>>>,
     pub cancel: std::sync::Mutex<CancellationToken>,
     pub running: AtomicBool,
+    /// Why the last run of this job failed. Lives here because the
+    /// registry's `Job` is immutable and `JobStatus.error` has no
+    /// column in the store: without it the failure exists only as a
+    /// fired event, so a window opened *after* the failure — which is
+    /// every window the daemon spawns in response to one — sees a job
+    /// that is `Failed` for no stated reason. Cleared when the job
+    /// starts again.
+    pub last_error: std::sync::RwLock<Option<crate::domain::JobError>>,
     /// The user started *this* download by hand — a row's Resume, the
     /// download window's Resume, Add → Download now, Retry. Only such
     /// a run raises the failure window: a batch reports its failures in
@@ -122,6 +130,11 @@ impl JobEntry {
         let started_at_ms = job.started_at.map(|d| d.timestamp_millis()).unwrap_or(0);
         let finished_at_ms = job.finished_at.map(|d| d.timestamp_millis()).unwrap_or(0);
         let retries = job.retries;
+        // Same reason: the entry is the source of truth `splice_live`
+        // writes back from, so it starts out holding whatever the store
+        // recorded — otherwise the first persist after boot would clear
+        // the column for a job that is still `Failed`.
+        let last_error = job.status.error.clone();
         Self {
             job,
             live_phase: AtomicU8::new(encode_phase(phase)),
@@ -133,6 +146,7 @@ impl JobEntry {
             parts: std::sync::RwLock::new(IndexMap::new()),
             cancel: std::sync::Mutex::new(CancellationToken::new()),
             running: AtomicBool::new(false),
+            last_error: std::sync::RwLock::new(last_error),
             manual_run: AtomicBool::new(false),
             is_resumable: std::sync::atomic::AtomicI8::new(0),
             captured_response: std::sync::RwLock::new(None),
@@ -982,14 +996,15 @@ impl AppState {
             jobs.insert(id, entry);
         }
         drop(jobs);
+        let err = JobError::ConflictPending(msg);
         if let Some(entry) = self.jobs.read().await.get(&id) {
             entry.set_phase(Phase::Failed);
             entry.reset_live_speed();
+            if let Ok(mut g) = entry.last_error.write() {
+                *g = Some(err.clone());
+            }
         }
-        let _ = self.events.send(DomainEvent::JobFailed {
-            id,
-            error: JobError::ConflictPending(msg),
-        });
+        let _ = self.events.send(DomainEvent::JobFailed { id, error: err });
     }
 
     /// Replace the extension token with a freshly generated one and
@@ -1597,6 +1612,10 @@ impl AppState {
         // resume actually run instead of returning Cancelled instantly.
         let token = CancellationToken::new();
         *entry.cancel.lock().expect("cancel mutex poisoned") = token.clone();
+        // A new run supersedes whatever the last one failed with.
+        if let Ok(mut g) = entry.last_error.write() {
+            *g = None;
+        }
         let manager = self.manager.read().await.clone();
         let events = self.events.clone();
         let bridge: Arc<dyn LiveBridge> = Arc::new(StateLiveBridge {
@@ -1798,6 +1817,9 @@ impl AppState {
                 Err(err) => {
                     entry.set_phase(Phase::Failed);
                     entry.reset_live_speed();
+                    if let Ok(mut g) = entry.last_error.write() {
+                        *g = Some(err.clone());
+                    }
                     state.persist_job(id).await;
                     // NotifyAndPark path: surface the conflict failure
                     // as a parked job (end of queue, no auto-retry)
@@ -2161,6 +2183,12 @@ pub struct RemoveOpts {
 pub(crate) fn splice_live(entry: &JobEntry) -> Job {
     let mut j = entry.job.clone();
     j.status.phase = entry.phase();
+    // Why the last run failed, for any window that opens after it did
+    // — including after a restart, since this round-trips to the store
+    // through `persist_job`.
+    if let Ok(g) = entry.last_error.read() {
+        j.status.error = g.clone();
+    }
     j.status.downloaded = entry.counters.downloaded();
     if let Some(t) = entry.counters.total() {
         j.status.total = Some(t);
@@ -2249,6 +2277,7 @@ async fn clone_entry_with_job(old: &Arc<JobEntry>, new_job: Job) -> Arc<JobEntry
         parts: std::sync::RwLock::new(parts),
         cancel: std::sync::Mutex::new(cancel_token),
         running: AtomicBool::new(old.running.load(Ordering::Acquire)),
+        last_error: std::sync::RwLock::new(old.last_error.read().ok().and_then(|g| g.clone())),
         manual_run: AtomicBool::new(old.manual_run.load(Ordering::Acquire)),
         is_resumable: std::sync::atomic::AtomicI8::new(old.is_resumable.load(Ordering::Acquire)),
         captured_response: std::sync::RwLock::new(captured_response),
