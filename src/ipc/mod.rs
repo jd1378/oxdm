@@ -78,6 +78,9 @@ pub async fn accept_capture(
     if interactive {
         crate::daemon::tray::spawn_add_gui(Some(id), None);
     } else {
+        // Browser capture, not a click in oxdm — the window opens here
+        // either way, so a failure does not need to raise a second one.
+        state.mark_run_intent(id, false).await;
         let _ = state.start_job(id).await;
         crate::daemon::tray::spawn_download_gui(id);
     }

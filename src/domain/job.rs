@@ -65,6 +65,16 @@ impl Phase {
         matches!(self, Self::Completed | Self::Failed)
     }
 
+    /// Can a queue run pick this job up? Everything that is not
+    /// already running and not already done — a failed job is a
+    /// retry, not a reason to refuse to start the queue.
+    pub fn is_startable(self) -> bool {
+        matches!(
+            self,
+            Self::Queued | Self::Paused | Self::Failed | Self::Cancelled
+        )
+    }
+
     pub fn is_running(self) -> bool {
         matches!(
             self,
@@ -585,6 +595,18 @@ mod tests {
             category: Category::Other,
             captured_response: None,
         }
+    }
+
+    #[test]
+    fn failed_jobs_are_startable_so_a_queue_of_failures_can_run_again() {
+        assert!(Phase::Failed.is_startable());
+        assert!(Phase::Queued.is_startable());
+        assert!(Phase::Paused.is_startable());
+        assert!(Phase::Cancelled.is_startable());
+        // Done stays done, and a running job is not re-launched.
+        assert!(!Phase::Completed.is_startable());
+        assert!(!Phase::Downloading.is_startable());
+        assert!(!Phase::Evaluating.is_startable());
     }
 
     #[test]

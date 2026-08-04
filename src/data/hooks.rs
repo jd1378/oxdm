@@ -18,7 +18,11 @@ pub fn spawn(state: Arc<AppState>) {
         while let Ok(event) = rx.recv().await {
             match event {
                 DomainEvent::QueueStarted { id } => run_hooks(&state, id, HookPhase::Start).await,
-                DomainEvent::QueueFinished { id } => run_hooks(&state, id, HookPhase::Finish).await,
+                DomainEvent::QueueFinished {
+                    id,
+                    completed,
+                    failed,
+                } => run_hooks(&state, id, HookPhase::Finish { completed, failed }).await,
                 _ => {}
             }
         }
@@ -28,7 +32,12 @@ pub fn spawn(state: Arc<AppState>) {
 #[derive(Copy, Clone)]
 enum HookPhase {
     Start,
-    Finish,
+    /// Carries the run's outcome so a Notify hook can say what
+    /// happened rather than repeat its own title.
+    Finish {
+        completed: u32,
+        failed: u32,
+    },
 }
 
 async fn run_hooks(state: &AppState, id: QueueId, when: HookPhase) {
@@ -38,21 +47,37 @@ async fn run_hooks(state: &AppState, id: QueueId, when: HookPhase) {
     };
     let hooks = match when {
         HookPhase::Start => &queue.on_start,
-        HookPhase::Finish => &queue.on_finish,
+        HookPhase::Finish { .. } => &queue.on_finish,
     };
     for hook in hooks {
-        if let Err(e) = execute(state, hook).await {
+        if let Err(e) = execute(state, hook, &queue, when).await {
             tracing::warn!(queue = %queue.name, error = %e, "queue hook failed");
         }
     }
 }
 
-async fn execute(state: &AppState, hook: &QueueHook) -> Result<(), String> {
+async fn execute(
+    state: &AppState,
+    hook: &QueueHook,
+    queue: &crate::domain::Queue,
+    when: HookPhase,
+) -> Result<(), String> {
     match hook {
         QueueHook::Notify { title, body } => {
+            // The finish notification describes the run. The stored
+            // body is a placeholder the queues window wrote when the
+            // hook was created — it cannot know how the run went, and
+            // repeating the queue name under a "Queue finished" title
+            // tells the user nothing.
+            let body = match when {
+                HookPhase::Finish { completed, failed } => {
+                    crate::domain::finish_summary(&queue.name, completed, failed)
+                }
+                HookPhase::Start => body.clone(),
+            };
             #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
             {
-                crate::platform::show_notification(title.clone(), body.clone());
+                crate::platform::show_notification(title.clone(), body);
             }
             #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
             {

@@ -258,7 +258,10 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                             client.set_job_queue(id, q).await?;
                         }
                         if start_now {
-                            client.start_job(id).await?;
+                            // Bulk: the triage list can start dozens at
+                            // once, so failures belong in the list, not
+                            // in a window each.
+                            client.start_job_bulk(id).await?;
                         }
                     }
                     Ok(())

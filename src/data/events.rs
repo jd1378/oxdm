@@ -65,8 +65,12 @@ pub enum DomainEvent {
     },
     /// Every job of a queue reached a terminal phase and at least one
     /// job had been running. Drives `Queue::on_finish` (shutdown, …).
+    /// The counts cover *this run* only — a queue keeps jobs from
+    /// earlier runs, so they cannot be recovered from the job list.
     QueueFinished {
         id: QueueId,
+        completed: u32,
+        failed: u32,
     },
     /// Queue mutation (created / renamed / schedule edit / deleted).
     /// UI re-snapshots the queue list.

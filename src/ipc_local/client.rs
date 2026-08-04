@@ -198,8 +198,15 @@ impl Client {
             .await
     }
 
+    /// Start one download on the user's explicit request.
     pub async fn start_job(&self, id: JobId) -> Result<(), String> {
-        self.expect_ok(Request::StartJob(id)).await
+        self.expect_ok(Request::StartJob { id, manual: true }).await
+    }
+    /// Start a download as part of a bulk action, where one window per
+    /// failure would bury the screen.
+    pub async fn start_job_bulk(&self, id: JobId) -> Result<(), String> {
+        self.expect_ok(Request::StartJob { id, manual: false })
+            .await
     }
     pub async fn pause(&self, id: JobId) -> Result<(), String> {
         self.expect_ok(Request::Pause(id)).await

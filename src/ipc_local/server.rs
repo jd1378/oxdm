@@ -485,26 +485,37 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
                 Err(e) => Reply::Err(job_err_string(e)),
             }
         }
-        Request::StartJob(id) => match state.start_job(id).await {
-            Ok(()) => Reply::Ok,
-            Err(e) => Reply::Err(job_err_string(e)),
-        },
+        Request::StartJob { id, manual } => {
+            state.mark_run_intent(id, manual).await;
+            match state.start_job(id).await {
+                Ok(()) => Reply::Ok,
+                Err(e) => Reply::Err(job_err_string(e)),
+            }
+        }
         Request::Pause(id) => match state.pause(id).await {
             Ok(()) => Reply::Ok,
             Err(e) => Reply::Err(job_err_string(e)),
         },
-        Request::Resume(id) => match state.resume(id).await {
-            Ok(()) => Reply::Ok,
-            Err(e) => Reply::Err(job_err_string(e)),
-        },
+        // Resume / Restart reach the daemon only from a GUI gesture
+        // aimed at one download, so their failures are worth a window.
+        Request::Resume(id) => {
+            state.mark_run_intent(id, true).await;
+            match state.resume(id).await {
+                Ok(()) => Reply::Ok,
+                Err(e) => Reply::Err(job_err_string(e)),
+            }
+        }
         Request::CancelToQueued(id) => match state.cancel_to_queued(id).await {
             Ok(()) => Reply::Ok,
             Err(e) => Reply::Err(job_err_string(e)),
         },
-        Request::RestartJob(id) => match state.restart_job(id).await {
-            Ok(()) => Reply::Ok,
-            Err(e) => Reply::Err(job_err_string(e)),
-        },
+        Request::RestartJob(id) => {
+            state.mark_run_intent(id, true).await;
+            match state.restart_job(id).await {
+                Ok(()) => Reply::Ok,
+                Err(e) => Reply::Err(job_err_string(e)),
+            }
+        }
         Request::Remove(id, opts) => {
             let opts = RemoveOpts {
                 purge_partial: opts.purge_partial,

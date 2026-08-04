@@ -440,26 +440,24 @@ impl Main {
     /// Whether the toolbar Start/Stop toggle has anything to act on
     /// (design §3.1: "Start disabled when nothing resumable").
     /// Queue scope: pausing an active queue is always actionable;
-    /// starting needs ≥1 non-terminal job in the queue. Other scopes:
-    /// pausing needs something running; resuming needs ≥1 job that is
-    /// neither running nor terminal (Queued/Paused/Cancelled).
+    /// starting needs ≥1 startable job. Other scopes: pausing needs
+    /// something running; resuming needs ≥1 startable job.
+    ///
+    /// "Startable" is the daemon's own rule (`Phase::is_startable`),
+    /// failed jobs included — the button must not refuse work that
+    /// `start_queue` / `resume_all` would happily do.
     fn toggle_actionable(&self) -> bool {
+        let any_startable = |f: &dyn Fn(&crate::domain::Job) -> bool| -> bool {
+            self.snap
+                .jobs
+                .iter()
+                .any(|j| f(j) && self.phase(j.id).is_startable())
+        };
         match self.filter {
             SidebarFilter::Queue(q) => {
-                self.snap.active_queues.contains(&q)
-                    || self
-                        .snap
-                        .jobs
-                        .iter()
-                        .any(|j| j.queue_id == q && !self.phase(j.id).is_terminal())
+                self.snap.active_queues.contains(&q) || any_startable(&|j| j.queue_id == q)
             }
-            _ => {
-                self.any_running()
-                    || self.snap.jobs.iter().any(|j| {
-                        let p = self.phase(j.id);
-                        !p.is_running() && !p.is_terminal()
-                    })
-            }
+            _ => self.any_running() || any_startable(&|_| true),
         }
     }
 

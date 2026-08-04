@@ -64,6 +64,13 @@ pub struct JobEntry {
     pub parts: std::sync::RwLock<IndexMap<String, Arc<PartCounters>>>,
     pub cancel: std::sync::Mutex<CancellationToken>,
     pub running: AtomicBool,
+    /// The user started *this* download by hand — a row's Resume, the
+    /// download window's Resume, Add → Download now, Retry. Only such
+    /// a run raises the failure window: a batch reports its failures in
+    /// the queue-finished summary instead of stacking one window per
+    /// failed job. Set by [`AppState::mark_run_intent`] at every entry
+    /// point that starts a job, so it always describes the current run.
+    pub manual_run: AtomicBool,
     /// `0` = unknown, `1` = yes, `-1` = no. Set by the runner after
     /// evaluate succeeds. UI exposes the value as
     /// "Resume support: Yes / No / Unknown".
@@ -126,6 +133,7 @@ impl JobEntry {
             parts: std::sync::RwLock::new(IndexMap::new()),
             cancel: std::sync::Mutex::new(CancellationToken::new()),
             running: AtomicBool::new(false),
+            manual_run: AtomicBool::new(false),
             is_resumable: std::sync::atomic::AtomicI8::new(0),
             captured_response: std::sync::RwLock::new(None),
             session_speed_override: std::sync::atomic::AtomicU64::new(0),
@@ -235,8 +243,10 @@ pub struct AppState {
     /// Queues currently in "active" state — at least one job has been
     /// started by `start_queue` and no `QueueFinished` event has fired
     /// yet. Used to gate `QueueStarted` / `QueueFinished` emission so
-    /// hooks fire exactly once per run.
-    active_queues: RwLock<std::collections::HashSet<QueueId>>,
+    /// hooks fire exactly once per run. The value tallies *this run's*
+    /// outcomes so the finish event can report them; a queue's own job
+    /// list cannot, since it also holds results from earlier runs.
+    active_queues: RwLock<std::collections::HashMap<QueueId, QueueRunTally>>,
     /// FIFO of unresolved conflict prompts. The conflict window pops
     /// from here; its presence on `AppState` lets a freshly opened
     /// window observe pending items even when the dispatching event
@@ -360,7 +370,7 @@ impl AppState {
             hidden_jobs: RwLock::new(std::collections::HashSet::new()),
             main_queue_id,
             queues: RwLock::new(queues),
-            active_queues: RwLock::new(std::collections::HashSet::new()),
+            active_queues: RwLock::new(std::collections::HashMap::new()),
             conflict_queue: RwLock::new(std::collections::VecDeque::new()),
             master_key: RwLock::new(master_key),
             db_error: RwLock::new(db_error),
@@ -548,17 +558,15 @@ impl AppState {
             if budget == 0 {
                 break;
             }
-            match phase {
-                Phase::Queued | Phase::Paused if self.start_job(jid).await.is_ok() => {
-                    started_any = true;
-                    budget -= 1;
-                }
-                _ => {}
+            self.mark_run_intent(jid, false).await;
+            if phase.is_startable() && self.start_job(jid).await.is_ok() {
+                started_any = true;
+                budget -= 1;
             }
         }
 
         let mut active = self.active_queues.write().await;
-        if started_any && active.insert(id) {
+        if started_any && active.insert(id, QueueRunTally::default()).is_none() {
             let _ = self.events.send(DomainEvent::QueueStarted { id });
         }
         Ok(())
@@ -567,12 +575,12 @@ impl AppState {
     /// True when the queue has been started (via `start_queue` or
     /// scheduler) and has not yet emitted `QueueFinished`.
     pub async fn is_queue_active(&self, id: QueueId) -> bool {
-        self.active_queues.read().await.contains(&id)
+        self.active_queues.read().await.contains_key(&id)
     }
 
     /// Snapshot of currently active queue ids.
     pub async fn active_queue_ids(&self) -> std::collections::HashSet<QueueId> {
-        self.active_queues.read().await.clone()
+        self.active_queues.read().await.keys().copied().collect()
     }
 
     /// Pause every running job in the queue. Emits `QueueFinished` on
@@ -590,8 +598,12 @@ impl AppState {
             let _ = self.pause(jid).await;
         }
         let mut active = self.active_queues.write().await;
-        if active.remove(&id) {
-            let _ = self.events.send(DomainEvent::QueueFinished { id });
+        if let Some(tally) = active.remove(&id) {
+            let _ = self.events.send(DomainEvent::QueueFinished {
+                id,
+                completed: tally.completed,
+                failed: tally.failed,
+            });
         }
         Ok(())
     }
@@ -609,10 +621,27 @@ impl AppState {
             return;
         }
         let mut active = self.active_queues.write().await;
-        if active.remove(&queue_id) {
-            let _ = self
-                .events
-                .send(DomainEvent::QueueFinished { id: queue_id });
+        if let Some(tally) = active.remove(&queue_id) {
+            let _ = self.events.send(DomainEvent::QueueFinished {
+                id: queue_id,
+                completed: tally.completed,
+                failed: tally.failed,
+            });
+        }
+    }
+
+    /// Record one job's terminal outcome against its queue's current
+    /// run. Called before the finish watcher runs, so the job that
+    /// drains the queue is counted in the event it triggers.
+    async fn tally_queue_outcome(&self, queue_id: QueueId, outcome: JobOutcome) {
+        let mut active = self.active_queues.write().await;
+        let Some(tally) = active.get_mut(&queue_id) else {
+            return; // job outside a queue run (single Start of a paused job)
+        };
+        match outcome {
+            JobOutcome::Completed => tally.completed += 1,
+            JobOutcome::Failed => tally.failed += 1,
+            JobOutcome::Cancelled => {}
         }
     }
 
@@ -646,6 +675,7 @@ impl AppState {
             )
             .await?;
         self.hidden_jobs.write().await.insert(id);
+        self.mark_run_intent(id, false).await;
         self.start_job(id).await?;
         Ok(id)
     }
@@ -1535,6 +1565,25 @@ impl AppState {
 
     /// Spawn a runner for a queued / paused job. Idempotent on a
     /// running job (no-op).
+    /// Record who asked for the run that is about to start: a user
+    /// gesture aimed at this one download, or automation (a queue run,
+    /// Resume all, the scheduler, a browser capture). Every entry point
+    /// that starts a job states this, so the flag always describes the
+    /// current run rather than an earlier one.
+    pub async fn mark_run_intent(&self, id: JobId, manual: bool) {
+        if let Some(entry) = self.job_entry(id).await {
+            entry.manual_run.store(manual, Ordering::Release);
+        }
+    }
+
+    /// Did the user start this download by hand?
+    pub async fn is_manual_run(&self, id: JobId) -> bool {
+        match self.job_entry(id).await {
+            Some(entry) => entry.manual_run.load(Ordering::Acquire),
+            None => false,
+        }
+    }
+
     pub async fn start_job(self: &Arc<Self>, id: JobId) -> Result<(), JobError> {
         let entry = self
             .job_entry(id)
@@ -1668,12 +1717,31 @@ impl AppState {
         // First started job in a queue also fires QueueStarted, so a
         // manual single-job Start surfaces on_start hooks the same as a
         // schedule-driven start_queue.
-        if self.active_queues.write().await.insert(queue_id) {
+        if self
+            .active_queues
+            .write()
+            .await
+            .insert(queue_id, QueueRunTally::default())
+            .is_none()
+        {
             let _ = self.events.send(DomainEvent::QueueStarted { id: queue_id });
         }
         tokio::spawn(async move {
             let outcome = runner.run(job_clone).await;
             entry.running.store(false, Ordering::Release);
+            // Tally before the finish watcher: the job that empties the
+            // queue must be part of the counts its own completion
+            // reports.
+            state
+                .tally_queue_outcome(
+                    queue_id,
+                    match &outcome {
+                        Ok(_) => JobOutcome::Completed,
+                        Err(JobError::Cancelled) => JobOutcome::Cancelled,
+                        Err(_) => JobOutcome::Failed,
+                    },
+                )
+                .await;
             // After every terminal outcome, ask the watcher whether this
             // job's queue has now drained completely; if so it emits
             // QueueFinished. Doing it here avoids a second subscriber
@@ -2029,17 +2097,20 @@ impl AppState {
         }
     }
 
-    /// Resume every paused / queued job.
+    /// Resume every job that is not already running or done — failed
+    /// ones included, same rule as `start_queue`: "resume everything"
+    /// that silently skips the failures is not what it says.
     pub async fn resume_all(self: &Arc<Self>) {
         let ids: Vec<JobId> = self
             .jobs
             .read()
             .await
             .values()
-            .filter(|e| matches!(e.phase(), Phase::Paused | Phase::Queued))
+            .filter(|e| e.phase().is_startable())
             .map(|e| e.job.id)
             .collect();
         for id in ids {
+            self.mark_run_intent(id, false).await;
             let _ = self.resume(id).await;
         }
     }
@@ -2176,6 +2247,7 @@ async fn clone_entry_with_job(old: &Arc<JobEntry>, new_job: Job) -> Arc<JobEntry
         parts: std::sync::RwLock::new(parts),
         cancel: std::sync::Mutex::new(cancel_token),
         running: AtomicBool::new(old.running.load(Ordering::Acquire)),
+        manual_run: AtomicBool::new(old.manual_run.load(Ordering::Acquire)),
         is_resumable: std::sync::atomic::AtomicI8::new(old.is_resumable.load(Ordering::Acquire)),
         captured_response: std::sync::RwLock::new(captured_response),
         session_speed_override: std::sync::atomic::AtomicU64::new(
@@ -2264,6 +2336,25 @@ fn build_manager(settings: &Settings, proxy_password: Option<&str>) -> DownloadM
             DownloadManager::new(odl::config::Config::default())
         }
     }
+}
+
+/// One queue run's terminal outcomes. Reset every time the queue goes
+/// active, because "how did this run go" is the only question the
+/// finish notification can answer honestly — the queue's job list still
+/// holds whatever earlier runs left behind.
+#[derive(Default, Clone, Copy)]
+struct QueueRunTally {
+    completed: u32,
+    failed: u32,
+}
+
+/// A finished job's contribution to its queue's tally. Cancelled (the
+/// user paused or stopped it) is neither a success nor a failure.
+#[derive(Clone, Copy)]
+enum JobOutcome {
+    Completed,
+    Failed,
+    Cancelled,
 }
 
 /// AAD identity for secrets that belong to the app rather than to a

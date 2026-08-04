@@ -97,7 +97,13 @@ pub enum Request {
         url: Url,
         filename: Option<String>,
     },
-    StartJob(JobId),
+    /// Start a job. `manual` marks a gesture aimed at this one
+    /// download (a row's Start, Add → Download now): only those raise
+    /// the failure window. Bulk senders (batch triage) pass `false`.
+    StartJob {
+        id: JobId,
+        manual: bool,
+    },
     Pause(JobId),
     Resume(JobId),
     CancelToQueued(JobId),

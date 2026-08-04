@@ -296,3 +296,52 @@ pub enum QueueHook {
         body: String,
     },
 }
+
+/// What a queue run produced, as one sentence. Shared by the built-in
+/// "queue finished" notification and the per-queue Notify hook so a
+/// user who turns both on is told the same thing twice, not two
+/// different things.
+///
+/// Failures are named because a queue that "finished" with downloads
+/// still broken has not done what the user asked, and a bare total
+/// would hide that.
+pub fn finish_summary(queue: &str, completed: u32, failed: u32) -> String {
+    let files = |n: u32| if n == 1 { "file" } else { "files" };
+    match (completed, failed) {
+        (0, 0) => format!("{queue} is done — nothing was downloaded."),
+        (0, f) => format!("{queue} is done — {f} {} failed.", files(f)),
+        (c, 0) => format!("{queue} is done — {c} {} downloaded.", files(c)),
+        (c, f) => format!("{queue} is done — {c} {} downloaded, {f} failed.", files(c)),
+    }
+}
+
+#[cfg(test)]
+mod finish_summary_tests {
+    use super::finish_summary;
+
+    #[test]
+    fn reports_both_counts_and_singularises() {
+        assert_eq!(
+            finish_summary("Main", 4, 0),
+            "Main is done — 4 files downloaded."
+        );
+        assert_eq!(
+            finish_summary("Main", 1, 0),
+            "Main is done — 1 file downloaded."
+        );
+        assert_eq!(
+            finish_summary("Main", 3, 2),
+            "Main is done — 3 files downloaded, 2 failed."
+        );
+        assert_eq!(
+            finish_summary("Main", 0, 1),
+            "Main is done — 1 file failed."
+        );
+        // A queue stopped before anything finished says so rather than
+        // claiming success.
+        assert_eq!(
+            finish_summary("Main", 0, 0),
+            "Main is done — nothing was downloaded."
+        );
+    }
+}

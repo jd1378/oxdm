@@ -45,7 +45,11 @@ pub fn spawn(state: Arc<AppState>) {
                     };
                     notify(title, &error.to_string());
                 }
-                DomainEvent::QueueFinished { id } => {
+                DomainEvent::QueueFinished {
+                    id,
+                    completed,
+                    failed,
+                } => {
                     if !state.settings().await.notify_queue_finished {
                         continue;
                     }
@@ -54,7 +58,7 @@ pub fn spawn(state: Arc<AppState>) {
                     };
                     notify(
                         "Queue finished",
-                        &format!("Every download in {} is done.", queue.name),
+                        &crate::domain::finish_summary(&queue.name, completed, failed),
                     );
                 }
                 _ => {}

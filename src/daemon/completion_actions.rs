@@ -4,9 +4,12 @@
 //! `OnCompletion` preferences. The "show dialog" flag suppresses every
 //! other automatic action — same UX as IDM.
 //!
-//! Also raises the per-job window when a download *fails*, which has no
-//! per-job preferences to honour: the window is the only place that
-//! shows the error and offers a retry.
+//! Also raises the per-job window when a download the user started by
+//! hand *fails*: that gesture was aimed at one download, and the window
+//! is the only place showing the error and offering a retry. Automated
+//! runs (a queue, Resume all, the scheduler, a capture) stay silent —
+//! a batch can fail many jobs, and a stack of windows buries the
+//! queue-finished summary that already reports them.
 
 use std::process::Command;
 use std::sync::Arc;
@@ -22,7 +25,10 @@ pub fn spawn(state: Arc<AppState>) {
                 // A conflict parks the job pending an answer and has its
                 // own dialog; only real failures raise this one.
                 let conflict = matches!(error, crate::domain::JobError::ConflictPending(_));
-                if !conflict && state.settings().await.show_failed_dialog {
+                // Only a hand-started run gets a window; automation
+                // reports its failures elsewhere.
+                let manual = state.is_manual_run(*id).await;
+                if !conflict && manual && state.settings().await.show_failed_dialog {
                     crate::daemon::tray::spawn_download_gui(*id);
                 }
                 continue;

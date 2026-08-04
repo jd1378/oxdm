@@ -463,9 +463,11 @@ impl State {
         };
         q.on_finish = match self.finish {
             FinishKind::Nothing => vec![],
+            // Body is filled in when the hook fires (`data::hooks`):
+            // only the run itself knows how many downloads finished.
             FinishKind::Notify => vec![QueueHook::Notify {
                 title: "Queue finished".to_owned(),
-                body: q.name.clone(),
+                body: String::new(),
             }],
             FinishKind::Sleep => vec![QueueHook::Sleep],
             FinishKind::Shutdown => vec![QueueHook::Shutdown(ShutdownAction::ShutDown)],

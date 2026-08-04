@@ -48,6 +48,8 @@ pub fn spawn(state: Arc<AppState>) {
                 None => {
                     for id in std::mem::take(&mut held) {
                         // A job removed meanwhile simply fails to resume.
+                        // Automatic: the guard resumed it, not the user.
+                        state.mark_run_intent(id, false).await;
                         if state.resume(id).await.is_ok() {
                             tracing::info!(job = %id, "resumed by environment guard");
                         }
