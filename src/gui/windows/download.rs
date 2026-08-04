@@ -159,6 +159,7 @@ pub enum Msg {
     CsCompute,
     CsComputed(Result<String, String>),
     WinResized(f32, f32),
+    WinFocused(bool),
     ShotTick,
     Shot(iced::window::Screenshot),
     Themed(Box<Tokens>),
@@ -440,6 +441,10 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                     Msg::Noop,
                 ),
             ]),
+            // The failure path fires `JobFailed` and no `JobsChanged`,
+            // so without this the window an already-focused user is
+            // looking at would keep showing the transfer view.
+            Event::JobFailed { id, .. } if id == st.id => refetch(st.client.clone(), st.id),
             Event::Close => iced::exit(),
             Event::Focus => iced::window::latest().and_then(iced::window::gain_focus),
             _ => Task::none(),
@@ -652,6 +657,12 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             st.tokens = *t;
             Task::none()
         }
+        Msg::WinFocused(focused) => {
+            let client = st.client.clone();
+            Task::perform(async move { client.window_focused(focused).await }, |_| {
+                Msg::Noop
+            })
+        }
         Msg::WinResized(w, h) => {
             chrome::enforce_min_size(iced::Size::new(w, h), iced::Size::new(WIN_MIN_W, WIN_MIN_H))
         }
@@ -728,6 +739,10 @@ pub fn subscription(app: &App) -> Subscription<Msg> {
             iced::Event::Window(iced::window::Event::Resized(size)) => {
                 Some(Msg::WinResized(size.width, size.height))
             }
+            // The daemon reopens this window when the job fails; it
+            // only needs to when the user isn't already looking at it.
+            iced::Event::Window(iced::window::Event::Focused) => Some(Msg::WinFocused(true)),
+            iced::Event::Window(iced::window::Event::Unfocused) => Some(Msg::WinFocused(false)),
             _ => None,
         }),
         crate::gui::ipc::all_events(crate::ipc_local::protocol::GuiKind::Download(st.id))

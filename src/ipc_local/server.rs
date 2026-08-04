@@ -38,6 +38,24 @@ fn registry() -> &'static FocusRegistry {
     REG.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
+/// Which GUI windows currently hold keyboard focus, as reported by the
+/// windows themselves (`Request::WindowFocused`). Cleared with the rest
+/// of a connection's state on disconnect.
+type FocusState = std::sync::Mutex<HashMap<GuiKind, bool>>;
+fn focus_state() -> &'static FocusState {
+    static FOCUS: OnceLock<FocusState> = OnceLock::new();
+    FOCUS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// Is this window open *and* focused? A window the user is already
+/// looking at does not need to be replaced to be seen.
+pub fn is_focused(kind: GuiKind) -> bool {
+    focus_state()
+        .lock()
+        .map(|f| f.get(&kind).copied().unwrap_or(false))
+        .unwrap_or(false)
+}
+
 /// Try to surface an existing GUI process matching `kind`. Returns
 /// `true` when a `Focus` event was queued onto its connection — the
 /// caller should then *not* spawn a duplicate subprocess.
@@ -147,6 +165,9 @@ impl Drop for ConnState {
             };
             if same {
                 r.remove(&k);
+                if let Ok(mut f) = focus_state().lock() {
+                    f.remove(&k);
+                }
                 // The Spawning/Registered tracking owned by the
                 // tray module is keyed by the *kind*, not by this
                 // connection — only clear it on a clean disconnect
@@ -197,6 +218,18 @@ async fn handle_conn(stream: IpcStream, state: Arc<AppState>) -> Result<(), Code
             // Now that event_tx is known, register in the focus
             // registry if Hello already arrived.
             register_if_ready(&conn_state);
+            let _g = writer.lock().await;
+            let mut w = &*stream;
+            write_frame(&mut w, &Frame::Reply(req_id, Reply::Ok)).await?;
+            continue;
+        }
+
+        if let Request::WindowFocused(focused) = req {
+            if let Some(kind) = conn_state.kind
+                && let Ok(mut f) = focus_state().lock()
+            {
+                f.insert(kind, focused);
+            }
             let _g = writer.lock().await;
             let mut w = &*stream;
             write_frame(&mut w, &Frame::Reply(req_id, Reply::Ok)).await?;
@@ -735,6 +768,10 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
             crate::daemon::tray::spawn_queues_gui();
             Reply::Ok
         }
+        // Handled before dispatch (it needs the connection's kind);
+        // reaching here means a caller sent it on a connection that
+        // never said Hello, which is a no-op rather than an error.
+        Request::WindowFocused(_) => Reply::Ok,
         Request::OpenAboutWindow => {
             crate::daemon::tray::spawn_about_gui();
             Reply::Ok

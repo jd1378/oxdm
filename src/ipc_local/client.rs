@@ -457,6 +457,11 @@ impl Client {
     pub async fn open_about_window(&self) -> Result<(), String> {
         self.expect_ok(Request::OpenAboutWindow).await
     }
+    /// Report this window's focus state, so the daemon knows whether it
+    /// still has to surface it.
+    pub async fn window_focused(&self, focused: bool) -> Result<(), String> {
+        self.expect_ok(Request::WindowFocused(focused)).await
+    }
     pub async fn open_add_window(
         &self,
         edit_id: Option<JobId>,

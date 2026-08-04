@@ -1908,6 +1908,13 @@ impl AppState {
             .await
             .ok_or_else(|| JobError::Other("job not found".into()))?;
         entry.reset_run_stats();
+        // The abandoned run's failure goes with it: the job is back to
+        // Queued, and a stale reason would still be rendered by the
+        // download window, which keys the error block on the reason
+        // rather than the phase.
+        if let Ok(mut g) = entry.last_error.write() {
+            *g = None;
+        }
         entry.set_phase(Phase::Queued);
         self.persist_job(id).await;
         let _ = self.events.send(DomainEvent::JobUpdated {

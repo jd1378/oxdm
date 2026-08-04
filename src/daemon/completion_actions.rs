@@ -28,7 +28,19 @@ pub fn spawn(state: Arc<AppState>) {
                 // Only a hand-started run gets a window; automation
                 // reports its failures elsewhere.
                 let manual = state.is_manual_run(*id).await;
-                if !conflict && manual && state.settings().await.show_failed_dialog {
+                // Surfacing means evict-and-respawn (focusing is
+                // unreliable across window managers), which would tear
+                // down a window the user is already reading. If it is
+                // focused it is already surfaced — it refreshes itself
+                // off the same event.
+                let already_watching = crate::ipc_local::server::is_focused(
+                    crate::ipc_local::protocol::GuiKind::Download(*id),
+                );
+                if !conflict
+                    && manual
+                    && !already_watching
+                    && state.settings().await.show_failed_dialog
+                {
                     crate::daemon::tray::spawn_download_gui(*id);
                 }
                 continue;

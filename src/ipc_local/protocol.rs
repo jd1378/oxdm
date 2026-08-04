@@ -220,6 +220,9 @@ pub enum Request {
     OpenQueuesWindow,
     /// Open or focus the About window.
     OpenAboutWindow,
+    /// This connection's window gained or lost keyboard focus. Lets the
+    /// daemon skip surfacing a window the user is already looking at.
+    WindowFocused(bool),
     /// Open or focus the Add Download window. `edit_id` carries the
     /// capture-review path; `prefill_url` is the clipboard-resolved
     /// URL the caller (main GUI) read on the user's behalf, since the
