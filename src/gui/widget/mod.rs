@@ -12,8 +12,8 @@ pub mod striped;
 
 pub use button::{Btn, BtnSize};
 pub use cards::{
-    SCROLL_GUTTER, TabBtn, card, collapsible_card, hairline, section_card, sibling, vdivider,
-    vscroll,
+    SCROLL_GUTTER, TabBtn, card, collapsible_card, hairline, section_card, sibling, surface,
+    vdivider, vscroll,
 };
 pub use controls::{
     checkbox, col_header, col_header_sortable, combo, number_stepper, segmented, toggle,

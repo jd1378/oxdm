@@ -5,7 +5,7 @@
 //! settings tab is built from these so the panes stay coherent.
 
 use iced::widget::{column, container, row, text};
-use iced::{Alignment, Border, Color, Element, Length, Padding};
+use iced::{Alignment, Color, Element, Length, Padding};
 
 use crate::gui::color;
 use crate::gui::theme::{self, Tokens};
@@ -175,7 +175,6 @@ fn rows_surface<'a, M: 'a>(
     border_color: Color,
     rows: Vec<Element<'a, M>>,
 ) -> Element<'a, M> {
-    let t2 = *t;
     let mut body = column![].width(Length::Fill);
     for (i, r) in rows.into_iter().enumerate() {
         if i > 0 {
@@ -183,18 +182,8 @@ fn rows_surface<'a, M: 'a>(
         }
         body = body.push(r);
     }
-    container(body)
-        .width(Length::Fill)
-        .style(move |_| container::Style {
-            background: Some(t2.bg_surface.into()),
-            border: Border {
-                color: border_color,
-                width: 1.0,
-                radius: theme::surface::RADIUS.into(),
-            },
-            ..Default::default()
-        })
-        .into()
+    // Rows carry their own padding, so the surface adds none.
+    crate::gui::widget::surface(t.bg_surface, border_color, 0.0, body.into())
 }
 
 fn head<'a, M: 'a>(title: &str, color: Color) -> Element<'a, M> {

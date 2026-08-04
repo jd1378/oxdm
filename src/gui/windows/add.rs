@@ -772,7 +772,7 @@ fn ready_view(st: &AddState) -> Element<'_, Msg> {
             e,
             PROBE_CHECKLIST,
             Some(Msg::RetryProbe),
-            Msg::CopyText(crate::gui::widget::error_panel::error_meta(e).2.to_owned()),
+            Msg::CopyText(crate::gui::widget::error_panel::error_report(e)),
         ),
         _ => detect_card(st),
     };

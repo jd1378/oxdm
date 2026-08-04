@@ -9,22 +9,34 @@ use crate::gui::icons;
 use crate::gui::theme::{self, Tokens};
 use crate::gui::widget::pills;
 
-/// Plain card: bg_surface, border_subtle, control radius, padding.
-pub fn card<'a, M: 'a>(t: &Tokens, padding: f32, content: Element<'a, M>) -> Element<'a, M> {
-    let t = *t;
+/// The surface every framed block in the app is made of: one fill, one
+/// 1px border, the shared corner radius. Settings groups, plain cards
+/// and the severe-error panels differ only in those two colours and
+/// their padding, so they all come through here.
+pub fn surface<'a, M: 'a>(
+    background: Color,
+    border: Color,
+    padding: f32,
+    content: Element<'a, M>,
+) -> Element<'a, M> {
     container(content)
         .padding(padding)
         .width(Length::Fill)
         .style(move |_| container::Style {
-            background: Some(t.bg_surface.into()),
+            background: Some(background.into()),
             border: Border {
-                color: t.border_subtle,
+                color: border,
                 width: 1.0,
                 radius: theme::surface::RADIUS.into(),
             },
             ..Default::default()
         })
         .into()
+}
+
+/// Plain card: bg_surface, border_subtle, surface radius, padding.
+pub fn card<'a, M: 'a>(t: &Tokens, padding: f32, content: Element<'a, M>) -> Element<'a, M> {
+    surface(t.bg_surface, t.border_subtle, padding, content)
 }
 
 /// Section card with icon + bold title header, then body.

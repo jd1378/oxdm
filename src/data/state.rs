@@ -1807,6 +1807,8 @@ impl AppState {
                     let is_conflict = matches!(
                         &err,
                         JobError::ServerConflict(_)
+                            | JobError::NotResumable(_)
+                            | JobError::FileChanged(_)
                             | JobError::SaveConflict(_)
                             | JobError::ChecksumMismatch { .. }
                     );

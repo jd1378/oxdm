@@ -22,10 +22,11 @@ use crate::gui::theme::{self, Tokens};
 use crate::gui::widget::error_panel::{
     HASH_TRUNCATE_CHARS, error_block, hash_mismatch, mid_truncate,
 };
+use crate::gui::widget::striped::striped_progress_hatched;
 use crate::gui::widget::{
     Btn, BtnSize, RateChart, TabBtn, TextInput, card, checkbox, collapsible_card, combo, hairline,
     number_stepper, pill_progress, rate_chart, segmented, set_row, set_row_panel, set_rows,
-    sibling, status_dot, striped_progress, toggle,
+    sibling, status_dot, toggle,
 };
 use crate::gui::windows::add::footer;
 use crate::ipc_local::Client;
@@ -41,6 +42,14 @@ const WIN_MIN_W: f32 = 530.0;
 /// Floor height, minus the bottom gap that moved inside the scroll port
 /// and so no longer has to be reserved by the frame.
 const WIN_MIN_H: f32 = 418.0 - theme::space::S4;
+/// Launch height for the completion view: hero burst, the saved-to and
+/// address rows, the actions and the "don't show again" checkbox. Fixed
+/// content, so one measured number covers it.
+const WIN_COMPLETE_H: f32 = 440.0;
+/// Everything the error view puts around the error card: title bar,
+/// hero, progress bar, the gaps between them and the footer. The card
+/// itself is measured from its own copy — see `error_block_height`.
+const WIN_ERROR_CHROME_H: f32 = 206.0;
 
 // --- Speed tab (design §3.3 "Speed" pane) ----------------------------
 /// Max parallel connections stepper bounds — mirrors the runner's
@@ -129,6 +138,14 @@ pub enum Msg {
     // Footer / complete view
     PauseResume,
     Cancel,
+    /// Failure recovery (design §3.3): discard the partial file and
+    /// fetch from byte 0. The only way forward when the server refuses
+    /// to resume or the remote file changed.
+    RestartFromZero,
+    /// Failure recovery for a write fault: pick a new destination, then
+    /// retry. The bytes already downloaded carry over.
+    PickSaveFolder,
+    SaveFolderPicked(Option<std::path::PathBuf>),
     Open,
     OpenFolder,
     CloseWin,
@@ -360,7 +377,14 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 client,
                 entry,
             }));
-            Task::none()
+            let App::Ready(st) = app else {
+                return Task::none();
+            };
+            match launch_height(st) {
+                Some(h) => iced::window::latest()
+                    .and_then(move |id| iced::window::resize(id, iced::Size::new(WIN_W, h))),
+                None => Task::none(),
+            }
         }
         Msg::Connected(Err(e)) => {
             *app = App::Failed(e);
@@ -374,6 +398,21 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
             update_ready(st, msg)
         }
     }
+}
+
+/// Height this window should open at, when the state it opens in is a
+/// single page rather than the scrolling transfer view. `None` = keep
+/// the launch size. Only the *launch* size: `WIN_MIN_H` is untouched,
+/// so the user can still shrink the window afterwards.
+fn launch_height(st: &State) -> Option<f32> {
+    if st.phase() == Phase::Completed {
+        return Some(WIN_COMPLETE_H);
+    }
+    let err = st.entry.job.status.error.as_ref()?;
+    let wanted = WIN_ERROR_CHROME_H + crate::gui::widget::error_panel::error_block_height(err);
+    // Never below the floor: a two-line error must not open a window
+    // smaller than the user can resize it to.
+    Some(wanted.max(WIN_MIN_H))
 }
 
 fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
@@ -549,6 +588,40 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             Task::perform(async move { client.cancel_to_queued(id).await }, |_| {
                 Msg::CloseWin
             })
+        }
+        Msg::RestartFromZero => {
+            let client = st.client.clone();
+            let id = st.id;
+            Task::perform(async move { client.restart_job(id).await }, |_| Msg::Noop)
+        }
+        Msg::PickSaveFolder => {
+            let start = st.entry.job.save_dir.clone();
+            Task::perform(
+                async move {
+                    let mut dlg = rfd::AsyncFileDialog::new();
+                    if start.is_dir() {
+                        dlg = dlg.set_directory(&start);
+                    }
+                    dlg.pick_folder().await.map(|h| h.path().to_path_buf())
+                },
+                Msg::SaveFolderPicked,
+            )
+        }
+        Msg::SaveFolderPicked(None) => Task::none(),
+        Msg::SaveFolderPicked(Some(dir)) => {
+            // Move the destination, then retry: a write fault is only
+            // fixed once the job points somewhere writable.
+            let client = st.client.clone();
+            let id = st.id;
+            let url = st.entry.job.url.clone();
+            let filename = st.entry.job.filename.clone();
+            Task::perform(
+                async move {
+                    client.set_job_source(id, url, dir, filename).await?;
+                    client.resume(id).await
+                },
+                |_| Msg::Noop,
+            )
         }
         Msg::Open => {
             let path = final_path(&st.entry);
@@ -814,7 +887,23 @@ fn running_view(st: &State) -> Element<'_, Msg> {
     let phase = st.phase();
     // Barber-pole stripes are motion → off under reduce_motion (W6).
     let striped = phase.is_running() && !st.reduce_motion;
+    // Design §3.3 gives the bar three interrupted looks:
+    //   is-reconnecting → ochre, still trying (below, a running phase)
+    //   is-errored      → rust on a rust-tinted track, frozen
+    //   is-will-restart → dimmed rust struck through: the bytes under
+    //                     the bar are going to be thrown away
+    let error = st.entry.job.status.error.clone();
+    let restart_required = matches!(
+        error,
+        Some(crate::domain::JobError::FileChanged(_) | crate::domain::JobError::NotResumable(_))
+    );
+    let hatch = restart_required.then_some(color::rust::R300);
     let (track, fill, gradient) = match phase {
+        Phase::Failed if restart_required => (
+            color::with_alpha(t.status_danger_bg, 0.55),
+            color::with_alpha(color::rust::R200, 0.55),
+            None,
+        ),
         Phase::Failed => (t.status_danger_bg, t.status_danger, None),
         // Reconnecting reads ochre (design `is-reconnecting`), pairing
         // with the banner above; still striped (it's a running phase).
@@ -841,10 +930,15 @@ fn running_view(st: &State) -> Element<'_, Msg> {
     // A severe error replaces the tabs + pane entirely (design §3.3
     // "Severe error"): friendly title → detail → what-to-check → quiet
     // code footer, driven only by the real `JobStatus.error` field.
-    let error = st.entry.job.status.error.clone();
-
     let lower: Element<'_, Msg> = if let Some(err) = &error {
-        crate::gui::widget::vscroll(error_block(&st.tokens, err, Msg::Copy(err.to_string())))
+        let report = crate::gui::widget::error_panel::error_report(err);
+        let block = crate::gui::widget::error_panel::error_recovery_block(
+            &st.tokens,
+            err,
+            Msg::Copy(report.clone()),
+        )
+        .unwrap_or_else(|| error_block(&st.tokens, err, Msg::Copy(report)));
+        crate::gui::widget::vscroll(block)
             .height(Length::Fill)
             .into()
     } else {
@@ -947,7 +1041,7 @@ fn running_view(st: &State) -> Element<'_, Msg> {
         hero = hero.push(reconnect_banner(st));
     }
     hero = hero
-        .push(sibling(striped_progress(
+        .push(sibling(striped_progress_hatched(
             st.frac(),
             Length::Fill,
             10.0,
@@ -956,6 +1050,7 @@ fn running_view(st: &State) -> Element<'_, Msg> {
             gradient,
             striped,
             st.anim_t,
+            hatch,
         )))
         .push(lower);
 
@@ -1001,7 +1096,33 @@ fn error_footer<'a>(t: &Tokens, err: &JobError) -> Element<'a, Msg> {
             .on_press(Msg::PauseResume)
             .view(t)
     };
+    let restart = |label: &'a str, primary: bool| {
+        let btn = Btn::new(label).icon("rotate-ccw");
+        let btn = if primary {
+            btn.primary()
+        } else {
+            btn.toolbar()
+        };
+        btn.on_press(Msg::RestartFromZero).view(t)
+    };
     let group = match err {
+        // The server will not continue from the bytes on disk: retry in
+        // case it was transient, or discard them and start over.
+        JobError::NotResumable(_) => row![restart("Restart from 0", false), retry(), cancel],
+        // Continuing would splice two different files, so retrying is
+        // not on offer — only starting over, or giving up.
+        JobError::FileChanged(_) => row![restart("Restart from 0", true), cancel],
+        // A write fault is fixed by writing somewhere else; the bytes
+        // already downloaded carry over to the new folder.
+        JobError::DiskFull(_) | JobError::PermissionDenied(_) => row![
+            Btn::new("Save to different folder…")
+                .toolbar()
+                .icon("folder-open")
+                .on_press(Msg::PickSaveFolder)
+                .view(t),
+            retry(),
+            cancel,
+        ],
         // Write / disk problems: offer the folder so the user can free
         // space or fix permissions, then cancel.
         JobError::Io(_) | JobError::SaveConflict(_) => row![

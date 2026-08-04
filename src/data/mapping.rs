@@ -324,21 +324,27 @@ pub fn job_error_from_odl(e: &OdlError) -> JobError {
                 status_code,
                 reason,
                 url,
-            } => {
-                let mut msg = format!("status {status_code}");
-                if let Some(r) = reason {
-                    msg.push_str(&format!(" {r}"));
-                }
-                if let Some(u) = url {
-                    msg.push_str(&format!(" (url: {u})"));
-                }
-                JobError::Network(msg)
-            }
+            } => JobError::HttpStatus {
+                code: *status_code,
+                reason: reason.clone(),
+                url: url.as_ref().map(|u| u.to_string()),
+            },
             NetworkError::Other { message } => JobError::Network(message.clone()),
         },
         OdlError::Conflict(c) => match c {
             ConflictError::Save { conflict } => JobError::SaveConflict(conflict.to_string()),
-            ConflictError::Server { conflict } => JobError::ServerConflict(conflict.to_string()),
+            // Two of odl's server conflicts have their own recovery in
+            // the UI (restart from zero vs. retry), so they keep their
+            // identity instead of collapsing into one string.
+            ConflictError::Server { conflict } => match conflict {
+                odl::conflict::ServerConflict::FileChanged => {
+                    JobError::FileChanged(conflict.to_string())
+                }
+                odl::conflict::ServerConflict::NotResumable => {
+                    JobError::NotResumable(conflict.to_string())
+                }
+                _ => JobError::ServerConflict(conflict.to_string()),
+            },
             ConflictError::ChecksumMismatch { expected, actual } => JobError::ChecksumMismatch {
                 expected: expected.clone(),
                 actual: actual.clone(),
@@ -350,7 +356,15 @@ pub fn job_error_from_odl(e: &OdlError) -> JobError {
                 Some(extra) => format!("{e} ({extra})"),
                 None => e.to_string(),
             };
-            JobError::Io(msg)
+            // A full disk and a rejected folder are the two write
+            // faults the user can actually fix, so they are named.
+            // `ErrorKind` already folds the per-OS codes (ENOSPC,
+            // ERROR_DISK_FULL, …) into these two.
+            match e.kind() {
+                std::io::ErrorKind::StorageFull => JobError::DiskFull(msg),
+                std::io::ErrorKind::PermissionDenied => JobError::PermissionDenied(msg),
+                _ => JobError::Io(msg),
+            }
         }
         other => JobError::Other(other.to_string()),
     }

@@ -98,8 +98,28 @@ pub enum JobError {
         host: Option<String>,
         message: String,
     },
+    /// The server answered, but with a refusal. Kept structured
+    /// because the status class decides what the user should do —
+    /// 403 is a permissions problem, 404 a wrong address, 429 a
+    /// waiting game.
+    #[error("HTTP {code}{}", reason.as_ref().map(|r| format!(" {r}")).unwrap_or_default())]
+    HttpStatus {
+        code: u16,
+        reason: Option<String>,
+        url: Option<String>,
+    },
     #[error("server conflict: {0}")]
     ServerConflict(String),
+    /// The server refused a ranged request, so the bytes already on
+    /// disk cannot be continued — only discarded and re-fetched.
+    /// (odl `ServerConflict::NotResumable`.)
+    #[error("server refused to resume: {0}")]
+    NotResumable(String),
+    /// The remote file changed since this run started (size / ETag /
+    /// Last-Modified). Continuing would splice two different files.
+    /// (odl `ServerConflict::FileChanged`.)
+    #[error("the file on the server changed: {0}")]
+    FileChanged(String),
     #[error("save conflict: {0}")]
     SaveConflict(String),
     #[error("a download with filename `{filename}` is already in progress in {save_dir}")]
@@ -110,6 +130,14 @@ pub enum JobError {
     Cancelled,
     #[error("io error: {0}")]
     Io(String),
+    /// The destination drive ran out of space. Split from `Io` because
+    /// the user can act on it — free space, or save elsewhere — and
+    /// the partial download survives either way.
+    #[error("out of disk space: {0}")]
+    DiskFull(String),
+    /// The destination folder rejected the write.
+    #[error("can't write to the destination: {0}")]
+    PermissionDenied(String),
     /// Conflict surfaced while the job was running in background mode
     /// and the user has set `conflict_while_hidden = NotifyAndPark`.
     /// The job is parked at the end of the queue; user must explicitly

@@ -19,6 +19,35 @@ pub fn striped_progress<'a, M: 'a>(
     animate: bool,
     time_s: f32,
 ) -> Element<'a, M> {
+    striped_progress_hatched(
+        frac,
+        width,
+        height,
+        track,
+        fill,
+        fill_gradient,
+        animate,
+        time_s,
+        None,
+    )
+}
+
+/// Same bar, struck through with static diagonal bands across its whole
+/// width (design `.big-progress.is-will-restart .bp-strike`). Says the
+/// progress underneath is not going to be used — the download has to
+/// start over.
+#[allow(clippy::too_many_arguments)]
+pub fn striped_progress_hatched<'a, M: 'a>(
+    frac: f32,
+    width: Length,
+    height: f32,
+    track: Color,
+    fill: Color,
+    fill_gradient: Option<(Color, Color)>,
+    animate: bool,
+    time_s: f32,
+    hatch: Option<Color>,
+) -> Element<'a, M> {
     canvas(Striped {
         frac: frac.clamp(0.0, 1.0),
         track,
@@ -26,6 +55,7 @@ pub fn striped_progress<'a, M: 'a>(
         fill_gradient,
         animate,
         time_s,
+        hatch,
     })
     .width(width)
     .height(Length::Fixed(height))
@@ -39,6 +69,8 @@ struct Striped {
     fill_gradient: Option<(Color, Color)>,
     animate: bool,
     time_s: f32,
+    /// Static strike-through bands over the entire bar, fill included.
+    hatch: Option<Color>,
 }
 
 impl<M> canvas::Program<M> for Striped {
@@ -60,6 +92,9 @@ impl<M> canvas::Program<M> for Striped {
         frame.fill(&track_path, self.track);
 
         if self.frac <= 0.0 {
+            if let Some(color) = self.hatch {
+                hatch_bands(&mut frame, size, color);
+            }
             return vec![frame.into_geometry()];
         }
         let fw = size.width * self.frac;
@@ -151,7 +186,40 @@ impl<M> canvas::Program<M> for Striped {
             }
         }
 
+        // Strike-through last so it reads over the fill (design
+        // `.bp-strike` sits above `.fill`), and across the whole track:
+        // the part still to download is being discarded too.
+        if let Some(color) = self.hatch {
+            hatch_bands(&mut frame, size, color);
+        }
+
         vec![frame.into_geometry()]
+    }
+}
+
+/// Design `.bp-strike`: 1px bands every 11px at -45°, drawn over the
+/// full width of the bar.
+fn hatch_bands(frame: &mut canvas::Frame, size: Size, color: Color) {
+    const PERIOD: f32 = 11.0;
+    const BAND: f32 = 1.5;
+    let h = size.height;
+    let angle = 45.0_f32.to_radians();
+    let h_period = PERIOD / angle.cos();
+    let band_w = BAND / angle.cos();
+    let mut x = -h;
+    while x < size.width + h {
+        // Mirror of the animated stripes, sloping the other way: top
+        // edge shifted *left* by h instead of right.
+        let poly = [
+            Point::new(x, h),
+            Point::new(x + band_w, h),
+            Point::new(x + band_w - h, 0.0),
+            Point::new(x - h, 0.0),
+        ];
+        if let Some(path) = clip_poly_x(&poly, 0.0, size.width) {
+            frame.fill(&path, color);
+        }
+        x += h_period;
     }
 }
 
