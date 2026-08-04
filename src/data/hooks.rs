@@ -168,7 +168,7 @@ fn hibernate_action() -> Result<(), String> {
     #[cfg(target_os = "linux")]
     return spawn_detached("systemctl", &["hibernate"]);
     #[cfg(target_os = "macos")]
-    return Err("hibernate not supported on macOS — use sleep".into());
+    return Err("hibernate not supported on macOS; use sleep".into());
     #[cfg(target_os = "windows")]
     return spawn_detached("shutdown", &["/h"]);
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]

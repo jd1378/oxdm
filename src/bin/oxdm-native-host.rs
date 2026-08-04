@@ -271,7 +271,7 @@ fn read_db(path: &Path) -> Result<(u16, String), String> {
         .parse()
         .map_err(|e| format!("settings.ipc_port not numeric: {e}"))?;
     if token.is_empty() {
-        return Err("settings.ext_token is empty — open oxdm Settings to generate one".into());
+        return Err("settings.ext_token is empty; open oxdm Settings to generate one".into());
     }
     Ok((port, token))
 }

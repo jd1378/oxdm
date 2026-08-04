@@ -308,10 +308,10 @@ pub enum QueueHook {
 pub fn finish_summary(queue: &str, completed: u32, failed: u32) -> String {
     let files = |n: u32| if n == 1 { "file" } else { "files" };
     match (completed, failed) {
-        (0, 0) => format!("{queue} is done — nothing was downloaded."),
-        (0, f) => format!("{queue} is done — {f} {} failed.", files(f)),
-        (c, 0) => format!("{queue} is done — {c} {} downloaded.", files(c)),
-        (c, f) => format!("{queue} is done — {c} {} downloaded, {f} failed.", files(c)),
+        (0, 0) => format!("{queue} is done. Nothing was downloaded."),
+        (0, f) => format!("{queue} is done. {f} {} failed.", files(f)),
+        (c, 0) => format!("{queue} is done. {c} {} downloaded.", files(c)),
+        (c, f) => format!("{queue} is done. {c} {} downloaded, {f} failed.", files(c)),
     }
 }
 
@@ -323,25 +323,22 @@ mod finish_summary_tests {
     fn reports_both_counts_and_singularises() {
         assert_eq!(
             finish_summary("Main", 4, 0),
-            "Main is done — 4 files downloaded."
+            "Main is done. 4 files downloaded."
         );
         assert_eq!(
             finish_summary("Main", 1, 0),
-            "Main is done — 1 file downloaded."
+            "Main is done. 1 file downloaded."
         );
         assert_eq!(
             finish_summary("Main", 3, 2),
-            "Main is done — 3 files downloaded, 2 failed."
+            "Main is done. 3 files downloaded, 2 failed."
         );
-        assert_eq!(
-            finish_summary("Main", 0, 1),
-            "Main is done — 1 file failed."
-        );
+        assert_eq!(finish_summary("Main", 0, 1), "Main is done. 1 file failed.");
         // A queue stopped before anything finished says so rather than
         // claiming success.
         assert_eq!(
             finish_summary("Main", 0, 0),
-            "Main is done — nothing was downloaded."
+            "Main is done. Nothing was downloaded."
         );
     }
 }

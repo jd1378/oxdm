@@ -1866,7 +1866,7 @@ fn categories_section(st: &State) -> Element<'_, Msg> {
             let body = column![
                 label_input(
                     t,
-                    "extensions — comma-separated, no dots",
+                    "extensions, comma-separated, no dots",
                     // "Other" is the overflow bucket, not a list: it
                     // takes whatever the named categories don't claim,
                     // so there is nothing to edit.
@@ -2000,7 +2000,7 @@ fn network_section(st: &State) -> Element<'_, Msg> {
                 vec![toggle_row(
                     t,
                     "Accept invalid TLS certificates",
-                    Some("Dangerous — disables certificate verification for every host."),
+                    Some("Dangerous: disables certificate verification for every host."),
                     st.s.accept_invalid_certs,
                     Msg::InvalidCerts
                 )]
@@ -2225,8 +2225,8 @@ fn notifications_section(st: &State) -> Element<'_, Msg> {
                     ),
                     set_note(
                         t,
-                        "A finished queue has no dialog. For an action instead of a report — \
-                         run a command, sleep, shut down — use the queue's on-finish hooks in \
+                        "A finished queue has no dialog. For an action instead of a report (run a \
+                         command, sleep, shut down), use the queue's on-finish hooks in \
                          Queues & scheduling.",
                     ),
                 ],
@@ -2280,7 +2280,7 @@ fn danger_section(st: &State) -> Element<'_, Msg> {
             t,
             "Reset oxdm",
             Some(
-                "Backs up and clears the database — all jobs, queues and settings. \
+                "Backs up and clears the database: all jobs, queues and settings. \
                  Downloaded files stay on disk. The daemon exits and must be relaunched.",
             ),
             Btn::new("Reset oxdm…")
@@ -2305,7 +2305,7 @@ fn reset_overlay<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a, Msg> 
                 .color(t.fg_1),
             text(
                 "The database is backed up, then all jobs, queues and settings are \
-                 erased. Downloaded files are not touched. The daemon exits — relaunch \
+                 erased. Downloaded files are not touched. The daemon exits; relaunch \
                  oxdm to start fresh.",
             )
             .font(theme::BODY)
@@ -2372,7 +2372,7 @@ fn reset_overlay<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a, Msg> 
 
 pub fn launch_settings() {
     let mut app = iced::application(boot, update, view)
-        .title(|_: &App| "oxdm — Settings".to_owned())
+        .title(|_: &App| "oxdm: Settings".to_owned())
         .theme(|app: &App| match app {
             App::Ready(st) => st.tokens.iced_theme(),
             _ => Tokens::dark().iced_theme(),

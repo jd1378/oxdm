@@ -1191,7 +1191,7 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
     // title's left gutter; a plain container passes pointer events
     // through to the drag region below.
     let bar: Element<'_, Msg> =
-        titlebar::titlebar(t, &format!("Properties — {name}"), false, Msg::Window);
+        titlebar::titlebar(t, &format!("Properties: {name}"), false, Msg::Window);
     let bar: Element<'_, Msg> = if st.locked() {
         iced::widget::stack![
             bar,
@@ -1281,7 +1281,7 @@ fn lock_banner(t: &Tokens) -> Element<'_, Msg> {
                     .size(11.5)
                     .color(t.fg_1),
                 text(
-                    "Pause it to edit connection, cookie, or transfer settings — your \
+                    "Pause it to edit connection, cookie, or transfer settings. Your \
                      changes will take effect when you resume. Checksums can still be \
                      added at any time."
                 )
@@ -1493,7 +1493,7 @@ fn general_tab(st: &State) -> Element<'_, Msg> {
     );
 
     let cs_summary = if st.checksums.is_empty() {
-        "None — open the Checksums tab to add one.".to_owned()
+        "None. Open the Checksums tab to add one.".to_owned()
     } else {
         format!("{} saved", st.checksums.len())
     };
@@ -1735,7 +1735,7 @@ fn cs_lockhint(t: &Tokens) -> Element<'_, Msg> {
         row![
             icons::icon("shield-check", 11.0, t.status_success),
             text(
-                "Adding checksums is allowed even while the download is running — \
+                "Adding checksums is allowed even while the download is running; \
                  verification doesn't touch the transfer."
             )
             .font(theme::BODY_MEDIUM)
@@ -1925,7 +1925,7 @@ fn add_checksum_form(st: &State) -> Element<'_, Msg> {
         (
             t.status_danger,
             format!(
-                "{} too many — this is too long for {}.",
+                "{} too many. This is too long for {}.",
                 count - target,
                 form.algo.label()
             ),
@@ -2215,7 +2215,7 @@ fn connection_tab(st: &State) -> Element<'_, Msg> {
     // express "clear the global proxy" via `builder.proxy(None)`).
     let mode_hint: Option<String> = match st.proxy_mode {
         ProxyMode::Inherit => {
-            let mut hint = "Inherit (global / environment) — uses the proxy from \
+            let mut hint = "Inherit (global / environment): uses the proxy from \
                             Settings → Network, or your proxy environment variables."
                 .to_owned();
             if let Some(legacy) = &st.entry.job.proxy {
@@ -2226,7 +2226,7 @@ fn connection_tab(st: &State) -> Element<'_, Msg> {
             Some(hint)
         }
         ProxyMode::System => Some(
-            "System (environment variables) — ignores the global oxdm proxy for this \
+            "System (environment variables): ignores the global oxdm proxy for this \
              job; the standard proxy environment variables still apply."
                 .to_owned(),
         ),
@@ -2649,7 +2649,7 @@ fn headers_tab(st: &State) -> Element<'_, Msg> {
         section(t, "request headers (will send)", will_send),
         hdr_note(
             t,
-            "Merged from your global settings and this download's overrides — \
+            "Merged from your global settings and this download's overrides: \
              what oxdm sends on the next request. Stored cookies and credentials \
              are never displayed."
                 .to_owned(),
@@ -2675,7 +2675,7 @@ fn headers_tab(st: &State) -> Element<'_, Msg> {
             let body = if c.headers.is_empty() {
                 container(
                     text(
-                        "The server sent nothing displayable — every header it returned \
+                        "The server sent nothing displayable. Every header it returned \
                           was credential-bearing and is never stored.",
                     )
                     .font(theme::BODY)
@@ -2698,7 +2698,7 @@ fn headers_tab(st: &State) -> Element<'_, Msg> {
                 hdr_note(
                     t,
                     format!(
-                        "Captured on {when} — what the server sent then, not necessarily \
+                        "Captured on {when}: what the server sent then, not necessarily \
                          what it would send now. Cookies and credential-bearing headers \
                          are never stored."
                     ),
@@ -2710,7 +2710,7 @@ fn headers_tab(st: &State) -> Element<'_, Msg> {
             "captured response",
             container(
                 text(
-                    "Nothing captured yet — starting this download records the headers \
+                    "Nothing captured yet. Starting this download records the headers \
                      the server replies with."
                 )
                 .font(theme::BODY)
@@ -2825,10 +2825,10 @@ pub fn launch_properties(_id: JobId) {
     let mut app = iced::application(boot, update, view)
         .title(|app: &App| match app {
             App::Ready(st) => format!(
-                "oxdm — Properties {}",
+                "oxdm: Properties {}",
                 st.entry.job.filename.as_deref().unwrap_or("")
             ),
-            _ => "oxdm — Properties".to_owned(),
+            _ => "oxdm: Properties".to_owned(),
         })
         .theme(|app: &App| match app {
             App::Ready(st) => st.tokens.iced_theme(),

@@ -469,7 +469,7 @@ fn extensions_dialog<'a>(
     // the shorter helper line.
     let sub = if welcome_mode {
         "Install the oxdm extension and every download started in your browser \
-         comes here automatically — segmented, resumable, and queued."
+         comes here automatically: segmented, resumable, and queued."
     } else {
         "Install the oxdm helper extension to send links straight to oxdm."
     };
@@ -568,7 +568,7 @@ fn extensions_dialog<'a>(
 
     let privacy = row![
         icons::icon("shield", 14.0, t.status_success),
-        text("The extension reads only download URLs — never page content or browsing history.")
+        text("The extension reads only download URLs, never page content or browsing history.")
             .font(theme::BODY)
             .size(11.0)
             .color(t.fg_3),
@@ -635,7 +635,7 @@ pub fn secrets_locked<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Ms
         .align_y(Alignment::Center),
         text(
             "The encryption key for stored passwords/cookies is unavailable (OS keyring \
-             changed?). You can wipe stored job secrets and continue — downloads themselves \
+             changed?). You can wipe stored job secrets and continue. Downloads themselves \
              are not affected."
         )
         .font(theme::BODY)

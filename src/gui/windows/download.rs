@@ -1688,9 +1688,8 @@ fn completion_warn(st: &State) -> Option<Element<'_, Msg>> {
     // Mirrors the daemon's precedence: a power action supersedes the
     // disconnect, so don't promise something that won't run.
     if oc.disconnect && oc.shutdown.is_none() {
-        items.push(
-            "Your network connection will be turned off — other running transfers will fail.",
-        );
+        items
+            .push("Your network connection will be turned off. Other running transfers will fail.");
     }
     if items.is_empty() {
         return None;
@@ -1905,7 +1904,7 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
             t.status_danger,
             t.status_danger_bg,
             "shield-alert",
-            "Don't open this file — it may be corrupted, compromised, or intercepted.".to_owned(),
+            "Don't open this file. It may be corrupted, compromised, or intercepted.".to_owned(),
         ));
     }
     if let Some(stats) = completion_stats(st) {
@@ -2375,9 +2374,9 @@ pub fn launch_download(_id: JobId) {
                 .job
                 .filename
                 .clone()
-                .map(|n| format!("oxdm — download {n}"))
-                .unwrap_or_else(|| "oxdm — download".to_owned()),
-            _ => "oxdm — download".to_owned(),
+                .map(|n| format!("oxdm: download {n}"))
+                .unwrap_or_else(|| "oxdm: download".to_owned()),
+            _ => "oxdm: download".to_owned(),
         })
         .theme(|app: &App| match app {
             App::Ready(st) => st.tokens.iced_theme(),

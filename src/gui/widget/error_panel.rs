@@ -141,7 +141,7 @@ pub fn error_meta(err: &JobError) -> (&'static str, &'static str, &'static str, 
         ),
         JobError::ConflictPending(_) => (
             "triangle-alert",
-            "Paused — needs your attention",
+            "Paused: needs your attention",
             "CONFLICT_PENDING",
             "A conflict came up while running in the background. Resume to retry the download.",
         ),
@@ -225,8 +225,8 @@ pub fn error_detail(err: &JobError) -> String {
                 _ => "answered with an error instead of the file",
             };
             match reason {
-                Some(r) => format!("The server {what} — HTTP {code} {r}."),
-                None => format!("The server {what} — HTTP {code}."),
+                Some(r) => format!("The server {what} (HTTP {code} {r})."),
+                None => format!("The server {what} (HTTP {code})."),
             }
         }
         JobError::ServerConflict(_) => {
@@ -234,7 +234,7 @@ pub fn error_detail(err: &JobError) -> String {
         }
         JobError::NotResumable(_) => {
             "This server won't send part of a file, so the bytes already downloaded can't be \
-             continued — only discarded."
+             continued, only discarded."
                 .into()
         }
         JobError::FileChanged(_) => {
@@ -292,17 +292,17 @@ fn recovery_copy(err: &JobError) -> Option<(Tone, &'static str, &'static [&'stat
                 &[
                     "Add the sign-in under Properties → Connection, then retry.",
                     "If the link came from a logged-in page, copy it again from that session.",
-                    "Some hosts also need the referring page — set it under Properties.",
+                    "Some hosts also need the referring page. Set it under Properties.",
                 ],
             ),
             403 => (
                 Tone::Danger,
                 TRY,
                 &[
-                    "Open the link in the browser you got it from — many hosts only serve it \
+                    "Open the link in the browser you got it from; many hosts only serve it \
                      to that session.",
                     "Signed links expire; fetch a fresh one from the source.",
-                    "Some hosts reject unknown clients — set a browser User-Agent under \
+                    "Some hosts reject unknown clients. Set a browser User-Agent under \
                      Settings → Network.",
                 ],
             ),
@@ -311,7 +311,7 @@ fn recovery_copy(err: &JobError) -> Option<(Tone, &'static str, &'static [&'stat
                 TRY,
                 &[
                     "Check the address for typos, then open it in a browser.",
-                    "The file may have moved or been taken down — look for a current link.",
+                    "The file may have moved or been taken down. Look for a current link.",
                     "If the URL was copied from a page, copy it again; some are one-time.",
                 ],
             ),
@@ -319,7 +319,7 @@ fn recovery_copy(err: &JobError) -> Option<(Tone, &'static str, &'static [&'stat
                 Tone::Warning,
                 TRY,
                 &[
-                    "Wait a few minutes before retrying — the limit is time-based.",
+                    "Wait a few minutes before retrying; the limit is time-based.",
                     "Lower the connections per file under Properties → Connection.",
                     "Avoid running several downloads from this host at once.",
                 ],
@@ -328,7 +328,7 @@ fn recovery_copy(err: &JobError) -> Option<(Tone, &'static str, &'static [&'stat
                 Tone::Danger,
                 TRY,
                 &[
-                    "Retry in a few minutes — server-side failures are usually temporary.",
+                    "Retry in a few minutes. Server-side failures are usually temporary.",
                     "Check the host's status page if it has one.",
                     "If it persists, the file may need to be fetched from a mirror.",
                 ],
@@ -349,7 +349,7 @@ fn recovery_copy(err: &JobError) -> Option<(Tone, &'static str, &'static [&'stat
             Tone::Danger,
             TRY,
             &[
-                "Check the address for typos — the hostname did not resolve.",
+                "The hostname did not resolve. Check the address for typos.",
                 "Open the site in a browser; if that fails too, the problem is upstream of oxdm.",
                 "On a VPN or a custom DNS server, switch it off and retry.",
                 "A domain registered or moved in the last day or two may still be propagating.",
@@ -359,7 +359,7 @@ fn recovery_copy(err: &JobError) -> Option<(Tone, &'static str, &'static [&'stat
             Tone::Danger,
             TRY,
             &[
-                "Get a fresh URL from the source — signed links expire.",
+                "Get a fresh URL from the source; signed links expire.",
                 "Check whether your sign-in or session is still valid.",
                 "If the file changed on the server, restart from the beginning; the bytes \
                  already downloaded are discarded.",
@@ -382,7 +382,7 @@ fn recovery_copy(err: &JobError) -> Option<(Tone, &'static str, &'static [&'stat
             TRY,
             &[
                 "Free up space on the destination drive, then try again.",
-                "Or save this download to a different folder — your progress carries over.",
+                "Or save this download to a different folder. Your progress carries over.",
                 "Check that the drive isn't being unmounted or going to sleep.",
             ],
         ),
@@ -391,7 +391,7 @@ fn recovery_copy(err: &JobError) -> Option<(Tone, &'static str, &'static [&'stat
             TRY,
             &[
                 "Check that you can write to the destination folder.",
-                "Or save this download to a different folder — your progress carries over.",
+                "Or save this download to a different folder. Your progress carries over.",
                 "If another program is holding the file open, close it and try again.",
             ],
         ),

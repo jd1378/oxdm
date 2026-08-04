@@ -37,8 +37,8 @@ const ERROR_H: f32 = 484.0;
 /// (design §3.2, `add-dialog.jsx` `.eb-checklist` copy).
 const PROBE_CHECKLIST: &[&str] = &[
     "The link is still valid and hasn't expired.",
-    "You're signed in if the file requires authentication — add credentials under Advanced → Auth.",
-    "A proxy or VPN isn't blocking the host — review Advanced → Proxy.",
+    "You're signed in if the file requires authentication. Add credentials under Advanced → Auth.",
+    "A proxy or VPN isn't blocking the host. Review Advanced → Proxy.",
     "Try a different user agent if the server filters by browser.",
 ];
 
@@ -1375,8 +1375,8 @@ pub fn launch_add(_edit_id: Option<JobId>, _prefill: Option<String>) {
     // Args re-parsed in boot() (iced's boot closure takes no params).
     let mut app = iced::application(boot, update, view)
         .title(|app: &App| match app {
-            App::Ready(st) if st.edit_id.is_some() => "oxdm — Edit Download".to_owned(),
-            _ => "oxdm — Download File Info".to_owned(),
+            App::Ready(st) if st.edit_id.is_some() => "oxdm: Edit Download".to_owned(),
+            _ => "oxdm: Download File Info".to_owned(),
         })
         .theme(|app: &App| match app {
             App::Ready(st) => st.tokens.iced_theme(),
