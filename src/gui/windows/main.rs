@@ -116,6 +116,10 @@ pub enum Msg {
     SetSort(SortColumn),
     SetSearch(String),
     RowClick(JobId, bool, bool),
+    /// Press that landed on the table but not on a row — the empty
+    /// space below the last row, or beside the columns. Rows capture
+    /// their own presses, so reaching this means "nothing here".
+    ClearSelection,
     RowDoubleClick(JobId),
     RowRightClick(JobId),
     Toolbar(ToolbarAction),
@@ -744,6 +748,11 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
         }
         Msg::SetSearch(s) => {
             m.search = s;
+            Task::none()
+        }
+        Msg::ClearSelection => {
+            m.selection.clear();
+            m.select_anchor = None;
             Task::none()
         }
         Msg::RowClick(id, ctrl, shift) => {
@@ -1599,15 +1608,27 @@ fn main_view(m: &Main) -> Element<'_, Msg> {
             row![
                 sidebar(m),
                 vdivider(t.border_subtle, f32::MAX),
-                column![
-                    toolbar(m),
-                    hairline(t.border_subtle),
-                    tab_strip(m),
-                    hairline(t.border_subtle),
-                    table(m),
-                ]
-                .width(Length::Fill)
-                .height(Length::Fill),
+                // Clicking past the rows clears the selection, the way
+                // every file list does. One `mouse_area` around the
+                // whole pane covers the empty table body, the strip
+                // beside the columns and the gaps in the bars above it:
+                // rows, buttons, tabs, the search field and the
+                // scrollbars all capture their own presses (iced's
+                // `mouse_area` forwards to its content first and stops
+                // if the event was captured), so this only ever sees
+                // presses that hit nothing.
+                mouse_area(
+                    column![
+                        toolbar(m),
+                        hairline(t.border_subtle),
+                        tab_strip(m),
+                        hairline(t.border_subtle),
+                        table(m),
+                    ]
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+                )
+                .on_press(Msg::ClearSelection),
             ]
             .height(Length::Fill),
             hairline(t.border_subtle),
