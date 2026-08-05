@@ -94,9 +94,26 @@ const BURST_STAGE: f32 = 88.0;
 const BURST_CIRCLE: f32 = 64.0;
 /// Check / shield-alert glyph size, centered over the burst circle.
 const BURST_ICON: f32 = 30.0;
-/// Outer-ring max radius as a fraction of the stage half-extent — the
-/// rings breathe between the circle edge and this on each pulse.
-const BURST_RING_MAX: f32 = 0.96;
+/// `cb-pulse`: one ring expands from 0.7× to 1.5× of the 88px stage
+/// while fading 0.5 → 0, over this period, on CSS `ease-out`.
+const BURST_PULSE_SECS: f32 = 1.6;
+const BURST_RING_FROM: f32 = 0.7;
+const BURST_RING_TO: f32 = 1.5;
+const BURST_RING_ALPHA: f32 = 0.5;
+/// The rings grow past the 88px stage, and CSS lets them overflow it.
+/// A canvas clips to its bounds, so the stage it paints on has to be the
+/// full extent of the widest ring while radii stay measured from
+/// `BURST_STAGE` — otherwise the pulse gets its edges sliced off.
+const BURST_CANVAS: f32 = BURST_STAGE * BURST_RING_TO;
+/// `.cb-ring.r2 { animation-delay: 600ms }`. Shorter than the period, so
+/// the two rings read as a pair of pulses followed by a pause rather
+/// than an even heartbeat — that gap is the design's rhythm, not a gap
+/// in the implementation.
+const BURST_RING2_DELAY: f32 = 0.6;
+/// `.complete-burst.danger .cb-ring`: no animation, one ring held at
+/// this scale and alpha. A hard stop, not a heartbeat.
+const BURST_DANGER_RING_SCALE: f32 = 1.15;
+const BURST_DANGER_RING_ALPHA: f32 = 0.45;
 /// Burst/pulse oscillation rate (rad/s feel applied to `anim_t`).
 const PULSE_RATE: f32 = 3.2;
 
@@ -748,9 +765,10 @@ pub fn subscription(app: &App) -> Subscription<Msg> {
         if st.rate_open {
             subs.push(iced::time::every(Duration::from_millis(500)).map(|_| Msg::SampleTick));
         }
-    } else if shows_complete(st) && !st.reduce_motion {
+    } else if shows_complete(st) && !is_tampered(st) && !st.reduce_motion {
         // Drive the completion-burst pulse; the running branch's tick is
-        // gone once terminal, so the burst needs its own (W6-gated) tick.
+        // gone once terminal, so the burst needs its own (W6-gated)
+        // tick. The danger burst is a still image — nothing to drive.
         subs.push(iced::time::every(Duration::from_millis(33)).map(|_| Msg::AnimTick));
     }
     Subscription::batch(subs)
@@ -1884,7 +1902,7 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
     .width(Length::Fill)
     .align_x(Alignment::Center);
 
-    let mut body = column![burst, header].spacing(theme::space::S3);
+    let mut body = column![header].spacing(theme::space::S3);
     // Tampered files get a heavy "don't open" warning right under the
     // header (design `.tamper-banner`).
     if tampered {
@@ -1966,9 +1984,19 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
         t,
         column![
             titlebar::titlebar(t, &st.window_title(), false, Msg::Window),
+            // The burst sits outside the scroll area. A scrollable clips
+            // to its viewport, and the widest ring bleeds 22px above the
+            // stage — inside the scroll region that bleed is sheared off
+            // at the top edge no matter how much padding surrounds it.
+            container(burst).width(Length::Fill).padding(iced::Padding {
+                top: theme::space::S6,
+                bottom: theme::space::S3,
+                left: theme::space::S4,
+                right: theme::space::S4,
+            }),
             container(crate::gui::widget::vscroll(body).height(Length::Fill))
                 .padding(iced::Padding {
-                    top: theme::space::S4,
+                    top: 0.0,
                     bottom: theme::space::S4,
                     left: theme::space::S4,
                     right: theme::space::S4 - crate::gui::widget::SCROLL_GUTTER,
@@ -2291,46 +2319,54 @@ fn is_tampered(st: &State) -> bool {
     saved_mismatch || computed_mismatch
 }
 
-/// Completion burst (design `.complete-burst`, anim `cb-pop`): an 88px
-/// stage with two pulsing rings around a gradient circle + a centered
-/// glyph. Clay/check when healthy; rust/`x` when the integrity check
-/// failed — a cross reads as "this did not pass" at a glance, where a
-/// shield reads as protection.
-/// Pulse is frozen (rings at rest) when `reduce_motion`.
+/// Completion burst (design `.complete-burst`): an 88px stage with a
+/// gradient circle and a centered glyph. Healthy is clay with a check
+/// and two rings pulsing outward; the danger variant is rust with
+/// `shield-alert` and a single ring held still.
+///
+/// Pulse is frozen (ring at rest) when `reduce_motion`, which lands on
+/// the same still image the danger variant always shows.
 fn completion_burst(st: &State, tampered: bool) -> Element<'_, Msg> {
-    let phase_t = if st.reduce_motion { 0.0 } else { st.anim_t };
     let (ring, circle) = if tampered {
-        (color::rust::R300, color::rust::R400)
+        (color::rust::R200, color::rust::R400)
     } else {
-        (color::clay::C400, color::clay::C300)
+        (color::clay::C400, color::clay::C500)
     };
     let rings = canvas(Burst {
-        t: phase_t,
+        t: st.anim_t,
+        still: tampered || st.reduce_motion,
         ring,
         circle,
     })
-    .width(Length::Fixed(BURST_STAGE))
-    .height(Length::Fixed(BURST_STAGE));
+    .width(Length::Fixed(BURST_CANVAS))
+    .height(Length::Fixed(BURST_CANVAS));
 
     let glyph = container(icons::icon(
-        if tampered { "x" } else { "check" },
+        if tampered { "shield-alert" } else { "check" },
         BURST_ICON,
         iced::Color::WHITE,
     ))
-    .width(Length::Fixed(BURST_STAGE))
-    .height(Length::Fixed(BURST_STAGE))
+    .width(Length::Fixed(BURST_CANVAS))
+    .height(Length::Fixed(BURST_CANVAS))
     .align_x(Alignment::Center)
     .align_y(Alignment::Center);
 
-    stack![rings, glyph]
-        .width(Length::Fixed(BURST_STAGE))
-        .height(Length::Fixed(BURST_STAGE))
-        .into()
+    // The rings bleed past the stage exactly as `overflow: visible`
+    // lets them in CSS: painted in full, but costing the column only
+    // the 88px the design reserves.
+    crate::gui::widget::overflowing(
+        stack![rings, glyph]
+            .width(Length::Fixed(BURST_CANVAS))
+            .height(Length::Fixed(BURST_CANVAS)),
+        BURST_STAGE,
+    )
 }
 
 /// Canvas program for the burst: gradient circle + two breathing rings.
 struct Burst {
     t: f32,
+    /// Danger variant, or reduce-motion: one ring, held.
+    still: bool,
     ring: iced::Color,
     circle: iced::Color,
 }
@@ -2348,27 +2384,53 @@ impl<M> canvas::Program<M> for Burst {
     ) -> Vec<canvas::Geometry> {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
         let center = Point::new(bounds.width / 2.0, bounds.height / 2.0);
-        let half = bounds.width.min(bounds.height) / 2.0;
+        // Radii come from the design's 88px stage, not the wider canvas.
+        let half = BURST_STAGE / 2.0;
         let circle_r = BURST_CIRCLE / 2.0;
 
-        // Two rings, phase-offset, breathing from the circle edge out to
-        // `BURST_RING_MAX`; alpha fades as they expand (pulse-out feel).
-        for i in 0..2 {
-            let phase = (self.t * PULSE_RATE + i as f32 * std::f32::consts::PI).sin() * 0.5 + 0.5;
-            let r = circle_r + (half * BURST_RING_MAX - circle_r) * phase;
-            let alpha = (1.0 - phase) * 0.5;
-            let path = canvas::Path::circle(center, r);
+        // The ring is the stage inset to 0 — an 88px circle — scaled and
+        // faded by `cb-pulse`. Each ring runs the same 1.6s curve, the
+        // second offset by 600ms; drawing them from one clock keeps the
+        // offset exact instead of drifting between two animation handles.
+        let mut ring = |scale: f32, alpha: f32| {
+            let path = canvas::Path::circle(center, half * scale);
             frame.stroke(
                 &path,
                 canvas::Stroke::default()
-                    .with_width(2.0)
+                    .with_width(1.0)
                     .with_color(color::with_alpha(self.ring, alpha)),
             );
+        };
+        if self.still {
+            ring(BURST_DANGER_RING_SCALE, BURST_DANGER_RING_ALPHA);
+        } else {
+            for delay in [0.0, BURST_RING2_DELAY] {
+                let phase = ((self.t - delay).rem_euclid(BURST_PULSE_SECS)) / BURST_PULSE_SECS;
+                // CSS `ease-out` eases the timing, and both properties
+                // read the eased fraction — so the ring is already
+                // near-transparent by the time it is near-largest.
+                let p = iced_anim::transition::bezier::EASE_OUT.solve(phase);
+                ring(
+                    BURST_RING_FROM + (BURST_RING_TO - BURST_RING_FROM) * p,
+                    BURST_RING_ALPHA * (1.0 - p),
+                );
+            }
         }
 
-        // Solid gradient-ish circle (vertical mix from `circle`→`ring`).
+        // `linear-gradient(135deg, …)`: CSS measures the angle clockwise
+        // from "to top", so 135deg runs top-left → bottom-right.
         let body = canvas::Path::circle(center, circle_r);
-        frame.fill(&body, color::mix(self.circle, self.ring, 0.5));
+        frame.fill(
+            &body,
+            canvas::Fill::from(canvas::gradient::Gradient::Linear(
+                canvas::gradient::Linear::new(
+                    Point::new(center.x - circle_r, center.y - circle_r),
+                    Point::new(center.x + circle_r, center.y + circle_r),
+                )
+                .add_stop(0.0, self.ring)
+                .add_stop(1.0, self.circle),
+            )),
+        );
 
         vec![frame.into_geometry()]
     }

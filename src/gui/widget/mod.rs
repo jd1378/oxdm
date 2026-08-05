@@ -6,6 +6,7 @@ pub mod controls;
 pub mod ellipsis;
 pub mod error_panel;
 pub mod inputs;
+pub mod overflow;
 pub mod pills;
 pub mod settings;
 pub mod striped;
@@ -20,6 +21,7 @@ pub use controls::{
 };
 pub use ellipsis::ellipsized;
 pub use inputs::{FileInput, PasswordInput, TextInput, search_field};
+pub use overflow::overflowing;
 pub use pills::{
     ProgressTone, chip, dot, eyebrow, field_label, inline_progress, pill_count, pill_progress,
     status_dot, swatch,
