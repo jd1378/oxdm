@@ -685,7 +685,6 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
 
     container(column![
         titlebar::titlebar(t, "About oxdm", false, Msg::Window),
-        hairline(t.border_subtle),
         identity(t),
         hairline(t.border_subtle),
         body,

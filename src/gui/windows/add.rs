@@ -890,7 +890,6 @@ fn ready_view(st: &AddState) -> Element<'_, Msg> {
     let t2 = *t;
     let page = column![
         titlebar::titlebar(t, title, false, Msg::Window),
-        hairline(t.border_subtle),
         crate::gui::widget::vscroll(
             container(body)
                 .padding(iced::Padding {

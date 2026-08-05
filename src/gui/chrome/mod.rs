@@ -37,6 +37,11 @@ pub fn window_task<M: Send + 'static>(control: WindowControl) -> Task<M> {
 /// over the ring.
 pub fn framed<'a, M: 'a>(content: impl Into<iced::Element<'a, M>>) -> iced::Element<'a, M> {
     const BORDER_W: f32 = 1.0;
+    // A decorated window already has an OS frame; the ring would be a
+    // black line inside it.
+    if !titlebar::use_custom() {
+        return content.into();
+    }
     iced::widget::container(content)
         .width(iced::Length::Fill)
         .height(iced::Length::Fill)

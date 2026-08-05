@@ -1843,7 +1843,6 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
 
     let content = container(column![
         titlebar::titlebar(t, "oxdm — Queues & scheduling", false, Msg::Window),
-        hairline(t.border_subtle),
         overlaid,
     ])
     .width(Length::Fill)
@@ -1985,9 +1984,9 @@ fn color_pop_overlay<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a, M
     let cx = LIST_W + theme::space::S4;
     let cy = theme::space::S4 + COLOR_BTN + POP_GAP;
     let (ww, wh) = if st.win_size.0 > 0.0 {
-        (st.win_size.0, st.win_size.1 - titlebar::HEIGHT - 1.0)
+        (st.win_size.0, st.win_size.1 - titlebar::chrome_h())
     } else {
-        (WIN_DEFAULT_W, WIN_DEFAULT_H - titlebar::HEIGHT - 1.0)
+        (WIN_DEFAULT_W, WIN_DEFAULT_H - titlebar::chrome_h())
     };
     let left = cx.min(ww - mw).max(0.0);
     let top = cy.min(wh - mh).max(0.0);

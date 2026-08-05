@@ -1681,7 +1681,6 @@ fn main_view(m: &Main) -> Element<'_, Msg> {
 
     let content = container(column![
         titlebar::titlebar(t, "oxdm", m.maximized, Msg::Window),
-        hairline(t.border_subtle),
         with_toasts,
     ])
     .width(Length::Fill)
@@ -2361,7 +2360,7 @@ fn header_ghost<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg> {
             left: (m.cursor.0 - grab).max(0.0),
             // The layer starts below the titlebar, so window-space y has
             // to lose that; centre the ghost on the pointer.
-            top: (m.cursor.1 - titlebar::HEIGHT - 1.0 - HEADER_H / 2.0).max(0.0),
+            top: (m.cursor.1 - titlebar::chrome_h() - HEADER_H / 2.0).max(0.0),
             ..Default::default()
         }),
     ]
@@ -3362,10 +3361,10 @@ fn context_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>, id: JobId) -> E
     // Anchor at the cursor (egui opens context menus at the click
     // point); clamp so the menu stays inside the window.
     let (cx, cy) = m.menu_anchor;
-    let cy = cy - titlebar::HEIGHT - 1.0; // overlay stack starts below the bar
+    let cy = cy - titlebar::chrome_h(); // overlay stack starts below the bar
     let (mw, mh) = (268.0, 290.0);
     let (ww, wh) = if m.win_size.0 > 0.0 {
-        (m.win_size.0, m.win_size.1 - titlebar::HEIGHT - 1.0)
+        (m.win_size.0, m.win_size.1 - titlebar::chrome_h())
     } else {
         (1240.0, 760.0)
     };
@@ -3434,10 +3433,10 @@ fn columns_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, 
     .on_right_press(Msg::CloseOverlay);
 
     let (cx, cy) = m.menu_anchor;
-    let cy = cy - titlebar::HEIGHT - 1.0;
+    let cy = cy - titlebar::chrome_h();
     let (mw, mh) = (188.0, 200.0);
     let (ww, wh) = if m.win_size.0 > 0.0 {
-        (m.win_size.0, m.win_size.1 - titlebar::HEIGHT - 1.0)
+        (m.win_size.0, m.win_size.1 - titlebar::chrome_h())
     } else {
         (1240.0, 760.0)
     };

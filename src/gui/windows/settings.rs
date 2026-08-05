@@ -1164,7 +1164,6 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
 
     let page = column![
         titlebar::titlebar(t, "Settings", false, Msg::Window),
-        hairline(t.border_subtle),
         row![
             sidebar,
             crate::gui::widget::vscroll(

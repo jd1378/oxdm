@@ -21,7 +21,7 @@ use crate::gui::icons;
 use crate::gui::ipc::DaemonSignal;
 use crate::gui::shot::Shot;
 use crate::gui::theme::{self, Tokens};
-use crate::gui::widget::{Btn, hairline};
+use crate::gui::widget::Btn;
 use crate::ipc_local::Client;
 use crate::ipc_local::protocol::Event;
 
@@ -326,7 +326,6 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
 
     let content = container(column![
         titlebar::titlebar(t, "oxdm — Power action pending", false, Msg::Window),
-        hairline(t.border_subtle),
         body,
     ])
     .width(Length::Fill)

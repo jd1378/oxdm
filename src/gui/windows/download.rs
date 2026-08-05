@@ -1074,7 +1074,6 @@ fn running_view(st: &State) -> Element<'_, Msg> {
         t,
         column![
             titlebar::titlebar(t, &st.window_title(), false, Msg::Window),
-            hairline(t.border_subtle),
             container(hero)
                 // No bottom pad: the tab body already scrolls, so its
                 // last row should meet the footer hairline instead of
@@ -1950,7 +1949,6 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
         t,
         column![
             titlebar::titlebar(t, &st.window_title(), false, Msg::Window),
-            hairline(t.border_subtle),
             container(crate::gui::widget::vscroll(body).height(Length::Fill))
                 .padding(iced::Padding {
                     top: theme::space::S4,

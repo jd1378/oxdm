@@ -1192,8 +1192,10 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
     // `.prop-titlebar-lock`). The chip is stacked over the (centered)
     // title's left gutter; a plain container passes pointer events
     // through to the drag region below.
+    // Without a painted bar (macOS) there is nothing to stack the chip
+    // over; the locked state still reads from the Apply/field states.
     let bar: Element<'_, Msg> = titlebar::titlebar(t, &st.window_title(), false, Msg::Window);
-    let bar: Element<'_, Msg> = if st.locked() {
+    let bar: Element<'_, Msg> = if st.locked() && titlebar::use_custom() {
         iced::widget::stack![
             bar,
             container(titlebar_lock_chip(t))
@@ -1212,7 +1214,6 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
     let t2 = *t;
     let page = column![
         bar,
-        hairline(t.border_subtle),
         tabs,
         hairline(t.border_subtle),
         crate::gui::widget::vscroll(

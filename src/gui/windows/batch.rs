@@ -443,7 +443,6 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
 
     let page = column![
         titlebar::titlebar(t, "Send to oxdm", false, Msg::Window),
-        hairline(t.border_subtle),
         container(
             column![
                 sibling(header.into()),

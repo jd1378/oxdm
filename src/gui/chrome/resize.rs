@@ -78,6 +78,12 @@ pub fn resizable<'a, M: Clone + 'a>(
     on_control: impl Fn(WindowControl) -> M + 'a,
 ) -> Element<'a, M> {
     use iced::mouse::Interaction as I;
+    // A decorated window resizes from its own frame edges and draws its
+    // own border, so both the handles and the hairline are dead weight
+    // there — and the painted SE grip is not a macOS idiom.
+    if !crate::gui::chrome::titlebar::use_custom() {
+        return content;
+    }
     let t = *t;
     let bordered = container(content)
         .width(Length::Fill)

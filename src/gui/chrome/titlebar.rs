@@ -1,7 +1,8 @@
 //! Custom client-side titlebar: drag region, centered title, window
-//! controls (minimize / maximize / close). Heights per design
-//! (`.win-titlebar` height: 32px) on Linux/Windows, 28px on macOS
-//! (native bar there).
+//! controls (minimize / maximize / close), 32px per design
+//! (`.win-titlebar`). Linux/Windows only — macOS keeps its native bar
+//! and every painted piece of chrome collapses there (see
+//! [`use_custom`]).
 
 use iced::widget::{container, mouse_area, row};
 use iced::{Alignment, Color, Element, Length};
@@ -10,16 +11,26 @@ use crate::gui::chrome::WindowControl;
 use crate::gui::icons;
 use crate::gui::theme::{self, Tokens};
 
-#[cfg(target_os = "macos")]
-pub const HEIGHT: f32 = 28.0;
-#[cfg(not(target_os = "macos"))]
+/// Height of the painted bar itself. Only meaningful where the painted
+/// chrome exists at all — see [`use_custom`].
 pub const HEIGHT: f32 = theme::size::TITLEBAR_H;
 
 const BTN_SIDE: f32 = 24.0;
 
 /// Whether the custom (painted) titlebar is used on this platform.
+/// macOS keeps its native decorations (`chrome::window_settings` sets
+/// `decorations` from the same condition), so painting our own bar
+/// there would stack a second title bar under the traffic lights.
 pub fn use_custom() -> bool {
     !cfg!(target_os = "macos")
+}
+
+/// Vertical space the painted chrome occupies at the top of a window:
+/// the bar plus its hairline, or nothing when the OS draws its own.
+/// Overlay layers sit *below* this, so they convert window-space y with
+/// it.
+pub fn chrome_h() -> f32 {
+    if use_custom() { HEIGHT + 1.0 } else { 0.0 }
 }
 
 fn control_button<'a, M: Clone + 'a>(
@@ -69,14 +80,19 @@ fn control_button<'a, M: Clone + 'a>(
     .into()
 }
 
-/// Render the titlebar. `on_control` maps window controls into the
-/// window's message type.
+/// Render the titlebar and the hairline that separates it from the
+/// window body. `on_control` maps window controls into the window's
+/// message type. Collapses to nothing where the OS decorates the
+/// window itself, so callers need no platform branch of their own.
 pub fn titlebar<'a, M: Clone + 'a>(
     t: &Tokens,
     title: &str,
     maximized: bool,
     on_control: impl Fn(WindowControl) -> M + 'a,
 ) -> Element<'a, M> {
+    if !use_custom() {
+        return iced::widget::Space::new().height(Length::Fixed(0.0)).into();
+    }
     let t2 = *t;
 
     // Ellipsized, not `text`: a title can be a full URL (a download with
@@ -116,7 +132,7 @@ pub fn titlebar<'a, M: Clone + 'a>(
     .spacing(theme::space::S2)
     .align_y(Alignment::Center);
 
-    container(
+    let bar = container(
         row![
             drag_region,
             container(controls)
@@ -134,6 +150,9 @@ pub fn titlebar<'a, M: Clone + 'a>(
     .style(move |_| container::Style {
         background: Some(t2.bg_titlebar.into()),
         ..Default::default()
-    })
-    .into()
+    });
+
+    // The hairline belongs to the bar, not to the body: it is what
+    // `chrome_h` counts, and it must disappear with the bar.
+    iced::widget::column![bar, crate::gui::widget::hairline(t.border_subtle)].into()
 }
