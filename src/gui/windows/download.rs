@@ -1872,7 +1872,7 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
 
     // "From" (source URL) row — copy only (design `FromUrlRow`).
     let from_row = column![
-        label("Address"),
+        label("URL"),
         row![
             ro_field(mid_truncate(&address, PATH_TRUNCATE_CHARS)),
             Btn::new("")
