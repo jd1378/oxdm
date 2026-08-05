@@ -241,6 +241,14 @@ impl State {
             _ => 0.0,
         }
     }
+    /// Caption for both the painted titlebar and the OS/taskbar title:
+    /// what the download is, then how it is doing. The URL stands in
+    /// until evaluation resolves a filename.
+    fn window_title(&self) -> String {
+        let job = &self.entry.job;
+        let name = job.filename.as_deref().unwrap_or(job.url.as_str());
+        format!("{name} — {}", self.phase().label())
+    }
 }
 
 /// The connection count `max_conn` currently asks for: blank (or a
@@ -935,13 +943,6 @@ fn running_view(st: &State) -> Element<'_, Msg> {
         _ => (t.progress_track, t.fg_4, None),
     };
 
-    let name = st
-        .entry
-        .job
-        .filename
-        .clone()
-        .unwrap_or_else(|| "download".to_owned());
-
     // A severe error replaces the tabs + pane entirely (design §3.3
     // "Severe error"): friendly title → detail → what-to-check → quiet
     // code footer, driven only by the real `JobStatus.error` field.
@@ -1072,7 +1073,7 @@ fn running_view(st: &State) -> Element<'_, Msg> {
     page(
         t,
         column![
-            titlebar::titlebar(t, &name, false, Msg::Window),
+            titlebar::titlebar(t, &st.window_title(), false, Msg::Window),
             hairline(t.border_subtle),
             container(hero)
                 // No bottom pad: the tab body already scrolls, so its
@@ -1948,7 +1949,7 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
     page(
         t,
         column![
-            titlebar::titlebar(t, &name, false, Msg::Window),
+            titlebar::titlebar(t, &st.window_title(), false, Msg::Window),
             hairline(t.border_subtle),
             container(crate::gui::widget::vscroll(body).height(Length::Fill))
                 .padding(iced::Padding {
@@ -2369,14 +2370,14 @@ fn completion_stats(st: &State) -> Option<Element<'_, Msg>> {
 pub fn launch_download(_id: JobId) {
     let mut app = iced::application(boot, update, view)
         .title(|app: &App| match app {
-            // Taskbar/switcher entry: the phase leads, since it is the
-            // one thing the window body shows but the title bar doesn't.
+            // Taskbar/switcher entry: identity first, then the phase,
+            // which is the one thing the window body shows but the
+            // title bar doesn't. The URL stands in until evaluation
+            // resolves a filename.
             App::Ready(st) => {
-                let phase = st.phase().label();
-                match &st.entry.job.filename {
-                    Some(n) => format!("{phase} — download {n}"),
-                    None => format!("{phase} — download"),
-                }
+                let job = &st.entry.job;
+                let name = job.filename.as_deref().unwrap_or(job.url.as_str());
+                format!("{name} — {}", st.phase().label())
             }
             _ => "oxdm — download".to_owned(),
         })

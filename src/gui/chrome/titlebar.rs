@@ -3,7 +3,7 @@
 //! (`.win-titlebar` height: 32px) on Linux/Windows, 28px on macOS
 //! (native bar there).
 
-use iced::widget::{container, mouse_area, row, text};
+use iced::widget::{container, mouse_area, row};
 use iced::{Alignment, Color, Element, Length};
 
 use crate::gui::chrome::WindowControl;
@@ -79,11 +79,11 @@ pub fn titlebar<'a, M: Clone + 'a>(
 ) -> Element<'a, M> {
     let t2 = *t;
 
-    let title_el: Element<'a, M> = text(title.to_owned())
-        .font(theme::BODY_BOLD)
-        .size(13.0)
-        .color(t.fg_2)
-        .into();
+    // Ellipsized, not `text`: a title can be a full URL (a download with
+    // no resolved filename yet), which would otherwise wrap out of the
+    // fixed-height bar and shove the controls off-screen.
+    let title_el: Element<'a, M> =
+        crate::gui::widget::ellipsized(title.to_owned(), theme::BODY_BOLD, 13.0, t.fg_2);
 
     // Drag region: everything except the trailing controls strip.
     let drag_region = mouse_area(

@@ -216,6 +216,15 @@ impl State {
         self.entry.counters.phase.is_running()
     }
 
+    /// Caption for both the painted titlebar and the OS/taskbar title:
+    /// what the download is, then which window this is. The URL stands
+    /// in until evaluation resolves a filename.
+    fn window_title(&self) -> String {
+        let job = &self.entry.job;
+        let name = job.filename.as_deref().unwrap_or(job.url.as_str());
+        format!("{name} — Properties")
+    }
+
     /// Mode that synthesizes its own `scheme://host:port` and therefore
     /// needs both fields (`Inherit` / `System` carry no address).
     fn proxy_explicit(&self) -> bool {
@@ -1103,13 +1112,6 @@ fn row_sep<'a>(t: &Tokens) -> Element<'a, Msg> {
 
 fn ready_view(st: &State) -> Element<'_, Msg> {
     let t = &st.tokens;
-    let name = st
-        .entry
-        .job
-        .filename
-        .clone()
-        .unwrap_or_else(|| "download".to_owned());
-
     let tabs = container(
         row![
             tabbtn(t, "General", "info", Tab::General, st.tab),
@@ -1190,8 +1192,7 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
     // `.prop-titlebar-lock`). The chip is stacked over the (centered)
     // title's left gutter; a plain container passes pointer events
     // through to the drag region below.
-    let bar: Element<'_, Msg> =
-        titlebar::titlebar(t, &format!("Properties — {name}"), false, Msg::Window);
+    let bar: Element<'_, Msg> = titlebar::titlebar(t, &st.window_title(), false, Msg::Window);
     let bar: Element<'_, Msg> = if st.locked() {
         iced::widget::stack![
             bar,
@@ -2824,10 +2825,7 @@ fn advanced_tab(st: &State) -> Element<'_, Msg> {
 pub fn launch_properties(_id: JobId) {
     let mut app = iced::application(boot, update, view)
         .title(|app: &App| match app {
-            App::Ready(st) => format!(
-                "oxdm — Properties {}",
-                st.entry.job.filename.as_deref().unwrap_or("")
-            ),
+            App::Ready(st) => st.window_title(),
             _ => "oxdm — Properties".to_owned(),
         })
         .theme(|app: &App| match app {
