@@ -122,11 +122,14 @@ const BURST_DANGER_RING_ALPHA: f32 = 0.45;
 /// the interruption note under the last one. The row is pinned because
 /// `vdivider` needs a concrete height.
 const STAT_GRID_PAD: f32 = 4.0;
+const STAT_CELL_PAD_Y: f32 = 8.0;
+const STAT_CELL_PAD_X: f32 = 10.0;
 const STAT_LABEL_SIZE: f32 = 9.5;
 const STAT_VALUE_SIZE: f32 = 13.0;
 const STAT_SUB_ICON: f32 = 10.0;
-/// 8px padding twice, plus the label, value and sub-line boxes.
-const STAT_CELL_H: f32 = 8.0 * 2.0 + 13.0 + 18.0 + 15.0;
+/// The cell's own padding twice, plus the label, value and sub-line
+/// boxes. Pinned so `vdivider` has a height to draw against.
+const STAT_CELL_H: f32 = STAT_CELL_PAD_Y * 2.0 + 13.0 + 18.0 + 15.0;
 
 /// Burst/pulse oscillation rate (rad/s feel applied to `anim_t`).
 const PULSE_RATE: f32 = 3.2;
@@ -2694,11 +2697,15 @@ fn stat_cell<'a>(
     if let Some(sub) = sub {
         col = col.push(sub);
     }
+    // Top-aligned, not centered: the last cell carries a sub-line the
+    // others don't, and centering each cell in the row would drop the
+    // first two labels below the third.
     container(col)
         .width(Length::Fill)
         .height(Length::Fill)
         .align_x(Alignment::Center)
-        .align_y(Alignment::Center)
+        .align_y(Alignment::Start)
+        .padding([STAT_CELL_PAD_Y, STAT_CELL_PAD_X])
         .into()
 }
 
