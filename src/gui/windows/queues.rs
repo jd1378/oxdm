@@ -277,6 +277,12 @@ pub struct State {
 
     name: String,
     max_concurrent: usize,
+    /// The selected queue stores no per-queue limit and inherits the
+    /// global one. The stepper cannot show "inherit", so it displays the
+    /// fallback — and must not turn that display into an edit: without
+    /// this flag the editor reports one change the moment it opens.
+    /// Cleared as soon as the user works the stepper.
+    conc_inherited: bool,
     sched: SchedKind,
     sched_start: String,
     sched_days: WeekDayMask,
@@ -345,6 +351,7 @@ impl State {
         self.color_hex = q.color.map(hex_string).unwrap_or_default();
         self.color_open = false;
         self.max_concurrent = q.max_concurrent.unwrap_or(CONC_FALLBACK);
+        self.conc_inherited = q.max_concurrent.is_none();
         self.sched = match q.schedule {
             QueueSchedule::Manual => SchedKind::Manual,
             QueueSchedule::Daily { .. } => SchedKind::Recurring,
@@ -422,7 +429,7 @@ impl State {
         let mut q = self.selected_queue()?.clone();
         q.name = self.name.trim().to_owned();
         q.color = self.color;
-        q.max_concurrent = Some(self.max_concurrent);
+        q.max_concurrent = (!self.conc_inherited).then_some(self.max_concurrent);
         q.schedule = match self.sched {
             SchedKind::Manual => QueueSchedule::Manual,
             SchedKind::Condition => QueueSchedule::Condition(CondSet {
@@ -514,6 +521,8 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 queues,
                 name: String::new(),
                 max_concurrent: CONC_FALLBACK,
+                // Owned by `hydrate`, which runs on every selection.
+                conc_inherited: false,
                 sched: SchedKind::Manual,
                 sched_start: String::new(),
                 sched_days: WeekDayMask(0x7F),
@@ -654,6 +663,7 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
         }
         Msg::Concurrency(v) => {
             st.max_concurrent = v;
+            st.conc_inherited = false;
             Task::none()
         }
         Msg::Sched(k) => {
