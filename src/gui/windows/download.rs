@@ -45,13 +45,13 @@ const WIN_MIN_H: f32 = 418.0 - theme::space::S4;
 /// Launch height for the completion view: hero burst and its title, the
 /// file card, the saved-to and address rows, and the actions. Fixed
 /// content, so one measured number covers it.
-const WIN_COMPLETE_H: f32 = 490.0;
+const WIN_COMPLETE_H: f32 = 474.0;
 /// The failed-integrity view adds a "don't open this file" banner, an
 /// expected-vs-got digest panel and the integrity box to the same
 /// content. Both heights are measured from what the page actually
 /// draws, so neither view opens scrolled — the scroll region stays only
 /// as the fallback for a window the user shrinks.
-const WIN_TAMPERED_H: f32 = 814.0;
+const WIN_TAMPERED_H: f32 = 798.0;
 /// Everything the error view puts around the error card: title bar,
 /// hero, progress bar, the gaps between them and the footer. The card
 /// itself is measured from its own copy — see `error_block_height`.
@@ -118,6 +118,14 @@ const BURST_RING2_DELAY: f32 = 0.6;
 /// this scale and alpha. A hard stop, not a heartbeat.
 const BURST_DANGER_RING_SCALE: f32 = 1.15;
 const BURST_DANGER_RING_ALPHA: f32 = 0.45;
+/// Completed-view file card (design `.complete-file`): a 40px ext tile
+/// beside the name and size.
+const FILE_TILE: f32 = 40.0;
+const FILE_TILE_RADIUS: f32 = 7.0;
+const FILE_EXT_SIZE: f32 = 10.0;
+const FILE_NAME_SIZE: f32 = 13.5;
+const FILE_META_SIZE: f32 = 11.0;
+
 /// Completion stat cells (design `.complete-stats`): an eyebrow label
 /// over a mono value, centered, with the interruption note under the
 /// last one.
@@ -1844,19 +1852,27 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
     };
     let tile_bg = color::mix(t.bg_surface, accent, 0.20);
     let t2 = *t;
-    let tile = container(text(ext).font(theme::MONO_BOLD).size(12.0).color(accent))
-        .width(Length::Fixed(56.0))
-        .height(Length::Fixed(56.0))
-        .align_x(Alignment::Center)
-        .align_y(Alignment::Center)
-        .style(move |_| container::Style {
-            background: Some(tile_bg.into()),
-            border: iced::Border {
-                radius: theme::radius::SM.into(),
-                ..Default::default()
-            },
+    // Design `.complete-file .ext-big` overrides the 44px detected-card
+    // tile with a 40px one: this card names a file that is already on
+    // disk, so the extension is a label, not the headline.
+    let tile = container(
+        text(ext)
+            .font(theme::MONO_BOLD)
+            .size(FILE_EXT_SIZE)
+            .color(accent),
+    )
+    .width(Length::Fixed(FILE_TILE))
+    .height(Length::Fixed(FILE_TILE))
+    .align_x(Alignment::Center)
+    .align_y(Alignment::Center)
+    .style(move |_| container::Style {
+        background: Some(tile_bg.into()),
+        border: iced::Border {
+            radius: FILE_TILE_RADIUS.into(),
             ..Default::default()
-        });
+        },
+        ..Default::default()
+    });
 
     let (title_text, title_color) = if tampered {
         ("Integrity check failed", t.status_danger)
@@ -1878,18 +1894,18 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
                 column![
                     text(name.clone())
                         .font(theme::BODY_BOLD)
-                        .size(14.0)
+                        .size(FILE_NAME_SIZE)
                         .color(t.fg_1),
                     text(format!(
                         "Downloaded {} ({} bytes)",
                         format_bytes_2(total),
                         crate::gui::format::format_int_grouped(total)
                     ))
-                    .font(theme::BODY)
-                    .size(12.0)
-                    .color(t.fg_2),
+                    .font(theme::MONO)
+                    .size(FILE_META_SIZE)
+                    .color(t.fg_3),
                 ]
-                .spacing(4.0),
+                .spacing(3.0),
             ]
             .spacing(theme::space::S3)
             .align_y(Alignment::Center)
