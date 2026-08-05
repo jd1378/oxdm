@@ -24,4 +24,7 @@ pub use queue::{
     QueueHook, QueueId, QueueSchedule, WeekDayMask, finish_summary, finish_title,
     random_vivid_color,
 };
-pub use settings::{ConflictWhileHidden, Settings, Theme};
+pub use settings::{
+    ConflictWhileHidden, Settings, Theme, default_category_folder, default_category_folders,
+    detected_download_dir,
+};

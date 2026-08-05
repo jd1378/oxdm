@@ -167,7 +167,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 queue: main_queue,
                 queues,
                 start_now: false,
-                save_dir: settings.download_dir.clone(),
+                save_dir: settings.fallback_dir(),
                 shot: Shot::from_env(),
                 client,
             }));

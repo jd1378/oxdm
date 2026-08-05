@@ -181,14 +181,14 @@ impl AddState {
         let url: url::Url = self.url.trim().parse().ok()?;
         let p = PathBuf::from(self.save_path.trim());
         let (save_dir, filename) = if self.save_path.trim().is_empty() {
-            (self.settings.download_dir.clone(), None)
+            (self.settings.fallback_dir(), None)
         } else if self.save_path.ends_with('/') || p.extension().is_none() && p.is_dir() {
             (p, None)
         } else {
             let dir = p
                 .parent()
                 .map(|d| d.to_path_buf())
-                .unwrap_or_else(|| self.settings.download_dir.clone());
+                .unwrap_or_else(|| self.settings.fallback_dir());
             let name = p.file_name().map(|n| n.to_string_lossy().into_owned());
             (dir, name)
         };
@@ -318,7 +318,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 probe_gen: 0,
                 probing: false,
                 probed: None,
-                save_path: boot.settings.download_dir.display().to_string(),
+                save_path: boot.settings.fallback_dir().display().to_string(),
                 category: None,
                 queue: boot.main_queue,
                 segments: 8,
@@ -408,7 +408,7 @@ fn start_probe(st: &AddState) -> Task<Msg> {
 
 /// Per-category routing prefill (feature #10 / guardian F5): when the
 /// category changes, seed the save folder from
-/// `Settings::category_folders` and the queue from
+/// `Settings::category_folder` and the queue from
 /// `Settings::category_queues` — but never overwrite a field the user
 /// already touched (`save_dirty` / `queue_dirty`). Client-side only;
 /// the daemon applies the same routing solely on the non-interactive
@@ -417,9 +417,11 @@ fn apply_category_prefill(st: &mut AddState) {
     let Some(cat) = st.category else {
         return;
     };
-    if !st.save_dirty
-        && let Some(folder) = st.settings.category_folders.get(&cat)
-    {
+    if !st.save_dirty {
+        // Resolved, not just explicit overrides: a category the user has
+        // never retargeted still has a folder, and it is the one the
+        // Settings pane shows them.
+        let folder = st.settings.category_folder(cat);
         // Keep the detected filename; before detection the path is a
         // bare directory (a trailing separator marks it as such for
         // `build_req`).
@@ -489,7 +491,7 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
                 } else {
                     dir.parent()
                         .map(|d| d.to_path_buf())
-                        .unwrap_or_else(|| st.settings.download_dir.clone())
+                        .unwrap_or_else(|| st.settings.fallback_dir())
                 };
                 st.save_path = dir.join(&p.filename).display().to_string();
                 if st.category.is_none() {

@@ -21,7 +21,9 @@ pub fn settings_to_odl_config(
 ) -> Result<OdlConfig, String> {
     let download = settings_to_download_options(s, proxy_password)?;
     ConfigBuilder::default()
-        .download_dir(s.download_dir.clone())
+        // odl needs a config-level default; `Other` is ours. Per-job
+        // instructions override it anyway.
+        .download_dir(s.fallback_dir())
         .max_concurrent_downloads(s.max_concurrent_downloads)
         .download(download)
         .build()

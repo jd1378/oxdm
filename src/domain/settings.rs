@@ -14,10 +14,9 @@ use crate::domain::{Category, ProxyAdv, ProxyMode, QueueId};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     // ── odl pass-through ────────────────────────────────────────────
-    pub download_dir: PathBuf,
     /// Working directory for in-flight downloads — `metadata.pb` and
     /// every `.part` for every job live here, keyed by job id. Stable
-    /// across `download_dir` changes so a user retargeting the final
+    /// across save-folder changes so a user retargeting the final
     /// destination of an in-flight download does not orphan its
     /// partial state. Defaults to the platform data dir.
     #[serde(default = "default_work_dir")]
@@ -159,11 +158,19 @@ pub struct Settings {
     /// at write time rather than enforced at read time.
     #[serde(default)]
     pub category_extensions: IndexMap<Category, Vec<String>>,
-    /// Per-category save-folder override. A capture classified into a
-    /// `Category` present here lands in that folder instead of
-    /// `download_dir`. Applied only on the non-interactive capture
-    /// path (`add_from_capture`); the Add dialog prefills client-side
-    /// so an explicit user choice always wins.
+    /// Where each category saves. This is the *only* download-location
+    /// setting: there is no separate global default, because every file
+    /// has a category and `Other` is the catch-all every unclassified
+    /// file falls into. Populated for all categories on first run and
+    /// edited per category from there.
+    ///
+    /// A `Category` absent here (or mapped to an empty path) resolves to
+    /// `default_category_folder`. Read through
+    /// [`Settings::category_folder`] rather than directly, so every
+    /// caller sees the same resolved path the user is shown. Applied on
+    /// the non-interactive capture path (`add_from_capture`); the Add
+    /// dialog prefills client-side so an explicit user choice always
+    /// wins.
     #[serde(default)]
     pub category_folders: IndexMap<Category, PathBuf>,
     /// Per-category default queue. Same application rules as
@@ -247,6 +254,59 @@ pub enum ConflictWhileHidden {
 /// binds while the field stays an ordinary number.
 pub const UNLIMITED_CONCURRENT: usize = 9999;
 
+/// The OS download folder, detected fresh. Only ever used to seed the
+/// category folders on first run (and to repair a settings row that
+/// somehow lost one) — nothing reads it as a live setting, so a user who
+/// retargets their categories is never silently pulled back here.
+pub fn detected_download_dir() -> PathBuf {
+    dirs::download_dir()
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Where a category saves when the user has not retargeted it: a
+/// same-named subfolder of `base`, except `Other` — the catch-all keeps
+/// unsorted files in the download folder itself rather than pushing them
+/// into a bin the user never asked for.
+pub fn default_category_folder(base: &std::path::Path, cat: Category) -> PathBuf {
+    match cat {
+        Category::Other => base.to_path_buf(),
+        _ => base.join(cat.label()),
+    }
+}
+
+/// Every category materialised against `base`, in display order. New
+/// installs store these outright so the folder a user sees is the folder
+/// that is saved, with nothing derived behind their back.
+pub fn default_category_folders(base: &std::path::Path) -> IndexMap<Category, PathBuf> {
+    Category::ALL_ASSIGNABLE
+        .iter()
+        .map(|c| (*c, default_category_folder(base, *c)))
+        .collect()
+}
+
+impl Settings {
+    /// Resolved save folder for `cat`: the stored value when there is
+    /// one, else the derived default. The single reader every call site
+    /// goes through, so the Settings pane, the Add dialog and the
+    /// capture path cannot disagree about where a file lands.
+    pub fn category_folder(&self, cat: Category) -> PathBuf {
+        self.category_folders
+            .get(&cat)
+            .filter(|p| !p.as_os_str().is_empty())
+            .cloned()
+            .unwrap_or_else(|| default_category_folder(&detected_download_dir(), cat))
+    }
+
+    /// Save folder for anything with no category yet — an empty Add
+    /// dialog, a batch, odl's own config default. That is exactly what
+    /// `Other` means, so it answers rather than a second global setting
+    /// that could disagree with it.
+    pub fn fallback_dir(&self) -> PathBuf {
+        self.category_folder(Category::Other)
+    }
+}
+
 /// A global proxy has nothing to inherit from: unset means "System",
 /// which is reqwest reading the standard proxy environment variables.
 fn default_proxy() -> ProxyAdv {
@@ -328,11 +388,7 @@ mod humantime_serde {
 
 impl Default for Settings {
     fn default() -> Self {
-        let dl = dirs::download_dir()
-            .or_else(dirs::home_dir)
-            .unwrap_or_else(|| PathBuf::from("."));
         Self {
-            download_dir: dl,
             work_dir: default_work_dir(),
             max_connections: None,
             max_concurrent_downloads: UNLIMITED_CONCURRENT,
@@ -370,7 +426,7 @@ impl Default for Settings {
             custom_window_chrome: false,
             theme_overrides: IndexMap::new(),
             category_extensions: IndexMap::new(),
-            category_folders: IndexMap::new(),
+            category_folders: default_category_folders(&detected_download_dir()),
             category_queues: IndexMap::new(),
             first_run_seen: false,
             capture_min_size: 0,
@@ -380,5 +436,51 @@ impl Default for Settings {
             capture_allow_extensions: Vec::new(),
             capture_allow_mime_prefixes: Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    /// The catch-all keeps unsorted files in the download folder itself
+    /// — no `/Other` bin the user never asked for. Named categories do
+    /// get their subfolder.
+    #[test]
+    fn other_defaults_to_the_base_folder_itself() {
+        let base = Path::new("/home/u/Downloads");
+        assert_eq!(
+            default_category_folder(base, Category::Other),
+            PathBuf::from("/home/u/Downloads")
+        );
+        assert_eq!(
+            default_category_folder(base, Category::Videos),
+            PathBuf::from("/home/u/Downloads/Videos")
+        );
+    }
+
+    #[test]
+    fn category_folder_prefers_an_override() {
+        let mut s = Settings {
+            category_folders: default_category_folders(Path::new("/base")),
+            ..Settings::default()
+        };
+        s.category_folders
+            .insert(Category::Videos, PathBuf::from("/mnt/media"));
+        // An empty stored path is not a retarget — it resolves to the
+        // detected default, the same as an absent key would.
+        s.category_folders.insert(Category::Music, PathBuf::new());
+
+        assert_eq!(
+            s.category_folder(Category::Videos),
+            PathBuf::from("/mnt/media")
+        );
+        assert_eq!(
+            s.category_folder(Category::Music),
+            default_category_folder(&detected_download_dir(), Category::Music)
+        );
+        assert_eq!(s.category_folder(Category::Other), PathBuf::from("/base"));
+        assert_eq!(s.fallback_dir(), PathBuf::from("/base"));
     }
 }

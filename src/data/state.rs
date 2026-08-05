@@ -1535,7 +1535,7 @@ impl AppState {
         let instr = manager
             .evaluate(odl::download_manager::EvaluateRequest::new(
                 url,
-                settings.download_dir,
+                settings.fallback_dir(),
                 &resolver,
             ))
             .await
@@ -1591,12 +1591,7 @@ impl AppState {
             filename.as_deref().unwrap_or(""),
             &settings.category_extensions,
         );
-        let save_dir = settings
-            .category_folders
-            .get(&category)
-            .filter(|p| !p.as_os_str().is_empty())
-            .cloned()
-            .unwrap_or(settings.download_dir);
+        let save_dir = settings.category_folder(category);
         let id = self
             .add_job(
                 req.url,

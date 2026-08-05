@@ -53,10 +53,10 @@ impl Section {
     fn desc(self) -> &'static str {
         match self {
             Section::General => "Startup, appearance, and when to hold downloads back.",
-            Section::Downloads => "Where files land, retry behavior, and removal confirmations.",
+            Section::Downloads => "Cache location, retry behavior, and removal confirmations.",
             Section::Categories => {
-                "Categories auto-sort downloads by file extension. \
-                 Edit save folders and detected types."
+                "Categories auto-sort downloads by file extension. Each one owns \
+                 the folder its files land in."
             }
             Section::Network => "Connections, bandwidth, proxy, and request identity.",
             Section::Browser => "Pair the browser extension and resolve capture conflicts.",
@@ -133,9 +133,6 @@ pub enum Msg {
     SetTheme(String),
     ReduceMotion(bool),
     CustomWindowChrome(bool),
-    DownloadDir(String),
-    BrowseDownloadDir,
-    BrowsedDownloadDir(Option<std::path::PathBuf>),
     WorkDir(String),
     StartAtLogin(bool),
     StartToTray(bool),
@@ -218,7 +215,6 @@ pub struct State {
     original: Settings,
     s: Settings,
     // string mirrors for numeric fields
-    download_dir: String,
     work_dir: String,
     max_retries: String,
     fixed_retries: String,
@@ -274,7 +270,6 @@ pub struct State {
 /// can never disagree with what applying would write.
 fn pending_settings(st: &State) -> Settings {
     let mut s = st.s.clone();
-    s.download_dir = std::path::PathBuf::from(st.download_dir.trim());
     s.work_dir = std::path::PathBuf::from(st.work_dir.trim());
     if let Ok(v) = st.max_retries.trim().parse() {
         s.max_retries = v;
@@ -332,11 +327,14 @@ fn pending_settings(st: &State) -> Settings {
         })
         .filter(|(c, exts)| exts.as_slice() != c.default_extensions())
         .collect();
+    // Stored verbatim, defaults included: the folder shown is the folder
+    // saved. Nothing is derived behind the user's back, so editing one
+    // category can never move another.
     s.category_folders = st
         .cat_folders
         .iter()
         .map(|(c, dir)| (*c, std::path::PathBuf::from(dir.trim())))
-        .filter(|(c, dir)| !dir.as_os_str().is_empty() && *dir != s.download_dir.join(c.label()))
+        .filter(|(_, dir)| !dir.as_os_str().is_empty())
         .collect();
     s.category_queues = st
         .cat_queues
@@ -359,7 +357,6 @@ fn copy_section(dst: &mut Settings, src: &Settings, section: Section) {
             dst.pause_on_low_battery = src.pause_on_low_battery;
             dst.theme = src.theme;
             dst.reduce_motion = src.reduce_motion;
-            dst.download_dir = src.download_dir.clone();
             dst.work_dir = src.work_dir.clone();
             dst.start_at_login = src.start_at_login;
             dst.start_to_tray = src.start_to_tray;
@@ -417,15 +414,21 @@ fn normalize_for_editing(s: &mut Settings) {
     if let Some(bps) = s.speed_limit.filter(|v| *v > 0) {
         s.speed_limit = Some((bps / BYTES_PER_KB).max(1) * BYTES_PER_KB);
     }
-    drop_default_categories(s);
+    normalize_categories(s);
 }
 
-fn drop_default_categories(s: &mut Settings) {
-    let download_dir = s.download_dir.clone();
+/// Extensions equal to their built-in list are not overrides; folders,
+/// by contrast, are always materialised, so an older settings row that
+/// is missing one gets it filled in here rather than resolving lazily on
+/// every read.
+fn normalize_categories(s: &mut Settings) {
     s.category_extensions
         .retain(|c, exts| exts.as_slice() != c.default_extensions());
-    s.category_folders
-        .retain(|c, dir| !dir.as_os_str().is_empty() && *dir != download_dir.join(c.label()));
+    let resolved: Vec<_> = Category::ALL_ASSIGNABLE
+        .iter()
+        .map(|c| (*c, s.category_folder(*c)))
+        .collect();
+    s.category_folders = resolved.into_iter().collect();
 }
 
 fn mirror(st: &mut State) {
@@ -434,7 +437,6 @@ fn mirror(st: &mut State) {
     // spot.
     st.tokens = Tokens::from_settings(&st.s);
     let s = &st.s;
-    st.download_dir = s.download_dir.display().to_string();
     st.work_dir = s.work_dir.display().to_string();
     st.max_retries = s.max_retries.to_string();
     st.fixed_retries = s.n_fixed_retries.to_string();
@@ -480,15 +482,7 @@ fn mirror(st: &mut State) {
     // it. Writing these back on the next apply is intended.
     st.cat_folders = Category::ALL_ASSIGNABLE
         .iter()
-        .map(|c| {
-            let dir = s
-                .category_folders
-                .get(c)
-                .filter(|p| !p.as_os_str().is_empty())
-                .cloned()
-                .unwrap_or_else(|| s.download_dir.join(c.label()));
-            (*c, dir.display().to_string())
-        })
+        .map(|c| (*c, s.category_folder(*c).display().to_string()))
         .collect();
     st.cat_queues = Category::ALL_ASSIGNABLE
         .iter()
@@ -551,7 +545,6 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 section: section_arg(),
                 original: settings.clone(),
                 s: settings,
-                download_dir: String::new(),
                 work_dir: String::new(),
                 max_retries: String::new(),
                 fixed_retries: String::new(),
@@ -675,24 +668,6 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
             st.s.custom_window_chrome = v;
             Task::none()
         }
-        Msg::DownloadDir(v) => {
-            st.download_dir = v;
-            Task::none()
-        }
-        Msg::BrowseDownloadDir => Task::perform(
-            async {
-                rfd::AsyncFileDialog::new()
-                    .pick_folder()
-                    .await
-                    .map(|h| h.path().to_path_buf())
-            },
-            Msg::BrowsedDownloadDir,
-        ),
-        Msg::BrowsedDownloadDir(Some(d)) => {
-            st.download_dir = d.display().to_string();
-            Task::none()
-        }
-        Msg::BrowsedDownloadDir(None) => Task::none(),
         Msg::WorkDir(v) => {
             st.work_dir = v;
             Task::none()
@@ -1642,23 +1617,12 @@ fn downloads_section(st: &State) -> Element<'_, Msg> {
             set_section(
                 t,
                 "Storage",
-                vec![
-                    set_row_stack(
-                        t,
-                        "Default download folder",
-                        Some("Where finished files land unless a category overrides it."),
-                        FileInput::new(&st.download_dir)
-                            .on_input(Msg::DownloadDir)
-                            .on_browse(Msg::BrowseDownloadDir)
-                            .view(t)
-                    ),
-                    set_row_stack(
-                        t,
-                        "In-flight cache folder",
-                        Some("Holds per-job .part files and metadata until a download completes."),
-                        FileInput::new(&st.work_dir).on_input(Msg::WorkDir).view(t)
-                    ),
-                ]
+                vec![set_row_stack(
+                    t,
+                    "In-flight cache folder",
+                    Some("Holds per-job .part files and metadata until a download completes."),
+                    FileInput::new(&st.work_dir).on_input(Msg::WorkDir).view(t)
+                ),]
             ),
             set_section(
                 t,

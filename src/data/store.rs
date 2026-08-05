@@ -412,7 +412,7 @@ impl Store {
     }
 
     pub async fn load_settings(&self) -> Result<Settings, StoreError> {
-        let map: Map<String, Value> = self
+        let mut map: Map<String, Value> = self
             .with_conn(|conn| {
                 let mut stmt = conn.prepare("SELECT key, value FROM settings")?;
                 let rows = stmt.query_map([], |row| {
@@ -434,7 +434,13 @@ impl Store {
         if map.is_empty() {
             return Ok(Settings::default());
         }
-        serde_json::from_value(Value::Object(map)).map_err(|e| StoreError::Other(e.to_string()))
+        let legacy_base = map
+            .remove("download_dir")
+            .and_then(|v| serde_json::from_value::<PathBuf>(v).ok());
+        let mut s: Settings = serde_json::from_value(Value::Object(map))
+            .map_err(|e| StoreError::Other(e.to_string()))?;
+        migrate_download_dir(&mut s, legacy_base);
+        Ok(s)
     }
 
     pub async fn save_settings(&self, s: &Settings) -> Result<(), StoreError> {
@@ -954,6 +960,21 @@ fn phase_from_str(s: &str) -> Option<Phase> {
     })
 }
 
+/// Carry a settings row written before the global download folder was
+/// removed. That field was the base every category folder derived from,
+/// so a user who had retargeted it would otherwise find all their
+/// categories silently back under the OS download folder. Only
+/// categories the row does not already name are filled in — an explicit
+/// per-category choice always outranks the old base.
+fn migrate_download_dir(s: &mut Settings, legacy_base: Option<PathBuf>) {
+    let Some(base) = legacy_base.filter(|p| !p.as_os_str().is_empty()) else {
+        return;
+    };
+    for (cat, dir) in crate::domain::default_category_folders(&base) {
+        s.category_folders.entry(cat).or_insert(dir);
+    }
+}
+
 pub fn default_db_path() -> PathBuf {
     let dir = dirs::data_dir()
         .or_else(dirs::home_dir)
@@ -1006,6 +1027,45 @@ mod tests {
             category: crate::domain::Category::Other,
             captured_response: None,
         }
+    }
+
+    /// A pre-existing row that still carries the removed global folder
+    /// keeps pointing where the user aimed it, and an explicit category
+    /// choice outranks it.
+    #[tokio::test]
+    async fn legacy_download_dir_seeds_the_category_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("oxdm.db")).await.unwrap();
+        let mut s = Settings::default();
+        s.category_folders.clear();
+        s.category_folders
+            .insert(crate::domain::Category::Videos, PathBuf::from("/mnt/media"));
+        store.save_settings(&s).await.unwrap();
+        // Write the key the current struct no longer serializes.
+        store
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO settings (key, value) VALUES ('download_dir', '\"/mnt/big\"')",
+                    [],
+                )
+            })
+            .await
+            .unwrap();
+
+        let loaded = store.load_settings().await.unwrap();
+        assert_eq!(
+            loaded.category_folder(crate::domain::Category::Videos),
+            PathBuf::from("/mnt/media"),
+            "an explicit category folder wins over the old base",
+        );
+        assert_eq!(
+            loaded.category_folder(crate::domain::Category::Music),
+            PathBuf::from("/mnt/big/Music"),
+        );
+        assert_eq!(
+            loaded.category_folder(crate::domain::Category::Other),
+            PathBuf::from("/mnt/big"),
+        );
     }
 
     #[tokio::test]
