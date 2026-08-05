@@ -45,12 +45,13 @@ const WIN_MIN_H: f32 = 418.0 - theme::space::S4;
 /// Launch height for the completion view: hero burst and its title, the
 /// file card, the saved-to and address rows, and the actions. Fixed
 /// content, so one measured number covers it.
-const WIN_COMPLETE_H: f32 = 516.0;
-/// The failed-integrity completion view adds a "don't open this file"
-/// banner and an expected-vs-got digest panel above the same content.
-/// Without the extra room the actions — including the "Download again"
-/// that fixes the problem — open below the fold.
-const WIN_TAMPERED_H: f32 = WIN_COMPLETE_H + 176.0;
+const WIN_COMPLETE_H: f32 = 490.0;
+/// The failed-integrity view adds a "don't open this file" banner, an
+/// expected-vs-got digest panel and the integrity box to the same
+/// content. Both heights are measured from what the page actually
+/// draws, so neither view opens scrolled — the scroll region stays only
+/// as the fallback for a window the user shrinks.
+const WIN_TAMPERED_H: f32 = 814.0;
 /// Everything the error view puts around the error card: title bar,
 /// hero, progress bar, the gaps between them and the footer. The card
 /// itself is measured from its own copy — see `error_block_height`.
@@ -117,11 +118,9 @@ const BURST_RING2_DELAY: f32 = 0.6;
 /// this scale and alpha. A hard stop, not a heartbeat.
 const BURST_DANGER_RING_SCALE: f32 = 1.15;
 const BURST_DANGER_RING_ALPHA: f32 = 0.45;
-/// Completion stat grid (design `.complete-stats`): 4px frame padding
-/// around cells that pad 8/10, an eyebrow label over a mono value, and
-/// the interruption note under the last one. The row is pinned because
-/// `vdivider` needs a concrete height.
-const STAT_GRID_PAD: f32 = 4.0;
+/// Completion stat cells (design `.complete-stats`): an eyebrow label
+/// over a mono value, centered, with the interruption note under the
+/// last one.
 const STAT_CELL_PAD_Y: f32 = 8.0;
 const STAT_CELL_PAD_X: f32 = 10.0;
 const STAT_LABEL_SIZE: f32 = 9.5;
@@ -1868,39 +1867,35 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
     // (design §3.3 `.complete-file` = ext tile + name + size): putting
     // the outcome in the card's title slot left the filename with
     // nowhere to go, and the user reads this page to find their file.
-    let header = container(
-        row![
-            tile,
-            column![
-                text(name.clone())
-                    .font(theme::BODY_BOLD)
-                    .size(14.0)
-                    .color(t.fg_1),
-                text(format!(
-                    "Downloaded {} ({} bytes)",
-                    format_bytes_2(total),
-                    crate::gui::format::format_int_grouped(total)
-                ))
-                .font(theme::BODY)
-                .size(12.0)
-                .color(t.fg_2),
+    // The file card is a settings row on a settings surface (design
+    // `.complete-file`), so it reads as the same material as the rest of
+    // the app instead of a one-off panel with its own border rules.
+    let header = set_rows(
+        t,
+        vec![set_row_panel(
+            row![
+                tile,
+                column![
+                    text(name.clone())
+                        .font(theme::BODY_BOLD)
+                        .size(14.0)
+                        .color(t.fg_1),
+                    text(format!(
+                        "Downloaded {} ({} bytes)",
+                        format_bytes_2(total),
+                        crate::gui::format::format_int_grouped(total)
+                    ))
+                    .font(theme::BODY)
+                    .size(12.0)
+                    .color(t.fg_2),
+                ]
+                .spacing(4.0),
             ]
-            .spacing(4.0),
-        ]
-        .spacing(theme::space::S3)
-        .align_y(Alignment::Center),
-    )
-    .width(Length::Fill)
-    .padding(theme::space::S3)
-    .style(move |_| container::Style {
-        background: Some(t2.bg_surface.into()),
-        border: iced::Border {
-            color: t2.border_subtle,
-            width: 1.0,
-            radius: theme::surface::RADIUS.into(),
-        },
-        ..Default::default()
-    });
+            .spacing(theme::space::S3)
+            .align_y(Alignment::Center)
+            .into(),
+        )],
+    );
 
     let label = |s: &'static str| text(s).font(theme::BODY).size(11.0).color(t2.fg_3);
     // Read-only "input": mono text in an input-styled box (egui used a
@@ -2606,7 +2601,6 @@ impl<M> canvas::Program<M> for Burst {
 /// only when `job.retries > 0`. Returns `None` when nothing is showable.
 fn completion_stats(st: &State) -> Option<Element<'_, Msg>> {
     let t = &st.tokens;
-    let t2 = *t;
     let job = &st.entry.job;
     let downloaded = st.entry.counters.downloaded;
 
@@ -2647,30 +2641,21 @@ fn completion_stats(st: &State) -> Option<Element<'_, Msg>> {
     .spacing(theme::space::S1)
     .align_y(Alignment::Center);
 
-    let grid = row![
+    // Same material as the About window's build facts: settings-row
+    // surface, cells split by a vertical hairline (design
+    // `.complete-stats`). The row is pinned because `vdivider` needs a
+    // concrete height.
+    let grid: Element<'_, Msg> = row![
         stat_cell(t, "average speed", avg, None),
         vdivider(t.border_subtle, STAT_CELL_H),
         stat_cell(t, "time taken", taken, None),
         vdivider(t.border_subtle, STAT_CELL_H),
         stat_cell(t, "finished at", finished, Some(sub.into())),
     ]
-    .height(Length::Fixed(STAT_CELL_H));
+    .height(Length::Fixed(STAT_CELL_H))
+    .into();
 
-    Some(
-        container(grid)
-            .width(Length::Fill)
-            .padding(STAT_GRID_PAD)
-            .style(move |_| container::Style {
-                background: Some(t2.bg_sunken.into()),
-                border: iced::Border {
-                    color: t2.border_subtle,
-                    width: 1.0,
-                    radius: theme::surface::RADIUS.into(),
-                },
-                ..Default::default()
-            })
-            .into(),
-    )
+    Some(set_rows(t, vec![grid]))
 }
 
 /// One `.cs-cell`: eyebrow label over a mono value, centered, with an
