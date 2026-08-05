@@ -206,6 +206,8 @@ pub enum Msg {
     CsCompute,
     CsComputed(Result<String, String>),
     WinResized(f32, f32),
+    /// Re-assert a height asked for `SIZE_REASSERTS` ago.
+    EnsureHeight(f32),
     WinFocused(bool),
     ShotTick,
     Shot(iced::window::Screenshot),
@@ -235,11 +237,6 @@ pub struct State {
     /// event — otherwise a user resizing a completed window would be
     /// snapped back by the next counter tick.
     imposed_h: Option<f32>,
-    /// The window manager has confirmed `imposed_h`. Until it does, a
-    /// resize report that disagrees is treated as our request having
-    /// been dropped, not as the user resizing.
-    size_settled: bool,
-    size_attempts: u8,
     rate_open: bool,
     segments_open: bool,
     samples: Vec<f32>,
@@ -419,8 +416,6 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 confirm_open: false,
                 win_w: WIN_W,
                 imposed_h: None,
-                size_settled: false,
-                size_attempts: 0,
                 rate_open: false,
                 segments_open: false,
                 samples: Vec::new(),
@@ -508,9 +503,22 @@ fn fit_window(st: &mut State) -> Task<Msg> {
         return Task::none();
     }
     st.imposed_h = Some(h);
-    st.size_settled = false;
-    st.size_attempts = 0;
-    resize_to(st.win_w, h)
+    let w = st.win_w;
+    let mut tasks = vec![resize_to(w, h)];
+    // A resize issued while the window is still being mapped can be
+    // dropped, and the compositor sends no event to say so — which is
+    // why the completion view sometimes arrived at the transfer view's
+    // height. Re-assert a few times over the first second instead of
+    // waiting for a report that may never come. Each re-assert bails if
+    // the state has moved on, and asking for a size the window already
+    // has is a no-op.
+    for delay in SIZE_REASSERTS {
+        tasks.push(Task::perform(
+            async move { tokio::time::sleep(Duration::from_millis(delay)).await },
+            move |()| Msg::EnsureHeight(h),
+        ));
+    }
+    Task::batch(tasks)
 }
 
 fn resize_to<M: Send + 'static>(w: f32, h: f32) -> Task<M> {
@@ -518,12 +526,10 @@ fn resize_to<M: Send + 'static>(w: f32, h: f32) -> Task<M> {
     iced::window::latest().and_then(move |id| iced::window::resize(id, size))
 }
 
-/// How many times to re-ask for a height the window manager did not
-/// give us. A resize issued while the window is still being mapped can
-/// be dropped, which is why the completion view sometimes opened at the
-/// transfer view's height; a tiling WM will refuse every time, so the
-/// retries are capped rather than looping.
-const SIZE_ATTEMPTS: u8 = 3;
+/// When to re-assert a height we just asked for, in ms after the ask.
+/// Bounded rather than a loop: a tiling WM refuses every time, and past
+/// a second the user is looking at the window and owns its size.
+const SIZE_REASSERTS: [u64; 3] = [120, 400, 900];
 
 fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
     let task = update_state(st, msg);
@@ -757,28 +763,13 @@ fn update_state(st: &mut State, msg: Msg) -> Task<Msg> {
         }
         Msg::WinResized(w, h) => {
             st.win_w = w;
-            let min = chrome::enforce_min_size(
-                iced::Size::new(w, h),
-                iced::Size::new(WIN_MIN_W, WIN_MIN_H),
-            );
-            match st.imposed_h {
-                Some(target) if !st.size_settled => {
-                    if (h - target).abs() <= 1.0 {
-                        st.size_settled = true;
-                        min
-                    } else if st.size_attempts < SIZE_ATTEMPTS {
-                        st.size_attempts += 1;
-                        Task::batch([min, resize_to(w, target)])
-                    } else {
-                        // Give up and let the user have the window: a
-                        // WM that has refused three times is tiling or
-                        // otherwise in charge, and fighting it would
-                        // spin.
-                        st.size_settled = true;
-                        min
-                    }
-                }
-                _ => min,
+            chrome::enforce_min_size(iced::Size::new(w, h), iced::Size::new(WIN_MIN_W, WIN_MIN_H))
+        }
+        Msg::EnsureHeight(h) => {
+            if st.imposed_h == Some(h) {
+                resize_to(st.win_w, h)
+            } else {
+                Task::none()
             }
         }
         Msg::ShotTick => {
