@@ -142,6 +142,13 @@ pub struct Settings {
     /// `design/handoff/16_animations.md §4` for per-animation rules.
     #[serde(default)]
     pub reduce_motion: bool,
+    /// Draw oxdm's own title bar, frame and resize grips instead of the
+    /// desktop's. Off by default: native decorations match whatever
+    /// window management the user already has (tiling, snapping,
+    /// shortcuts, accessibility). A window picks this up when it opens,
+    /// since decorations are fixed at window creation.
+    #[serde(default)]
+    pub custom_window_chrome: bool,
     /// Per-CSS-variable overrides applied on top of the active theme.
     /// Keys must be valid CSS custom-property names *without* the
     /// leading `--` (e.g. `accent`, `bg`, `text`). Values are any valid
@@ -366,6 +373,7 @@ impl Default for Settings {
             update_feed_url: String::new(),
             theme: Theme::System,
             reduce_motion: false,
+            custom_window_chrome: false,
             theme_overrides: IndexMap::new(),
             category_extensions: IndexMap::new(),
             category_folders: IndexMap::new(),

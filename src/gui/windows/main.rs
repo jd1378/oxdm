@@ -671,6 +671,9 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
         Msg::Connected(_) | Msg::Window(_) => unreachable!(),
         Msg::Snapshot(snap) => {
             m.tokens = Tokens::from_settings(&snap.settings);
+            // Covers changes that did not come from this machine's
+            // Settings window (import, another host, a hand-edited DB).
+            crate::gui::ui_prefs::sync_custom_window_chrome(snap.settings.custom_window_chrome);
             m.counters = snap.counters.iter().map(|c| (c.id, c.clone())).collect();
             let new_count = snap.jobs.len();
             // Toast genuine adds (count grew). Removals are toasted from

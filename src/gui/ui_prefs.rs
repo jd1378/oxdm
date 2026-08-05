@@ -12,6 +12,13 @@ pub struct UiPrefs {
     /// a stale table layout must not cost the user their window size.
     #[serde(default, deserialize_with = "columns_or_none")]
     pub columns: Option<ColumnsState>,
+    /// Cached mirror of `Settings.custom_window_chrome`. The setting
+    /// itself stays the source of truth; it is copied here because a
+    /// window must decide on decorations when it is created, which is
+    /// before the daemon connection that carries `Settings` exists.
+    /// `None` = never seen, treated as the default (native chrome).
+    #[serde(default)]
+    pub custom_window_chrome: Option<bool>,
 }
 
 /// Number of table columns = `windows::main::SortColumn` variants.
@@ -139,6 +146,18 @@ pub fn save(prefs: &UiPrefs) {
 pub fn save_window(w: WindowPrefs) {
     let mut prefs = load();
     prefs.window = Some(w);
+    save(&prefs);
+}
+
+/// Refresh the cached chrome preference from the daemon's settings.
+/// Costs nothing while the two agree, which is every case but the
+/// snapshot right after the user flips the toggle.
+pub fn sync_custom_window_chrome(v: bool) {
+    if v == crate::gui::chrome::titlebar::use_custom() {
+        return;
+    }
+    let mut prefs = load();
+    prefs.custom_window_chrome = Some(v);
     save(&prefs);
 }
 

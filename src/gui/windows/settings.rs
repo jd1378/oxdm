@@ -132,6 +132,7 @@ pub enum Msg {
     // General
     SetTheme(String),
     ReduceMotion(bool),
+    CustomWindowChrome(bool),
     DownloadDir(String),
     BrowseDownloadDir,
     BrowsedDownloadDir(Option<std::path::PathBuf>),
@@ -672,6 +673,10 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
             st.s.reduce_motion = v;
             Task::none()
         }
+        Msg::CustomWindowChrome(v) => {
+            st.s.custom_window_chrome = v;
+            Task::none()
+        }
         Msg::DownloadDir(v) => {
             st.download_dir = v;
             Task::none()
@@ -966,6 +971,10 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
             // The window stays open, so "Reset <section>" has to mean
             // "back to what is saved" — which is now this.
             st.original = st.s.clone();
+            // Windows are created before they can ask the daemon
+            // anything, so the chrome choice has to be readable from
+            // disk by the next one that opens.
+            crate::gui::ui_prefs::sync_custom_window_chrome(st.s.custom_window_chrome);
             Task::none()
         }
         Msg::Saved(Err(_)) => Task::none(),
@@ -1589,6 +1598,16 @@ fn general_section(st: &State) -> Element<'_, Msg> {
                         Some("Skip animations and transitions across the app."),
                         st.s.reduce_motion,
                         Msg::ReduceMotion
+                    ),
+                    toggle_row(
+                        t,
+                        "Custom window chrome",
+                        Some(
+                            "Draw oxdm's own title bar and frame instead of your \
+                             desktop's. Applies to windows opened after saving."
+                        ),
+                        st.s.custom_window_chrome,
+                        Msg::CustomWindowChrome
                     ),
                 ]
             ),

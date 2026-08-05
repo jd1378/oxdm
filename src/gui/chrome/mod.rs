@@ -80,7 +80,10 @@ pub fn window_settings(size: iced::Size, min_size: iced::Size) -> window::Settin
     window::Settings {
         size,
         min_size: Some(min_size),
-        decorations: cfg!(target_os = "macos"),
+        // The one place decorations are chosen; every painted piece of
+        // chrome branches on the same predicate so the two can't
+        // disagree.
+        decorations: !titlebar::use_custom(),
         platform_specific,
         exit_on_close_request: true,
         icon: app_icon(),

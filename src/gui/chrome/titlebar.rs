@@ -17,12 +17,25 @@ pub const HEIGHT: f32 = theme::size::TITLEBAR_H;
 
 const BTN_SIDE: f32 = 24.0;
 
-/// Whether the custom (painted) titlebar is used on this platform.
-/// macOS keeps its native decorations (`chrome::window_settings` sets
-/// `decorations` from the same condition), so painting our own bar
-/// there would stack a second title bar under the traffic lights.
+/// Whether oxdm paints its own titlebar, frame and resize grips instead
+/// of letting the OS decorate the window. Off unless the user opts in
+/// (`Settings.custom_window_chrome`), so oxdm looks native everywhere by
+/// default.
+///
+/// Read once per process and cached: `chrome::window_settings` decides
+/// `decorations` from this at window creation and the OS cannot change
+/// its mind afterwards, so a mid-life flip would leave a window with
+/// both kinds of chrome or neither. New windows pick up the new value.
+///
+/// The value comes from the GUI-local mirror in `ui_prefs`, not from
+/// `Settings` directly — see [`crate::gui::ui_prefs::UiPrefs`].
 pub fn use_custom() -> bool {
-    !cfg!(target_os = "macos")
+    static CUSTOM: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CUSTOM.get_or_init(|| {
+        crate::gui::ui_prefs::load()
+            .custom_window_chrome
+            .unwrap_or(false)
+    })
 }
 
 /// Vertical space the painted chrome occupies at the top of a window:
