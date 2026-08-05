@@ -542,6 +542,10 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
             Ok(()) => Reply::Ok,
             Err(e) => Reply::Err(job_err_string(e)),
         },
+        Request::DeleteFinalFile(id) => match state.delete_final_file(id).await {
+            Ok(()) => Reply::Ok,
+            Err(e) => Reply::Err(job_err_string(e)),
+        },
         Request::RestartJob(id) => {
             state.mark_run_intent(id, true).await;
             match state.restart_job(id).await {

@@ -108,6 +108,10 @@ pub enum Request {
     Resume(JobId),
     CancelToQueued(JobId),
     RestartJob(JobId),
+    /// Delete the assembled file for a completed job, leaving the job
+    /// itself in the list. `Remove` is the one that forgets the
+    /// download; this only reclaims the bytes on disk.
+    DeleteFinalFile(JobId),
     Remove(JobId, RemoveOpts),
     SetJobQueue(JobId, QueueId),
     /// Set a job's category explicitly.

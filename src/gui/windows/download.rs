@@ -45,13 +45,15 @@ const WIN_MIN_H: f32 = 418.0 - theme::space::S4;
 /// Launch height for the completion view: hero burst and its title, the
 /// file card, the saved-to and address rows, and the actions. Fixed
 /// content, so one measured number covers it.
-const WIN_COMPLETE_H: f32 = 474.0;
-/// The failed-integrity view adds a "don't open this file" banner, an
-/// expected-vs-got digest panel and the integrity box to the same
-/// content. Both heights are measured from what the page actually
-/// draws, so neither view opens scrolled — the scroll region stays only
-/// as the fallback for a window the user shrinks.
-const WIN_TAMPERED_H: f32 = 798.0;
+const WIN_COMPLETE_H: f32 = 478.0;
+/// What each optional block above the footer adds. The completion view
+/// is a fixed page except for these, and a single "tampered" constant
+/// was wrong for every job that did not have all of them — a mismatch
+/// with no saved hash left a screenful of empty surface. All four
+/// measured off the rendered page.
+const TAMPER_BANNER_H: f32 = 56.0;
+const DIGEST_PANEL_H: f32 = 86.0;
+const INTEGRITY_BOX_H: f32 = 180.0;
 /// Everything the error view puts around the error card: title bar,
 /// hero, progress bar, the gaps between them and the footer. The card
 /// itself is measured from its own copy — see `error_block_height`.
@@ -192,10 +194,11 @@ pub enum Msg {
     /// Failure recovery for a write fault: pick a new destination, then
     /// retry. The bytes already downloaded carry over.
     Open,
-    /// Open the file anyway, from the failed-integrity confirmation.
-    OpenConfirm,
-    OpenCancel,
     OpenFolder,
+    /// Delete the saved file, via the confirmation.
+    DeleteAsk,
+    DeleteCancel,
+    DeleteConfirm,
     CloseWin,
     MinimizeTray,
     // Completed view — copy / reveal / checksum verify
@@ -226,8 +229,8 @@ pub struct State {
     entry: JobEntryView,
 
     tab: Tab,
-    /// The "open it anyway?" confirmation is up (failed integrity only).
-    confirm_open: bool,
+    /// The "delete the saved file?" confirmation is up.
+    confirm_delete: bool,
     /// Live window width, so a height correction can leave it alone.
     win_w: f32,
     /// Height this window last imposed on itself. Kept so the
@@ -411,7 +414,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 tokens: Tokens::from_settings(&settings),
                 id: entry.job.id,
                 tab: Tab::Info,
-                confirm_open: false,
+                confirm_delete: false,
                 win_w: WIN_W,
                 imposed_h: LAUNCH_H.get().copied(),
                 rate_open: false,
@@ -467,29 +470,43 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
 /// the launch size. Only the *launch* size: `WIN_MIN_H` is untouched,
 /// so the user can still shrink the window afterwards.
 fn launch_height(st: &State) -> Option<f32> {
-    // `is_tampered` also folds in a digest the *window* computed, which
-    // no job snapshot can know; everything else comes off the job.
-    job_height(&st.entry.job).map(|h| {
-        if h == WIN_COMPLETE_H && is_tampered(st) {
-            WIN_TAMPERED_H
-        } else {
-            h
-        }
+    let h = job_height(&st.entry.job)?;
+    // A digest the *window* computed can turn a healthy page into a
+    // tampered one, and no job snapshot can know about it. That adds
+    // the banner; the box was already counted, and the expected-vs-got
+    // panel needs the runner's error, which this case does not have.
+    Some(if is_tampered(st) && !job_tampered(&st.entry.job) {
+        h + TAMPER_BANNER_H
+    } else {
+        h
     })
+}
+
+/// Does the job itself report a failed integrity check?
+fn job_tampered(job: &crate::domain::Job) -> bool {
+    matches!(job.status.error, Some(JobError::ChecksumMismatch { .. }))
+        || job.checksums.iter().any(|c| c.status == CsStatus::Mismatch)
 }
 
 /// The height a window showing `job` wants, from the job alone — so the
 /// launcher can size the window before it exists rather than resizing it
 /// afterwards. `None` = the transfer view, which asks for nothing.
 fn job_height(job: &crate::domain::Job) -> Option<f32> {
-    let tampered = matches!(job.status.error, Some(JobError::ChecksumMismatch { .. }))
-        || job.checksums.iter().any(|c| c.status == CsStatus::Mismatch);
+    let tampered = job_tampered(job);
     if job.status.phase == Phase::Completed || tampered {
-        return Some(if tampered {
-            WIN_TAMPERED_H
-        } else {
-            WIN_COMPLETE_H
-        });
+        let mut h = WIN_COMPLETE_H;
+        if tampered {
+            h += TAMPER_BANNER_H;
+        }
+        // The expected-vs-got panel only has something to say when the
+        // run itself reported the mismatch.
+        if matches!(job.status.error, Some(JobError::ChecksumMismatch { .. })) {
+            h += DIGEST_PANEL_H;
+        }
+        if !job.checksums.is_empty() {
+            h += INTEGRITY_BOX_H;
+        }
+        return Some(h);
     }
     let err = job.status.error.as_ref()?;
     let wanted = WIN_ERROR_CHROME_H + crate::gui::widget::error_panel::error_block_height(err);
@@ -718,27 +735,28 @@ fn update_state(st: &mut State, msg: Msg) -> Task<Msg> {
             Task::perform(async move { client.restart_job(id).await }, |_| Msg::Noop)
         }
         Msg::Open => {
-            // A file whose hash did not match is exactly the file the
-            // page told the user not to open, so opening it is a
-            // decision rather than a click. Every other completion opens
-            // straight away.
-            if is_tampered(st) {
-                st.confirm_open = true;
-                return Task::none();
-            }
             let path = final_path(&st.entry);
             crate::platform::open_path(&path);
             Task::none()
         }
-        Msg::OpenConfirm => {
-            st.confirm_open = false;
-            let path = final_path(&st.entry);
-            crate::platform::open_path(&path);
+        Msg::DeleteAsk => {
+            st.confirm_delete = true;
             Task::none()
         }
-        Msg::OpenCancel => {
-            st.confirm_open = false;
+        Msg::DeleteCancel => {
+            st.confirm_delete = false;
             Task::none()
+        }
+        Msg::DeleteConfirm => {
+            st.confirm_delete = false;
+            let client = st.client.clone();
+            let id = st.id;
+            // Nothing left on this page to act on once the file is
+            // gone, so the window goes with it. The job keeps its row
+            // in the list.
+            Task::perform(async move { client.delete_final_file(id).await }, |_| {
+                Msg::CloseWin
+            })
         }
         Msg::OpenFolder => {
             crate::platform::open_path(&st.entry.job.save_dir);
@@ -837,13 +855,13 @@ pub fn subscription(app: &App) -> Subscription<Msg> {
             // only needs to when the user isn't already looking at it.
             iced::Event::Window(iced::window::Event::Focused) => Some(Msg::WinFocused(true)),
             iced::Event::Window(iced::window::Event::Unfocused) => Some(Msg::WinFocused(false)),
-            // Escape backs out of the open-anyway confirmation. Enter is
+            // Escape backs out of the delete confirmation. Enter is
             // deliberately NOT wired to confirm: a stray keypress must
-            // not be what opens a file we just warned about.
+            // not be what deletes a file.
             iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
                 key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
                 ..
-            }) => Some(Msg::OpenCancel),
+            }) => Some(Msg::DeleteCancel),
             _ => None,
         }),
         crate::gui::ipc::all_events(crate::ipc_local::protocol::GuiKind::Download(st.id))
@@ -888,7 +906,7 @@ pub fn view(app: &App) -> Element<'_, Msg> {
             // under a different parent, and the scrollable loses its
             // state with it — the page would jump back to the top the
             // moment the confirmation opened.
-            open_anyway_overlay(st, page)
+            delete_overlay(st, page)
         }
     })
 }
@@ -2042,38 +2060,52 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
     if !tampered && let Some(cs_box) = cs_box.take() {
         body = body.push(cs_box);
     }
-    // A file that failed its integrity check must not be handed an
-    // inviting primary "Open": the banner above says not to. Nothing
-    // takes the primary slot in its place — there is no action here that
-    // makes the file safe.
-    let open = Btn::new("Open").icon("play").on_press(Msg::Open);
-    body = body.push(
-        row![if tampered {
-            open.toolbar().view(t)
-        } else {
-            open.primary().view(t)
-        }]
-        .spacing(theme::space::S2)
-        .align_y(Alignment::Center)
-        .push(
-            Btn::new("Open Containing Folder")
-                .toolbar()
-                .icon("folder")
-                .on_press(Msg::OpenFolder)
+    if let Some(cs_box) = cs_box {
+        body = body.push(cs_box);
+    }
+
+    // Actions live in the footer, the same band the transfer view uses,
+    // so the window's controls are always in the same place. Tampered
+    // offers no way to open the file: the banner above says not to, and
+    // an "open anyway" next to it would be the app arguing with itself.
+    let footer_el = if tampered {
+        footer(
+            t,
+            Btn::new("Delete tampered file")
+                .danger()
+                .icon("trash-2")
+                .on_press(Msg::DeleteAsk)
+                .view(t),
+            Btn::new("Keep anyway")
+                .ghost()
+                .on_press(Msg::CloseWin)
                 .view(t),
         )
-        .push(iced::widget::Space::new().width(Length::Fill))
-        .push(
+    } else {
+        footer(
+            t,
+            row![
+                Btn::new("Open")
+                    .primary()
+                    .icon("play")
+                    .on_press(Msg::Open)
+                    .view(t),
+                Btn::new("Open Containing Folder")
+                    .toolbar()
+                    .icon("folder")
+                    .on_press(Msg::OpenFolder)
+                    .view(t),
+            ]
+            .spacing(theme::space::S2)
+            .align_y(Alignment::Center)
+            .into(),
             Btn::new("Close")
                 .toolbar()
                 .icon("x")
                 .on_press(Msg::CloseWin)
                 .view(t),
-        ),
-    );
-    if let Some(cs_box) = cs_box {
-        body = body.push(cs_box);
-    }
+        )
+    };
 
     page(
         t,
@@ -2100,23 +2132,24 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
                 right: theme::space::S4 - crate::gui::widget::SCROLL_GUTTER,
             })
             .height(Length::Fill),
+            hairline(t.border_subtle),
+            footer_el,
         ]
         .into(),
     )
 }
 
-/// "Open it anyway?" confirmation (pattern: queues `delete_overlay`).
-/// The completed page already warns not to open a file that failed its
-/// integrity check; this is the last step before doing it, and it
-/// restates *why* rather than asking an abstract "are you sure".
+/// "Delete the saved file?" confirmation (pattern: queues
+/// `delete_overlay`). Names the file and says what survives, since the
+/// download keeps its row in the list either way.
 ///
 /// Always wraps, and adds the scrim + card only while confirming, so
 /// the page underneath keeps its widget state — scroll position first
 /// among them.
 ///
 /// Escape backs out. Nothing confirms on Enter — see the subscription.
-fn open_anyway_overlay<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a, Msg> {
-    if !st.confirm_open {
+fn delete_overlay<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a, Msg> {
+    if !st.confirm_delete {
         return stack![base].into();
     }
     let t = &st.tokens;
@@ -2130,8 +2163,8 @@ fn open_anyway_overlay<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a,
     let card = container(
         column![
             row![
-                icons::icon("shield-alert", 20.0, t.status_danger),
-                text("Open this file anyway?")
+                icons::icon("trash-2", 20.0, t.status_danger),
+                text("Delete this file?")
                     .font(theme::BODY_BOLD)
                     .size(14.0)
                     .color(t.fg_1),
@@ -2139,9 +2172,8 @@ fn open_anyway_overlay<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a,
             .spacing(theme::space::S2)
             .align_y(Alignment::Center),
             text(format!(
-                "{name} does not match the checksum it was published with. It may be \
-                 corrupted, or it may have been tampered with on the way here. Opening \
-                 it runs that risk."
+                "{name} is permanently deleted from your disk. This download keeps its \
+                 place in the list, so you can fetch it again from the same address."
             ))
             .font(theme::BODY)
             .size(12.0)
@@ -2149,11 +2181,14 @@ fn open_anyway_overlay<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a,
             .line_height(iced::widget::text::LineHeight::Relative(1.4)),
             row![
                 iced::widget::Space::new().width(Length::Fill),
-                Btn::new("Cancel").ghost().on_press(Msg::OpenCancel).view(t),
-                Btn::new("Open anyway")
+                Btn::new("Cancel")
+                    .ghost()
+                    .on_press(Msg::DeleteCancel)
+                    .view(t),
+                Btn::new("Delete file")
                     .danger_filled()
-                    .icon("play")
-                    .on_press(Msg::OpenConfirm)
+                    .icon("trash-2")
+                    .on_press(Msg::DeleteConfirm)
                     .view(t),
             ]
             .spacing(theme::space::S2)
@@ -2188,7 +2223,7 @@ fn open_anyway_overlay<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a,
                     ..Default::default()
                 }),
         )
-        .on_press(Msg::OpenCancel),
+        .on_press(Msg::DeleteCancel),
     );
 
     stack![

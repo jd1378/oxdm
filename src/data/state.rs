@@ -2019,6 +2019,36 @@ impl AppState {
         self.start_job(id).await
     }
 
+    /// Delete the assembled file of a completed job, leaving the job in
+    /// the list. The record keeps pointing at where the file *was*: the
+    /// user asked to reclaim the bytes, not to forget the download, and
+    /// a history row that suddenly claims no path is a worse lie than
+    /// one naming a path that is now empty.
+    pub async fn delete_final_file(self: &Arc<Self>, id: JobId) -> Result<(), JobError> {
+        let entry = self
+            .job_entry(id)
+            .await
+            .ok_or_else(|| JobError::Other("job not found".into()))?;
+        let path = entry
+            .final_path
+            .read()
+            .ok()
+            .and_then(|g| g.clone())
+            .or_else(|| entry.job.status.final_path.clone())
+            .ok_or_else(|| JobError::Other("this download has no saved file".into()))?;
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => {}
+            // Already gone is the state the user asked for.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(JobError::Io(e.to_string())),
+        }
+        let _ = self.events.send(DomainEvent::JobUpdated {
+            id,
+            phase: entry.phase(),
+        });
+        Ok(())
+    }
+
     /// Remove a job. `delete_files` decides whether to also wipe
     /// `metadata.pb` + `.part` + (if completed) the assembled file.
     pub async fn remove(self: &Arc<Self>, id: JobId, opts: RemoveOpts) -> Result<(), JobError> {
