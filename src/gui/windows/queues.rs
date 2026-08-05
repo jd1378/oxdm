@@ -1781,18 +1781,17 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
                 st.finish == FinishKind::Shutdown,
                 Msg::Finish(FinishKind::Shutdown)
             ),
+            seg_btn(
+                t,
+                "Run command",
+                Some("terminal"),
+                st.finish == FinishKind::RunCommand,
+                Msg::Finish(FinishKind::RunCommand)
+            ),
         ]
         .spacing(4.0)
         .wrap()
         .vertical_spacing(PILL_WRAP_GAP),
-        row![seg_btn(
-            t,
-            "Run command",
-            Some("terminal"),
-            st.finish == FinishKind::RunCommand,
-            Msg::Finish(FinishKind::RunCommand)
-        ),]
-        .spacing(4.0),
     ]
     .spacing(theme::space::S2);
     if st.finish == FinishKind::RunCommand {
