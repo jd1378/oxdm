@@ -2927,20 +2927,20 @@ fn cell(content: Element<'_, Msg>, width: Length, align: Alignment) -> Element<'
 }
 
 fn phase_style(t: &Tokens, phase: Phase) -> (iced::Color, String) {
-    match phase {
+    let color = match phase {
         Phase::Evaluating
         | Phase::ResolvingConflicts
         | Phase::Downloading
         | Phase::Assembling
         | Phase::Flushing
-        | Phase::Verifying => (t.action_primary, "Downloading".to_owned()),
-        Phase::Reconnecting => (t.action_primary, "Reconnecting".to_owned()),
-        Phase::Queued => (t.status_info, "Queued".to_owned()),
-        Phase::Paused => (t.fg_3, "Paused".to_owned()),
-        Phase::Cancelled => (t.fg_3, "Cancelled".to_owned()),
-        Phase::Completed => (t.status_success, "Complete".to_owned()),
-        Phase::Failed => (t.status_danger, "Failed".to_owned()),
-    }
+        | Phase::Verifying
+        | Phase::Reconnecting => t.action_primary,
+        Phase::Queued => t.status_info,
+        Phase::Paused | Phase::Cancelled => t.fg_3,
+        Phase::Completed => t.status_success,
+        Phase::Failed => t.status_danger,
+    };
+    (color, phase.label().to_owned())
 }
 
 fn format_short_date(dt: &chrono::DateTime<chrono::Utc>) -> String {

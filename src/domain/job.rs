@@ -61,6 +61,27 @@ pub enum Phase {
 }
 
 impl Phase {
+    /// Single source of the user-facing phase wording. The pre-transfer
+    /// and post-transfer steps read as "Downloading" because they are
+    /// invisible plumbing to the user, and every surface (list pill,
+    /// window title) must agree on one vocabulary.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Evaluating
+            | Self::ResolvingConflicts
+            | Self::Downloading
+            | Self::Assembling
+            | Self::Flushing
+            | Self::Verifying => "Downloading",
+            Self::Reconnecting => "Reconnecting",
+            Self::Queued => "Queued",
+            Self::Paused => "Paused",
+            Self::Cancelled => "Cancelled",
+            Self::Completed => "Complete",
+            Self::Failed => "Failed",
+        }
+    }
+
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed)
     }

@@ -2369,13 +2369,15 @@ fn completion_stats(st: &State) -> Option<Element<'_, Msg>> {
 pub fn launch_download(_id: JobId) {
     let mut app = iced::application(boot, update, view)
         .title(|app: &App| match app {
-            App::Ready(st) => st
-                .entry
-                .job
-                .filename
-                .clone()
-                .map(|n| format!("oxdm — download {n}"))
-                .unwrap_or_else(|| "oxdm — download".to_owned()),
+            // Taskbar/switcher entry: the phase leads, since it is the
+            // one thing the window body shows but the title bar doesn't.
+            App::Ready(st) => {
+                let phase = st.phase().label();
+                match &st.entry.job.filename {
+                    Some(n) => format!("{phase} — download {n}"),
+                    None => format!("{phase} — download"),
+                }
+            }
             _ => "oxdm — download".to_owned(),
         })
         .theme(|app: &App| match app {
