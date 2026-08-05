@@ -475,7 +475,7 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
 
 pub fn launch_batch(_path: PathBuf) {
     let mut app = iced::application(boot, update, view)
-        .title(|_: &App| "oxdm: Send to oxdm".to_owned())
+        .title(|_: &App| "oxdm — Send to oxdm".to_owned())
         .theme(|app: &App| match app {
             App::Ready(st) => st.tokens.iced_theme(),
             _ => Tokens::dark().iced_theme(),

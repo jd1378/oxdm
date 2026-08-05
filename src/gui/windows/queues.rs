@@ -1842,7 +1842,7 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
     };
 
     let content = container(column![
-        titlebar::titlebar(t, "oxdm: Queues & scheduling", false, Msg::Window),
+        titlebar::titlebar(t, "oxdm — Queues & scheduling", false, Msg::Window),
         hairline(t.border_subtle),
         overlaid,
     ])
@@ -2274,7 +2274,7 @@ fn delete_overlay<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a, Msg>
 
 pub fn launch_queues() {
     let mut app = iced::application(boot, update, view)
-        .title(|_: &App| "oxdm: Queues & scheduling".to_owned())
+        .title(|_: &App| "oxdm — Queues & scheduling".to_owned())
         .theme(|app: &App| match app {
             App::Ready(st) => st.tokens.iced_theme(),
             _ => Tokens::dark().iced_theme(),

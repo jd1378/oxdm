@@ -1191,7 +1191,7 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
     // title's left gutter; a plain container passes pointer events
     // through to the drag region below.
     let bar: Element<'_, Msg> =
-        titlebar::titlebar(t, &format!("Properties: {name}"), false, Msg::Window);
+        titlebar::titlebar(t, &format!("Properties — {name}"), false, Msg::Window);
     let bar: Element<'_, Msg> = if st.locked() {
         iced::widget::stack![
             bar,
@@ -2825,10 +2825,10 @@ pub fn launch_properties(_id: JobId) {
     let mut app = iced::application(boot, update, view)
         .title(|app: &App| match app {
             App::Ready(st) => format!(
-                "oxdm: Properties {}",
+                "oxdm — Properties {}",
                 st.entry.job.filename.as_deref().unwrap_or("")
             ),
-            _ => "oxdm: Properties".to_owned(),
+            _ => "oxdm — Properties".to_owned(),
         })
         .theme(|app: &App| match app {
             App::Ready(st) => st.tokens.iced_theme(),

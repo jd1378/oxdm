@@ -2374,9 +2374,9 @@ pub fn launch_download(_id: JobId) {
                 .job
                 .filename
                 .clone()
-                .map(|n| format!("oxdm: download {n}"))
-                .unwrap_or_else(|| "oxdm: download".to_owned()),
-            _ => "oxdm: download".to_owned(),
+                .map(|n| format!("oxdm — download {n}"))
+                .unwrap_or_else(|| "oxdm — download".to_owned()),
+            _ => "oxdm — download".to_owned(),
         })
         .theme(|app: &App| match app {
             App::Ready(st) => st.tokens.iced_theme(),
