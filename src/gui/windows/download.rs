@@ -171,6 +171,9 @@ pub enum Msg {
     /// Failure recovery for a write fault: pick a new destination, then
     /// retry. The bytes already downloaded carry over.
     Open,
+    /// Open the file anyway, from the failed-integrity confirmation.
+    OpenConfirm,
+    OpenCancel,
     OpenFolder,
     CloseWin,
     MinimizeTray,
@@ -202,6 +205,8 @@ pub struct State {
     entry: JobEntryView,
 
     tab: Tab,
+    /// The "open it anyway?" confirmation is up (failed integrity only).
+    confirm_open: bool,
     rate_open: bool,
     segments_open: bool,
     samples: Vec<f32>,
@@ -378,6 +383,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 tokens: Tokens::from_settings(&settings),
                 id: entry.job.id,
                 tab: Tab::Info,
+                confirm_open: false,
                 rate_open: false,
                 segments_open: false,
                 samples: Vec::new(),
@@ -633,8 +639,26 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             Task::perform(async move { client.restart_job(id).await }, |_| Msg::Noop)
         }
         Msg::Open => {
+            // A file whose hash did not match is exactly the file the
+            // page told the user not to open, so opening it is a
+            // decision rather than a click. Every other completion opens
+            // straight away.
+            if is_tampered(st) {
+                st.confirm_open = true;
+                return Task::none();
+            }
             let path = final_path(&st.entry);
             crate::platform::open_path(&path);
+            Task::none()
+        }
+        Msg::OpenConfirm => {
+            st.confirm_open = false;
+            let path = final_path(&st.entry);
+            crate::platform::open_path(&path);
+            Task::none()
+        }
+        Msg::OpenCancel => {
+            st.confirm_open = false;
             Task::none()
         }
         Msg::OpenFolder => {
@@ -733,6 +757,13 @@ pub fn subscription(app: &App) -> Subscription<Msg> {
             // only needs to when the user isn't already looking at it.
             iced::Event::Window(iced::window::Event::Focused) => Some(Msg::WinFocused(true)),
             iced::Event::Window(iced::window::Event::Unfocused) => Some(Msg::WinFocused(false)),
+            // Escape backs out of the open-anyway confirmation. Enter is
+            // deliberately NOT wired to confirm: a stray keypress must
+            // not be what opens a file we just warned about.
+            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+                ..
+            }) => Some(Msg::OpenCancel),
             _ => None,
         }),
         crate::gui::ipc::all_events(crate::ipc_local::protocol::GuiKind::Download(st.id))
@@ -767,11 +798,17 @@ pub fn view(app: &App) -> Element<'_, Msg> {
         App::Connecting => splash("Connecting…".to_owned()),
         App::Failed(e) => splash(e.clone()),
         App::Ready(st) => {
-            if shows_complete(st) {
+            let page = if shows_complete(st) {
                 complete_view(st)
             } else {
                 running_view(st)
-            }
+            };
+            // Always the same shape, overlay or not. Swapping the root
+            // between `page` and `stack![page, …]` rebuilds the subtree
+            // under a different parent, and the scrollable loses its
+            // state with it — the page would jump back to the top the
+            // moment the confirmation opened.
+            open_anyway_overlay(st, page)
         }
     })
 }
@@ -1608,8 +1645,8 @@ fn completion_tab(st: &State) -> Element<'_, Msg> {
     let mut rows = vec![
         set_row(
             t,
-            "Show notification when done",
-            Some("Open the completion dialog instead of acting unattended."),
+            "Show completion dialog when done",
+            None,
             toggle(t, oc.show_dialog, true, Msg::NotifyDone),
         ),
         set_row(
@@ -1976,6 +2013,104 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
         ]
         .into(),
     )
+}
+
+/// "Open it anyway?" confirmation (pattern: queues `delete_overlay`).
+/// The completed page already warns not to open a file that failed its
+/// integrity check; this is the last step before doing it, and it
+/// restates *why* rather than asking an abstract "are you sure".
+///
+/// Always wraps, and adds the scrim + card only while confirming, so
+/// the page underneath keeps its widget state — scroll position first
+/// among them.
+///
+/// Escape backs out. Nothing confirms on Enter — see the subscription.
+fn open_anyway_overlay<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a, Msg> {
+    if !st.confirm_open {
+        return stack![base].into();
+    }
+    let t = &st.tokens;
+    let t2 = *t;
+    let name = st
+        .entry
+        .job
+        .filename
+        .clone()
+        .unwrap_or_else(|| "This file".to_owned());
+    let card = container(
+        column![
+            row![
+                icons::icon("shield-alert", 20.0, t.status_danger),
+                text("Open this file anyway?")
+                    .font(theme::BODY_BOLD)
+                    .size(14.0)
+                    .color(t.fg_1),
+            ]
+            .spacing(theme::space::S2)
+            .align_y(Alignment::Center),
+            text(format!(
+                "{name} does not match the checksum it was published with. It may be \
+                 corrupted, or it may have been tampered with on the way here. Opening \
+                 it runs that risk."
+            ))
+            .font(theme::BODY)
+            .size(12.0)
+            .color(t.fg_2)
+            .line_height(iced::widget::text::LineHeight::Relative(1.4)),
+            row![
+                iced::widget::Space::new().width(Length::Fill),
+                Btn::new("Cancel").ghost().on_press(Msg::OpenCancel).view(t),
+                Btn::new("Open anyway")
+                    .danger_filled()
+                    .icon("play")
+                    .on_press(Msg::OpenConfirm)
+                    .view(t),
+            ]
+            .spacing(theme::space::S2)
+            .align_y(Alignment::Center),
+        ]
+        .spacing(theme::space::S3),
+    )
+    .width(Length::Fixed(400.0))
+    .padding(theme::space::S4)
+    .style(move |_| container::Style {
+        background: Some(t2.bg_surface.into()),
+        border: iced::Border {
+            color: t2.border_default,
+            width: 1.0,
+            radius: theme::surface::RADIUS.into(),
+        },
+        shadow: iced::Shadow {
+            color: color::with_alpha(iced::Color::BLACK, 80.0 / 255.0),
+            offset: iced::Vector::new(0.0, 4.0),
+            blur_radius: 16.0,
+        },
+        ..Default::default()
+    });
+
+    let scrim = iced::widget::opaque(
+        iced::widget::mouse_area(
+            container(iced::widget::Space::new())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(|_| container::Style {
+                    background: Some(color::with_alpha(iced::Color::BLACK, 120.0 / 255.0).into()),
+                    ..Default::default()
+                }),
+        )
+        .on_press(Msg::OpenCancel),
+    );
+
+    stack![
+        base,
+        scrim,
+        container(iced::widget::opaque(card))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center),
+    ]
+    .into()
 }
 
 /// Expected-vs-got panel for a verification failure, naming the digest

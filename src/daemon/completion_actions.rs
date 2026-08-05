@@ -53,12 +53,12 @@ pub fn spawn(state: Arc<AppState>) {
                     Ok(g) => g.clone(),
                     Err(_) => continue,
                 };
-                // Honour IDM's "show dialog wins" rule. Per-job opt-in
-                // *and* the global "Show download-complete dialog"
-                // setting must both be on; either off skips the dialog
-                // and falls through to unattended actions below.
-                let show_global = state.settings().await.show_complete_dialog;
-                if prefs.show_dialog && show_global {
+                // The per-job toggle is the answer. It starts out as a
+                // copy of the global "Show download-complete dialog"
+                // setting, so leaving it alone follows the global; a
+                // user who changed it for this download meant it, and
+                // ANDing the global back in would silently ignore them.
+                if prefs.show_dialog {
                     crate::daemon::tray::spawn_download_gui(id);
                     continue;
                 }

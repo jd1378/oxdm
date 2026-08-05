@@ -114,7 +114,11 @@ pub struct JobEntry {
 }
 
 impl JobEntry {
-    fn new(job: Job) -> Self {
+    /// Per-job completion prefs are passed in rather than defaulted:
+    /// they live in memory only, so every boot re-seeds them from the
+    /// current global setting, and from then on the job's own answer is
+    /// what the completion handler reads.
+    fn with_completion(job: Job, on_completion: crate::domain::OnCompletion) -> Self {
         let phase = job.status.phase;
         let job_final_path = job.status.final_path.clone();
         // Seed live counters from the persisted snapshot so a freshly
@@ -151,7 +155,7 @@ impl JobEntry {
             is_resumable: std::sync::atomic::AtomicI8::new(0),
             captured_response: std::sync::RwLock::new(None),
             session_speed_override: std::sync::atomic::AtomicU64::new(0),
-            on_completion: std::sync::RwLock::new(crate::domain::OnCompletion::default()),
+            on_completion: std::sync::RwLock::new(on_completion),
             resolver: RwLock::new(None),
             final_path: std::sync::RwLock::new(job_final_path),
             live_controls: odl::progress::LiveControls::new(),
@@ -353,8 +357,12 @@ impl AppState {
         let manager = build_manager(&settings, boot_proxy_password.as_deref());
         let stored_jobs = store.list_jobs().await.unwrap_or_default();
         let mut jobs = IndexMap::new();
+        let completion = seeded_completion(&settings);
         for j in stored_jobs {
-            jobs.insert(j.id, Arc::new(JobEntry::new(j)));
+            jobs.insert(
+                j.id,
+                Arc::new(JobEntry::with_completion(j, completion.clone())),
+            );
         }
 
         let main_queue_id = store
@@ -1446,10 +1454,11 @@ impl AppState {
             .upsert_job(&job)
             .await
             .map_err(|e| JobError::Io(e.to_string()))?;
+        let completion = seeded_completion(&self.settings().await);
         self.jobs
             .write()
             .await
-            .insert(id, Arc::new(JobEntry::new(job)));
+            .insert(id, Arc::new(JobEntry::with_completion(job, completion)));
         let _ = self.events.send(DomainEvent::JobAdded { id });
         Ok(id)
     }
@@ -2285,6 +2294,16 @@ fn ms_to_datetime(ms: i64) -> Option<chrono::DateTime<chrono::Utc>> {
 /// not lose its partial state when the user edits its destination.
 pub fn per_job_dir(work_dir: &std::path::Path, id: JobId) -> std::path::PathBuf {
     work_dir.join(per_job_dir_name(id))
+}
+
+/// Per-job completion prefs for a newly-tracked job: defaults, with the
+/// dialog opt-in taking the global setting as its starting point. The
+/// per-job toggle then overrides the global for that download.
+fn seeded_completion(settings: &Settings) -> crate::domain::OnCompletion {
+    crate::domain::OnCompletion {
+        show_dialog: settings.show_complete_dialog,
+        ..Default::default()
+    }
 }
 
 /// Directory-name prefix every per-job working dir carries. The reset
