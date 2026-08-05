@@ -2936,7 +2936,7 @@ fn phase_mark(phase: Phase) -> crate::gui::widget::Mark {
     match phase {
         Phase::Completed => Mark::Check,
         Phase::Failed => Mark::Cross,
-        Phase::Queued => Mark::Dashed,
+        Phase::Queued => Mark::Waiting,
         Phase::Paused | Phase::Cancelled => Mark::Hollow,
         _ => Mark::Filled,
     }

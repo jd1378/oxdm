@@ -103,8 +103,8 @@ pub enum Mark {
     Filled,
     /// Stopped by the user — a hollow ring.
     Hollow,
-    /// Waiting its turn — a dashed ring.
-    Dashed,
+    /// Waiting its turn — a clock face.
+    Waiting,
     /// Finished — a check.
     Check,
     /// Gave up — a cross.
@@ -121,11 +121,13 @@ pub fn status_mark<'a, M: 'a>(
     let glyph: Element<'a, M> = match mark {
         Mark::Filled => dot(DOT, color),
         Mark::Hollow => ring(RING, color, false),
-        Mark::Dashed => ring(RING, color, true),
+        // A detailed glyph needs more room than a check to stay
+        // legible; the fixed mark box keeps the labels aligned anyway.
+        Mark::Waiting => crate::gui::icons::icon("calendar-clock", GLYPH + 2.0, color),
         // Glyphs read larger than a dot at the same nominal size, so
         // they are drawn one step down to sit on the same optical line.
-        Mark::Check => crate::gui::icons::icon("check", DOT + 3.0, color),
-        Mark::Cross => crate::gui::icons::icon("x", DOT + 3.0, color),
+        Mark::Check => crate::gui::icons::icon("check", GLYPH, color),
+        Mark::Cross => crate::gui::icons::icon("x", GLYPH, color),
     };
     row![
         container(glyph)
@@ -146,11 +148,14 @@ pub fn status_mark<'a, M: 'a>(
 /// centred in so labels line up whichever glyph precedes them.
 const DOT: f32 = 8.0;
 const RING: f32 = 9.0;
-const MARK_BOX: f32 = 13.0;
+/// Glyph marks read smaller than a filled shape of the same nominal
+/// size, so they are drawn a few px up from the dot.
+const GLYPH: f32 = 11.0;
+const MARK_BOX: f32 = 14.0;
 
-/// Ring outline of `size` px, optionally dashed (design's queued dot).
-/// Canvas rather than a bordered container: tiny-skia can dash a stroke,
-/// CSS-style dashed borders do not exist in iced.
+/// Ring outline of `size` px, optionally dashed. Canvas rather than a
+/// bordered container: tiny-skia can dash a stroke, CSS-style dashed
+/// borders do not exist in iced.
 pub fn ring<'a, M: 'a>(size: f32, color: Color, dashed: bool) -> Element<'a, M> {
     canvas(Ring { color, dashed })
         .width(Length::Fixed(size))
