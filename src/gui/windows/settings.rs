@@ -61,7 +61,7 @@ impl Section {
             Section::Network => "Connections, bandwidth, proxy, and request identity.",
             Section::Browser => "Pair the browser extension and resolve capture conflicts.",
             Section::Notifications => "What oxdm tells you, and how, for each event.",
-            Section::Advanced => "Reset oxdm to a clean database.",
+            Section::Advanced => "Reset oxdm to a clean slate.",
         }
     }
 }
@@ -2275,8 +2275,9 @@ fn danger_section(st: &State) -> Element<'_, Msg> {
             t,
             "Reset oxdm",
             Some(
-                "Backs up and clears the database: all jobs, queues and settings. \
-                 Downloaded files stay on disk. The daemon exits and must be relaunched.",
+                "Deletes the database and every unfinished download: all jobs, queues \
+                 and settings. Completed files stay on disk. The daemon exits and \
+                 must be relaunched.",
             ),
             Btn::new("Reset oxdm…")
                 .danger_filled()
@@ -2299,9 +2300,10 @@ fn reset_overlay<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a, Msg> 
                 .size(14.0)
                 .color(t.fg_1),
             text(
-                "The database is backed up, then all jobs, queues and settings are \
-                 erased. Downloaded files are not touched. The daemon exits; relaunch \
-                 oxdm to start fresh.",
+                "All jobs, queues and settings are erased, and the partial data of \
+                 every unfinished download is deleted. This cannot be undone. \
+                 Completed files are not touched. The daemon exits; relaunch oxdm \
+                 to start fresh.",
             )
             .font(theme::BODY)
             .size(12.0)

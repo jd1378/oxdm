@@ -1074,28 +1074,74 @@ impl AppState {
         self.db_error.read().await.clone()
     }
 
-    /// User chose "Reset" in the recovery dialog. Move the broken DB
-    /// aside (timestamped `.bak`) and exit the daemon process. The
-    /// next daemon spawn re-runs `Store::open`, gets a fresh DB, and
-    /// boots normally.
+    /// User chose "Reset" — from the Advanced danger section, or from
+    /// the recovery dialog after `Store::open` failed. Wipe every
+    /// per-job working dir, drop the DB, and exit the daemon process.
+    /// The next daemon spawn re-runs `Store::open`, gets a fresh DB,
+    /// and boots normally.
+    ///
+    /// The DB is only kept (renamed to a timestamped `.bak`) when it
+    /// failed to open: there a copy is the user's one shot at recovering
+    /// their job list out of a corrupt file. A healthy DB is deleted
+    /// outright — the user asked for a clean slate, and a backup they
+    /// cannot restore from the UI is just a stale file that outlives its
+    /// purpose.
+    ///
+    /// Partials are always deleted, never backed up: they belong to the
+    /// jobs this reset destroys, nothing would ever collect them again,
+    /// and they can run to gigabytes.
     ///
     /// We do not try to hot-swap the `Store` in place — too many live
     /// references (queues / runners / scheduler / IPC handlers) hold
     /// pointers into the existing one. A clean exit + re-spawn is the
     /// safer reset path.
-    pub fn reset_database_and_exit(&self) -> Result<(), String> {
+    pub async fn reset_database_and_exit(&self) -> Result<(), String> {
+        // Prefix scan rather than "walk the job registry": it is the
+        // only form that works on the corrupt-DB path (no rows to walk)
+        // and it also reaps dirs orphaned by past crashes.
+        let work_dir = self.settings().await.work_dir;
+        let purged = purge_work_dir_partials(&work_dir);
+        if purged > 0 {
+            tracing::warn!(
+                work_dir = %work_dir.display(),
+                dirs = purged,
+                "reset: deleted per-job working dirs",
+            );
+        }
+
+        let keep_backup = self.db_error().await.is_some();
         let path = crate::data::store::default_db_path();
         if path.exists() {
-            let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
-            let backup = path.with_extension(format!("db.bak-{ts}"));
-            if let Err(e) = std::fs::rename(&path, &backup) {
-                return Err(format!("could not back up corrupt DB: {e}"));
+            if keep_backup {
+                let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+                let backup = path.with_extension(format!("db.bak-{ts}"));
+                if let Err(e) = std::fs::rename(&path, &backup) {
+                    return Err(format!("could not back up corrupt DB: {e}"));
+                }
+                // WAL + shm carry committed pages the main file does not
+                // — a forensic copy without them is not the same DB.
+                for suffix in DB_SIDECARS {
+                    let from = sidecar(&path, suffix);
+                    if from.exists() {
+                        let _ = std::fs::rename(&from, sidecar(&backup, suffix));
+                    }
+                }
+                tracing::warn!(
+                    original = %path.display(),
+                    backup = %backup.display(),
+                    "DB reset: corrupt file renamed for forensics",
+                );
+            } else {
+                if let Err(e) = std::fs::remove_file(&path) {
+                    return Err(format!("could not delete database: {e}"));
+                }
+                // Leaving a `-wal` behind next to a freshly created DB
+                // invites SQLite into recovering pages from the store we
+                // just erased.
+                for suffix in DB_SIDECARS {
+                    let _ = std::fs::remove_file(sidecar(&path, suffix));
+                }
             }
-            tracing::warn!(
-                original = %path.display(),
-                backup = %backup.display(),
-                "DB reset: original file renamed for forensics",
-            );
         }
         // Spawn the replacement daemon ourselves, then exit. The new
         // daemon's normal boot path calls `tray::spawn_main_gui`, so
@@ -2243,7 +2289,68 @@ fn ms_to_datetime(ms: i64) -> Option<chrono::DateTime<chrono::Utc>> {
 /// Stable across renames / save-dir retargets so an in-flight job does
 /// not lose its partial state when the user edits its destination.
 pub fn per_job_dir(work_dir: &std::path::Path, id: JobId) -> std::path::PathBuf {
-    work_dir.join(format!(".oxdm-{}", id.0.simple()))
+    work_dir.join(per_job_dir_name(id))
+}
+
+/// Directory-name prefix every per-job working dir carries. The reset
+/// sweep keys off it, so the two must not drift apart.
+const PER_JOB_PREFIX: &str = ".oxdm-";
+
+fn per_job_dir_name(id: JobId) -> String {
+    format!("{PER_JOB_PREFIX}{}", id.0.simple())
+}
+
+/// SQLite sidecars that must travel with (or die with) the main DB file.
+const DB_SIDECARS: [&str; 3] = ["-wal", "-shm", "-journal"];
+
+fn sidecar(db: &std::path::Path, suffix: &str) -> std::path::PathBuf {
+    let mut s = db.as_os_str().to_os_string();
+    s.push(suffix);
+    std::path::PathBuf::from(s)
+}
+
+/// Delete every per-job working dir under `work_dir`, returning how many
+/// went. Matching is by directory-name prefix so a `work_dir` the user
+/// shares with their own files keeps everything that is not ours; a
+/// symlink pointing outside is unlinked, never followed.
+///
+/// Best-effort: an unreadable dir or a failed removal is logged and
+/// skipped rather than aborting the reset, which must still get to the
+/// point of dropping the DB.
+fn purge_work_dir_partials(work_dir: &std::path::Path) -> usize {
+    let entries = match std::fs::read_dir(work_dir) {
+        Ok(e) => e,
+        Err(e) => {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(dir = %work_dir.display(), error = %e, "reset: cannot scan work dir");
+            }
+            return 0;
+        }
+    };
+    let mut purged = 0;
+    for entry in entries.flatten() {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(PER_JOB_PREFIX)
+        {
+            continue;
+        }
+        let path = entry.path();
+        // `file_type` does not follow symlinks: a symlinked `.oxdm-*` is
+        // removed as a link, so we never recurse into whatever it aims at.
+        let removed = match entry.file_type() {
+            Ok(t) if t.is_dir() => std::fs::remove_dir_all(&path),
+            _ => std::fs::remove_file(&path),
+        };
+        match removed {
+            Ok(()) => purged += 1,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "reset: cannot remove partial")
+            }
+        }
+    }
+    purged
 }
 
 /// Rebuild a `JobEntry` carrying every sticky field forward but with a
@@ -2580,5 +2687,74 @@ impl ResumeContext for StateResumeContext {
             return Err(JobError::Other("app state dropped".into()));
         };
         state.start_job(id).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The reset sweep must take every per-job dir — including ones
+    /// orphaned by a past crash — and nothing else the user parked in
+    /// their work dir.
+    #[test]
+    fn purge_takes_only_per_job_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        let mine = per_job_dir(root, JobId::new());
+        std::fs::create_dir_all(mine.join("nested")).unwrap();
+        std::fs::write(mine.join("metadata.pb"), b"x").unwrap();
+        let orphan = root.join(".oxdm-deadbeef");
+        std::fs::create_dir_all(&orphan).unwrap();
+
+        let keep_dir = root.join("keepme");
+        std::fs::create_dir_all(&keep_dir).unwrap();
+        let keep_file = root.join("notes.txt");
+        std::fs::write(&keep_file, b"x").unwrap();
+        // Prefix-adjacent, not ours.
+        let keep_lookalike = root.join(".oxdm");
+        std::fs::create_dir_all(&keep_lookalike).unwrap();
+
+        assert_eq!(purge_work_dir_partials(root), 2);
+        assert!(!mine.exists());
+        assert!(!orphan.exists());
+        assert!(keep_dir.exists());
+        assert!(keep_file.exists());
+        assert!(keep_lookalike.exists());
+    }
+
+    /// A missing work dir is a normal state (nothing downloaded yet) —
+    /// the reset has to carry on to dropping the DB regardless.
+    #[test]
+    fn purge_tolerates_missing_work_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(purge_work_dir_partials(&tmp.path().join("nope")), 0);
+    }
+
+    /// A symlinked `.oxdm-*` is unlinked, not followed — otherwise a
+    /// reset could delete whatever the link aims at.
+    #[cfg(unix)]
+    #[test]
+    fn purge_does_not_follow_symlinks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("precious"), b"x").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join(".oxdm-link")).unwrap();
+
+        assert_eq!(purge_work_dir_partials(root), 1);
+        assert!(!root.join(".oxdm-link").exists());
+        assert!(outside.join("precious").exists());
+    }
+
+    #[test]
+    fn sidecar_appends_suffix_to_full_filename() {
+        let p = std::path::Path::new("/data/oxdm/oxdm.db");
+        assert_eq!(
+            sidecar(p, "-wal"),
+            std::path::Path::new("/data/oxdm/oxdm.db-wal")
+        );
     }
 }

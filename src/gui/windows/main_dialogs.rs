@@ -384,10 +384,14 @@ pub fn db_error<'a>(m: &'a Main, base: Element<'a, Msg>, error: &str) -> Element
             .font(theme::BODY)
             .size(12.0)
             .color(t.fg_2),
-        text("Resetting deletes the download list (files on disk are kept).")
-            .font(theme::BODY)
-            .size(11.0)
-            .color(t.fg_3),
+        text(
+            "Resetting deletes the download list and every unfinished download \
+             (completed files are kept). A copy of the damaged database is left \
+             behind."
+        )
+        .font(theme::BODY)
+        .size(11.0)
+        .color(t.fg_3),
         row![
             iced::widget::Space::new().width(Length::Fill),
             Btn::new("Exit").ghost().on_press(Msg::DbExit).view(t),

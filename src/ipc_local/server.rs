@@ -611,7 +611,7 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
             Err(e) => Reply::Err(e),
         },
         Request::DbStatus => Reply::DbStatus(state.db_error().await),
-        Request::ResetDatabase => match state.reset_database_and_exit() {
+        Request::ResetDatabase => match state.reset_database_and_exit().await {
             Ok(()) => Reply::Ok,
             Err(e) => Reply::Err(e),
         },
