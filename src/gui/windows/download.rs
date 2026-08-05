@@ -42,10 +42,11 @@ const WIN_MIN_W: f32 = 530.0;
 /// Floor height, minus the bottom gap that moved inside the scroll port
 /// and so no longer has to be reserved by the frame.
 const WIN_MIN_H: f32 = 418.0 - theme::space::S4;
-/// Launch height for the completion view: hero burst, the saved-to and
-/// address rows, the actions and the "don't show again" checkbox. Fixed
-/// content, so one measured number covers it.
-const WIN_COMPLETE_H: f32 = 440.0;
+/// Launch height for the completion view: hero burst and its title, the
+/// file card, the saved-to and address rows, the actions and the "don't
+/// show again" checkbox. Fixed content, so one measured number covers
+/// it.
+const WIN_COMPLETE_H: f32 = 524.0;
 /// The failed-integrity completion view adds a "don't open this file"
 /// banner and an expected-vs-got digest panel above the same content.
 /// Without the extra room the actions — including the "Download again"
@@ -1770,14 +1771,18 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
     } else {
         ("Download complete", t.fg_1)
     };
+    // The verdict belongs to the burst, the file card to the file
+    // (design §3.3 `.complete-file` = ext tile + name + size): putting
+    // the outcome in the card's title slot left the filename with
+    // nowhere to go, and the user reads this page to find their file.
     let header = container(
         row![
             tile,
             column![
-                text(title_text)
-                    .font(theme::DISPLAY)
-                    .size(20.0)
-                    .color(title_color),
+                text(name.clone())
+                    .font(theme::BODY_BOLD)
+                    .size(14.0)
+                    .color(t.fg_1),
                 text(format!(
                     "Downloaded {} ({} bytes)",
                     format_bytes_2(total),
@@ -1864,10 +1869,20 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
     ]
     .spacing(6.0);
 
-    // Burst stage, centered above the header (`cb-pop`).
-    let burst = container(completion_burst(st, tampered))
-        .width(Length::Fill)
-        .align_x(Alignment::Center);
+    // Burst stage + its title, centered above the header (`cb-pop`).
+    let burst = container(
+        column![
+            completion_burst(st, tampered),
+            text(title_text)
+                .font(theme::DISPLAY)
+                .size(20.0)
+                .color(title_color),
+        ]
+        .spacing(theme::space::S2)
+        .align_x(Alignment::Center),
+    )
+    .width(Length::Fill)
+    .align_x(Alignment::Center);
 
     let mut body = column![burst, header].spacing(theme::space::S3);
     // Tampered files get a heavy "don't open" warning right under the
