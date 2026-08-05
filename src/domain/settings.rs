@@ -95,10 +95,11 @@ pub struct Settings {
     #[serde(default)]
     pub start_to_tray: bool,
     /// If true, finishing a download surfaces the per-job window with a
-    /// "Download complete" view. Maps to IDM's "Don't show this dialog
-    /// again" checkbox: unchecked = global suppression for future
-    /// completions. Per-job `OnCompletion::show_dialog` still gates,
-    /// so users can opt out individual jobs while keeping the global on.
+    /// "Download complete" view. Owned by Settings → Notifications; the
+    /// completion view itself carries no opt-out, so there is one place
+    /// this is answered. Per-job `OnCompletion::show_dialog` still
+    /// gates, so users can opt out individual jobs while keeping the
+    /// global on.
     #[serde(default = "yes_default")]
     pub show_complete_dialog: bool,
     /// System notification when a download completes. Independent of

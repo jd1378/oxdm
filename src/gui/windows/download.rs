@@ -24,7 +24,7 @@ use crate::gui::widget::error_panel::{
 };
 use crate::gui::widget::striped::striped_progress_hatched;
 use crate::gui::widget::{
-    Btn, BtnSize, RateChart, TabBtn, TextInput, card, checkbox, collapsible_card, combo, hairline,
+    Btn, BtnSize, RateChart, TabBtn, TextInput, card, collapsible_card, combo, hairline,
     number_stepper, pill_progress, rate_chart, segmented, set_row, set_row_panel, set_rows,
     sibling, status_dot, toggle,
 };
@@ -43,10 +43,9 @@ const WIN_MIN_W: f32 = 530.0;
 /// and so no longer has to be reserved by the frame.
 const WIN_MIN_H: f32 = 418.0 - theme::space::S4;
 /// Launch height for the completion view: hero burst and its title, the
-/// file card, the saved-to and address rows, the actions and the "don't
-/// show again" checkbox. Fixed content, so one measured number covers
-/// it.
-const WIN_COMPLETE_H: f32 = 524.0;
+/// file card, the saved-to and address rows, and the actions. Fixed
+/// content, so one measured number covers it.
+const WIN_COMPLETE_H: f32 = 488.0;
 /// The failed-integrity completion view adds a "don't open this file"
 /// banner and an expected-vs-got digest panel above the same content.
 /// Without the extra room the actions — including the "Download again"
@@ -175,7 +174,6 @@ pub enum Msg {
     OpenFolder,
     CloseWin,
     MinimizeTray,
-    DontShowAgain(bool),
     // Completed view — copy / reveal / checksum verify
     Copy(String),
     Reveal(PathBuf),
@@ -202,7 +200,6 @@ pub struct State {
     tokens: Tokens,
     id: JobId,
     entry: JobEntryView,
-    show_complete_dialog: bool,
 
     tab: Tab,
     rate_open: bool,
@@ -380,7 +377,6 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
             *app = App::Ready(Box::new(State {
                 tokens: Tokens::from_settings(&settings),
                 id: entry.job.id,
-                show_complete_dialog: settings.show_complete_dialog,
                 tab: Tab::Info,
                 rate_open: false,
                 segments_open: false,
@@ -647,20 +643,6 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
         }
         Msg::CloseWin => iced::exit(),
         Msg::MinimizeTray => iced::window::latest().and_then(|id| iced::window::minimize(id, true)),
-        Msg::DontShowAgain(dont) => {
-            st.show_complete_dialog = !dont;
-            let client = st.client.clone();
-            let show = !dont;
-            Task::perform(
-                async move {
-                    let snap = client.snapshot().await?;
-                    let mut s = snap.settings;
-                    s.show_complete_dialog = show;
-                    client.update_settings(s).await
-                },
-                |_| Msg::Noop,
-            )
-        }
         Msg::Themed(t) => {
             st.tokens = *t;
             Task::none()
@@ -1938,38 +1920,30 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
     // takes the primary slot in its place — there is no action here that
     // makes the file safe.
     let open = Btn::new("Open").icon("play").on_press(Msg::Open);
-    body = body
+    body = body.push(
+        row![if tampered {
+            open.toolbar().view(t)
+        } else {
+            open.primary().view(t)
+        }]
+        .spacing(theme::space::S2)
+        .align_y(Alignment::Center)
         .push(
-            row![if tampered {
-                open.toolbar().view(t)
-            } else {
-                open.primary().view(t)
-            }]
-            .spacing(theme::space::S2)
-            .align_y(Alignment::Center)
-            .push(
-                Btn::new("Open Containing Folder")
-                    .toolbar()
-                    .icon("folder")
-                    .on_press(Msg::OpenFolder)
-                    .view(t),
-            )
-            .push(iced::widget::Space::new().width(Length::Fill))
-            .push(
-                Btn::new("Close")
-                    .toolbar()
-                    .icon("x")
-                    .on_press(Msg::CloseWin)
-                    .view(t),
-            ),
+            Btn::new("Open Containing Folder")
+                .toolbar()
+                .icon("folder")
+                .on_press(Msg::OpenFolder)
+                .view(t),
         )
-        .push(checkbox(
-            t,
-            "Don't show this dialog again",
-            !st.show_complete_dialog,
-            true,
-            Msg::DontShowAgain,
-        ));
+        .push(iced::widget::Space::new().width(Length::Fill))
+        .push(
+            Btn::new("Close")
+                .toolbar()
+                .icon("x")
+                .on_press(Msg::CloseWin)
+                .view(t),
+        ),
+    );
     if let Some(cs_box) = cs_box {
         body = body.push(cs_box);
     }
