@@ -187,7 +187,6 @@ pub enum Msg {
     NotifyComplete(bool),
     ShowFailedDialog(bool),
     NotifyFailed(bool),
-    NotifyQueueFinished(bool),
     // Advanced
     ResetDbAsk,
     ResetDbCancel,
@@ -399,7 +398,6 @@ fn copy_section(dst: &mut Settings, src: &Settings, section: Section) {
             dst.notify_complete = src.notify_complete;
             dst.show_failed_dialog = src.show_failed_dialog;
             dst.notify_failed = src.notify_failed;
-            dst.notify_queue_finished = src.notify_queue_finished;
             dst.show_update_dialog = src.show_update_dialog;
             dst.notify_update = src.notify_update;
         }
@@ -910,10 +908,6 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
         }
         Msg::NotifyFailed(v) => {
             st.s.notify_failed = v;
-            Task::none()
-        }
-        Msg::NotifyQueueFinished(v) => {
-            st.s.notify_queue_finished = v;
             Task::none()
         }
         Msg::ResetDbAsk => {
@@ -2227,25 +2221,6 @@ fn notifications_section(st: &State) -> Element<'_, Msg> {
                         Some("Reports the failure without taking focus."),
                         st.s.notify_failed,
                         Msg::NotifyFailed,
-                    ),
-                ],
-            ),
-            set_section(
-                t,
-                "Queue finished",
-                vec![
-                    toggle_row(
-                        t,
-                        "System notification",
-                        Some("Fires when every download in a queue has finished."),
-                        st.s.notify_queue_finished,
-                        Msg::NotifyQueueFinished,
-                    ),
-                    set_note(
-                        t,
-                        "A finished queue has no dialog. For an action instead of a report (run a \
-                         command, sleep, shut down), use the queue's on-finish hooks in \
-                         Queues & scheduling.",
                     ),
                 ],
             ),

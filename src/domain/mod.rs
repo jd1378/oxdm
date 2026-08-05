@@ -21,6 +21,7 @@ pub use job::{
 };
 pub use queue::{
     CMD_INTERVAL_RANGE, CondCombine, CondCommand, CondKind, CondSet, IDLE_MINUTES_RANGE, Queue,
-    QueueHook, QueueId, QueueSchedule, WeekDayMask, finish_summary, random_vivid_color,
+    QueueHook, QueueId, QueueSchedule, WeekDayMask, finish_summary, finish_title,
+    random_vivid_color,
 };
 pub use settings::{ConflictWhileHidden, Settings, Theme};

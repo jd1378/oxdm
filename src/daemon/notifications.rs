@@ -45,22 +45,6 @@ pub fn spawn(state: Arc<AppState>) {
                     };
                     notify(title, &error.to_string());
                 }
-                DomainEvent::QueueFinished {
-                    id,
-                    completed,
-                    failed,
-                } => {
-                    if !state.settings().await.notify_queue_finished {
-                        continue;
-                    }
-                    let Some(queue) = state.queue(id).await else {
-                        continue;
-                    };
-                    notify(
-                        "Queue finished",
-                        &crate::domain::finish_summary(&queue.name, completed, failed),
-                    );
-                }
                 _ => {}
             }
         }

@@ -61,14 +61,15 @@ impl Queue {
     /// that one caps every queue together.
     pub const DEFAULT_CONCURRENT: usize = 3;
 
-    /// Title of the default finish notification. Shared with the queues
+    /// Stored title of the default finish hook. Shared with the queues
     /// editor, which rebuilds the hook when the user switches its kind:
     /// a second spelling here would read as an edit the moment the
     /// window opened.
     pub const FINISH_NOTIFY_TITLE: &'static str = "Queue finished";
 
-    /// The body is a placeholder — `data::hooks` replaces it with the
-    /// run's outcome when the hook actually fires.
+    /// Both strings are placeholders — when the hook fires,
+    /// `data::hooks` replaces them with [`finish_title`] and
+    /// [`finish_summary`], which know the queue and how the run went.
     pub fn finish_notify() -> QueueHook {
         QueueHook::Notify {
             title: Self::FINISH_NOTIFY_TITLE.into(),
@@ -315,48 +316,48 @@ pub enum QueueHook {
     },
 }
 
-/// What a queue run produced, as one sentence. Shared by the built-in
-/// "queue finished" notification and the per-queue Notify hook so a
-/// user who turns both on is told the same thing twice, not two
-/// different things.
+/// Title of a queue-finished notification. The queue name leads because
+/// notification surfaces that collapse or truncate keep the title and
+/// drop the body — a generic "Queue finished" there says nothing about
+/// which one.
+pub fn finish_title(queue: &str) -> String {
+    format!("{queue} finished")
+}
+
+/// What a queue run produced, as one sentence. Pairs with
+/// [`finish_title`], which already carries the queue name, so this does
+/// not repeat it.
 ///
 /// Failures are named because a queue that "finished" with downloads
 /// still broken has not done what the user asked, and a bare total
 /// would hide that.
-pub fn finish_summary(queue: &str, completed: u32, failed: u32) -> String {
+pub fn finish_summary(completed: u32, failed: u32) -> String {
     let files = |n: u32| if n == 1 { "file" } else { "files" };
     match (completed, failed) {
-        (0, 0) => format!("{queue} is done. Nothing was downloaded."),
-        (0, f) => format!("{queue} is done. {f} {} failed.", files(f)),
-        (c, 0) => format!("{queue} is done. {c} {} downloaded.", files(c)),
-        (c, f) => format!("{queue} is done. {c} {} downloaded, {f} failed.", files(c)),
+        (0, 0) => "Nothing was downloaded.".to_owned(),
+        (0, f) => format!("{f} {} failed.", files(f)),
+        (c, 0) => format!("{c} {} downloaded.", files(c)),
+        (c, f) => format!("{c} {} downloaded, {f} failed.", files(c)),
     }
 }
 
 #[cfg(test)]
 mod finish_summary_tests {
-    use super::finish_summary;
+    use super::{finish_summary, finish_title};
+
+    #[test]
+    fn title_names_the_queue() {
+        assert_eq!(finish_title("Main"), "Main finished");
+    }
 
     #[test]
     fn reports_both_counts_and_singularises() {
-        assert_eq!(
-            finish_summary("Main", 4, 0),
-            "Main is done. 4 files downloaded."
-        );
-        assert_eq!(
-            finish_summary("Main", 1, 0),
-            "Main is done. 1 file downloaded."
-        );
-        assert_eq!(
-            finish_summary("Main", 3, 2),
-            "Main is done. 3 files downloaded, 2 failed."
-        );
-        assert_eq!(finish_summary("Main", 0, 1), "Main is done. 1 file failed.");
+        assert_eq!(finish_summary(4, 0), "4 files downloaded.");
+        assert_eq!(finish_summary(1, 0), "1 file downloaded.");
+        assert_eq!(finish_summary(3, 2), "3 files downloaded, 2 failed.");
+        assert_eq!(finish_summary(0, 1), "1 file failed.");
         // A queue stopped before anything finished says so rather than
         // claiming success.
-        assert_eq!(
-            finish_summary("Main", 0, 0),
-            "Main is done. Nothing was downloaded."
-        );
+        assert_eq!(finish_summary(0, 0), "Nothing was downloaded.");
     }
 }

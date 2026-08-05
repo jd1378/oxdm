@@ -118,11 +118,6 @@ pub struct Settings {
     /// the other notifications.
     #[serde(default)]
     pub notify_failed: bool,
-    /// System notification when every job in a queue reaches a terminal
-    /// phase. Queue completion has no dialog — the queue window and the
-    /// tray already carry the state. Off by default.
-    #[serde(default)]
-    pub notify_queue_finished: bool,
     /// Update-available surfaces. Both are inert for now: the updater
     /// only checks on demand from the About dialog, so nothing raises
     /// these events and the settings rows stay disabled.
@@ -367,7 +362,6 @@ impl Default for Settings {
             notify_complete: false,
             show_failed_dialog: true,
             notify_failed: false,
-            notify_queue_finished: false,
             show_update_dialog: false,
             notify_update: false,
             update_feed_url: String::new(),

@@ -64,20 +64,21 @@ async fn execute(
 ) -> Result<(), String> {
     match hook {
         QueueHook::Notify { title, body } => {
-            // The finish notification describes the run. The stored
-            // body is a placeholder the queues window wrote when the
-            // hook was created — it cannot know how the run went, and
-            // repeating the queue name under a "Queue finished" title
-            // tells the user nothing.
-            let body = match when {
-                HookPhase::Finish { completed, failed } => {
-                    crate::domain::finish_summary(&queue.name, completed, failed)
-                }
-                HookPhase::Start => body.clone(),
+            // The finish notification describes the run, so neither
+            // stored string survives: they were written when the hook
+            // was created and cannot know how the run went. The title
+            // names the queue because that is what a collapsed or
+            // truncated notification keeps.
+            let (title, body) = match when {
+                HookPhase::Finish { completed, failed } => (
+                    crate::domain::finish_title(&queue.name),
+                    crate::domain::finish_summary(completed, failed),
+                ),
+                HookPhase::Start => (title.clone(), body.clone()),
             };
             #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
             {
-                crate::platform::show_notification(title.clone(), body);
+                crate::platform::show_notification(title, body);
             }
             #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
             {
