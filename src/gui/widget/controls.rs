@@ -355,15 +355,21 @@ const STEPPER_FONT: f32 = 11.0;
 const STEPPER_LINE: f32 = 12.0;
 const STEPPER_INK_NUDGE: f32 = 2.0;
 
+/// `selected` marks the stepper as *the* control holding the current
+/// choice — true when the value is one no sibling preset pill covers.
+/// Without it a custom value leaves every pill unlit and nothing lit in
+/// their place, so the row reads as if nothing were chosen.
 pub fn number_stepper<'a, M: Clone + 'a>(
     t: &Tokens,
     value: i64,
     min: i64,
     max: i64,
     enabled: bool,
+    selected: bool,
     msg: impl Fn(i64) -> M,
 ) -> Element<'a, M> {
     let t2 = *t;
+    let (_, sel_fg, sel_border) = t.pill_selected();
     let seg = |el: Element<'a, M>| el;
     let arrow = |name: &'static str, target: Option<i64>, msg: Option<M>| {
         let enabled_btn = enabled && target.is_some();
@@ -388,7 +394,11 @@ pub fn number_stepper<'a, M: Clone + 'a>(
                 // Even line box, so centring it in the even-height field
                 // lands on whole pixels.
                 .line_height(text::LineHeight::Absolute(STEPPER_LINE.into()))
-                .color(if enabled { t.fg_1 } else { t.fg_4 })
+                .color(match (enabled, selected) {
+                    (false, _) => t.fg_4,
+                    (true, true) => sel_fg,
+                    (true, false) => t.fg_1,
+                })
         )
         .width(Length::Fixed(32.0))
         .align_x(Alignment::Center)
@@ -410,7 +420,11 @@ pub fn number_stepper<'a, M: Clone + 'a>(
         .style(move |_| container::Style {
             background: Some(t2.bg_raised.into()),
             border: Border {
-                color: t2.border_subtle,
+                color: if selected {
+                    sel_border
+                } else {
+                    t2.border_subtle
+                },
                 width: 1.0,
                 radius: theme::control::RADIUS.into(),
             },

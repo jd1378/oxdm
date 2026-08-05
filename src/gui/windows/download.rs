@@ -1517,6 +1517,7 @@ fn speed_tab(st: &State) -> Element<'_, Msg> {
             MAX_CONN_MIN,
             MAX_CONN_MAX,
             true,
+            false,
             |n| Msg::MaxConn(n.to_string()),
         ));
     }

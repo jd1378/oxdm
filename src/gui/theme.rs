@@ -187,6 +187,18 @@ pub struct Tokens {
 }
 
 impl Tokens {
+    /// Clay tint of a chosen radio pill, as `(background, foreground,
+    /// border)`. `tokens.css` remaps clay-50/200/700 to dark warm tints
+    /// under the dark theme so the active pill doesn't punch a bright
+    /// hole. Shared by every control that can hold the same choice, so
+    /// "selected" reads identically wherever it lands.
+    pub fn pill_selected(&self) -> (Color, Color, Color) {
+        match self.theme {
+            ResolvedTheme::Dark => (clay::DARK_C50, clay::DARK_C700, clay::DARK_C200),
+            _ => (clay::C50, clay::C700, clay::C200),
+        }
+    }
+
     /// Light theme — sources from `theme-utility` in
     /// `design/tokens.css`: cool neutral grays with the clay accent.
     pub fn light() -> Self {

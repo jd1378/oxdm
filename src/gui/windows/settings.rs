@@ -1296,7 +1296,7 @@ fn stepper<'a>(
         .parse::<i64>()
         .unwrap_or(default)
         .clamp(min, max);
-    number_stepper(t, v, min, max, true, move |n| msg(n.to_string()))
+    number_stepper(t, v, min, max, true, false, move |n| msg(n.to_string()))
 }
 
 /// Connection-count presets (design: the Queues window's concurrency
@@ -1339,6 +1339,7 @@ fn connections_picker<'a>(t: &Tokens, current: Option<u64>) -> Element<'a, Msg> 
         CONN_MIN,
         CONN_MAX,
         true,
+        current.is_some_and(|n| !CONN_PRESETS.contains(&n)),
         |n| Msg::Connections(Some(n as u64)),
     ))
     .into()
@@ -1409,6 +1410,7 @@ fn concurrent_picker<'a>(t: &Tokens, value: &str) -> Element<'a, Msg> {
             CONCURRENT_MIN,
             CONCURRENT_MAX,
             true,
+            !unlimited,
             |n| Msg::Concurrent(n.to_string()),
         ),
     ]

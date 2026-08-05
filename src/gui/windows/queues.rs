@@ -43,6 +43,9 @@ const CONC_PILL_PAD_X: f32 = 14.0;
 const PILL_WRAP_GAP: f32 = 4.0;
 /// Custom-concurrency stepper bounds. Min 1 keeps at least one active
 /// download; no design max, so cap at a sane parallelism ceiling.
+/// Concurrency values the preset pills cover. The stepper lights up for
+/// anything else, so the two must be read from one list.
+const CONC_PRESETS: [usize; 5] = [1, 2, 3, 5, 8];
 const CONC_MIN: i64 = 1;
 const CONC_MAX: i64 = 16;
 /// Concurrency a queue gets when it carries none of its own — a queue
@@ -943,16 +946,7 @@ fn radio_pill<'a>(
     msg: Msg,
 ) -> Element<'a, Msg> {
     let t2 = *t;
-    // tokens.css remaps clay-50/200/700 to dark warm tints under the
-    // dark theme so the active pill doesn't punch a bright hole.
-    let (on_bg, on_fg, on_border) = match t.theme {
-        theme::ResolvedTheme::Dark => (
-            color::clay::DARK_C50,
-            color::clay::DARK_C700,
-            color::clay::DARK_C200,
-        ),
-        _ => (color::clay::C50, color::clay::C700, color::clay::C200),
-    };
+    let (on_bg, on_fg, on_border) = t.pill_selected();
     let fg = if selected { on_fg } else { t.fg_2 };
     let label = text(label).font(theme::BODY_BOLD).size(CONC_PILL_FONT);
     // `button` paints the label from its own style; the icon carries
@@ -1613,6 +1607,7 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
                     CONC_MIN,
                     CONC_MAX,
                     true,
+                    conc < CONC_UNLIMITED && !CONC_PRESETS.contains(&conc),
                     |n| Msg::Concurrency(n as usize),
                 ),
             ]
