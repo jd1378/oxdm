@@ -105,6 +105,10 @@ const BURST_RING_ALPHA: f32 = 0.5;
 /// full extent of the widest ring while radii stay measured from
 /// `BURST_STAGE` — otherwise the pulse gets its edges sliced off.
 const BURST_CANVAS: f32 = BURST_STAGE * BURST_RING_TO;
+/// How far the widest ring reaches past the stage on each side. The
+/// scroll region has to open with at least this much padding or the
+/// bleed lands outside the viewport and is clipped away.
+const BURST_BLEED: f32 = (BURST_CANVAS - BURST_STAGE) / 2.0;
 /// `.cb-ring.r2 { animation-delay: 600ms }`. Shorter than the period, so
 /// the two rings read as a pair of pulses followed by a pause rather
 /// than an even heartbeat — that gap is the design's rhythm, not a gap
@@ -1902,7 +1906,7 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
     .width(Length::Fill)
     .align_x(Alignment::Center);
 
-    let mut body = column![header].spacing(theme::space::S3);
+    let mut body = column![burst, header].spacing(theme::space::S3);
     // Tampered files get a heavy "don't open" warning right under the
     // header (design `.tamper-banner`).
     if tampered {
@@ -1984,24 +1988,27 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
         t,
         column![
             titlebar::titlebar(t, &st.window_title(), false, Msg::Window),
-            // The burst sits outside the scroll area. A scrollable clips
-            // to its viewport, and the widest ring bleeds 22px above the
-            // stage — inside the scroll region that bleed is sheared off
-            // at the top edge no matter how much padding surrounds it.
-            container(burst).width(Length::Fill).padding(iced::Padding {
-                top: theme::space::S6,
-                bottom: theme::space::S3,
-                left: theme::space::S4,
-                right: theme::space::S4,
-            }),
-            container(crate::gui::widget::vscroll(body).height(Length::Fill))
-                .padding(iced::Padding {
-                    top: 0.0,
-                    bottom: theme::space::S4,
-                    left: theme::space::S4,
-                    right: theme::space::S4 - crate::gui::widget::SCROLL_GUTTER,
-                })
+            // The top pad lives INSIDE the scroll region, not around
+            // it. A scrollable clips to its viewport, and the widest
+            // burst ring bleeds `BURST_BLEED` above its stage — padding
+            // on the outside would put that bleed beyond the viewport
+            // edge and shear it off. Design `.complete-body` pads 24,
+            // which covers the bleed. Scrolled down, the ring clips at
+            // the edge like any other content.
+            container(
+                crate::gui::widget::vscroll(
+                    container(body)
+                        .padding(iced::Padding::default().top(theme::space::S6.max(BURST_BLEED)),),
+                )
                 .height(Length::Fill),
+            )
+            .padding(iced::Padding {
+                top: 0.0,
+                bottom: theme::space::S4,
+                left: theme::space::S4,
+                right: theme::space::S4 - crate::gui::widget::SCROLL_GUTTER,
+            })
+            .height(Length::Fill),
         ]
         .into(),
     )
