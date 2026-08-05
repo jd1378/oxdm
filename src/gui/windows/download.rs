@@ -1926,52 +1926,42 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
     }
     body = body.push(from_row).push(saved_row);
     // Healthy: the integrity box is optional tooling, so it sits above
-    // the actions. Failed: verification is what just went wrong, and
-    // the decision it forces — don't open, download again — must not
-    // open below a tall box the user has to scroll past to reach it.
+    // the actions. Failed: the box is a tall verification workbench and
+    // the page already said what went wrong — leaving it above would
+    // push the close/reveal actions off the bottom of the window.
     let mut cs_box = checksum_box(st);
     if !tampered && let Some(cs_box) = cs_box.take() {
         body = body.push(cs_box);
     }
     // A file that failed its integrity check must not be handed an
-    // inviting primary "Open": the banner above says not to. Downloading
-    // it again is the remedy the error copy names, so that takes the
-    // primary slot instead.
+    // inviting primary "Open": the banner above says not to. Nothing
+    // takes the primary slot in its place — there is no action here that
+    // makes the file safe.
     let open = Btn::new("Open").icon("play").on_press(Msg::Open);
-    let mut actions = row![if tampered {
-        open.toolbar().view(t)
-    } else {
-        open.primary().view(t)
-    }]
-    .spacing(theme::space::S2)
-    .align_y(Alignment::Center);
-    if tampered {
-        actions = actions.push(
-            Btn::new("Download again")
-                .primary()
-                .icon("rotate-ccw")
-                .on_press(Msg::RestartFromZero)
-                .view(t),
-        );
-    }
     body = body
         .push(
-            actions
-                .push(
-                    Btn::new("Open Containing Folder")
-                        .toolbar()
-                        .icon("folder")
-                        .on_press(Msg::OpenFolder)
-                        .view(t),
-                )
-                .push(iced::widget::Space::new().width(Length::Fill))
-                .push(
-                    Btn::new("Close")
-                        .toolbar()
-                        .icon("x")
-                        .on_press(Msg::CloseWin)
-                        .view(t),
-                ),
+            row![if tampered {
+                open.toolbar().view(t)
+            } else {
+                open.primary().view(t)
+            }]
+            .spacing(theme::space::S2)
+            .align_y(Alignment::Center)
+            .push(
+                Btn::new("Open Containing Folder")
+                    .toolbar()
+                    .icon("folder")
+                    .on_press(Msg::OpenFolder)
+                    .view(t),
+            )
+            .push(iced::widget::Space::new().width(Length::Fill))
+            .push(
+                Btn::new("Close")
+                    .toolbar()
+                    .icon("x")
+                    .on_press(Msg::CloseWin)
+                    .view(t),
+            ),
         )
         .push(checkbox(
             t,
