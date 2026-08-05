@@ -93,6 +93,103 @@ pub fn status_dot<'a, M: 'a>(
     .into()
 }
 
+/// Dot treatment per download status (design §3.1 "Download status
+/// semantics"): the status column says the same thing twice, in colour
+/// and in shape, so the row still reads at a glance to someone who
+/// cannot separate moss from slate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mark {
+    /// Live transfer — a solid dot.
+    Filled,
+    /// Stopped by the user — a hollow ring.
+    Hollow,
+    /// Waiting its turn — a dashed ring.
+    Dashed,
+    /// Finished — a check.
+    Check,
+    /// Gave up — a cross.
+    Cross,
+}
+
+/// `Mark` + bold label in the same colour, on the `status_dot` metrics.
+pub fn status_mark<'a, M: 'a>(
+    mark: Mark,
+    color: Color,
+    label: impl Into<String>,
+    font_size: f32,
+) -> Element<'a, M> {
+    let glyph: Element<'a, M> = match mark {
+        Mark::Filled => dot(DOT, color),
+        Mark::Hollow => ring(DOT, color, false),
+        Mark::Dashed => ring(DOT + 2.0, color, true),
+        // Glyphs read larger than a dot at the same nominal size, so
+        // they are drawn one step down to sit on the same optical line.
+        Mark::Check => crate::gui::icons::icon("check", DOT + 3.0, color),
+        Mark::Cross => crate::gui::icons::icon("x", DOT + 3.0, color),
+    };
+    row![
+        container(glyph)
+            .width(Length::Fixed(MARK_BOX))
+            .align_x(Alignment::Center),
+        text(label.into())
+            .font(theme::BODY_BOLD)
+            .size(font_size)
+            .color(color),
+    ]
+    .spacing(4.0)
+    .align_y(Alignment::Center)
+    .into()
+}
+
+/// Diameter of the plain status dot, and the box every mark is centred
+/// in so labels line up whichever glyph precedes them.
+const DOT: f32 = 8.0;
+const MARK_BOX: f32 = 13.0;
+
+/// Ring outline of `size` px, optionally dashed (design's queued dot).
+/// Canvas rather than a bordered container: tiny-skia can dash a stroke,
+/// CSS-style dashed borders do not exist in iced.
+pub fn ring<'a, M: 'a>(size: f32, color: Color, dashed: bool) -> Element<'a, M> {
+    canvas(Ring { color, dashed })
+        .width(Length::Fixed(size))
+        .height(Length::Fixed(size))
+        .into()
+}
+
+struct Ring {
+    color: Color,
+    dashed: bool,
+}
+
+impl<M> canvas::Program<M> for Ring {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &iced::Renderer,
+        _theme: &iced::Theme,
+        bounds: Rectangle,
+        _cursor: iced::mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        const WIDTH: f32 = 1.5;
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let center = Point::new(bounds.width / 2.0, bounds.height / 2.0);
+        let path = canvas::Path::circle(center, (bounds.width - WIDTH) / 2.0);
+        let mut stroke = canvas::Stroke::default()
+            .with_width(WIDTH)
+            .with_color(self.color);
+        if self.dashed {
+            stroke.line_dash = canvas::LineDash {
+                segments: &[2.0, 2.0],
+                offset: 0,
+            };
+        }
+        frame.stroke(&path, stroke);
+        vec![frame.into_geometry()]
+    }
+}
+
 /// Plain filled circle of `size` px.
 pub fn dot<'a, M: 'a>(size: f32, color: Color) -> Element<'a, M> {
     container(iced::widget::Space::new())

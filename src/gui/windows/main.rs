@@ -17,7 +17,7 @@ use crate::gui::shot::Shot;
 use crate::gui::theme::{self, Tokens};
 use crate::gui::widget::{
     Btn, BtnSize, ProgressTone, TabBtn, col_header_sortable, hairline, inline_progress,
-    search_field, status_dot, swatch, vdivider,
+    search_field, status_dot, status_mark, swatch, vdivider,
 };
 use crate::gui::{color, icons};
 use crate::ipc_local::Client;
@@ -2805,7 +2805,7 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
     } else {
         let (color, label) = phase_style(t, phase);
         cell(
-            status_dot(color, label, 12.0),
+            status_mark(phase_mark(phase), color, label, 12.0),
             Length::Fixed(m.columns.width(SortColumn::Status as usize)),
             Alignment::Start,
         )
@@ -2926,6 +2926,20 @@ fn cell(content: Element<'_, Msg>, width: Length, align: Alignment) -> Element<'
         .align_y(Alignment::Center)
         .height(Length::Fill)
         .into()
+}
+
+/// Dot treatment per phase (design §3.1): shape carries the status
+/// alongside colour, so Queued and Complete no longer render as the
+/// same dot in two tints.
+fn phase_mark(phase: Phase) -> crate::gui::widget::Mark {
+    use crate::gui::widget::Mark;
+    match phase {
+        Phase::Completed => Mark::Check,
+        Phase::Failed => Mark::Cross,
+        Phase::Queued => Mark::Dashed,
+        Phase::Paused | Phase::Cancelled => Mark::Hollow,
+        _ => Mark::Filled,
+    }
 }
 
 fn phase_style(t: &Tokens, phase: Phase) -> (iced::Color, String) {
