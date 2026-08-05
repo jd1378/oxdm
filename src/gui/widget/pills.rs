@@ -120,8 +120,8 @@ pub fn status_mark<'a, M: 'a>(
 ) -> Element<'a, M> {
     let glyph: Element<'a, M> = match mark {
         Mark::Filled => dot(DOT, color),
-        Mark::Hollow => ring(DOT, color, false),
-        Mark::Dashed => ring(DOT + 2.0, color, true),
+        Mark::Hollow => ring(RING, color, false),
+        Mark::Dashed => ring(RING, color, true),
         // Glyphs read larger than a dot at the same nominal size, so
         // they are drawn one step down to sit on the same optical line.
         Mark::Check => crate::gui::icons::icon("check", DOT + 3.0, color),
@@ -141,9 +141,11 @@ pub fn status_mark<'a, M: 'a>(
     .into()
 }
 
-/// Diameter of the plain status dot, and the box every mark is centred
-/// in so labels line up whichever glyph precedes them.
+/// Diameter of the plain status dot, of the ring treatments (design
+/// gives those 9px against the dot's 8), and of the box every mark is
+/// centred in so labels line up whichever glyph precedes them.
 const DOT: f32 = 8.0;
+const RING: f32 = 9.0;
 const MARK_BOX: f32 = 13.0;
 
 /// Ring outline of `size` px, optionally dashed (design's queued dot).
@@ -172,7 +174,8 @@ impl<M> canvas::Program<M> for Ring {
         bounds: Rectangle,
         _cursor: iced::mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
-        const WIDTH: f32 = 1.5;
+        // Design: `border: 2px [dashed] currentColor`.
+        const WIDTH: f32 = 2.0;
         let mut frame = canvas::Frame::new(renderer, bounds.size());
         let center = Point::new(bounds.width / 2.0, bounds.height / 2.0);
         let path = canvas::Path::circle(center, (bounds.width - WIDTH) / 2.0);
@@ -181,7 +184,7 @@ impl<M> canvas::Program<M> for Ring {
             .with_color(self.color);
         if self.dashed {
             stroke.line_dash = canvas::LineDash {
-                segments: &[2.0, 2.0],
+                segments: &[2.5, 2.0],
                 offset: 0,
             };
         }
