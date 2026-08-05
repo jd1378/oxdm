@@ -186,11 +186,12 @@ impl<M> canvas::Program<M> for Ring {
             .with_width(WIDTH)
             .with_color(self.color);
         if self.dashed {
-            // Longer dashes with more air between them than the CSS
-            // default: on a 9px circle the browser's fine pattern
-            // collapsed into a smudge at this size.
+            // Coarser than the CSS default: a 9px circle is ~22px
+            // around, so the browser's fine pattern collapsed into a
+            // smudge. Two long arcs with a clear break read as a ring
+            // that is deliberately open.
             stroke.line_dash = canvas::LineDash {
-                segments: &[3.5, 3.0],
+                segments: &[7.0, 3.5],
                 offset: 0,
             };
         }
