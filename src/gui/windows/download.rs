@@ -1851,6 +1851,11 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
         color::clay::C400
     };
     let tile_bg = color::mix(t.bg_surface, accent, 0.20);
+    // Design `.ext-big` outlines the tile in clay-200 — a step up from
+    // its own fill, so the tile keeps an edge on a surface that is
+    // nearly the same value. Mixed from the accent rather than hardcoded
+    // so the danger variant's rust tile gets a rust edge.
+    let tile_border = color::mix(t.bg_surface, accent, 0.45);
     let t2 = *t;
     // Design `.complete-file .ext-big` overrides the 44px detected-card
     // tile with a 40px one: this card names a file that is already on
@@ -1868,8 +1873,9 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
     .style(move |_| container::Style {
         background: Some(tile_bg.into()),
         border: iced::Border {
+            color: tile_border,
+            width: 1.0,
             radius: FILE_TILE_RADIUS.into(),
-            ..Default::default()
         },
         ..Default::default()
     });
