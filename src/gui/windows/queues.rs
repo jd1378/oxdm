@@ -468,19 +468,40 @@ impl State {
                 stop: None,
             },
         };
+        // The editor picks a *kind*; the saved hook carries more than
+        // that (notify body, shutdown variant, command args). Keep the
+        // saved hook whenever the kind still matches, or reopening a
+        // queue would silently rewrite those fields — and count as a
+        // change before the user has touched anything.
+        let saved = q.on_finish.first().cloned();
         q.on_finish = match self.finish {
-            FinishKind::Nothing => vec![],
+            FinishKind::Nothing => match saved {
+                Some(h @ QueueHook::ExitOxdm) => vec![h],
+                _ => vec![],
+            },
             // Body is filled in when the hook fires (`data::hooks`):
             // only the run itself knows how many downloads finished.
-            FinishKind::Notify => vec![QueueHook::Notify {
-                title: "Queue finished".to_owned(),
-                body: String::new(),
-            }],
-            FinishKind::Sleep => vec![QueueHook::Sleep],
-            FinishKind::Shutdown => vec![QueueHook::Shutdown(ShutdownAction::ShutDown)],
+            FinishKind::Notify => match saved {
+                Some(h @ QueueHook::Notify { .. }) => vec![h],
+                _ => vec![QueueHook::Notify {
+                    title: "Queue finished".to_owned(),
+                    body: String::new(),
+                }],
+            },
+            FinishKind::Sleep => match saved {
+                Some(h @ (QueueHook::Sleep | QueueHook::Hibernate)) => vec![h],
+                _ => vec![QueueHook::Sleep],
+            },
+            FinishKind::Shutdown => match saved {
+                Some(h @ QueueHook::Shutdown(_)) => vec![h],
+                _ => vec![QueueHook::Shutdown(ShutdownAction::ShutDown)],
+            },
             FinishKind::RunCommand => vec![QueueHook::RunCommand {
                 cmd: self.finish_cmd.trim().to_owned(),
-                args: vec![],
+                args: match saved {
+                    Some(QueueHook::RunCommand { args, .. }) => args,
+                    _ => vec![],
+                },
             }],
         };
         Some(q)
