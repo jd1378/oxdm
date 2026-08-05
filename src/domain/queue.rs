@@ -61,6 +61,21 @@ impl Queue {
     /// that one caps every queue together.
     pub const DEFAULT_CONCURRENT: usize = 3;
 
+    /// Title of the default finish notification. Shared with the queues
+    /// editor, which rebuilds the hook when the user switches its kind:
+    /// a second spelling here would read as an edit the moment the
+    /// window opened.
+    pub const FINISH_NOTIFY_TITLE: &'static str = "Queue finished";
+
+    /// The body is a placeholder — `data::hooks` replaces it with the
+    /// run's outcome when the hook actually fires.
+    pub fn finish_notify() -> QueueHook {
+        QueueHook::Notify {
+            title: Self::FINISH_NOTIFY_TITLE.into(),
+            body: String::new(),
+        }
+    }
+
     pub fn new_main() -> Self {
         Self {
             id: QueueId::new(),
@@ -69,7 +84,10 @@ impl Queue {
             job_ids: Vec::new(),
             schedule: QueueSchedule::Manual,
             on_start: Vec::new(),
-            on_finish: Vec::new(),
+            // Telling the user their queue is done is the useful
+            // default; every other finish action (sleep, shutdown, run
+            // a command) is a deliberate choice.
+            on_finish: vec![Self::finish_notify()],
             max_concurrent: Some(Self::DEFAULT_CONCURRENT),
             stop_on_error: false,
             color: None,

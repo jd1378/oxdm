@@ -483,10 +483,7 @@ impl State {
             // only the run itself knows how many downloads finished.
             FinishKind::Notify => match saved {
                 Some(h @ QueueHook::Notify { .. }) => vec![h],
-                _ => vec![QueueHook::Notify {
-                    title: "Queue finished".to_owned(),
-                    body: String::new(),
-                }],
+                _ => vec![Queue::finish_notify()],
             },
             FinishKind::Sleep => match saved {
                 Some(h @ (QueueHook::Sleep | QueueHook::Hibernate)) => vec![h],

@@ -259,16 +259,23 @@ impl Store {
                 return Ok(());
             }
             let q = Queue::new_main();
+            // Every column comes from the constructed queue: literals
+            // here would be a second definition of "a new Main queue",
+            // and the one that actually reaches disk.
             conn.execute(
                 "INSERT INTO queues \
                    (id, name, builtin, schedule_json, on_start_json, on_finish_json, \
                     max_concurrent, stop_on_error, position) \
-                 VALUES (?1, ?2, 1, ?3, '[]', '[]', NULL, 0, 0)",
+                 VALUES (?1, ?2, 1, ?3, ?4, ?5, ?6, ?7, 0)",
                 params![
                     q.id.to_string(),
                     q.name,
                     serde_json::to_string(&q.schedule)
                         .unwrap_or_else(|_| "{\"kind\":\"manual\"}".into()),
+                    serde_json::to_string(&q.on_start).unwrap_or_else(|_| "[]".into()),
+                    serde_json::to_string(&q.on_finish).unwrap_or_else(|_| "[]".into()),
+                    q.max_concurrent.map(|n| n as i64),
+                    q.stop_on_error,
                 ],
             )?;
             Ok::<_, rusqlite::Error>(())
