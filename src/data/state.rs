@@ -55,6 +55,9 @@ pub struct JobEntry {
     /// Cumulative count of `PartRetrying` events this run. Spliced onto
     /// `Job::retries`.
     pub retries: AtomicU32,
+    /// Live mirror of `Job::interruptions` — part retries plus explicit
+    /// resumes, the one number the completed view reports.
+    pub interruptions: AtomicU32,
     /// ULIDs of parts currently mid-retry. Drives the `Reconnecting`
     /// phase: non-empty ⇒ at least one part is retrying. Keyed by ulid
     /// (rather than a bare counter) so a sibling part's progress tick
@@ -134,6 +137,7 @@ impl JobEntry {
         let started_at_ms = job.started_at.map(|d| d.timestamp_millis()).unwrap_or(0);
         let finished_at_ms = job.finished_at.map(|d| d.timestamp_millis()).unwrap_or(0);
         let retries = job.retries;
+        let interruptions = job.interruptions;
         // Same reason: the entry is the source of truth `splice_live`
         // writes back from, so it starts out holding whatever the store
         // recorded — otherwise the first persist after boot would clear
@@ -146,6 +150,7 @@ impl JobEntry {
             started_at_ms: AtomicI64::new(started_at_ms),
             finished_at_ms: AtomicI64::new(finished_at_ms),
             retries: AtomicU32::new(retries),
+            interruptions: AtomicU32::new(interruptions),
             retrying_parts: std::sync::Mutex::new(std::collections::HashSet::new()),
             parts: std::sync::RwLock::new(IndexMap::new()),
             cancel: std::sync::Mutex::new(CancellationToken::new()),
@@ -179,6 +184,7 @@ impl JobEntry {
         self.started_at_ms.store(0, Ordering::Release);
         self.finished_at_ms.store(0, Ordering::Release);
         self.retries.store(0, Ordering::Release);
+        self.interruptions.store(0, Ordering::Release);
         if let Ok(mut g) = self.retrying_parts.lock() {
             g.clear();
         }
@@ -1444,6 +1450,7 @@ impl AppState {
             started_at: None,
             finished_at: None,
             retries: 0,
+            interruptions: 0,
             status: JobStatus::default(),
             advanced: crate::domain::Advanced::default(),
             checksums: Vec::new(),
@@ -1926,6 +1933,12 @@ impl AppState {
             .job_entry(id)
             .await
             .ok_or_else(|| JobError::Other("job not found".into()))?;
+        // Picking a stopped transfer back up is an interruption too —
+        // whether the user paused it or a failure did. A job that never
+        // started has nothing to interrupt.
+        if entry.counters.downloaded() > 0 {
+            entry.interruptions.fetch_add(1, Ordering::Relaxed);
+        }
         let handle = JobHandle {
             id,
             cancel: entry.cancel.lock().expect("cancel mutex poisoned").clone(),
@@ -2269,6 +2282,7 @@ pub(crate) fn splice_live(entry: &JobEntry) -> Job {
     j.started_at = ms_to_datetime(entry.started_at_ms.load(Ordering::Relaxed));
     j.finished_at = ms_to_datetime(entry.finished_at_ms.load(Ordering::Relaxed));
     j.retries = entry.retries.load(Ordering::Relaxed);
+    j.interruptions = entry.interruptions.load(Ordering::Relaxed);
     j
 }
 
@@ -2401,6 +2415,7 @@ async fn clone_entry_with_job(old: &Arc<JobEntry>, new_job: Job) -> Arc<JobEntry
         started_at_ms: AtomicI64::new(old.started_at_ms.load(Ordering::Acquire)),
         finished_at_ms: AtomicI64::new(old.finished_at_ms.load(Ordering::Acquire)),
         retries: AtomicU32::new(old.retries.load(Ordering::Acquire)),
+        interruptions: AtomicU32::new(old.interruptions.load(Ordering::Acquire)),
         retrying_parts: std::sync::Mutex::new(retrying_parts),
         parts: std::sync::RwLock::new(parts),
         cancel: std::sync::Mutex::new(cancel_token),
@@ -2631,6 +2646,9 @@ impl LiveBridge for StateLiveBridge {
                     // as retrying and surface the Reconnecting banner
                     // while ≥1 part is mid-retry (plan W1).
                     entry.retries.fetch_add(1, Ordering::Relaxed);
+                    // A dropped connection is an interruption whether or
+                    // not the retry succeeds.
+                    entry.interruptions.fetch_add(1, Ordering::Relaxed);
                     if let Ok(mut retrying) = entry.retrying_parts.lock() {
                         retrying.insert(ulid.clone());
                     }

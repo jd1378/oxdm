@@ -265,6 +265,14 @@ pub struct Job {
     /// the `retries` column.
     #[serde(default)]
     pub retries: u32,
+    /// How many times this download was knocked off course and had to
+    /// pick up again: every part retry (a dropped or refused
+    /// connection) plus every explicit resume. One number because the
+    /// user's question is "did this go cleanly", not "which of the
+    /// three mechanisms fired". Reset with the other run stats when a
+    /// job restarts from zero.
+    #[serde(default)]
+    pub interruptions: u32,
     pub status: JobStatus,
     /// Per-job advanced settings (Properties dialog → Advanced /
     /// Connection / Cookies / Headers tabs). Persisted as JSON in the
@@ -638,6 +646,7 @@ mod tests {
             started_at: None,
             finished_at: None,
             retries: 0,
+            interruptions: 0,
             status: JobStatus::default(),
             advanced: crate::domain::Advanced::default(),
             checksums: Vec::new(),

@@ -362,6 +362,7 @@ mod tests {
             started_at: None,
             finished_at: None,
             retries: 0,
+            interruptions: 0,
             status: JobStatus::default(),
             // `auto_verify` defaults to true — the gate under test.
             advanced: crate::domain::Advanced::default(),

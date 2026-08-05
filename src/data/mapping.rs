@@ -415,6 +415,7 @@ mod tests {
             started_at: None,
             finished_at: None,
             retries: 0,
+            interruptions: 0,
             status: JobStatus::default(),
             advanced: crate::domain::Advanced::default(),
             checksums: Vec::new(),

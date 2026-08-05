@@ -26,7 +26,7 @@ use crate::gui::widget::striped::striped_progress_hatched;
 use crate::gui::widget::{
     Btn, BtnSize, RateChart, TabBtn, TextInput, card, collapsible_card, combo, hairline,
     number_stepper, pill_progress, rate_chart, segmented, set_row, set_row_panel, set_rows,
-    sibling, status_dot, toggle,
+    sibling, status_dot, toggle, vdivider,
 };
 use crate::gui::windows::add::footer;
 use crate::ipc_local::Client;
@@ -45,7 +45,7 @@ const WIN_MIN_H: f32 = 418.0 - theme::space::S4;
 /// Launch height for the completion view: hero burst and its title, the
 /// file card, the saved-to and address rows, and the actions. Fixed
 /// content, so one measured number covers it.
-const WIN_COMPLETE_H: f32 = 488.0;
+const WIN_COMPLETE_H: f32 = 516.0;
 /// The failed-integrity completion view adds a "don't open this file"
 /// banner and an expected-vs-got digest panel above the same content.
 /// Without the extra room the actions — including the "Download again"
@@ -117,6 +117,17 @@ const BURST_RING2_DELAY: f32 = 0.6;
 /// this scale and alpha. A hard stop, not a heartbeat.
 const BURST_DANGER_RING_SCALE: f32 = 1.15;
 const BURST_DANGER_RING_ALPHA: f32 = 0.45;
+/// Completion stat grid (design `.complete-stats`): 4px frame padding
+/// around cells that pad 8/10, an eyebrow label over a mono value, and
+/// the interruption note under the last one. The row is pinned because
+/// `vdivider` needs a concrete height.
+const STAT_GRID_PAD: f32 = 4.0;
+const STAT_LABEL_SIZE: f32 = 9.5;
+const STAT_VALUE_SIZE: f32 = 13.0;
+const STAT_SUB_ICON: f32 = 10.0;
+/// 8px padding twice, plus the label, value and sub-line boxes.
+const STAT_CELL_H: f32 = 8.0 * 2.0 + 13.0 + 18.0 + 15.0;
+
 /// Burst/pulse oscillation rate (rad/s feel applied to `anim_t`).
 const PULSE_RATE: f32 = 3.2;
 
@@ -207,6 +218,13 @@ pub struct State {
     tab: Tab,
     /// The "open it anyway?" confirmation is up (failed integrity only).
     confirm_open: bool,
+    /// Live window width, so a height correction can leave it alone.
+    win_w: f32,
+    /// Height this window last imposed on itself. Kept so the
+    /// correction fires once per state change rather than on every
+    /// event — otherwise a user resizing a completed window would be
+    /// snapped back by the next counter tick.
+    imposed_h: Option<f32>,
     rate_open: bool,
     segments_open: bool,
     samples: Vec<f32>,
@@ -384,6 +402,8 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 id: entry.job.id,
                 tab: Tab::Info,
                 confirm_open: false,
+                win_w: WIN_W,
+                imposed_h: None,
                 rate_open: false,
                 segments_open: false,
                 samples: Vec::new(),
@@ -416,11 +436,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
             let App::Ready(st) = app else {
                 return Task::none();
             };
-            match launch_height(st) {
-                Some(h) => iced::window::latest()
-                    .and_then(move |id| iced::window::resize(id, iced::Size::new(WIN_W, h))),
-                None => Task::none(),
-            }
+            fit_window(st)
         }
         Msg::Connected(Err(e)) => {
             *app = App::Failed(e);
@@ -455,7 +471,39 @@ fn launch_height(st: &State) -> Option<f32> {
     Some(wanted.max(WIN_MIN_H))
 }
 
+/// Resize to the height the current state wants, if that is not the
+/// height we last asked for. Width is left alone — the user owns it.
+///
+/// The completion and error views are single pages with a known height;
+/// a download that finishes while its window is open would otherwise
+/// keep whatever height the transfer view had, which is either a lot of
+/// empty surface or a page the user has to scroll. The transfer view
+/// itself asks for nothing, so a window the user has resized stays
+/// resized for as long as it is one.
+fn fit_window(st: &mut State) -> Task<Msg> {
+    let Some(h) = launch_height(st) else {
+        // Back to a free-form view: forget what we imposed, so the next
+        // time one of the fixed pages comes up it is applied afresh.
+        st.imposed_h = None;
+        return Task::none();
+    };
+    if st.imposed_h == Some(h) {
+        return Task::none();
+    }
+    st.imposed_h = Some(h);
+    let size = iced::Size::new(st.win_w, h);
+    iced::window::latest().and_then(move |id| iced::window::resize(id, size))
+}
+
 fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
+    let task = update_state(st, msg);
+    // Any message can be the one that completes the download or lands
+    // the error, so the check rides along with all of them rather than
+    // being duplicated across the handful that mutate the entry.
+    Task::batch([task, fit_window(st)])
+}
+
+fn update_state(st: &mut State, msg: Msg) -> Task<Msg> {
     match msg {
         Msg::Entry(e) => {
             st.entry = *e;
@@ -678,6 +726,7 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             })
         }
         Msg::WinResized(w, h) => {
+            st.win_w = w;
             chrome::enforce_min_size(iced::Size::new(w, h), iced::Size::new(WIN_MIN_W, WIN_MIN_H))
         }
         Msg::ShotTick => {
@@ -2558,58 +2607,99 @@ fn completion_stats(st: &State) -> Option<Element<'_, Msg>> {
     let job = &st.entry.job;
     let downloaded = st.entry.counters.downloaded;
 
-    let mut cells: Vec<Element<'_, Msg>> = Vec::new();
-
-    // Avg speed + Time taken both need a [started, finished] interval.
-    if let (Some(started), Some(finished)) = (job.started_at, job.finished_at) {
-        let secs = (finished - started).num_seconds().max(0) as u64;
-        if secs > 0 {
-            let avg = downloaded as f64 / secs as f64;
-            cells.push(stat(t, "avg speed", format_speed(avg), true));
+    // Every cell renders, dash where the fact is missing (design shows
+    // "—" for both timing cells): three columns that come and go would
+    // move the interruption line around under the user.
+    let (avg, taken) = match (job.started_at, job.finished_at) {
+        (Some(started), Some(finished)) => {
+            let secs = (finished - started).num_seconds().max(0) as u64;
+            let avg = (secs > 0).then(|| format_speed(downloaded as f64 / secs as f64));
+            (avg, Some(format_eta(secs)))
         }
-        cells.push(stat(t, "time taken", format_eta(secs), false));
-    }
-    if let Some(finished) = job.finished_at {
-        let local = finished
-            .with_timezone(&chrono::Local)
-            .format("%H:%M")
-            .to_string();
-        cells.push(stat(t, "finished at", local, false));
-    }
-
-    if cells.is_empty() {
+        _ => (None, None),
+    };
+    let finished = job.finished_at.map(|f| {
+        f.with_timezone(&chrono::Local)
+            .format("%-I:%M %p")
+            .to_string()
+    });
+    if avg.is_none() && taken.is_none() && finished.is_none() {
         return None;
     }
 
-    let mut grid = row![].spacing(theme::space::S2);
-    for c in cells {
-        grid = grid.push(c);
-    }
+    let n = job.interruptions;
+    let (icon, tint, note) = if n == 0 {
+        ("check", t.action_primary, "No interruptions".to_owned())
+    } else {
+        (
+            "rotate-ccw",
+            t.fg_3,
+            format!("{n} interruption{}", if n == 1 { "" } else { "s" }),
+        )
+    };
+    let sub = row![
+        icons::icon(icon, STAT_SUB_ICON, tint),
+        text(note).font(theme::BODY_MEDIUM).size(10.0).color(t.fg_3),
+    ]
+    .spacing(theme::space::S1)
+    .align_y(Alignment::Center);
 
-    let mut col = column![
+    let grid = row![
+        stat_cell(t, "average speed", avg, None),
+        vdivider(t.border_subtle, STAT_CELL_H),
+        stat_cell(t, "time taken", taken, None),
+        vdivider(t.border_subtle, STAT_CELL_H),
+        stat_cell(t, "finished at", finished, Some(sub.into())),
+    ]
+    .height(Length::Fixed(STAT_CELL_H));
+
+    Some(
         container(grid)
             .width(Length::Fill)
-            .padding(theme::space::S3)
+            .padding(STAT_GRID_PAD)
             .style(move |_| container::Style {
                 background: Some(t2.bg_sunken.into()),
                 border: iced::Border {
+                    color: t2.border_subtle,
+                    width: 1.0,
                     radius: theme::surface::RADIUS.into(),
-                    ..Default::default()
                 },
                 ..Default::default()
             })
-    ]
-    .spacing(theme::space::S1);
+            .into(),
+    )
+}
 
-    if job.retries > 0 {
-        col = col.push(
-            text(format!("Retried {} times", job.retries))
-                .font(theme::BODY)
-                .size(11.0)
-                .color(t.fg_3),
-        );
+/// One `.cs-cell`: eyebrow label over a mono value, centered, with an
+/// optional sub-line under it. `None` prints the design's em dash — the
+/// fact is unknown, not zero.
+fn stat_cell<'a>(
+    t: &Tokens,
+    label: &'a str,
+    value: Option<String>,
+    sub: Option<Element<'a, Msg>>,
+) -> Element<'a, Msg> {
+    let mut col = column![
+        text(label.to_uppercase())
+            .font(theme::BODY_BOLD)
+            .size(STAT_LABEL_SIZE)
+            .color(t.fg_3),
+        text(value.unwrap_or_else(|| "—".to_owned()))
+            .font(theme::MONO_BOLD)
+            .size(STAT_VALUE_SIZE)
+            .color(t.fg_1),
+    ]
+    .spacing(3.0)
+    .align_x(Alignment::Center);
+    if let Some(sub) = sub {
+        col = col.push(sub);
     }
-    Some(col.into())
+    container(col)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(Alignment::Center)
+        .align_y(Alignment::Center)
+        .into()
 }
 
 pub fn launch_download(_id: JobId) {
