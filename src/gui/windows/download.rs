@@ -46,6 +46,11 @@ const WIN_MIN_H: f32 = 418.0 - theme::space::S4;
 /// address rows, the actions and the "don't show again" checkbox. Fixed
 /// content, so one measured number covers it.
 const WIN_COMPLETE_H: f32 = 440.0;
+/// The failed-integrity completion view adds a "don't open this file"
+/// banner and an expected-vs-got digest panel above the same content.
+/// Without the extra room the actions — including the "Download again"
+/// that fixes the problem — open below the fold.
+const WIN_TAMPERED_H: f32 = WIN_COMPLETE_H + 176.0;
 /// Everything the error view puts around the error card: title bar,
 /// hero, progress bar, the gaps between them and the footer. The card
 /// itself is measured from its own copy — see `error_block_height`.
@@ -144,8 +149,6 @@ pub enum Msg {
     RestartFromZero,
     /// Failure recovery for a write fault: pick a new destination, then
     /// retry. The bytes already downloaded carry over.
-    PickSaveFolder,
-    SaveFolderPicked(Option<std::path::PathBuf>),
     Open,
     OpenFolder,
     CloseWin,
@@ -414,8 +417,12 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
 /// the launch size. Only the *launch* size: `WIN_MIN_H` is untouched,
 /// so the user can still shrink the window afterwards.
 fn launch_height(st: &State) -> Option<f32> {
-    if st.phase() == Phase::Completed {
-        return Some(WIN_COMPLETE_H);
+    if shows_complete(st) {
+        return Some(if is_tampered(st) {
+            WIN_TAMPERED_H
+        } else {
+            WIN_COMPLETE_H
+        });
     }
     let err = st.entry.job.status.error.as_ref()?;
     let wanted = WIN_ERROR_CHROME_H + crate::gui::widget::error_panel::error_block_height(err);
@@ -607,35 +614,6 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             let id = st.id;
             Task::perform(async move { client.restart_job(id).await }, |_| Msg::Noop)
         }
-        Msg::PickSaveFolder => {
-            let start = st.entry.job.save_dir.clone();
-            Task::perform(
-                async move {
-                    let mut dlg = rfd::AsyncFileDialog::new();
-                    if start.is_dir() {
-                        dlg = dlg.set_directory(&start);
-                    }
-                    dlg.pick_folder().await.map(|h| h.path().to_path_buf())
-                },
-                Msg::SaveFolderPicked,
-            )
-        }
-        Msg::SaveFolderPicked(None) => Task::none(),
-        Msg::SaveFolderPicked(Some(dir)) => {
-            // Move the destination, then retry: a write fault is only
-            // fixed once the job points somewhere writable.
-            let client = st.client.clone();
-            let id = st.id;
-            let url = st.entry.job.url.clone();
-            let filename = st.entry.job.filename.clone();
-            Task::perform(
-                async move {
-                    client.set_job_source(id, url, dir, filename).await?;
-                    client.resume(id).await
-                },
-                |_| Msg::Noop,
-            )
-        }
         Msg::Open => {
             let path = final_path(&st.entry);
             crate::platform::open_path(&path);
@@ -769,7 +747,7 @@ pub fn subscription(app: &App) -> Subscription<Msg> {
         if st.rate_open {
             subs.push(iced::time::every(Duration::from_millis(500)).map(|_| Msg::SampleTick));
         }
-    } else if st.phase() == Phase::Completed && !st.reduce_motion {
+    } else if shows_complete(st) && !st.reduce_motion {
         // Drive the completion-burst pulse; the running branch's tick is
         // gone once terminal, so the burst needs its own (W6-gated) tick.
         subs.push(iced::time::every(Duration::from_millis(33)).map(|_| Msg::AnimTick));
@@ -784,13 +762,32 @@ pub fn view(app: &App) -> Element<'_, Msg> {
         App::Connecting => splash("Connecting…".to_owned()),
         App::Failed(e) => splash(e.clone()),
         App::Ready(st) => {
-            if st.phase() == Phase::Completed {
+            if shows_complete(st) {
                 complete_view(st)
             } else {
                 running_view(st)
             }
         }
     })
+}
+
+/// The completed view also owns the failed-integrity case: the bytes
+/// did arrive and the file is on disk, so the user needs the completed
+/// page's answers — which hash was expected, what landed, where the
+/// file is — not a transfer error card that hides all of it.
+fn shows_complete(st: &State) -> bool {
+    st.phase() == Phase::Completed || checksum_failure(st).is_some()
+}
+
+/// The expected/actual pair from a verification failure, if that is why
+/// this job failed.
+fn checksum_failure(st: &State) -> Option<(&str, &str)> {
+    match st.entry.job.status.error.as_ref()? {
+        JobError::ChecksumMismatch { expected, actual } => {
+            Some((expected.as_str(), actual.as_str()))
+        }
+        _ => None,
+    }
 }
 
 fn splash<'a>(msg: String) -> Element<'a, Msg> {
@@ -833,14 +830,6 @@ fn header_card(st: &State) -> Element<'_, Msg> {
         .map(|e| e.to_string_lossy().to_uppercase())
         .unwrap_or_else(|| "FILE".into());
     let host = st.entry.job.url.host_str().unwrap_or("").to_owned();
-    // Nothing is said until evaluation answers: "checking" is the
-    // absence of an answer, and a subtitle that changes under the user
-    // costs more than the fact is worth.
-    let resum = match st.entry.counters.is_resumable {
-        1 => Some("resumable"),
-        -1 => Some("no resume"),
-        _ => None,
-    };
     let cat_color = match st.entry.job.category {
         crate::domain::Category::Compressed => t.cat_compressed,
         crate::domain::Category::Programs => t.cat_programs,
@@ -875,24 +864,16 @@ fn header_card(st: &State) -> Element<'_, Msg> {
             tile,
             column![
                 text(name).font(theme::BODY_BOLD).size(14.0).color(t.fg_1),
-                {
-                    let mut meta = row![
-                        text(host).font(theme::MONO).size(11.0).color(t.fg_3),
-                        dotsep(),
-                        text(st.entry.job.category.label())
-                            .font(theme::BODY)
-                            .size(11.0)
-                            .color(t.fg_3),
-                    ]
-                    .spacing(6.0)
-                    .align_y(Alignment::Center);
-                    if let Some(resum) = resum {
-                        meta = meta
-                            .push(dotsep())
-                            .push(text(resum).font(theme::BODY).size(11.0).color(t.fg_3));
-                    }
-                    meta
-                },
+                row![
+                    text(host).font(theme::MONO).size(11.0).color(t.fg_3),
+                    dotsep(),
+                    text(st.entry.job.category.label())
+                        .font(theme::BODY)
+                        .size(11.0)
+                        .color(t.fg_3),
+                ]
+                .spacing(6.0)
+                .align_y(Alignment::Center),
             ]
             .spacing(4.0),
             iced::widget::Space::new().width(Length::Fill),
@@ -1056,6 +1037,9 @@ fn running_view(st: &State) -> Element<'_, Msg> {
     if phase == Phase::Reconnecting {
         hero = hero.push(reconnect_banner(st));
     }
+    if let Some(b) = nonresume_banner(st) {
+        hero = hero.push(b);
+    }
     hero = hero
         .push(sibling(striped_progress_hatched(
             st.frac(),
@@ -1127,17 +1111,6 @@ fn error_footer<'a>(t: &Tokens, err: &JobError) -> Element<'a, Msg> {
         // Continuing would splice two different files, so retrying is
         // not on offer — only starting over, or giving up.
         JobError::FileChanged(_) => row![restart("Restart from 0", true), cancel],
-        // A write fault is fixed by writing somewhere else; the bytes
-        // already downloaded carry over to the new folder.
-        JobError::DiskFull(_) | JobError::PermissionDenied(_) => row![
-            Btn::new("Save to different folder…")
-                .toolbar()
-                .icon("folder-open")
-                .on_press(Msg::PickSaveFolder)
-                .view(t),
-            retry(),
-            cancel,
-        ],
         // Write / disk problems: offer the folder so the user can free
         // space or fix permissions, then cancel.
         JobError::Io(_) | JobError::SaveConflict(_) => row![
@@ -1908,35 +1881,60 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
             "Don't open this file. It may be corrupted, compromised, or intercepted.".to_owned(),
         ));
     }
+    if let Some(panel) = failed_digest_panel(st) {
+        body = body.push(panel);
+    }
     if let Some(stats) = completion_stats(st) {
         body = body.push(stats);
     }
     body = body.push(from_row).push(saved_row);
-    if let Some(cs_box) = checksum_box(st) {
+    // Healthy: the integrity box is optional tooling, so it sits above
+    // the actions. Failed: verification is what just went wrong, and
+    // the decision it forces — don't open, download again — must not
+    // open below a tall box the user has to scroll past to reach it.
+    let mut cs_box = checksum_box(st);
+    if !tampered && let Some(cs_box) = cs_box.take() {
         body = body.push(cs_box);
+    }
+    // A file that failed its integrity check must not be handed an
+    // inviting primary "Open": the banner above says not to. Downloading
+    // it again is the remedy the error copy names, so that takes the
+    // primary slot instead.
+    let open = Btn::new("Open").icon("play").on_press(Msg::Open);
+    let mut actions = row![if tampered {
+        open.toolbar().view(t)
+    } else {
+        open.primary().view(t)
+    }]
+    .spacing(theme::space::S2)
+    .align_y(Alignment::Center);
+    if tampered {
+        actions = actions.push(
+            Btn::new("Download again")
+                .primary()
+                .icon("rotate-ccw")
+                .on_press(Msg::RestartFromZero)
+                .view(t),
+        );
     }
     body = body
         .push(
-            row![
-                Btn::new("Open")
-                    .primary()
-                    .icon("play")
-                    .on_press(Msg::Open)
-                    .view(t),
-                Btn::new("Open Containing Folder")
-                    .toolbar()
-                    .icon("folder")
-                    .on_press(Msg::OpenFolder)
-                    .view(t),
-                iced::widget::Space::new().width(Length::Fill),
-                Btn::new("Close")
-                    .toolbar()
-                    .icon("x")
-                    .on_press(Msg::CloseWin)
-                    .view(t),
-            ]
-            .spacing(theme::space::S2)
-            .align_y(Alignment::Center),
+            actions
+                .push(
+                    Btn::new("Open Containing Folder")
+                        .toolbar()
+                        .icon("folder")
+                        .on_press(Msg::OpenFolder)
+                        .view(t),
+                )
+                .push(iced::widget::Space::new().width(Length::Fill))
+                .push(
+                    Btn::new("Close")
+                        .toolbar()
+                        .icon("x")
+                        .on_press(Msg::CloseWin)
+                        .view(t),
+                ),
         )
         .push(checkbox(
             t,
@@ -1945,6 +1943,9 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
             true,
             Msg::DontShowAgain,
         ));
+    if let Some(cs_box) = cs_box {
+        body = body.push(cs_box);
+    }
 
     page(
         t,
@@ -1963,6 +1964,34 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
     )
 }
 
+/// Expected-vs-got panel for a verification failure, naming the digest
+/// that did not match. The algorithm comes from the saved checksum that
+/// carries the expected hash; failing that, from the hash's own length,
+/// so the panel still names something real when the job holds no saved
+/// checksum row.
+fn failed_digest_panel(st: &State) -> Option<Element<'_, Msg>> {
+    let (expected, actual) = checksum_failure(st)?;
+    let algo = st
+        .entry
+        .job
+        .checksums
+        .iter()
+        .find(|c| c.hash.eq_ignore_ascii_case(expected))
+        .map(|c| c.algo)
+        .or_else(|| {
+            Algo::ALL
+                .iter()
+                .copied()
+                .find(|a| a.hex_len() == expected.len())
+        });
+    Some(hash_mismatch(
+        &st.tokens,
+        algo.map(|a| a.label()).unwrap_or("checksum"),
+        &expected.to_lowercase(),
+        &actual.to_lowercase(),
+    ))
+}
+
 /// Completed-view ChecksumBox (design §3.4): shows the job's saved
 /// checksum + status, a paste field to verify against the publisher's
 /// hash, AND a local "Compute from file" action that hashes the saved
@@ -1972,7 +2001,12 @@ fn checksum_box(st: &State) -> Option<Element<'_, Msg>> {
     let t = &st.tokens;
     let cs = st.entry.job.checksums.first()?;
 
+    // A run that failed verification is a mismatch even when the stored
+    // row has not been restamped yet — the box must not read
+    // "unverified" under a page titled "Integrity check failed".
+    let failed_here = checksum_failure(st).is_some_and(|(e, _)| cs.hash.eq_ignore_ascii_case(e));
     let (status_color, status_label) = match cs.status {
+        _ if failed_here => (t.status_danger, "mismatch"),
         CsStatus::Verified => (t.status_success, "verified"),
         CsStatus::Mismatch => (t.status_danger, "mismatch"),
         CsStatus::Unverified => (t.fg_3, "unverified"),
@@ -2158,6 +2192,25 @@ fn banner<'a>(
     .into()
 }
 
+/// Ochre "no resume" banner (design `.nonresume-banner`), shown once
+/// evaluation reports the server will not continue a transfer. Resuming
+/// is the assumed default, so nothing is said in the normal case and
+/// nothing is said while the answer is still unknown — this banner is
+/// the only place the fact appears.
+fn nonresume_banner(st: &State) -> Option<Element<'_, Msg>> {
+    (st.entry.counters.is_resumable == -1).then(|| {
+        banner(
+            &st.tokens,
+            st.tokens.status_warning,
+            st.tokens.status_warning_bg,
+            "plug-zap",
+            "Single connection · no resume — pausing or losing the connection restarts \
+             this download from the beginning."
+                .to_owned(),
+        )
+    })
+}
+
 /// Ochre "Reconnecting…" banner shown above the progress bar while the
 /// whole transfer is mid-retry (`Phase::Reconnecting`). Appends the
 /// live attempt count from `job.retries` when known, and gently pulses
@@ -2207,6 +2260,9 @@ fn reconnect_banner(st: &State) -> Element<'_, Msg> {
 /// reports `Mismatch`, or a locally-computed digest disagrees with the
 /// saved hash. Drives the rust burst + "don't open" warning.
 fn is_tampered(st: &State) -> bool {
+    if checksum_failure(st).is_some() {
+        return true;
+    }
     let saved_mismatch = st
         .entry
         .job
@@ -2222,7 +2278,9 @@ fn is_tampered(st: &State) -> bool {
 
 /// Completion burst (design `.complete-burst`, anim `cb-pop`): an 88px
 /// stage with two pulsing rings around a gradient circle + a centered
-/// glyph. Clay/check when healthy; rust/`shield-alert` when tampered.
+/// glyph. Clay/check when healthy; rust/`x` when the integrity check
+/// failed — a cross reads as "this did not pass" at a glance, where a
+/// shield reads as protection.
 /// Pulse is frozen (rings at rest) when `reduce_motion`.
 fn completion_burst(st: &State, tampered: bool) -> Element<'_, Msg> {
     let phase_t = if st.reduce_motion { 0.0 } else { st.anim_t };
@@ -2240,7 +2298,7 @@ fn completion_burst(st: &State, tampered: bool) -> Element<'_, Msg> {
     .height(Length::Fixed(BURST_STAGE));
 
     let glyph = container(icons::icon(
-        if tampered { "shield-alert" } else { "check" },
+        if tampered { "x" } else { "check" },
         BURST_ICON,
         iced::Color::WHITE,
     ))

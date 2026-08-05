@@ -382,8 +382,9 @@ fn recovery_copy(err: &JobError) -> Option<(Tone, &'static str, &'static [&'stat
             TRY,
             &[
                 "Free up space on the destination drive, then try again.",
-                "Or save this download to a different folder. Your progress carries over.",
                 "Check that the drive isn't being unmounted or going to sleep.",
+                "Or point this download at a roomier folder under Properties → General, \
+                 then retry. Your progress carries over.",
             ],
         ),
         JobError::PermissionDenied(_) => (
@@ -391,8 +392,9 @@ fn recovery_copy(err: &JobError) -> Option<(Tone, &'static str, &'static [&'stat
             TRY,
             &[
                 "Check that you can write to the destination folder.",
-                "Or save this download to a different folder. Your progress carries over.",
                 "If another program is holding the file open, close it and try again.",
+                "Or point this download at a writable folder under Properties → General, \
+                 then retry. Your progress carries over.",
             ],
         ),
         _ => return None,
