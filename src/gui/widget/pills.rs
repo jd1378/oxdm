@@ -103,8 +103,8 @@ pub enum Mark {
     Filled,
     /// Stopped by the user — a hollow ring.
     Hollow,
-    /// Waiting its turn — a clock face.
-    Waiting,
+    /// Waiting its turn — a dashed ring.
+    Dashed,
     /// Finished — a check.
     Check,
     /// Gave up — a cross.
@@ -121,9 +121,7 @@ pub fn status_mark<'a, M: 'a>(
     let glyph: Element<'a, M> = match mark {
         Mark::Filled => dot(DOT, color),
         Mark::Hollow => ring(RING, color, false),
-        // A detailed glyph needs more room than a check to stay
-        // legible; the fixed mark box keeps the labels aligned anyway.
-        Mark::Waiting => crate::gui::icons::icon("calendar-clock", GLYPH + 2.0, color),
+        Mark::Dashed => ring(RING, color, true),
         // Glyphs read larger than a dot at the same nominal size, so
         // they are drawn one step down to sit on the same optical line.
         Mark::Check => crate::gui::icons::icon("check", GLYPH, color),
@@ -188,8 +186,11 @@ impl<M> canvas::Program<M> for Ring {
             .with_width(WIDTH)
             .with_color(self.color);
         if self.dashed {
+            // Longer dashes with more air between them than the CSS
+            // default: on a 9px circle the browser's fine pattern
+            // collapsed into a smudge at this size.
             stroke.line_dash = canvas::LineDash {
-                segments: &[2.5, 2.0],
+                segments: &[3.5, 3.0],
                 offset: 0,
             };
         }
