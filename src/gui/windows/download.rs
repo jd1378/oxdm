@@ -206,8 +206,6 @@ pub enum Msg {
     CsCompute,
     CsComputed(Result<String, String>),
     WinResized(f32, f32),
-    /// Re-assert a height asked for `SIZE_REASSERTS` ago.
-    EnsureHeight(f32),
     WinFocused(bool),
     ShotTick,
     Shot(iced::window::Screenshot),
@@ -415,7 +413,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 tab: Tab::Info,
                 confirm_open: false,
                 win_w: WIN_W,
-                imposed_h: None,
+                imposed_h: LAUNCH_H.get().copied(),
                 rate_open: false,
                 segments_open: false,
                 samples: Vec::new(),
@@ -469,14 +467,31 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
 /// the launch size. Only the *launch* size: `WIN_MIN_H` is untouched,
 /// so the user can still shrink the window afterwards.
 fn launch_height(st: &State) -> Option<f32> {
-    if shows_complete(st) {
-        return Some(if is_tampered(st) {
+    // `is_tampered` also folds in a digest the *window* computed, which
+    // no job snapshot can know; everything else comes off the job.
+    job_height(&st.entry.job).map(|h| {
+        if h == WIN_COMPLETE_H && is_tampered(st) {
+            WIN_TAMPERED_H
+        } else {
+            h
+        }
+    })
+}
+
+/// The height a window showing `job` wants, from the job alone — so the
+/// launcher can size the window before it exists rather than resizing it
+/// afterwards. `None` = the transfer view, which asks for nothing.
+fn job_height(job: &crate::domain::Job) -> Option<f32> {
+    let tampered = matches!(job.status.error, Some(JobError::ChecksumMismatch { .. }))
+        || job.checksums.iter().any(|c| c.status == CsStatus::Mismatch);
+    if job.status.phase == Phase::Completed || tampered {
+        return Some(if tampered {
             WIN_TAMPERED_H
         } else {
             WIN_COMPLETE_H
         });
     }
-    let err = st.entry.job.status.error.as_ref()?;
+    let err = job.status.error.as_ref()?;
     let wanted = WIN_ERROR_CHROME_H + crate::gui::widget::error_panel::error_block_height(err);
     // Never below the floor: a two-line error must not open a window
     // smaller than the user can resize it to.
@@ -503,33 +518,13 @@ fn fit_window(st: &mut State) -> Task<Msg> {
         return Task::none();
     }
     st.imposed_h = Some(h);
-    let w = st.win_w;
-    let mut tasks = vec![resize_to(w, h)];
-    // A resize issued while the window is still being mapped can be
-    // dropped, and the compositor sends no event to say so — which is
-    // why the completion view sometimes arrived at the transfer view's
-    // height. Re-assert a few times over the first second instead of
-    // waiting for a report that may never come. Each re-assert bails if
-    // the state has moved on, and asking for a size the window already
-    // has is a no-op.
-    for delay in SIZE_REASSERTS {
-        tasks.push(Task::perform(
-            async move { tokio::time::sleep(Duration::from_millis(delay)).await },
-            move |()| Msg::EnsureHeight(h),
-        ));
-    }
-    Task::batch(tasks)
+    resize_to(st.win_w, h)
 }
 
 fn resize_to<M: Send + 'static>(w: f32, h: f32) -> Task<M> {
     let size = iced::Size::new(w, h);
     iced::window::latest().and_then(move |id| iced::window::resize(id, size))
 }
-
-/// When to re-assert a height we just asked for, in ms after the ask.
-/// Bounded rather than a loop: a tiling WM refuses every time, and past
-/// a second the user is looking at the window and owns its size.
-const SIZE_REASSERTS: [u64; 3] = [120, 400, 900];
 
 fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
     let task = update_state(st, msg);
@@ -764,13 +759,6 @@ fn update_state(st: &mut State, msg: Msg) -> Task<Msg> {
         Msg::WinResized(w, h) => {
             st.win_w = w;
             chrome::enforce_min_size(iced::Size::new(w, h), iced::Size::new(WIN_MIN_W, WIN_MIN_H))
-        }
-        Msg::EnsureHeight(h) => {
-            if st.imposed_h == Some(h) {
-                resize_to(st.win_w, h)
-            } else {
-                Task::none()
-            }
         }
         Msg::ShotTick => {
             if let Some(shot) = &mut st.shot
@@ -2749,7 +2737,50 @@ fn stat_cell<'a>(
         .into()
 }
 
-pub fn launch_download(_id: JobId) {
+/// The height this window should be *created* at. Asking the daemon
+/// before the window exists is the only deterministic way to get it:
+/// resizing a window that has just been mapped is a request the
+/// compositor is free to drop, with no event back to say it did — which
+/// is exactly how the completion view kept arriving at the transfer
+/// view's height. A window born the right size never has to be
+/// corrected.
+///
+/// Blocking is fine here: nothing is on screen yet, and iced has not
+/// started. A daemon that does not answer inside the timeout leaves the
+/// default, and `boot`'s own connect reports the real failure.
+fn launch_size(id: JobId) -> f32 {
+    /// Long enough for a local socket round-trip, short enough that a
+    /// wedged daemon does not hold up the window.
+    const PREFLIGHT: Duration = Duration::from_millis(600);
+
+    let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        return WIN_MIN_H;
+    };
+    rt.block_on(async {
+        let query = async {
+            let client = Client::connect().await.ok()?;
+            client.job_entry(id).await.ok().flatten()
+        };
+        tokio::time::timeout(PREFLIGHT, query)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|entry| job_height(&entry.job))
+            .unwrap_or(WIN_MIN_H)
+    })
+}
+
+/// The height the window was created at, so `boot` can seed
+/// `imposed_h` and skip a resize that would ask for the size the window
+/// already has.
+static LAUNCH_H: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+
+pub fn launch_download(id: JobId) {
+    let height = launch_size(id);
+    let _ = LAUNCH_H.set(height);
     let mut app = iced::application(boot, update, view)
         .title(|app: &App| match app {
             // Taskbar/switcher entry: identity first, then the phase,
@@ -2771,7 +2802,7 @@ pub fn launch_download(_id: JobId) {
         .default_font(theme::BODY)
         .antialiasing(true)
         .window(chrome::window_settings(
-            iced::Size::new(WIN_W, WIN_MIN_H),
+            iced::Size::new(WIN_W, height),
             iced::Size::new(WIN_MIN_W, WIN_MIN_H),
         ));
     for f in theme::fonts::ALL {
