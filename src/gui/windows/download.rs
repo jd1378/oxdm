@@ -2334,16 +2334,20 @@ fn is_tampered(st: &State) -> bool {
 /// Pulse is frozen (ring at rest) when `reduce_motion`, which lands on
 /// the same still image the danger variant always shows.
 fn completion_burst(st: &State, tampered: bool) -> Element<'_, Msg> {
-    let (ring, circle) = if tampered {
-        (color::rust::R200, color::rust::R400)
+    // The design's danger gradient starts at rust-200, which reads
+    // salmon against the dark surface; the core is the loudest thing on
+    // the page and has to read as a hard red. Deepen the gradient a step
+    // and leave the thin ring on the design's lighter tone.
+    let (ring, core) = if tampered {
+        (color::rust::R200, (color::rust::R300, color::rust::R400))
     } else {
-        (color::clay::C400, color::clay::C500)
+        (color::clay::C400, (color::clay::C400, color::clay::C500))
     };
     let rings = canvas(Burst {
         t: st.anim_t,
         still: tampered || st.reduce_motion,
         ring,
-        circle,
+        core,
     })
     .width(Length::Fixed(BURST_CANVAS))
     .height(Length::Fixed(BURST_CANVAS));
@@ -2375,7 +2379,8 @@ struct Burst {
     /// Danger variant, or reduce-motion: one ring, held.
     still: bool,
     ring: iced::Color,
-    circle: iced::Color,
+    /// The core's 135° gradient, top-left → bottom-right.
+    core: (iced::Color, iced::Color),
 }
 
 impl<M> canvas::Program<M> for Burst {
@@ -2434,8 +2439,8 @@ impl<M> canvas::Program<M> for Burst {
                     Point::new(center.x - circle_r, center.y - circle_r),
                     Point::new(center.x + circle_r, center.y + circle_r),
                 )
-                .add_stop(0.0, self.ring)
-                .add_stop(1.0, self.circle),
+                .add_stop(0.0, self.core.0)
+                .add_stop(1.0, self.core.1),
             )),
         );
 
