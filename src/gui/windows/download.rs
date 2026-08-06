@@ -93,9 +93,7 @@ const PATH_TRUNCATE_CHARS: usize = 52;
 
 /// The "don't open this" warning (design `.tamper-banner`): an
 /// alert-octagon, a one-line verdict, and the paragraph explaining what
-/// a hash mismatch can mean. A 3px rust rule runs down the left edge —
-/// iced borders are uniform, so it is a filled strip inside the frame
-/// rather than a border-left.
+/// a hash mismatch can mean.
 fn tamper_banner<'a>(t: &Tokens) -> Element<'a, Msg> {
     let t2 = *t;
     let bold = |s: &'static str| {
@@ -131,13 +129,12 @@ fn tamper_banner<'a>(t: &Tokens) -> Element<'a, Msg> {
     ]
     .spacing(3.0);
 
-    // CSS renders `border-left` as part of the frame, so it follows the
-    // corner radius. iced borders are uniform width, and a 3px strip
-    // cannot carry a 10px radius — the corner is clamped to half the
-    // box. So the frame is painted rust and the body laid on top of it,
-    // inset 3px from the left: what shows through is a rule that curves
-    // with the corners, which is what the border would have done.
-    let body = container(
+    // No left rule. The design's `border-left: 3px` cannot be expressed
+    // as a border here (iced borders are uniform), and every way of
+    // faking it — a strip, or the frame showing through under an inset
+    // body — read as a seam rather than an edge. The rust frame and the
+    // mark already say this is a warning.
+    container(
         row![
             icons::icon("octagon-alert", TAMPER_ICON, color::rust::R300),
             copy,
@@ -149,27 +146,6 @@ fn tamper_banner<'a>(t: &Tokens) -> Element<'a, Msg> {
     .padding([theme::space::S3, TAMPER_PAD_X])
     .style(move |_| container::Style {
         background: Some(t2.status_danger_bg.into()),
-        border: iced::Border {
-            // Square where it meets the rule, rounded where it meets
-            // the frame — the same corners the frame itself carries.
-            radius: iced::border::Radius {
-                top_left: 0.0,
-                bottom_left: 0.0,
-                top_right: theme::surface::RADIUS,
-                bottom_right: theme::surface::RADIUS,
-            },
-            ..Default::default()
-        },
-        ..Default::default()
-    });
-
-    container(row![
-        iced::widget::Space::new().width(Length::Fixed(TAMPER_RULE_W)),
-        body
-    ])
-    .width(Length::Fill)
-    .style(move |_| container::Style {
-        background: Some(color::rust::R300.into()),
         border: iced::Border {
             color: color::rust::R100,
             width: 1.0,
@@ -187,9 +163,7 @@ const FILE_TILE_RADIUS: f32 = 7.0;
 const FILE_EXT_SIZE: f32 = 10.0;
 const FILE_NAME_SIZE: f32 = 13.5;
 const FILE_META_SIZE: f32 = 11.0;
-/// `.tamper-banner` — 12/14 padding behind a 3px left rule, a 16px
-/// mark, and two sizes of copy.
-const TAMPER_RULE_W: f32 = 3.0;
+/// `.tamper-banner` — 12/14 padding, a 16px mark, two sizes of copy.
 const TAMPER_PAD_X: f32 = 14.0;
 const TAMPER_ICON: f32 = 16.0;
 const TAMPER_TITLE_SIZE: f32 = 12.5;
