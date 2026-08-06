@@ -26,7 +26,7 @@ use crate::gui::widget::striped::striped_progress_hatched;
 use crate::gui::widget::{
     Btn, BtnSize, RateChart, TabBtn, TextInput, card, collapsible_card, combo, hairline,
     number_stepper, pill_progress, rate_chart, segmented, set_row, set_row_panel, set_rows,
-    sibling, status_dot, toggle, vdivider,
+    sibling, status_dot, surface, toggle, vdivider,
 };
 use crate::gui::windows::add::footer;
 use crate::ipc_local::Client;
@@ -45,15 +45,17 @@ const WIN_MIN_H: f32 = 418.0 - theme::space::S4;
 /// Launch height for the completion view: hero burst and its title, the
 /// file card, the saved-to and address rows, and the actions. Fixed
 /// content, so one measured number covers it.
-const WIN_COMPLETE_H: f32 = 392.0;
+const WIN_COMPLETE_H: f32 = 336.0;
 /// What each optional block above the footer adds. The completion view
 /// is a fixed page except for these, and a single "tampered" constant
 /// was wrong for every job that did not have all of them — a mismatch
 /// with no saved hash left a screenful of empty surface. All four
 /// measured off the rendered page.
-const TAMPER_BANNER_H: f32 = 56.0;
+const TAMPER_BANNER_H: f32 = 130.0;
 const DIGEST_PANEL_H: f32 = 86.0;
 const INTEGRITY_BOX_H: f32 = 180.0;
+/// The stats strip, which a job with no finish time does not draw.
+const STATS_H: f32 = 74.0;
 /// Everything the error view puts around the error card: title bar,
 /// hero, progress bar, the gaps between them and the footer. The card
 /// itself is measured from its own copy — see `error_block_height`.
@@ -89,22 +91,92 @@ const SPEED_PRESETS_KBS: &[(&str, u64)] = &[
 /// `widget::error_panel::HASH_TRUNCATE_CHARS`.)
 const PATH_TRUNCATE_CHARS: usize = 52;
 
-// --- Completion status pill (design `.complete-status`) -------------
-/// 24px round mark holding a 13px glyph, then the label. Replaced the
-/// 88px pulsing burst: the design calls this status one that "doesn't
-/// need a hero", and the file card and stats below are what the user
-/// actually reads.
-const STATUS_MARK: f32 = 24.0;
-const STATUS_GLYPH: f32 = 13.0;
-const STATUS_LABEL: f32 = 13.5;
-const STATUS_GAP: f32 = 9.0;
-/// Design `padding: 5px 14px 5px 5px` — tight around the mark, open
-/// past the label — doubled: at our label size the mock's pill read as
-/// shrink-wrapped around the text. The ratio is kept.
-const STATUS_PAD_Y: f32 = 10.0;
-const STATUS_PAD_LEFT: f32 = 10.0;
-const STATUS_PAD_RIGHT: f32 = 28.0;
-const STATUS_BORDER: f32 = 2.0;
+/// The "don't open this" warning (design `.tamper-banner`): an
+/// alert-octagon, a one-line verdict, and the paragraph explaining what
+/// a hash mismatch can mean. A 3px rust rule runs down the left edge —
+/// iced borders are uniform, so it is a filled strip inside the frame
+/// rather than a border-left.
+fn tamper_banner<'a>(t: &Tokens) -> Element<'a, Msg> {
+    let t2 = *t;
+    let bold = |s: &'static str| {
+        iced::widget::span(s)
+            .font(theme::BODY_BOLD)
+            .color(color::rust::R300)
+    };
+    let plain = |s: &'static str| iced::widget::span(s);
+    let body = column![
+        text("This file doesn't match its expected checksum.")
+            .font(theme::BODY_BOLD)
+            .size(TAMPER_TITLE_SIZE)
+            .color(t.fg_1),
+        iced::widget::rich_text::<(), Msg, _, _>([
+            plain(
+                "The download finished, but the file's hash differs from what the publisher \
+                   signed. This can mean the file is "
+            ),
+            bold("corrupted in transit"),
+            plain(", the source has been "),
+            bold("compromised"),
+            plain(", or the connection was "),
+            bold("intercepted"),
+            plain(
+                ". Don't open or run this file until you've re-downloaded it from a trusted \
+                  source."
+            ),
+        ])
+        .font(theme::BODY)
+        .size(TAMPER_TEXT_SIZE)
+        .line_height(iced::widget::text::LineHeight::Relative(1.55))
+        .color(t.fg_2),
+    ]
+    .spacing(3.0);
+
+    // The rule takes the frame's corner radius on its own left side,
+    // otherwise its square corners poke out past the rounded frame.
+    let rule = container(iced::widget::Space::new())
+        .width(Length::Fixed(TAMPER_RULE_W))
+        .height(Length::Fill)
+        .style(move |_| container::Style {
+            background: Some(color::rust::R300.into()),
+            border: iced::Border {
+                radius: iced::border::Radius {
+                    top_left: theme::surface::RADIUS,
+                    bottom_left: theme::surface::RADIUS,
+                    top_right: 0.0,
+                    bottom_right: 0.0,
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
+    container(
+        row![
+            rule,
+            container(
+                row![
+                    icons::icon("octagon-alert", TAMPER_ICON, color::rust::R300),
+                    body,
+                ]
+                .spacing(theme::space::S3)
+                .align_y(Alignment::Start),
+            )
+            .padding([theme::space::S3, TAMPER_PAD_X]),
+        ]
+        .align_y(Alignment::Start),
+    )
+    .width(Length::Fill)
+    .style(move |_| container::Style {
+        background: Some(t2.status_danger_bg.into()),
+        border: iced::Border {
+            color: color::rust::R100,
+            width: 1.0,
+            radius: theme::surface::RADIUS.into(),
+        },
+        ..Default::default()
+    })
+    .into()
+}
 
 /// Completed-view file card (design `.complete-file`): a 40px ext tile
 /// beside the name and size.
@@ -113,6 +185,19 @@ const FILE_TILE_RADIUS: f32 = 7.0;
 const FILE_EXT_SIZE: f32 = 10.0;
 const FILE_NAME_SIZE: f32 = 13.5;
 const FILE_META_SIZE: f32 = 11.0;
+/// `.tamper-banner` — 12/14 padding behind a 3px left rule, a 16px
+/// mark, and two sizes of copy.
+const TAMPER_RULE_W: f32 = 3.0;
+const TAMPER_PAD_X: f32 = 14.0;
+const TAMPER_ICON: f32 = 16.0;
+const TAMPER_TITLE_SIZE: f32 = 12.5;
+const TAMPER_TEXT_SIZE: f32 = 11.5;
+
+/// `.cf-state` — the outcome chip on the file card, and the 3px dot
+/// separating it from the size.
+const FILE_STATE_SIZE: f32 = 11.5;
+const FILE_STATE_ICON: f32 = 12.0;
+const FILE_DOT: f32 = 3.0;
 
 /// Completion stat cells (design `.complete-stats`): an eyebrow label
 /// over a mono value, centered, with the interruption note under the
@@ -492,6 +577,11 @@ fn job_height(job: &crate::domain::Job) -> Option<f32> {
         if !job.checksums.is_empty() {
             h += INTEGRITY_BOX_H;
         }
+        // No finish time, no stats strip — `completion_stats` renders
+        // nothing rather than a row of dashes.
+        if job.finished_at.is_none() {
+            h -= STATS_H;
+        }
         return Some(h);
     }
     let err = job.status.error.as_ref()?;
@@ -513,8 +603,13 @@ fn job_height(job: &crate::domain::Job) -> Option<f32> {
 fn fit_window(st: &mut State) -> Task<Msg> {
     let Some(h) = launch_height(st) else {
         // Back to a free-form view: forget what we imposed, so the next
-        // time one of the fixed pages comes up it is applied afresh.
-        st.imposed_h = None;
+        // time one of the fixed pages comes up it is applied afresh,
+        // and give the transfer view its floor back.
+        if st.imposed_h.take().is_some() {
+            let min = iced::Size::new(WIN_MIN_W, WIN_MIN_H);
+            return iced::window::latest()
+                .and_then(move |id| iced::window::set_min_size(id, Some(min)));
+        }
         return Task::none();
     };
     if st.imposed_h == Some(h) {
@@ -526,7 +621,17 @@ fn fit_window(st: &mut State) -> Task<Msg> {
 
 fn resize_to<M: Send + 'static>(w: f32, h: f32) -> Task<M> {
     let size = iced::Size::new(w, h);
-    iced::window::latest().and_then(move |id| iced::window::resize(id, size))
+    // The minimum has to come down with the height: the completion page
+    // is shorter than the transfer view's floor, and a resize clamped by
+    // a stale minimum leaves a band of empty surface the window can
+    // never lose.
+    let min = iced::Size::new(WIN_MIN_W, WIN_MIN_H.min(h));
+    iced::window::latest().and_then(move |id| {
+        Task::batch([
+            iced::window::set_min_size(id, Some(min)),
+            iced::window::resize(id, size),
+        ])
+    })
 }
 
 fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
@@ -1904,35 +2009,65 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
     // (design §3.3 `.complete-file` = ext tile + name + size): putting
     // the outcome in the card's title slot left the filename with
     // nowhere to go, and the user reads this page to find their file.
-    // The file card is a settings row on a settings surface (design
-    // `.complete-file`), so it reads as the same material as the rest of
-    // the app instead of a one-off panel with its own border rules.
-    let header = set_rows(
-        t,
-        vec![set_row_panel(
-            row![
-                tile,
-                column![
-                    text(name.clone())
-                        .font(theme::BODY_BOLD)
-                        .size(FILE_NAME_SIZE)
-                        .color(t.fg_1),
-                    text(format!(
-                        "Downloaded {} ({} bytes)",
-                        format_bytes_2(total),
-                        crate::gui::format::format_int_grouped(total)
-                    ))
-                    .font(theme::MONO)
-                    .size(FILE_META_SIZE)
-                    .color(t.fg_3),
-                ]
-                .spacing(3.0),
+    //
+    // The outcome rides on the card too (design `.cf-state`): one
+    // object, one state, rather than a hero above it repeating what the
+    // card is about. Failure recolors the whole card.
+    let state_row = row![
+        row![
+            icons::icon(
+                if tampered { "shield-alert" } else { "check" },
+                FILE_STATE_ICON,
+                accent,
+            ),
+            text(if tampered {
+                "Integrity check failed"
+            } else {
+                "Download complete"
+            })
+            .font(theme::BODY_BOLD)
+            .size(FILE_STATE_SIZE)
+            .color(accent),
+        ]
+        .spacing(theme::space::S1)
+        .align_y(Alignment::Center),
+        crate::gui::widget::dot(FILE_DOT, t.fg_4),
+        text(format_bytes_2(total))
+            .font(theme::MONO)
+            .size(FILE_META_SIZE)
+            .color(t.fg_3),
+    ]
+    .spacing(7.0)
+    .align_y(Alignment::Center);
+
+    let card = set_row_panel(
+        row![
+            tile,
+            column![
+                text(name.clone())
+                    .font(theme::BODY_BOLD)
+                    .size(FILE_NAME_SIZE)
+                    .color(t.fg_1),
+                state_row,
             ]
-            .spacing(theme::space::S3)
-            .align_y(Alignment::Center)
-            .into(),
-        )],
+            .spacing(4.0),
+        ]
+        .spacing(theme::space::S3)
+        .align_y(Alignment::Center)
+        .into(),
     );
+    // `.is-bad` swaps the card's edge for rust and tints its fill: the
+    // whole object reads as the problem, not one line inside it.
+    let header = if tampered {
+        surface(
+            color::mix(t.bg_surface, accent, 0.08),
+            color::rust::R300,
+            0.0,
+            card,
+        )
+    } else {
+        set_rows(t, vec![card])
+    };
 
     let label = |s: &'static str| text(s).font(theme::BODY).size(11.0).color(t2.fg_3);
     // Read-only "input": mono text in an input-styled box (egui used a
@@ -1994,17 +2129,11 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
     ]
     .spacing(6.0);
 
-    let mut body = column![status_pill(t, tampered), header].spacing(theme::space::S3);
+    let mut body = column![header].spacing(theme::space::S3);
     // Tampered files get a heavy "don't open" warning right under the
     // header (design `.tamper-banner`).
     if tampered {
-        body = body.push(banner(
-            t,
-            t.status_danger,
-            t.status_danger_bg,
-            "shield-alert",
-            "Don't open this file. It may be corrupted, compromised, or intercepted.".to_owned(),
-        ));
+        body = body.push(tamper_banner(t));
     }
     if let Some(panel) = failed_digest_panel(st) {
         body = body.push(panel);
@@ -2220,74 +2349,6 @@ fn failed_digest_panel(st: &State) -> Option<Element<'_, Msg>> {
         &expected.to_lowercase(),
         &actual.to_lowercase(),
     ))
-}
-
-/// Completion status pill (design `.complete-status`): a filled round
-/// mark and a label in a tinted, outlined pill. The mock is a light
-/// theme — clay-50 on clay-200 — so the fill and edge are mixed from the
-/// accent here rather than hardcoded, which also gives the danger
-/// variant its rust without a second set of tokens.
-fn status_pill<'a>(t: &Tokens, tampered: bool) -> Element<'a, Msg> {
-    let (accent, label, text_color) = if tampered {
-        (
-            color::rust::R400,
-            "Integrity check failed",
-            color::rust::R200,
-        )
-    } else {
-        (color::clay::C400, "Download complete", color::clay::C200)
-    };
-    let fill = color::mix(t.bg_surface, accent, 0.14);
-    let edge = color::mix(t.bg_surface, accent, 0.45);
-    let mark = container(icons::icon(
-        if tampered { "shield-alert" } else { "check" },
-        STATUS_GLYPH,
-        iced::Color::WHITE,
-    ))
-    .width(Length::Fixed(STATUS_MARK))
-    .height(Length::Fixed(STATUS_MARK))
-    .align_x(Alignment::Center)
-    .align_y(Alignment::Center)
-    .style(move |_| container::Style {
-        background: Some(accent.into()),
-        border: iced::Border {
-            radius: (STATUS_MARK / 2.0).into(),
-            ..Default::default()
-        },
-        ..Default::default()
-    });
-
-    let pill = container(
-        row![
-            mark,
-            text(label)
-                .font(theme::BODY_BOLD)
-                .size(STATUS_LABEL)
-                .color(text_color),
-        ]
-        .spacing(STATUS_GAP)
-        .align_y(Alignment::Center),
-    )
-    .padding(iced::Padding {
-        top: STATUS_PAD_Y,
-        bottom: STATUS_PAD_Y,
-        left: STATUS_PAD_LEFT,
-        right: STATUS_PAD_RIGHT,
-    })
-    .style(move |_| container::Style {
-        background: Some(fill.into()),
-        border: iced::Border {
-            color: edge,
-            width: STATUS_BORDER,
-            radius: theme::radius::PILL.into(),
-        },
-        ..Default::default()
-    });
-
-    container(pill)
-        .width(Length::Fill)
-        .align_x(Alignment::Center)
-        .into()
 }
 
 /// Completed-view ChecksumBox (design §3.4): shows the job's saved
@@ -2740,7 +2801,10 @@ pub fn launch_download(id: JobId) {
         .antialiasing(true)
         .window(chrome::window_settings(
             iced::Size::new(WIN_W, height),
-            iced::Size::new(WIN_MIN_W, WIN_MIN_H),
+            // The completion page is shorter than the transfer view's
+            // floor; keeping that floor would open it with a band of
+            // empty surface it can never lose.
+            iced::Size::new(WIN_MIN_W, WIN_MIN_H.min(height)),
         ));
     for f in theme::fonts::ALL {
         app = app.font(*f);
