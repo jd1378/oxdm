@@ -104,7 +104,7 @@ fn tamper_banner<'a>(t: &Tokens) -> Element<'a, Msg> {
             .color(color::rust::R300)
     };
     let plain = |s: &'static str| iced::widget::span(s);
-    let body = column![
+    let copy = column![
         text("This file doesn't match its expected checksum.")
             .font(theme::BODY_BOLD)
             .size(TAMPER_TITLE_SIZE)
@@ -131,43 +131,45 @@ fn tamper_banner<'a>(t: &Tokens) -> Element<'a, Msg> {
     ]
     .spacing(3.0);
 
-    // The rule takes the frame's corner radius on its own left side,
-    // otherwise its square corners poke out past the rounded frame.
-    let rule = container(iced::widget::Space::new())
-        .width(Length::Fixed(TAMPER_RULE_W))
-        .height(Length::Fill)
-        .style(move |_| container::Style {
-            background: Some(color::rust::R300.into()),
-            border: iced::Border {
-                radius: iced::border::Radius {
-                    top_left: theme::surface::RADIUS,
-                    bottom_left: theme::surface::RADIUS,
-                    top_right: 0.0,
-                    bottom_right: 0.0,
-                },
-                ..Default::default()
-            },
-            ..Default::default()
-        });
-
-    container(
+    // CSS renders `border-left` as part of the frame, so it follows the
+    // corner radius. iced borders are uniform width, and a 3px strip
+    // cannot carry a 10px radius — the corner is clamped to half the
+    // box. So the frame is painted rust and the body laid on top of it,
+    // inset 3px from the left: what shows through is a rule that curves
+    // with the corners, which is what the border would have done.
+    let body = container(
         row![
-            rule,
-            container(
-                row![
-                    icons::icon("octagon-alert", TAMPER_ICON, color::rust::R300),
-                    body,
-                ]
-                .spacing(theme::space::S3)
-                .align_y(Alignment::Start),
-            )
-            .padding([theme::space::S3, TAMPER_PAD_X]),
+            icons::icon("octagon-alert", TAMPER_ICON, color::rust::R300),
+            copy,
         ]
+        .spacing(theme::space::S3)
         .align_y(Alignment::Start),
     )
     .width(Length::Fill)
+    .padding([theme::space::S3, TAMPER_PAD_X])
     .style(move |_| container::Style {
         background: Some(t2.status_danger_bg.into()),
+        border: iced::Border {
+            // Square where it meets the rule, rounded where it meets
+            // the frame — the same corners the frame itself carries.
+            radius: iced::border::Radius {
+                top_left: 0.0,
+                bottom_left: 0.0,
+                top_right: theme::surface::RADIUS,
+                bottom_right: theme::surface::RADIUS,
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+
+    container(row![
+        iced::widget::Space::new().width(Length::Fixed(TAMPER_RULE_W)),
+        body
+    ])
+    .width(Length::Fill)
+    .style(move |_| container::Style {
+        background: Some(color::rust::R300.into()),
         border: iced::Border {
             color: color::rust::R100,
             width: 1.0,
