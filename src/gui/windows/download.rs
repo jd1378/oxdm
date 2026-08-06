@@ -19,12 +19,10 @@ use crate::gui::icons;
 use crate::gui::ipc::DaemonSignal;
 use crate::gui::shot::Shot;
 use crate::gui::theme::{self, Tokens};
-use crate::gui::widget::error_panel::{
-    HASH_TRUNCATE_CHARS, error_block, hash_mismatch, mid_truncate,
-};
+use crate::gui::widget::error_panel::{error_block, hash_mismatch, mid_truncate};
 use crate::gui::widget::striped::striped_progress_hatched;
 use crate::gui::widget::{
-    Btn, BtnSize, RateChart, TabBtn, TextInput, card, collapsible_card, combo, hairline,
+    Btn, BtnSize, RateChart, TabBtn, TextInput, collapsible_card, combo, eyebrow, hairline,
     number_stepper, pill_progress, rate_chart, segmented, set_row, set_row_panel, set_rows,
     sibling, status_dot, surface, toggle, vdivider,
 };
@@ -49,11 +47,13 @@ const WIN_COMPLETE_H: f32 = 336.0;
 /// What each optional block above the footer adds. The completion view
 /// is a fixed page except for these, and a single "tampered" constant
 /// was wrong for every job that did not have all of them — a mismatch
-/// with no saved hash left a screenful of empty surface. All four
-/// measured off the rendered page.
-const TAMPER_BANNER_H: f32 = 130.0;
-const DIGEST_PANEL_H: f32 = 86.0;
-const INTEGRITY_BOX_H: f32 = 180.0;
+/// with no saved hash left a screenful of empty surface. All measured
+/// off the rendered page.
+const TAMPER_BANNER_H: f32 = 126.0;
+const INTEGRITY_BOX_H: f32 = 184.0;
+/// The second line an integrity row grows when it has both an expected
+/// and a got hash to show.
+const CB_DIFF_H: f32 = 26.0;
 /// The stats strip, which a job with no finish time does not draw.
 const STATS_H: f32 = 74.0;
 /// Everything the error view puts around the error card: title bar,
@@ -163,6 +163,26 @@ const FILE_TILE_RADIUS: f32 = 7.0;
 const FILE_EXT_SIZE: f32 = 10.0;
 const FILE_NAME_SIZE: f32 = 13.5;
 const FILE_META_SIZE: f32 = 11.0;
+/// How long the copy button shows a check instead of its own glyph
+/// (design `setTimeout(..., 1400)`).
+const HASH_COPIED_MS: u64 = 1400;
+/// `.checksum-box` table metrics: the algorithm and status columns are
+/// fixed so the hashes line up down the box, and a hash is
+/// mid-truncated rather than wrapped.
+const CB_ALGO_W: f32 = 64.0;
+const CB_STATUS_W: f32 = 100.0;
+const CB_LABEL_W: f32 = 64.0;
+const CB_ALGO_SIZE: f32 = 11.0;
+const CB_STATUS_SIZE: f32 = 10.0;
+const CB_HASH_SIZE: f32 = 11.0;
+const CB_LABEL_SIZE: f32 = 9.0;
+const CB_ROW_PAD_Y: f32 = 5.0;
+const CB_ROW_PAD_X: f32 = 10.0;
+/// Design truncates to `12…8`. Ours fits a little more, but the line
+/// must never wrap: the copy button shares the row, and a second line
+/// pushes it out of the box.
+const CB_HASH_CHARS: usize = 24;
+
 /// `.tamper-banner` — 12/14 padding, a 16px mark, two sizes of copy.
 const TAMPER_PAD_X: f32 = 14.0;
 const TAMPER_ICON: f32 = 16.0;
@@ -194,6 +214,15 @@ const PULSE_RATE: f32 = 3.2;
 /// Banner background alpha floor/ceiling for the gentle ochre pulse.
 const RECONNECT_PULSE_MIN: f32 = 0.55;
 const RECONNECT_PULSE_MAX: f32 = 1.0;
+
+/// Which hash line in the integrity table an interaction refers to:
+/// the checksum's index, and whether it is the "got" line of a mismatch
+/// rather than the expected one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HashLine {
+    row: usize,
+    got: bool,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -242,6 +271,9 @@ pub enum Msg {
     /// retry. The bytes already downloaded carry over.
     Open,
     OpenFolder,
+    HashHover(Option<HashLine>),
+    HashCopy(HashLine, String),
+    HashCopied(HashLine),
     /// Delete the saved file, via the confirmation.
     DeleteAsk,
     DeleteCancel,
@@ -278,6 +310,11 @@ pub struct State {
     tab: Tab,
     /// The "delete the saved file?" confirmation is up.
     confirm_delete: bool,
+    /// Hash line under the pointer, and the one that was just copied —
+    /// the design highlights on hover and flips the copy mark to a
+    /// check for a moment (`HASH_COPIED_MS`).
+    hash_hover: Option<HashLine>,
+    hash_copied: Option<HashLine>,
     /// Live window width, so a height correction can leave it alone.
     win_w: f32,
     /// Height this window last imposed on itself. Kept so the
@@ -462,6 +499,8 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 id: entry.job.id,
                 tab: Tab::Info,
                 confirm_delete: false,
+                hash_hover: None,
+                hash_copied: None,
                 win_w: WIN_W,
                 imposed_h: LAUNCH_H.get().copied(),
                 rate_open: false,
@@ -545,13 +584,12 @@ fn job_height(job: &crate::domain::Job) -> Option<f32> {
         if tampered {
             h += TAMPER_BANNER_H;
         }
-        // The expected-vs-got panel only has something to say when the
-        // run itself reported the mismatch.
-        if matches!(job.status.error, Some(JobError::ChecksumMismatch { .. })) {
-            h += DIGEST_PANEL_H;
-        }
         if !job.checksums.is_empty() {
             h += INTEGRITY_BOX_H;
+            // A failed check stacks expected over got in that row.
+            if tampered {
+                h += CB_DIFF_H;
+            }
         }
         // No finish time, no stats strip — `completion_stats` renders
         // nothing rather than a row of dashes.
@@ -858,6 +896,30 @@ fn update_state(st: &mut State, msg: Msg) -> Task<Msg> {
             None => Task::none(),
         },
         Msg::Copy(s) => iced::clipboard::write(s),
+        Msg::HashHover(line) => {
+            st.hash_hover = line;
+            Task::none()
+        }
+        Msg::HashCopy(line, hash) => {
+            st.hash_copied = Some(line);
+            Task::batch([
+                iced::clipboard::write(hash),
+                Task::perform(
+                    async move {
+                        tokio::time::sleep(Duration::from_millis(HASH_COPIED_MS)).await;
+                    },
+                    move |()| Msg::HashCopied(line),
+                ),
+            ])
+        }
+        Msg::HashCopied(line) => {
+            // Only clear our own confirmation: a second copy started
+            // while this one was still showing owns the mark now.
+            if st.hash_copied == Some(line) {
+                st.hash_copied = None;
+            }
+            Task::none()
+        }
         Msg::Reveal(path) => {
             crate::platform::reveal_in_folder(&path);
             Task::none()
@@ -2111,9 +2173,6 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
     if tampered {
         body = body.push(tamper_banner(t));
     }
-    if let Some(panel) = failed_digest_panel(st) {
-        body = body.push(panel);
-    }
     if let Some(stats) = completion_stats(st) {
         body = body.push(stats);
     }
@@ -2299,34 +2358,6 @@ fn delete_overlay<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a, Msg>
     .into()
 }
 
-/// Expected-vs-got panel for a verification failure, naming the digest
-/// that did not match. The algorithm comes from the saved checksum that
-/// carries the expected hash; failing that, from the hash's own length,
-/// so the panel still names something real when the job holds no saved
-/// checksum row.
-fn failed_digest_panel(st: &State) -> Option<Element<'_, Msg>> {
-    let (expected, actual) = checksum_failure(st)?;
-    let algo = st
-        .entry
-        .job
-        .checksums
-        .iter()
-        .find(|c| c.hash.eq_ignore_ascii_case(expected))
-        .map(|c| c.algo)
-        .or_else(|| {
-            Algo::ALL
-                .iter()
-                .copied()
-                .find(|a| a.hex_len() == expected.len())
-        });
-    Some(hash_mismatch(
-        &st.tokens,
-        algo.map(|a| a.label()).unwrap_or("checksum"),
-        &expected.to_lowercase(),
-        &actual.to_lowercase(),
-    ))
-}
-
 /// Completed-view ChecksumBox (design §3.4): shows the job's saved
 /// checksum + status, a paste field to verify against the publisher's
 /// hash, AND a local "Compute from file" action that hashes the saved
@@ -2338,50 +2369,85 @@ fn checksum_box(st: &State) -> Option<Element<'_, Msg>> {
 
     // A run that failed verification is a mismatch even when the stored
     // row has not been restamped yet — the box must not read
-    // "unverified" under a page titled "Integrity check failed".
-    let failed_here = checksum_failure(st).is_some_and(|(e, _)| cs.hash.eq_ignore_ascii_case(e));
-    let (status_color, status_label) = match cs.status {
-        _ if failed_here => (t.status_danger, "mismatch"),
-        CsStatus::Verified => (t.status_success, "verified"),
-        CsStatus::Mismatch => (t.status_danger, "mismatch"),
-        CsStatus::Unverified => (t.fg_3, "unverified"),
+    // "unverified" under a page titled "Integrity check failed", and
+    // the run's own digest is the "got" side of the diff.
+    let failure = checksum_failure(st).filter(|(e, _)| cs.hash.eq_ignore_ascii_case(e));
+    let mismatch = failure.is_some() || cs.status == CsStatus::Mismatch;
+    let (status_color, status_label, status_icon) = if mismatch {
+        (t.status_danger, "mismatch", "x")
+    } else {
+        match cs.status {
+            CsStatus::Verified => (t.status_success, "verified", "check"),
+            _ => (t.fg_3, "no source", "minus"),
+        }
     };
 
     let saved_hash = cs.hash.to_lowercase();
-    let intro = row![
-        icons::icon("shield-check", 17.0, t.action_primary),
-        text("File integrity")
-            .font(theme::BODY_BOLD)
-            .size(13.0)
-            .color(t.fg_1),
-        iced::widget::Space::new().width(Length::Fill),
-        status_dot(status_color, status_label, 11.0),
-    ]
-    .spacing(theme::space::S2)
-    .align_y(Alignment::Center);
+    // Expected/got pair when we have both sides, else the one hash.
+    let got = failure
+        .map(|(_, actual)| actual.to_lowercase())
+        .or_else(|| cs.expected.as_ref().map(|_| saved_hash.clone()));
+    let expected = match (&got, &cs.expected) {
+        // `expected` on the row wins: it is what the publisher said.
+        (Some(_), Some(e)) => e.to_lowercase(),
+        _ => saved_hash.clone(),
+    };
 
-    let saved_row = row![
-        container(
-            text(cs.algo.label())
-                .font(theme::MONO)
-                .size(11.0)
-                .color(t.fg_2)
-        )
-        .width(Length::Fixed(72.0)),
-        text(mid_truncate(&saved_hash, HASH_TRUNCATE_CHARS))
-            .font(theme::MONO)
-            .size(11.0)
-            .color(t.fg_2)
-            .width(Length::Fill),
-        Btn::new("")
-            .toolbar()
-            .icon_only("copy")
-            .size(BtnSize::Sm)
-            .on_press(Msg::Copy(cs.hash.clone()))
-            .view(t),
-    ]
-    .spacing(theme::space::S2)
-    .align_y(Alignment::Center);
+    let head = container(
+        row![
+            icons::icon(
+                if mismatch {
+                    "triangle-alert"
+                } else {
+                    "shield-check"
+                },
+                13.0,
+                status_color,
+            ),
+            eyebrow(t, "file integrity"),
+            iced::widget::Space::new().width(Length::Fill),
+            status_dot(status_color, status_label, 10.0),
+        ]
+        .spacing(theme::space::S2)
+        .align_y(Alignment::Center),
+    )
+    .width(Length::Fill)
+    .padding([6.0, CB_ROW_PAD_X]);
+
+    let values: Element<'_, Msg> = match got {
+        Some(got) => column![
+            hash_line(
+                st,
+                "expected",
+                &expected,
+                HashLine { row: 0, got: false },
+                false
+            ),
+            hash_line(st, "got", &got, HashLine { row: 0, got: true }, true),
+        ]
+        .spacing(theme::space::S1)
+        .into(),
+        None => hash_value(st, &saved_hash, HashLine { row: 0, got: false }, false),
+    };
+
+    let table_row = container(
+        row![
+            container(
+                text(cs.algo.label())
+                    .font(theme::MONO_BOLD)
+                    .size(CB_ALGO_SIZE)
+                    .color(t.fg_1)
+            )
+            .width(Length::Fixed(CB_ALGO_W)),
+            container(status_chip(t, status_icon, status_label, status_color))
+                .width(Length::Fixed(CB_STATUS_W)),
+            container(values).width(Length::Fill),
+        ]
+        .spacing(theme::space::S2)
+        .align_y(Alignment::Start),
+    )
+    .width(Length::Fill)
+    .padding([CB_ROW_PAD_Y, CB_ROW_PAD_X]);
 
     let paste_field = TextInput::new(&st.cs_paste)
         .hint("Paste the publisher's hash to compare…")
@@ -2490,11 +2556,136 @@ fn checksum_box(st: &State) -> Option<Element<'_, Msg>> {
             }
         });
 
-    let mut content = column![intro, saved_row, paste_field, result].spacing(theme::space::S2);
+    let mut tools = column![paste_field, result].spacing(theme::space::S2);
     if let Some(section) = compute_section {
-        content = content.push(hairline(t.border_subtle)).push(section);
+        tools = tools.push(hairline(t.border_subtle)).push(section);
     }
-    Some(card(t, theme::space::S3, content.into()))
+    let content = column![
+        head,
+        hairline(t.border_subtle),
+        table_row,
+        hairline(t.border_subtle),
+        container(tools).padding(theme::space::S3),
+    ];
+    // Mismatch tints the whole box, so the table reads as the problem
+    // rather than one row inside a neutral panel.
+    let (bg, border) = if mismatch {
+        (
+            color::mix(t.bg_sunken, t.status_danger, 0.06),
+            color::with_alpha(t.status_danger, 0.4),
+        )
+    } else {
+        (t.bg_sunken, t.border_subtle)
+    };
+    Some(
+        container(content)
+            .width(Length::Fill)
+            .style(move |_| container::Style {
+                background: Some(bg.into()),
+                border: iced::Border {
+                    color: border,
+                    width: 1.0,
+                    radius: theme::radius::XS.into(),
+                },
+                ..Default::default()
+            })
+            .into(),
+    )
+}
+
+/// Status chip in a table row: a glyph and a word on a tinted pill.
+fn status_chip<'a>(
+    t: &Tokens,
+    icon: &'a str,
+    label: &'a str,
+    color: iced::Color,
+) -> Element<'a, Msg> {
+    let _ = t;
+    container(
+        row![
+            icons::icon(icon, 10.0, color),
+            text(label)
+                .font(theme::BODY)
+                .size(CB_STATUS_SIZE)
+                .color(color),
+        ]
+        .spacing(theme::space::S1)
+        .align_y(Alignment::Center),
+    )
+    .padding([2.0, 6.0])
+    .style(move |_| container::Style {
+        background: Some(color::with_alpha(color, 0.12).into()),
+        border: iced::Border {
+            radius: theme::radius::PILL.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .into()
+}
+
+/// One labelled line of an expected/got pair.
+fn hash_line<'a>(
+    st: &'a State,
+    label: &'a str,
+    hash: &str,
+    line: HashLine,
+    bad: bool,
+) -> Element<'a, Msg> {
+    let t = &st.tokens;
+    row![
+        container(
+            text(label.to_uppercase())
+                .font(theme::BODY_BOLD)
+                .size(CB_LABEL_SIZE)
+                .color(if bad { t.status_danger } else { t.fg_3 })
+        )
+        .width(Length::Fixed(CB_LABEL_W)),
+        hash_value(st, hash, line, bad),
+    ]
+    .spacing(theme::space::S2)
+    .align_y(Alignment::Center)
+    .into()
+}
+
+/// A hash the user can click to copy, with the design's hover lift and
+/// a copy button that confirms with a check. The button keeps the app's
+/// ghost styling rather than the mock's bordered one.
+fn hash_value<'a>(st: &'a State, hash: &str, line: HashLine, bad: bool) -> Element<'a, Msg> {
+    let t = &st.tokens;
+    let hovered = st.hash_hover == Some(line);
+    let copied = st.hash_copied == Some(line);
+    let color = match (bad, hovered) {
+        (true, _) => t.status_danger,
+        (false, true) => t.fg_1,
+        (false, false) => t.fg_2,
+    };
+    let owned = hash.to_owned();
+    let value = iced::widget::mouse_area(
+        text(mid_truncate(hash, CB_HASH_CHARS))
+            .font(theme::MONO)
+            .size(CB_HASH_SIZE)
+            .wrapping(iced::widget::text::Wrapping::None)
+            .color(color),
+    )
+    .on_enter(Msg::HashHover(Some(line)))
+    .on_exit(Msg::HashHover(None))
+    .on_press(Msg::HashCopy(line, owned.clone()))
+    .interaction(iced::mouse::Interaction::Pointer);
+
+    row![
+        value,
+        iced::widget::Space::new().width(Length::Fill),
+        Btn::new("")
+            .toolbar()
+            .icon_only(if copied { "check" } else { "copy" })
+            .size(BtnSize::Sm)
+            .on_press(Msg::HashCopy(line, owned))
+            .view(t),
+    ]
+    .spacing(theme::space::S2)
+    .align_y(Alignment::Center)
+    .into()
 }
 
 /// Small tinted callout: icon + message on a `*-bg` surface.
