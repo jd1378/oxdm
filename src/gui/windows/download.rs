@@ -45,7 +45,7 @@ const WIN_MIN_H: f32 = 418.0 - theme::space::S4;
 /// Launch height for the completion view: hero burst and its title, the
 /// file card, the saved-to and address rows, and the actions. Fixed
 /// content, so one measured number covers it.
-const WIN_COMPLETE_H: f32 = 382.0;
+const WIN_COMPLETE_H: f32 = 392.0;
 /// What each optional block above the footer adds. The completion view
 /// is a fixed page except for these, and a single "tampered" constant
 /// was wrong for every job that did not have all of them — a mismatch
@@ -98,11 +98,12 @@ const STATUS_MARK: f32 = 24.0;
 const STATUS_GLYPH: f32 = 13.0;
 const STATUS_LABEL: f32 = 13.5;
 const STATUS_GAP: f32 = 9.0;
-/// `padding: 5px 14px 5px 5px` — tight around the mark, open past the
-/// label.
-const STATUS_PAD_Y: f32 = 5.0;
-const STATUS_PAD_LEFT: f32 = 5.0;
-const STATUS_PAD_RIGHT: f32 = 14.0;
+/// Design `padding: 5px 14px 5px 5px` — tight around the mark, open
+/// past the label — doubled: at our label size the mock's pill read as
+/// shrink-wrapped around the text. The ratio is kept.
+const STATUS_PAD_Y: f32 = 10.0;
+const STATUS_PAD_LEFT: f32 = 10.0;
+const STATUS_PAD_RIGHT: f32 = 28.0;
 const STATUS_BORDER: f32 = 2.0;
 
 /// Completed-view file card (design `.complete-file`): a 40px ext tile
