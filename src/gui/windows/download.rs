@@ -10,7 +10,7 @@ use std::time::Duration;
 use iced::widget::{column, container, row, stack, text};
 use iced::{Alignment, Element, Length, Subscription, Task};
 
-use crate::domain::checksum::{Algo, CsStatus};
+use crate::domain::checksum::CsStatus;
 use crate::domain::{JobError, JobId, OnCompletion, Phase, ShutdownAction};
 use crate::gui::chrome::{self, WindowControl, titlebar};
 use crate::gui::color;
@@ -52,7 +52,7 @@ const WIN_COMPLETE_H: f32 = 326.0;
 /// with no saved hash left a screenful of empty surface. All measured
 /// off the rendered page.
 const TAMPER_BANNER_H: f32 = 126.0;
-const INTEGRITY_BOX_H: f32 = 210.0;
+const INTEGRITY_BOX_H: f32 = 143.0;
 /// The second line an integrity row grows when it has both an expected
 /// and a got hash to show.
 const CB_DIFF_H: f32 = 26.0;
@@ -282,7 +282,6 @@ pub enum Msg {
     // Completed view — copy / reveal / checksum verify
     Copy(String),
     Reveal(PathBuf),
-    CsPaste(String),
     // Local checksum compute (hash `final_path` off the UI executor).
     CsCompute,
     CsComputed(Result<String, String>),
@@ -362,7 +361,6 @@ pub struct State {
 
     /// Hash the user pasted into the completed-view ChecksumBox to
     /// compare against the job's saved checksum (verify, not compute).
-    cs_paste: String,
     /// Local "Compute from file" state — drives the button label and the
     /// match/mismatch render once a digest comes back.
     cs_compute: CsCompute,
@@ -539,7 +537,6 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 power_choice: on_completion.shutdown.unwrap_or(POWER_DEFAULT),
                 power_force: on_completion.force_shutdown,
                 on_completion,
-                cs_paste: String::new(),
                 cs_compute: CsCompute::Idle,
                 reduce_motion: settings.reduce_motion,
                 shot: Shot::from_env(),
@@ -949,10 +946,6 @@ fn update_state(st: &mut State, msg: Msg) -> Task<Msg> {
         }
         Msg::Reveal(path) => {
             crate::platform::reveal_in_folder(&path);
-            Task::none()
-        }
-        Msg::CsPaste(v) => {
-            st.cs_paste = v;
             Task::none()
         }
         Msg::CsCompute => {
@@ -2468,55 +2461,6 @@ fn checksum_box(st: &State) -> Option<Element<'_, Msg>> {
         .into(),
     );
 
-    let paste_field = TextInput::new(&st.cs_paste)
-        .hint("Paste the publisher's hash to compare…")
-        .mono()
-        .on_input(Msg::CsPaste)
-        .view(t);
-
-    // Normalize: drop whitespace + a leading "filename:" prefix, lower.
-    let normalized: String = st
-        .cs_paste
-        .rsplit(':')
-        .next()
-        .unwrap_or(&st.cs_paste)
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .collect::<String>()
-        .to_lowercase();
-    let detected = Algo::ALL.iter().find(|a| a.hex_len() == normalized.len());
-
-    let result: Element<'_, Msg> = if normalized.is_empty() {
-        text("The algorithm is detected automatically from the hash length.")
-            .font(theme::BODY)
-            .size(11.0)
-            .color(t.fg_3)
-            .into()
-    } else if let Some(algo) = detected {
-        if normalized == saved_hash {
-            banner(
-                t,
-                t.status_success,
-                t.status_success_bg,
-                "circle-check",
-                format!("Matches the saved {} hash.", algo.label()),
-            )
-        } else {
-            // Saved algo (cs.algo), NOT the pasted-length auto-detected
-            // `algo` — they differ when the pasted hash is wrong-length.
-            hash_mismatch(t, cs.algo.label(), &saved_hash, &normalized)
-        }
-    } else {
-        text(format!(
-            "Doesn't look like a known hash ({} hex chars).",
-            normalized.len()
-        ))
-        .font(theme::BODY)
-        .size(11.0)
-        .color(t.status_warning)
-        .into()
-    };
-
     // Local "Compute from file" — only when the file exists on disk.
     // Hashes with the saved checksum's algorithm so the digest compares
     // directly; the heavy work runs off the UI executor (see update).
@@ -2575,10 +2519,10 @@ fn checksum_box(st: &State) -> Option<Element<'_, Msg>> {
             }
         });
 
-    let mut tools = column![paste_field, result].spacing(theme::space::S2);
-    if let Some(section) = compute_section {
-        tools = tools.push(hairline(t.border_subtle)).push(section);
-    }
+    // Only the local check remains: pasting a publisher hash asked the
+    // user to be the comparison engine, and the two rows it needed said
+    // more about the field than about the file.
+    let tools = compute_section?;
     // Same settings surface the file card and the stats strip sit on —
     // rows separated by hairlines, each carrying its own padding — so
     // the box reads as one more panel on this page rather than a
@@ -2598,7 +2542,7 @@ fn checksum_box(st: &State) -> Option<Element<'_, Msg>> {
         hairline(border),
         table_row,
         hairline(border),
-        set_row_panel(tools.into()),
+        set_row_panel(tools),
     ];
     Some(surface(bg, border, 0.0, content.into()))
 }
