@@ -1524,7 +1524,43 @@ fn general_tab(st: &State) -> Element<'_, Msg> {
         .into(),
     );
 
-    column![hero, file_section, source_section, integrity]
+    // Run history: how rough the transfer was. One number, because the
+    // question is "did this go cleanly", not which of retry, reconnect
+    // or resume fired.
+    let n = job.interruptions;
+    let history = section(
+        t,
+        "history",
+        container(
+            row![
+                column![
+                    text("Interruptions")
+                        .font(theme::BODY_MEDIUM)
+                        .size(12.0)
+                        .color(t.fg_1),
+                    text("Dropped connections and resumes during this download.")
+                        .font(theme::BODY)
+                        .size(11.0)
+                        .color(t.fg_3),
+                ]
+                .spacing(2.0),
+                iced::widget::Space::new().width(Length::Fill),
+                text(if n == 0 {
+                    "None".to_owned()
+                } else {
+                    n.to_string()
+                })
+                .font(theme::BODY)
+                .size(12.0)
+                .color(if n == 0 { t.fg_3 } else { t.fg_2 }),
+            ]
+            .align_y(Alignment::Center),
+        )
+        .padding([10.0, theme::space::S3])
+        .into(),
+    );
+
+    column![hero, file_section, source_section, integrity, history]
         .spacing(theme::space::S3)
         .into()
 }

@@ -40,10 +40,12 @@ const WIN_MIN_W: f32 = 530.0;
 /// Floor height, minus the bottom gap that moved inside the scroll port
 /// and so no longer has to be reserved by the frame.
 const WIN_MIN_H: f32 = 418.0 - theme::space::S4;
-/// Launch height for the completion view: hero burst and its title, the
-/// file card, the saved-to and address rows, and the actions. Fixed
-/// content, so one measured number covers it.
-const WIN_COMPLETE_H: f32 = 320.0;
+/// Launch height for the completion view: the file card, the stats
+/// strip, the URL and path rows, and the footer. Measured off the
+/// rendered page with a few pixels of slack — text metrics shift a
+/// little with display scaling, and a window one pixel short opens
+/// scrolled, which is far worse than one that opens a hair tall.
+const WIN_COMPLETE_H: f32 = 326.0;
 /// What each optional block above the footer adds. The completion view
 /// is a fixed page except for these, and a single "tampered" constant
 /// was wrong for every job that did not have all of them — a mismatch
