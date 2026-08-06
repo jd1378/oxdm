@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use iced::widget::{canvas, column, container, row, stack, text};
-use iced::{Alignment, Element, Length, Point, Rectangle, Subscription, Task};
+use iced::widget::{column, container, row, stack, text};
+use iced::{Alignment, Element, Length, Subscription, Task};
 
 use crate::domain::checksum::{Algo, CsStatus};
 use crate::domain::{JobError, JobId, OnCompletion, Phase, ShutdownAction};
@@ -45,7 +45,7 @@ const WIN_MIN_H: f32 = 418.0 - theme::space::S4;
 /// Launch height for the completion view: hero burst and its title, the
 /// file card, the saved-to and address rows, and the actions. Fixed
 /// content, so one measured number covers it.
-const WIN_COMPLETE_H: f32 = 478.0;
+const WIN_COMPLETE_H: f32 = 382.0;
 /// What each optional block above the footer adds. The completion view
 /// is a fixed page except for these, and a single "tampered" constant
 /// was wrong for every job that did not have all of them — a mismatch
@@ -89,37 +89,22 @@ const SPEED_PRESETS_KBS: &[(&str, u64)] = &[
 /// `widget::error_panel::HASH_TRUNCATE_CHARS`.)
 const PATH_TRUNCATE_CHARS: usize = 52;
 
-// --- Completion burst (design §3.3 `.complete-burst`, anim `cb-pop`) -
-/// 88px burst stage — two pulsing rings around a gradient check circle.
-const BURST_STAGE: f32 = 88.0;
-/// Inner gradient circle diameter (design 64px clay circle).
-const BURST_CIRCLE: f32 = 64.0;
-/// Check / shield-alert glyph size, centered over the burst circle.
-const BURST_ICON: f32 = 30.0;
-/// `cb-pulse`: one ring expands from 0.7× to 1.5× of the 88px stage
-/// while fading 0.5 → 0, over this period, on CSS `ease-out`.
-const BURST_PULSE_SECS: f32 = 1.6;
-const BURST_RING_FROM: f32 = 0.7;
-const BURST_RING_TO: f32 = 1.5;
-const BURST_RING_ALPHA: f32 = 0.5;
-/// The rings grow past the 88px stage, and CSS lets them overflow it.
-/// A canvas clips to its bounds, so the stage it paints on has to be the
-/// full extent of the widest ring while radii stay measured from
-/// `BURST_STAGE` — otherwise the pulse gets its edges sliced off.
-const BURST_CANVAS: f32 = BURST_STAGE * BURST_RING_TO;
-/// How far the widest ring reaches past the stage on each side. The
-/// scroll region has to open with at least this much padding or the
-/// bleed lands outside the viewport and is clipped away.
-const BURST_BLEED: f32 = (BURST_CANVAS - BURST_STAGE) / 2.0;
-/// `.cb-ring.r2 { animation-delay: 600ms }`. Shorter than the period, so
-/// the two rings read as a pair of pulses followed by a pause rather
-/// than an even heartbeat — that gap is the design's rhythm, not a gap
-/// in the implementation.
-const BURST_RING2_DELAY: f32 = 0.6;
-/// `.complete-burst.danger .cb-ring`: no animation, one ring held at
-/// this scale and alpha. A hard stop, not a heartbeat.
-const BURST_DANGER_RING_SCALE: f32 = 1.15;
-const BURST_DANGER_RING_ALPHA: f32 = 0.45;
+// --- Completion status pill (design `.complete-status`) -------------
+/// 24px round mark holding a 13px glyph, then the label. Replaced the
+/// 88px pulsing burst: the design calls this status one that "doesn't
+/// need a hero", and the file card and stats below are what the user
+/// actually reads.
+const STATUS_MARK: f32 = 24.0;
+const STATUS_GLYPH: f32 = 13.0;
+const STATUS_LABEL: f32 = 13.5;
+const STATUS_GAP: f32 = 9.0;
+/// `padding: 5px 14px 5px 5px` — tight around the mark, open past the
+/// label.
+const STATUS_PAD_Y: f32 = 5.0;
+const STATUS_PAD_LEFT: f32 = 5.0;
+const STATUS_PAD_RIGHT: f32 = 14.0;
+const STATUS_BORDER: f32 = 2.0;
+
 /// Completed-view file card (design `.complete-file`): a 40px ext tile
 /// beside the name and size.
 const FILE_TILE: f32 = 40.0;
@@ -880,11 +865,6 @@ pub fn subscription(app: &App) -> Subscription<Msg> {
         if st.rate_open {
             subs.push(iced::time::every(Duration::from_millis(500)).map(|_| Msg::SampleTick));
         }
-    } else if shows_complete(st) && !is_tampered(st) && !st.reduce_motion {
-        // Drive the completion-burst pulse; the running branch's tick is
-        // gone once terminal, so the burst needs its own (W6-gated)
-        // tick. The danger burst is a still image — nothing to drive.
-        subs.push(iced::time::every(Duration::from_millis(33)).map(|_| Msg::AnimTick));
     }
     Subscription::batch(subs)
 }
@@ -1919,11 +1899,6 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
         ..Default::default()
     });
 
-    let (title_text, title_color) = if tampered {
-        ("Integrity check failed", t.status_danger)
-    } else {
-        ("Download complete", t.fg_1)
-    };
     // The verdict belongs to the burst, the file card to the file
     // (design §3.3 `.complete-file` = ext tile + name + size): putting
     // the outcome in the card's title slot left the filename with
@@ -2018,22 +1993,7 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
     ]
     .spacing(6.0);
 
-    // Burst stage + its title, centered above the header (`cb-pop`).
-    let burst = container(
-        column![
-            completion_burst(st, tampered),
-            text(title_text)
-                .font(theme::DISPLAY)
-                .size(20.0)
-                .color(title_color),
-        ]
-        .spacing(theme::space::S2)
-        .align_x(Alignment::Center),
-    )
-    .width(Length::Fill)
-    .align_x(Alignment::Center);
-
-    let mut body = column![burst, header].spacing(theme::space::S3);
+    let mut body = column![status_pill(t, tampered), header].spacing(theme::space::S3);
     // Tampered files get a heavy "don't open" warning right under the
     // header (design `.tamper-banner`).
     if tampered {
@@ -2111,17 +2071,12 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
         t,
         column![
             titlebar::titlebar(t, &st.window_title(), false, Msg::Window),
-            // The top pad lives INSIDE the scroll region, not around
-            // it. A scrollable clips to its viewport, and the widest
-            // burst ring bleeds `BURST_BLEED` above its stage — padding
-            // on the outside would put that bleed beyond the viewport
-            // edge and shear it off. Design `.complete-body` pads 24,
-            // which covers the bleed. Scrolled down, the ring clips at
-            // the edge like any other content.
+            // Design `.complete-body` opens with 16px. It pads inside
+            // the scroll region rather than around it, so the first row
+            // scrolls with the rest instead of sitting in a fixed band.
             container(
                 crate::gui::widget::vscroll(
-                    container(body)
-                        .padding(iced::Padding::default().top(theme::space::S6.max(BURST_BLEED)),),
+                    container(body).padding(iced::Padding::default().top(theme::space::S4)),
                 )
                 .height(Length::Fill),
             )
@@ -2264,6 +2219,74 @@ fn failed_digest_panel(st: &State) -> Option<Element<'_, Msg>> {
         &expected.to_lowercase(),
         &actual.to_lowercase(),
     ))
+}
+
+/// Completion status pill (design `.complete-status`): a filled round
+/// mark and a label in a tinted, outlined pill. The mock is a light
+/// theme — clay-50 on clay-200 — so the fill and edge are mixed from the
+/// accent here rather than hardcoded, which also gives the danger
+/// variant its rust without a second set of tokens.
+fn status_pill<'a>(t: &Tokens, tampered: bool) -> Element<'a, Msg> {
+    let (accent, label, text_color) = if tampered {
+        (
+            color::rust::R400,
+            "Integrity check failed",
+            color::rust::R200,
+        )
+    } else {
+        (color::clay::C400, "Download complete", color::clay::C200)
+    };
+    let fill = color::mix(t.bg_surface, accent, 0.14);
+    let edge = color::mix(t.bg_surface, accent, 0.45);
+    let mark = container(icons::icon(
+        if tampered { "shield-alert" } else { "check" },
+        STATUS_GLYPH,
+        iced::Color::WHITE,
+    ))
+    .width(Length::Fixed(STATUS_MARK))
+    .height(Length::Fixed(STATUS_MARK))
+    .align_x(Alignment::Center)
+    .align_y(Alignment::Center)
+    .style(move |_| container::Style {
+        background: Some(accent.into()),
+        border: iced::Border {
+            radius: (STATUS_MARK / 2.0).into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+
+    let pill = container(
+        row![
+            mark,
+            text(label)
+                .font(theme::BODY_BOLD)
+                .size(STATUS_LABEL)
+                .color(text_color),
+        ]
+        .spacing(STATUS_GAP)
+        .align_y(Alignment::Center),
+    )
+    .padding(iced::Padding {
+        top: STATUS_PAD_Y,
+        bottom: STATUS_PAD_Y,
+        left: STATUS_PAD_LEFT,
+        right: STATUS_PAD_RIGHT,
+    })
+    .style(move |_| container::Style {
+        background: Some(fill.into()),
+        border: iced::Border {
+            color: edge,
+            width: STATUS_BORDER,
+            radius: theme::radius::PILL.into(),
+        },
+        ..Default::default()
+    });
+
+    container(pill)
+        .width(Length::Fill)
+        .align_x(Alignment::Center)
+        .into()
 }
 
 /// Completed-view ChecksumBox (design §3.4): shows the job's saved
@@ -2548,128 +2571,6 @@ fn is_tampered(st: &State) -> bool {
         _ => false,
     };
     saved_mismatch || computed_mismatch
-}
-
-/// Completion burst (design `.complete-burst`): an 88px stage with a
-/// gradient circle and a centered glyph. Healthy is clay with a check
-/// and two rings pulsing outward; the danger variant is rust with
-/// `shield-alert` and a single ring held still.
-///
-/// Pulse is frozen (ring at rest) when `reduce_motion`, which lands on
-/// the same still image the danger variant always shows.
-fn completion_burst(st: &State, tampered: bool) -> Element<'_, Msg> {
-    // The design's danger gradient starts at rust-200, which reads
-    // salmon against the dark surface; the core is the loudest thing on
-    // the page and has to read as a hard red. Deepen the gradient a step
-    // and leave the thin ring on the design's lighter tone.
-    let (ring, core) = if tampered {
-        (color::rust::R200, (color::rust::R300, color::rust::R400))
-    } else {
-        (color::clay::C400, (color::clay::C400, color::clay::C500))
-    };
-    let rings = canvas(Burst {
-        t: st.anim_t,
-        still: tampered || st.reduce_motion,
-        ring,
-        core,
-    })
-    .width(Length::Fixed(BURST_CANVAS))
-    .height(Length::Fixed(BURST_CANVAS));
-
-    let glyph = container(icons::icon(
-        if tampered { "shield-alert" } else { "check" },
-        BURST_ICON,
-        iced::Color::WHITE,
-    ))
-    .width(Length::Fixed(BURST_CANVAS))
-    .height(Length::Fixed(BURST_CANVAS))
-    .align_x(Alignment::Center)
-    .align_y(Alignment::Center);
-
-    // The rings bleed past the stage exactly as `overflow: visible`
-    // lets them in CSS: painted in full, but costing the column only
-    // the 88px the design reserves.
-    crate::gui::widget::overflowing(
-        stack![rings, glyph]
-            .width(Length::Fixed(BURST_CANVAS))
-            .height(Length::Fixed(BURST_CANVAS)),
-        BURST_STAGE,
-    )
-}
-
-/// Canvas program for the burst: gradient circle + two breathing rings.
-struct Burst {
-    t: f32,
-    /// Danger variant, or reduce-motion: one ring, held.
-    still: bool,
-    ring: iced::Color,
-    /// The core's 135° gradient, top-left → bottom-right.
-    core: (iced::Color, iced::Color),
-}
-
-impl<M> canvas::Program<M> for Burst {
-    type State = ();
-
-    fn draw(
-        &self,
-        _state: &(),
-        renderer: &iced::Renderer,
-        _theme: &iced::Theme,
-        bounds: Rectangle,
-        _cursor: iced::mouse::Cursor,
-    ) -> Vec<canvas::Geometry> {
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
-        let center = Point::new(bounds.width / 2.0, bounds.height / 2.0);
-        // Radii come from the design's 88px stage, not the wider canvas.
-        let half = BURST_STAGE / 2.0;
-        let circle_r = BURST_CIRCLE / 2.0;
-
-        // The ring is the stage inset to 0 — an 88px circle — scaled and
-        // faded by `cb-pulse`. Each ring runs the same 1.6s curve, the
-        // second offset by 600ms; drawing them from one clock keeps the
-        // offset exact instead of drifting between two animation handles.
-        let mut ring = |scale: f32, alpha: f32| {
-            let path = canvas::Path::circle(center, half * scale);
-            frame.stroke(
-                &path,
-                canvas::Stroke::default()
-                    .with_width(1.0)
-                    .with_color(color::with_alpha(self.ring, alpha)),
-            );
-        };
-        if self.still {
-            ring(BURST_DANGER_RING_SCALE, BURST_DANGER_RING_ALPHA);
-        } else {
-            for delay in [0.0, BURST_RING2_DELAY] {
-                let phase = ((self.t - delay).rem_euclid(BURST_PULSE_SECS)) / BURST_PULSE_SECS;
-                // CSS `ease-out` eases the timing, and both properties
-                // read the eased fraction — so the ring is already
-                // near-transparent by the time it is near-largest.
-                let p = iced_anim::transition::bezier::EASE_OUT.solve(phase);
-                ring(
-                    BURST_RING_FROM + (BURST_RING_TO - BURST_RING_FROM) * p,
-                    BURST_RING_ALPHA * (1.0 - p),
-                );
-            }
-        }
-
-        // `linear-gradient(135deg, …)`: CSS measures the angle clockwise
-        // from "to top", so 135deg runs top-left → bottom-right.
-        let body = canvas::Path::circle(center, circle_r);
-        frame.fill(
-            &body,
-            canvas::Fill::from(canvas::gradient::Gradient::Linear(
-                canvas::gradient::Linear::new(
-                    Point::new(center.x - circle_r, center.y - circle_r),
-                    Point::new(center.x + circle_r, center.y + circle_r),
-                )
-                .add_stop(0.0, self.core.0)
-                .add_stop(1.0, self.core.1),
-            )),
-        );
-
-        vec![frame.into_geometry()]
-    }
 }
 
 /// Completion stat grid (design `.complete-stats`): Avg speed · Time
