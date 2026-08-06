@@ -43,7 +43,7 @@ const WIN_MIN_H: f32 = 418.0 - theme::space::S4;
 /// Launch height for the completion view: hero burst and its title, the
 /// file card, the saved-to and address rows, and the actions. Fixed
 /// content, so one measured number covers it.
-const WIN_COMPLETE_H: f32 = 336.0;
+const WIN_COMPLETE_H: f32 = 320.0;
 /// What each optional block above the footer adds. The completion view
 /// is a fixed page except for these, and a single "tampered" constant
 /// was wrong for every job that did not have all of them — a mismatch
@@ -55,7 +55,7 @@ const INTEGRITY_BOX_H: f32 = 184.0;
 /// and a got hash to show.
 const CB_DIFF_H: f32 = 26.0;
 /// The stats strip, which a job with no finish time does not draw.
-const STATS_H: f32 = 74.0;
+const STATS_H: f32 = 59.0;
 /// Everything the error view puts around the error card: title bar,
 /// hero, progress bar, the gaps between them and the footer. The card
 /// itself is measured from its own copy — see `error_block_height`.
@@ -202,10 +202,9 @@ const STAT_CELL_PAD_Y: f32 = 8.0;
 const STAT_CELL_PAD_X: f32 = 10.0;
 const STAT_LABEL_SIZE: f32 = 9.5;
 const STAT_VALUE_SIZE: f32 = 13.0;
-const STAT_SUB_ICON: f32 = 10.0;
-/// The cell's own padding twice, plus the label, value and sub-line
-/// boxes. Pinned so `vdivider` has a height to draw against.
-const STAT_CELL_H: f32 = STAT_CELL_PAD_Y * 2.0 + 13.0 + 18.0 + 15.0;
+/// The cell's own padding twice, plus the label and value boxes. Pinned
+/// so `vdivider` has a height to draw against.
+const STAT_CELL_H: f32 = STAT_CELL_PAD_Y * 2.0 + 13.0 + 18.0;
 
 /// Burst/pulse oscillation rate (rad/s feel applied to `anim_t`).
 const PULSE_RATE: f32 = 3.2;
@@ -315,6 +314,11 @@ pub struct State {
     /// check for a moment (`HASH_COPIED_MS`).
     hash_hover: Option<HashLine>,
     hash_copied: Option<HashLine>,
+    /// Middle-truncated URL and save path. Owned by the state because a
+    /// text input borrows what it shows, and these are derived values —
+    /// recomputed whenever the entry changes.
+    url_field: String,
+    path_field: String,
     /// Live window width, so a height correction can leave it alone.
     win_w: f32,
     /// Height this window last imposed on itself. Kept so the
@@ -501,6 +505,8 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 confirm_delete: false,
                 hash_hover: None,
                 hash_copied: None,
+                url_field: String::new(),
+                path_field: String::new(),
                 win_w: WIN_W,
                 imposed_h: LAUNCH_H.get().copied(),
                 rate_open: false,
@@ -535,6 +541,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
             let App::Ready(st) = app else {
                 return Task::none();
             };
+            refresh_fields(st);
             fit_window(st)
         }
         Msg::Connected(Err(e)) => {
@@ -648,8 +655,18 @@ fn resize_to<M: Send + 'static>(w: f32, h: f32) -> Task<M> {
     })
 }
 
+/// Recompute the derived display strings the read-only fields borrow.
+fn refresh_fields(st: &mut State) {
+    st.url_field = mid_truncate(st.entry.job.url.as_ref(), PATH_TRUNCATE_CHARS);
+    st.path_field = mid_truncate(
+        &final_path(&st.entry).display().to_string(),
+        PATH_TRUNCATE_CHARS,
+    );
+}
+
 fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
     let task = update_state(st, msg);
+    refresh_fields(st);
     // Any message can be the one that completes the download or lands
     // the error, so the check rides along with all of them rather than
     // being duplicated across the handful that mutate the entry.
@@ -2110,28 +2127,19 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
     let label = |s: &'static str| text(s).font(theme::BODY).size(11.0).color(t2.fg_3);
     // Read-only "input": mono text in an input-styled box (egui used a
     // non-interactive TextEdit).
-    let ro_field = |v: String| {
-        container(text(v).font(theme::MONO).size(11.0).color(t2.fg_1))
-            .width(Length::Fill)
-            .height(Length::Fixed(theme::control::H_MD))
-            .align_y(Alignment::Center)
-            .padding([0.0, theme::control::INPUT_PAD_X])
-            .style(move |_| container::Style {
-                background: Some(t2.bg_raised.into()),
-                border: iced::Border {
-                    color: t2.border_subtle,
-                    width: 1.0,
-                    radius: theme::control::RADIUS.into(),
-                },
-                ..Default::default()
-            })
-    };
+    // A real input rather than styled text: the URL and the path are
+    // there to be taken, and selecting part of one is a normal thing to
+    // want. `read_only` keeps the field focusable and selectable while
+    // dropping every edit.
 
     // "From" (source URL) row — copy only (design `FromUrlRow`).
     let from_row = column![
         label("URL"),
         row![
-            ro_field(mid_truncate(&address, PATH_TRUNCATE_CHARS)),
+            TextInput::new(&st.url_field)
+                .mono()
+                .read_only(Msg::Noop)
+                .view(t),
             Btn::new("")
                 .secondary()
                 .icon_only("copy")
@@ -2148,7 +2156,10 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
     let saved_row = column![
         label("The file saved as"),
         row![
-            ro_field(mid_truncate(&path, PATH_TRUNCATE_CHARS)),
+            TextInput::new(&st.path_field)
+                .mono()
+                .read_only(Msg::Noop)
+                .view(t),
             Btn::new("")
                 .secondary()
                 .icon_only("copy")
@@ -2832,33 +2843,12 @@ fn completion_stats(st: &State) -> Option<Element<'_, Msg>> {
         return None;
     }
 
-    let n = job.interruptions;
-    let (icon, tint, note) = if n == 0 {
-        ("check", t.action_primary, "No interruptions".to_owned())
-    } else {
-        (
-            "rotate-ccw",
-            t.fg_3,
-            format!("{n} interruption{}", if n == 1 { "" } else { "s" }),
-        )
-    };
-    let sub = row![
-        icons::icon(icon, STAT_SUB_ICON, tint),
-        text(note).font(theme::BODY_MEDIUM).size(10.0).color(t.fg_3),
-    ]
-    .spacing(theme::space::S1)
-    .align_y(Alignment::Center);
-
-    // Same material as the About window's build facts: settings-row
-    // surface, cells split by a vertical hairline (design
-    // `.complete-stats`). The row is pinned because `vdivider` needs a
-    // concrete height.
     let grid: Element<'_, Msg> = row![
-        stat_cell(t, "average speed", avg, None),
+        stat_cell(t, "average speed", avg),
         vdivider(t.border_subtle, STAT_CELL_H),
-        stat_cell(t, "time taken", taken, None),
+        stat_cell(t, "time taken", taken),
         vdivider(t.border_subtle, STAT_CELL_H),
-        stat_cell(t, "finished at", finished, Some(sub.into())),
+        stat_cell(t, "finished at", finished),
     ]
     .height(Length::Fixed(STAT_CELL_H))
     .into();
@@ -2866,16 +2856,10 @@ fn completion_stats(st: &State) -> Option<Element<'_, Msg>> {
     Some(set_rows(t, vec![grid]))
 }
 
-/// One `.cs-cell`: eyebrow label over a mono value, centered, with an
-/// optional sub-line under it. `None` prints the design's em dash — the
-/// fact is unknown, not zero.
-fn stat_cell<'a>(
-    t: &Tokens,
-    label: &'a str,
-    value: Option<String>,
-    sub: Option<Element<'a, Msg>>,
-) -> Element<'a, Msg> {
-    let mut col = column![
+/// One `.cs-cell`: eyebrow label over a mono value, centered. `None`
+/// prints the design's em dash — the fact is unknown, not zero.
+fn stat_cell<'a>(t: &Tokens, label: &'a str, value: Option<String>) -> Element<'a, Msg> {
+    let col = column![
         text(label.to_uppercase())
             .font(theme::BODY_BOLD)
             .size(STAT_LABEL_SIZE)
@@ -2887,9 +2871,6 @@ fn stat_cell<'a>(
     ]
     .spacing(3.0)
     .align_x(Alignment::Center);
-    if let Some(sub) = sub {
-        col = col.push(sub);
-    }
     // Top-aligned, not centered: the last cell carries a sub-line the
     // others don't, and centering each cell in the row would drop the
     // first two labels below the third.

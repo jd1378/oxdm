@@ -44,6 +44,7 @@ pub struct TextInput<'a, M> {
     font_size: f32,
     secure: bool,
     enabled: bool,
+    read_only: Option<M>,
     border: Option<Color>,
     on_input: Option<Box<dyn Fn(String) -> M + 'a>>,
     on_submit: Option<M>,
@@ -60,6 +61,7 @@ impl<'a, M: Clone + 'a> TextInput<'a, M> {
             font_size: 13.0,
             secure: false,
             enabled: true,
+            read_only: None,
             border: None,
             on_input: None,
             on_submit: None,
@@ -89,6 +91,17 @@ impl<'a, M: Clone + 'a> TextInput<'a, M> {
         self.enabled = enabled;
         self
     }
+    /// Show a value the user can select and copy but not change.
+    ///
+    /// Not the same as `enabled(false)`: iced refuses focus to a
+    /// disabled input, so its text cannot be selected either, and a
+    /// field whose whole purpose is "here is the path, take it" has to
+    /// be selectable. The input stays live and swallows every edit by
+    /// mapping input to `noop` — the caller's do-nothing message.
+    pub fn read_only(mut self, noop: M) -> Self {
+        self.read_only = Some(noop);
+        self
+    }
     /// Override idle border color (e.g. brand border once URL filled).
     pub fn border(mut self, color: Color) -> Self {
         self.border = Some(color);
@@ -116,7 +129,9 @@ impl<'a, M: Clone + 'a> TextInput<'a, M> {
                 theme::control::INPUT_PAD_X,
             ])
             .style(move |_th, status| base_style(&t, status, border));
-        if self.enabled {
+        if let Some(noop) = self.read_only {
+            input = input.on_input(move |_| noop.clone());
+        } else if self.enabled {
             if let Some(f) = self.on_input {
                 input = input.on_input(move |s| f(s));
             }
