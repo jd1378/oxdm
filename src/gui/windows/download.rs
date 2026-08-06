@@ -323,6 +323,13 @@ pub struct State {
     path_field: String,
     /// Live window width, so a height correction can leave it alone.
     win_w: f32,
+    /// The minimum height currently in force. Tracks what was handed to
+    /// the window manager: the transfer view's floor, or a shorter
+    /// completion page's own height. Clamping against the static floor
+    /// instead made the window fight the user mid-drag — the WM allowed
+    /// the smaller size the completion page asked for, and every resize
+    /// event bounced it back up.
+    min_h: f32,
     /// Height this window last imposed on itself. Kept so the
     /// correction fires once per state change rather than on every
     /// event — otherwise a user resizing a completed window would be
@@ -510,6 +517,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 url_field: String::new(),
                 path_field: String::new(),
                 win_w: WIN_W,
+                min_h: LAUNCH_H.get().copied().unwrap_or(WIN_MIN_H).min(WIN_MIN_H),
                 imposed_h: LAUNCH_H.get().copied(),
                 rate_open: false,
                 segments_open: false,
@@ -629,6 +637,7 @@ fn fit_window(st: &mut State) -> Task<Msg> {
         // time one of the fixed pages comes up it is applied afresh,
         // and give the transfer view its floor back.
         if st.imposed_h.take().is_some() {
+            st.min_h = WIN_MIN_H;
             let min = iced::Size::new(WIN_MIN_W, WIN_MIN_H);
             return iced::window::latest()
                 .and_then(move |id| iced::window::set_min_size(id, Some(min)));
@@ -639,6 +648,7 @@ fn fit_window(st: &mut State) -> Task<Msg> {
         return Task::none();
     }
     st.imposed_h = Some(h);
+    st.min_h = WIN_MIN_H.min(h);
     resize_to(st.win_w, h)
 }
 
@@ -900,7 +910,7 @@ fn update_state(st: &mut State, msg: Msg) -> Task<Msg> {
         }
         Msg::WinResized(w, h) => {
             st.win_w = w;
-            chrome::enforce_min_size(iced::Size::new(w, h), iced::Size::new(WIN_MIN_W, WIN_MIN_H))
+            chrome::enforce_min_size(iced::Size::new(w, h), iced::Size::new(WIN_MIN_W, st.min_h))
         }
         Msg::ShotTick => {
             if let Some(shot) = &mut st.shot
