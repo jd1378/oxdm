@@ -52,7 +52,9 @@ const WIN_COMPLETE_H: f32 = 326.0;
 /// with no saved hash left a screenful of empty surface. All measured
 /// off the rendered page.
 const TAMPER_BANNER_H: f32 = 126.0;
-const INTEGRITY_BOX_H: f32 = 143.0;
+const INTEGRITY_BOX_H: f32 = 96.0;
+/// The "Compute from file" row, which a job with no saved file omits.
+const CB_COMPUTE_H: f32 = 47.0;
 /// The second line an integrity row grows when it has both an expected
 /// and a got hash to show.
 const CB_DIFF_H: f32 = 26.0;
@@ -601,6 +603,10 @@ fn job_height(job: &crate::domain::Job) -> Option<f32> {
             // A failed check stacks expected over got in that row.
             if tampered {
                 h += CB_DIFF_H;
+            }
+            // The local-check row only exists when there is a file.
+            if job.status.final_path.is_some() {
+                h += CB_COMPUTE_H;
             }
         }
         // No finish time, no stats strip — `completion_stats` renders
@@ -2521,8 +2527,9 @@ fn checksum_box(st: &State) -> Option<Element<'_, Msg>> {
 
     // Only the local check remains: pasting a publisher hash asked the
     // user to be the comparison engine, and the two rows it needed said
-    // more about the field than about the file.
-    let tools = compute_section?;
+    // more about the field than about the file. It is a row of the box,
+    // not the box itself — a job whose file is gone still has hashes
+    // worth showing.
     // Same settings surface the file card and the stats strip sit on —
     // rows separated by hairlines, each carrying its own padding — so
     // the box reads as one more panel on this page rather than a
@@ -2537,13 +2544,10 @@ fn checksum_box(st: &State) -> Option<Element<'_, Msg>> {
     } else {
         (t.bg_surface, t.border_subtle)
     };
-    let content = column![
-        head,
-        hairline(border),
-        table_row,
-        hairline(border),
-        set_row_panel(tools),
-    ];
+    let mut content = column![head, hairline(border), table_row];
+    if let Some(compute) = compute_section {
+        content = content.push(hairline(border)).push(set_row_panel(compute));
+    }
     Some(surface(bg, border, 0.0, content.into()))
 }
 
