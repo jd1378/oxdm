@@ -52,7 +52,7 @@ const WIN_COMPLETE_H: f32 = 326.0;
 /// with no saved hash left a screenful of empty surface. All measured
 /// off the rendered page.
 const TAMPER_BANNER_H: f32 = 126.0;
-const INTEGRITY_BOX_H: f32 = 184.0;
+const INTEGRITY_BOX_H: f32 = 210.0;
 /// The second line an integrity row grows when it has both an expected
 /// and a got hash to show.
 const CB_DIFF_H: f32 = 26.0;
@@ -178,8 +178,6 @@ const CB_ALGO_SIZE: f32 = 11.0;
 const CB_STATUS_SIZE: f32 = 10.0;
 const CB_HASH_SIZE: f32 = 11.0;
 const CB_LABEL_SIZE: f32 = 9.0;
-const CB_ROW_PAD_Y: f32 = 5.0;
-const CB_ROW_PAD_X: f32 = 10.0;
 /// Design truncates to `12…8`. Ours fits a little more, but the line
 /// must never wrap: the copy button shares the row, and a second line
 /// pushes it out of the box.
@@ -2416,7 +2414,7 @@ fn checksum_box(st: &State) -> Option<Element<'_, Msg>> {
         _ => saved_hash.clone(),
     };
 
-    let head = container(
+    let head = set_row_panel(
         row![
             icons::icon(
                 if mismatch {
@@ -2432,10 +2430,9 @@ fn checksum_box(st: &State) -> Option<Element<'_, Msg>> {
             status_dot(status_color, status_label, 10.0),
         ]
         .spacing(theme::space::S2)
-        .align_y(Alignment::Center),
-    )
-    .width(Length::Fill)
-    .padding([6.0, CB_ROW_PAD_X]);
+        .align_y(Alignment::Center)
+        .into(),
+    );
 
     let values: Element<'_, Msg> = match got {
         Some(got) => column![
@@ -2453,7 +2450,7 @@ fn checksum_box(st: &State) -> Option<Element<'_, Msg>> {
         None => hash_value(st, &saved_hash, HashLine { row: 0, got: false }, false),
     };
 
-    let table_row = container(
+    let table_row = set_row_panel(
         row![
             container(
                 text(cs.algo.label())
@@ -2467,10 +2464,9 @@ fn checksum_box(st: &State) -> Option<Element<'_, Msg>> {
             container(values).width(Length::Fill),
         ]
         .spacing(theme::space::S2)
-        .align_y(Alignment::Start),
-    )
-    .width(Length::Fill)
-    .padding([CB_ROW_PAD_Y, CB_ROW_PAD_X]);
+        .align_y(Alignment::Start)
+        .into(),
+    );
 
     let paste_field = TextInput::new(&st.cs_paste)
         .hint("Paste the publisher's hash to compare…")
@@ -2583,37 +2579,28 @@ fn checksum_box(st: &State) -> Option<Element<'_, Msg>> {
     if let Some(section) = compute_section {
         tools = tools.push(hairline(t.border_subtle)).push(section);
     }
-    let content = column![
-        head,
-        hairline(t.border_subtle),
-        table_row,
-        hairline(t.border_subtle),
-        container(tools).padding(theme::space::S3),
-    ];
-    // Mismatch tints the whole box, so the table reads as the problem
-    // rather than one row inside a neutral panel.
+    // Same settings surface the file card and the stats strip sit on —
+    // rows separated by hairlines, each carrying its own padding — so
+    // the box reads as one more panel on this page rather than a
+    // component with its own border rules. Built from `surface` rather
+    // than `set_rows` only because a mismatch tints the whole box, and
+    // `set_rows` fixes those colors.
     let (bg, border) = if mismatch {
         (
-            color::mix(t.bg_sunken, t.status_danger, 0.06),
+            color::mix(t.bg_surface, t.status_danger, 0.06),
             color::with_alpha(t.status_danger, 0.4),
         )
     } else {
-        (t.bg_sunken, t.border_subtle)
+        (t.bg_surface, t.border_subtle)
     };
-    Some(
-        container(content)
-            .width(Length::Fill)
-            .style(move |_| container::Style {
-                background: Some(bg.into()),
-                border: iced::Border {
-                    color: border,
-                    width: 1.0,
-                    radius: theme::radius::XS.into(),
-                },
-                ..Default::default()
-            })
-            .into(),
-    )
+    let content = column![
+        head,
+        hairline(border),
+        table_row,
+        hairline(border),
+        set_row_panel(tools.into()),
+    ];
+    Some(surface(bg, border, 0.0, content.into()))
 }
 
 /// Status chip in a table row: a glyph and a word on a tinted pill.
