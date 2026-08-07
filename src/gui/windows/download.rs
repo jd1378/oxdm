@@ -2459,12 +2459,17 @@ fn checksum_box(st: &State) -> Option<Element<'_, Msg>> {
                 st.entry.job.checksums.len() == 1 || saved.eq_ignore_ascii_case(e)
             });
             let mismatch = mine.is_some() || cs.status == CsStatus::Mismatch;
-            let (color, label, icon) = if mismatch {
-                (color::rust::R200, "mismatch", "x")
+            // Solid pairs, not a wash: the chip sits on a panel that is
+            // itself tinted, and an alpha of the same hue reads as a
+            // smudge of the background rather than a label. Fixed across
+            // themes for the same reason a warning sign is not
+            // repainted per room.
+            let (chip_bg, chip_fg, label, icon) = if mismatch {
+                (color::rust::R100, color::rust::R500, "mismatch", "x")
             } else if cs.status == CsStatus::Verified {
-                (t.status_success, "verified", "check")
+                (color::clay::C100, color::clay::C700, "verified", "check")
             } else {
-                (t.fg_3, "unverified", "minus")
+                (t.bg_page, t.fg_3, "unverified", "minus")
             };
             let got = mine
                 .map(|(_, actual)| digest_hex(actual))
@@ -2499,7 +2504,8 @@ fn checksum_box(st: &State) -> Option<Element<'_, Msg>> {
                             .color(t.fg_1)
                     )
                     .width(Length::Fixed(CB_ALGO_W)),
-                    container(status_chip(t, icon, label, color)).width(Length::Fixed(CB_STATUS_W)),
+                    container(status_chip(icon, label, chip_bg, chip_fg))
+                        .width(Length::Fixed(CB_STATUS_W)),
                     container(values).width(Length::Fill),
                 ]
                 .spacing(theme::space::S2)
@@ -2605,30 +2611,24 @@ fn cb_row<'a>(content: Element<'a, Msg>) -> Element<'a, Msg> {
         .into()
 }
 
-/// Status chip in a table row: a glyph and a word on a tinted pill.
+/// Status chip in a table row: a glyph and a word on a solid pill.
 fn status_chip<'a>(
-    t: &Tokens,
     icon: &'a str,
     label: &'a str,
-    color: iced::Color,
+    bg: iced::Color,
+    fg: iced::Color,
 ) -> Element<'a, Msg> {
-    let _ = t;
     container(
         row![
-            icons::icon(icon, 10.0, color),
-            text(label)
-                .font(theme::BODY)
-                .size(CB_STATUS_SIZE)
-                .color(color),
+            icons::icon(icon, 10.0, fg),
+            text(label).font(theme::BODY).size(CB_STATUS_SIZE).color(fg),
         ]
         .spacing(theme::space::S1)
         .align_y(Alignment::Center),
     )
     .padding([2.0, 6.0])
     .style(move |_| container::Style {
-        // The box behind it is already rust; a light wash of the same
-        // hue vanishes into it, so the chip carries a solid tint.
-        background: Some(color::with_alpha(color, 0.28).into()),
+        background: Some(bg.into()),
         border: iced::Border {
             radius: theme::radius::PILL.into(),
             ..Default::default()
