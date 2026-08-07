@@ -53,6 +53,8 @@ const WIN_COMPLETE_H: f32 = 326.0;
 /// off the rendered page.
 const TAMPER_BANNER_H: f32 = 126.0;
 const INTEGRITY_BOX_H: f32 = 96.0;
+/// Every checksum past the first adds a row to the table.
+const CB_EXTRA_ROW_H: f32 = 47.0;
 /// The "Compute from file" row, which a job with no saved file omits.
 const CB_COMPUTE_H: f32 = 47.0;
 /// The second line an integrity row grows when it has both an expected
@@ -600,6 +602,7 @@ fn job_height(job: &crate::domain::Job) -> Option<f32> {
         }
         if !job.checksums.is_empty() {
             h += INTEGRITY_BOX_H;
+            h += CB_EXTRA_ROW_H * (job.checksums.len() - 1) as f32;
             // A failed check stacks expected over got in that row.
             if tampered {
                 h += CB_DIFF_H;
@@ -2385,91 +2388,129 @@ fn delete_overlay<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a, Msg>
 /// from hex length for paste; compute uses the saved checksum's algo.
 fn checksum_box(st: &State) -> Option<Element<'_, Msg>> {
     let t = &st.tokens;
-    let cs = st.entry.job.checksums.first()?;
+    if st.entry.job.checksums.is_empty() {
+        return None;
+    }
 
-    // A run that failed verification is a mismatch even when the stored
-    // row has not been restamped yet — the box must not read
-    // "unverified" under a page titled "Integrity check failed", and
-    // the run's own digest is the "got" side of the diff.
-    let failure = checksum_failure(st).filter(|(e, _)| cs.hash.eq_ignore_ascii_case(e));
-    let mismatch = failure.is_some() || cs.status == CsStatus::Mismatch;
-    let (status_color, status_label, status_icon) = if mismatch {
-        (t.status_danger, "mismatch", "x")
+    // The run's own verdict, not the stored row's: a job can fail
+    // verification before the row is restamped, and the box must not
+    // read "unverified" under a page titled "Integrity check failed".
+    // The error carries both sides of the diff.
+    let failure = checksum_failure(st);
+    let failed = failure.is_some();
+    let overall_mismatch = failed
+        || st
+            .entry
+            .job
+            .checksums
+            .iter()
+            .any(|c| c.status == CsStatus::Mismatch);
+    let (head_color, head_label) = if overall_mismatch {
+        (t.status_danger, "mismatch")
+    } else if st
+        .entry
+        .job
+        .checksums
+        .iter()
+        .all(|c| c.status == CsStatus::Verified)
+    {
+        (t.status_success, "verified")
     } else {
-        match cs.status {
-            CsStatus::Verified => (t.status_success, "verified", "check"),
-            _ => (t.fg_3, "no source", "minus"),
-        }
-    };
-
-    let saved_hash = cs.hash.to_lowercase();
-    // Expected/got pair when we have both sides, else the one hash.
-    let got = failure
-        .map(|(_, actual)| actual.to_lowercase())
-        .or_else(|| cs.expected.as_ref().map(|_| saved_hash.clone()));
-    let expected = match (&got, &cs.expected) {
-        // `expected` on the row wins: it is what the publisher said.
-        (Some(_), Some(e)) => e.to_lowercase(),
-        _ => saved_hash.clone(),
+        (t.fg_3, "unverified")
     };
 
     let head = set_row_panel(
         row![
             icons::icon(
-                if mismatch {
+                if overall_mismatch {
                     "triangle-alert"
                 } else {
                     "shield-check"
                 },
                 13.0,
-                status_color,
+                head_color,
             ),
             eyebrow(t, "file integrity"),
             iced::widget::Space::new().width(Length::Fill),
-            status_dot(status_color, status_label, 10.0),
+            status_dot(head_color, head_label, 10.0),
         ]
         .spacing(theme::space::S2)
         .align_y(Alignment::Center)
         .into(),
     );
 
-    let values: Element<'_, Msg> = match got {
-        Some(got) => column![
-            hash_line(
-                st,
-                "expected",
-                &expected,
-                HashLine { row: 0, got: false },
-                false
-            ),
-            hash_line(st, "got", &got, HashLine { row: 0, got: true }, true),
-        ]
-        .spacing(theme::space::S1)
-        .into(),
-        None => hash_value(st, &saved_hash, HashLine { row: 0, got: false }, false),
-    };
-
-    let table_row = set_row_panel(
-        row![
-            container(
-                text(cs.algo.label())
-                    .font(theme::MONO_BOLD)
-                    .size(CB_ALGO_SIZE)
-                    .color(t.fg_1)
+    // One row per saved checksum — the design lists them all, and a
+    // publisher who gives two hashes has said something about both.
+    let rows: Vec<Element<'_, Msg>> = st
+        .entry
+        .job
+        .checksums
+        .iter()
+        .enumerate()
+        .map(|(i, cs)| {
+            let saved = cs.hash.to_lowercase();
+            // The run's digest is the "got" side for whichever row the
+            // failure names; a row with its own stored `expected` keeps
+            // that pairing.
+            let mine = failure.filter(|(e, _)| {
+                st.entry.job.checksums.len() == 1 || saved.eq_ignore_ascii_case(e)
+            });
+            let mismatch = mine.is_some() || cs.status == CsStatus::Mismatch;
+            let (color, label, icon) = if mismatch {
+                (t.status_danger, "mismatch", "x")
+            } else if cs.status == CsStatus::Verified {
+                (t.status_success, "verified", "check")
+            } else {
+                (t.fg_3, "unverified", "minus")
+            };
+            let got = mine
+                .map(|(_, actual)| digest_hex(actual))
+                .or_else(|| cs.expected.as_ref().map(|_| saved.clone()));
+            let expected = match (&got, &cs.expected) {
+                // A stored `expected` is what the publisher said; the
+                // saved hash is then what we have.
+                (Some(_), Some(e)) => e.to_lowercase(),
+                _ => saved.clone(),
+            };
+            let values: Element<'_, Msg> = match got {
+                Some(got) => column![
+                    hash_line(
+                        st,
+                        "expected",
+                        &expected,
+                        HashLine { row: i, got: false },
+                        false
+                    ),
+                    hash_line(st, "got", &got, HashLine { row: i, got: true }, true),
+                ]
+                .spacing(theme::space::S1)
+                .into(),
+                None => hash_value(st, &saved, HashLine { row: i, got: false }, false),
+            };
+            set_row_panel(
+                row![
+                    container(
+                        text(cs.algo.label())
+                            .font(theme::MONO_BOLD)
+                            .size(CB_ALGO_SIZE)
+                            .color(t.fg_1)
+                    )
+                    .width(Length::Fixed(CB_ALGO_W)),
+                    container(status_chip(t, icon, label, color)).width(Length::Fixed(CB_STATUS_W)),
+                    container(values).width(Length::Fill),
+                ]
+                .spacing(theme::space::S2)
+                .align_y(Alignment::Start)
+                .into(),
             )
-            .width(Length::Fixed(CB_ALGO_W)),
-            container(status_chip(t, status_icon, status_label, status_color))
-                .width(Length::Fixed(CB_STATUS_W)),
-            container(values).width(Length::Fill),
-        ]
-        .spacing(theme::space::S2)
-        .align_y(Alignment::Start)
-        .into(),
-    );
+        })
+        .collect();
 
-    // Local "Compute from file" — only when the file exists on disk.
-    // Hashes with the saved checksum's algorithm so the digest compares
-    // directly; the heavy work runs off the UI executor (see update).
+    // The local check compares against the first saved hash, which is
+    // the one a single-checksum job has and the strongest one a
+    // multi-checksum job lists first.
+    let first = &st.entry.job.checksums[0];
+    let saved_hash = first.hash.to_lowercase();
     let compute_section: Option<Element<'_, Msg>> =
         st.entry.job.status.final_path.as_ref().map(|_| {
             let action: Element<'_, Msg> = match &st.cs_compute {
@@ -2505,10 +2546,10 @@ fn checksum_box(st: &State) -> Option<Element<'_, Msg>> {
                             t.status_success,
                             t.status_success_bg,
                             "circle-check",
-                            format!("File hash matches the saved {} hash.", cs.algo.label()),
+                            format!("File hash matches the saved {} hash.", first.algo.label()),
                         )
                     } else {
-                        hash_mismatch(t, cs.algo.label(), &saved_hash, &got)
+                        hash_mismatch(t, first.algo.label(), &saved_hash, &got)
                     };
                     column![row_el, result].spacing(theme::space::S2).into()
                 }
@@ -2536,7 +2577,7 @@ fn checksum_box(st: &State) -> Option<Element<'_, Msg>> {
     // component with its own border rules. Built from `surface` rather
     // than `set_rows` only because a mismatch tints the whole box, and
     // `set_rows` fixes those colors.
-    let (bg, border) = if mismatch {
+    let (bg, border) = if overall_mismatch {
         (
             color::mix(t.bg_surface, t.status_danger, 0.06),
             color::with_alpha(t.status_danger, 0.4),
@@ -2544,7 +2585,10 @@ fn checksum_box(st: &State) -> Option<Element<'_, Msg>> {
     } else {
         (t.bg_surface, t.border_subtle)
     };
-    let mut content = column![head, hairline(border), table_row];
+    let mut content = column![head];
+    for r in rows {
+        content = content.push(hairline(border)).push(r);
+    }
     if let Some(compute) = compute_section {
         content = content.push(hairline(border)).push(set_row_panel(compute));
     }
@@ -2580,6 +2624,18 @@ fn status_chip<'a>(
         ..Default::default()
     })
     .into()
+}
+
+/// The bare digest out of whatever the engine reported. odl phrases a
+/// mismatch as `md5("<hex>", hex)`; the table wants the hex, and the
+/// wrapper reads as noise beside the expected value next to it.
+fn digest_hex(reported: &str) -> String {
+    let inner = reported
+        .split_once('"')
+        .and_then(|(_, rest)| rest.split_once('"'))
+        .map(|(hex, _)| hex)
+        .unwrap_or(reported);
+    inner.trim().to_lowercase()
 }
 
 /// One labelled line of an expected/got pair.
