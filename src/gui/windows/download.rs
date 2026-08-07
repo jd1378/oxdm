@@ -64,8 +64,6 @@ const CB_PAD_Y: f32 = 8.0;
 const CB_PAD_X: f32 = 12.0;
 /// Every checksum past the first adds a row to the table.
 const CB_EXTRA_ROW_H: f32 = 39.0;
-/// The "Compute from file" row, which a job with no saved file omits.
-const CB_COMPUTE_H: f32 = 39.0;
 /// The second line an integrity row grows when it has both an expected
 /// and a got hash to show.
 const CB_DIFF_H: f32 = 26.0;
@@ -326,8 +324,6 @@ pub enum Msg {
     // Completed view — copy / reveal / checksum verify
     Copy(String),
     Reveal(PathBuf),
-    // Local checksum compute (hash `final_path` off the UI executor).
-    CsCompute,
     WinResized(f32, f32),
     WinFocused(bool),
     ShotTick,
@@ -676,10 +672,6 @@ fn job_height(job: &crate::domain::Job) -> Option<f32> {
             // A failed check stacks expected over got in that row.
             if tampered {
                 h += CB_DIFF_H;
-            }
-            // The local-check row only exists when there is a file.
-            if job.status.final_path.is_some() {
-                h += CB_COMPUTE_H;
             }
         }
         return Some(h);
@@ -1043,17 +1035,6 @@ fn update_state(st: &mut State, msg: Msg) -> Task<Msg> {
         Msg::Reveal(path) => {
             crate::platform::reveal_in_folder(&path);
             Task::none()
-        }
-        Msg::CsCompute => {
-            // The daemon owns the hash. It reads a file this window
-            // cannot promise to outlive — a multi-gigabyte check
-            // survives closing every window, and its result lands on the
-            // job where the next window will find it.
-            let client = st.client.clone();
-            let id = st.id;
-            Task::perform(async move { client.verify_checksums(id).await }, |_| {
-                Msg::Noop
-            })
         }
         Msg::Connected(_) | Msg::Window(_) | Msg::Noop => Task::none(),
     }
@@ -1738,7 +1719,11 @@ fn info_tab(st: &State) -> Element<'_, Msg> {
 
         let mut rows = column![head, hairline(t.border_subtle)];
         for (i, p) in c.parts.iter().enumerate() {
-            let frac = if p.size > 0 {
+            // A part whose end the server never declared has no
+            // fraction to report — a bar pinned at 0% while bytes
+            // arrive reads as a stall.
+            let known = p.size > 0;
+            let frac = if known {
                 p.downloaded as f32 / p.size as f32
             } else {
                 0.0
@@ -1755,6 +1740,11 @@ fn info_tab(st: &State) -> Element<'_, Msg> {
                     .font(theme::BODY)
                     .size(11.0)
                     .color(t.status_warning)
+                    .into(),
+                None if !known => text(tracked("size unknown"))
+                    .font(theme::BODY)
+                    .size(10.0)
+                    .color(t.fg_3)
                     .into(),
                 None => row![
                     pill_progress(frac, Length::Fill, 6.0, t.progress_track, t.progress_fill),
@@ -1800,10 +1790,14 @@ fn info_tab(st: &State) -> Element<'_, Msg> {
                     .width(Length::Fixed(SEG_BYTES_W))
                     .align_x(Alignment::End),
                     container(
-                        text(format_bytes(p.size))
-                            .font(theme::MONO)
-                            .size(11.0)
-                            .color(t.fg_2)
+                        text(if known {
+                            format_bytes(p.size)
+                        } else {
+                            "\u{2014}".to_owned()
+                        })
+                        .font(theme::MONO)
+                        .size(11.0)
+                        .color(t.fg_2)
                     )
                     .width(Length::Fixed(SEG_BYTES_W))
                     .align_x(Alignment::End),
@@ -2593,7 +2587,7 @@ fn checksum_box(st: &State) -> Option<Element<'_, Msg>> {
             let (chip_bg, chip_fg, label, icon) = if mismatch {
                 (color::rust::R100, color::rust::R500, "mismatch", "x")
             } else if cs.status == CsStatus::Verified {
-                (color::clay::C100, color::clay::C700, "verified", "check")
+                (color::moss::M50, color::moss::M600, "verified", "check")
             } else {
                 (t.bg_page, t.fg_3, "unverified", "minus")
             };
@@ -2649,44 +2643,6 @@ fn checksum_box(st: &State) -> Option<Element<'_, Msg>> {
         })
         .collect();
 
-    let compute_section: Option<Element<'_, Msg>> =
-        st.entry.job.status.final_path.as_ref().map(|_| {
-            let action: Element<'_, Msg> = if st.entry.verifying {
-                Btn::new("Checking…")
-                    .secondary()
-                    .size(BtnSize::Sm)
-                    .icon("refresh-cw")
-                    .enabled(false)
-                    .view(t)
-            } else {
-                Btn::new("Compute from file")
-                    .secondary()
-                    .size(BtnSize::Sm)
-                    .icon("shield-check")
-                    .on_press(Msg::CsCompute)
-                    .view(t)
-            };
-            let row_el = row![
-                action,
-                text("Hash the saved file and compare to the saved checksum.")
-                    .font(theme::BODY)
-                    .size(11.0)
-                    .color(t.fg_3),
-            ]
-            .spacing(theme::space::S2)
-            .align_y(Alignment::Center);
-
-            // No result block: the verdict lands on the rows above,
-            // which is where a window opened after the check finishes
-            // reads it from too.
-            row_el.into()
-        });
-
-    // Only the local check remains: pasting a publisher hash asked the
-    // user to be the comparison engine, and the two rows it needed said
-    // more about the field than about the file. It is a row of the box,
-    // not the box itself — a job whose file is gone still has hashes
-    // worth showing.
     // Same settings surface the file card and the stats strip sit on —
     // rows separated by hairlines, each carrying its own padding — so
     // the box reads as one more panel on this page rather than a
@@ -2701,9 +2657,6 @@ fn checksum_box(st: &State) -> Option<Element<'_, Msg>> {
     let mut content = column![head];
     for r in rows {
         content = content.push(hairline(border)).push(r);
-    }
-    if let Some(compute) = compute_section {
-        content = content.push(hairline(border)).push(cb_row(compute));
     }
     Some(surface(bg, border, 0.0, content.into()))
 }
