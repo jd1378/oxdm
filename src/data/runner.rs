@@ -52,29 +52,15 @@ impl PartCounters {
         self.size.store(total, Ordering::Relaxed);
     }
 
-    /// odl finished this part. A finished part is a full part, and the
-    /// two counters are reconciled to say so.
+    /// odl finished this part.
     ///
-    /// Which one gives depends on how it finished:
-    ///
-    /// - Split mid-flight: odl finishes against the part's *current*
-    ///   limit, which a split can shorten between two progress samples,
-    ///   so the size we last heard is a range this part no longer owns.
-    ///   What it downloaded is what it owned.
-    /// - Already on disk: a resumed download finishes a part whose file
-    ///   is complete before any sample arrives, so nothing ever
-    ///   reported its bytes. The size is the truth there, and the row
-    ///   otherwise reads "Complete" beside 0 B.
+    /// Nothing to reconcile: since 2.0.3 odl emits a final
+    /// `PartProgress` with `downloaded == total` immediately before
+    /// every `PartFinished`, and emits one when a split shrinks a
+    /// part — so the counters already agree by the time this lands.
     pub fn mark_finished(&self) {
-        use std::sync::atomic::Ordering;
-        self.finished.store(true, Ordering::Release);
-        let done = self.downloaded.load(Ordering::Relaxed);
-        if done > 0 {
-            self.size.store(done, Ordering::Relaxed);
-        } else {
-            self.downloaded
-                .store(self.size.load(Ordering::Relaxed), Ordering::Relaxed);
-        }
+        self.finished
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -480,29 +466,21 @@ mod tests {
         assert_eq!(seen(&p), (100 * 1024, 144 * 1024));
     }
 
-    /// And a part finished between two samples is finished against
-    /// whatever it had, not against a range a split already took away —
-    /// the case that showed "Complete" beside a 56% bar.
+    /// odl closes a part with a full sample before saying it finished
+    /// — including a part whose bytes were already on disk, which
+    /// otherwise reported nothing at all. The row renders what arrived
+    /// rather than second-guessing it.
     #[test]
     fn a_finished_part_reads_as_full() {
         let p = part(256 * 1024);
-        // Last sample before the split lands.
-        p.apply_progress(144 * 1024, 256 * 1024);
+        // The split shortened it, then the closing sample squared the
+        // two counters.
+        p.apply_progress(144 * 1024, 144 * 1024);
         p.mark_finished();
 
         let (downloaded, size) = seen(&p);
-        assert_eq!(downloaded, size, "a finished part is a full part");
+        assert_eq!((downloaded, size), (144 * 1024, 144 * 1024));
         assert!(p.finished.load(std::sync::atomic::Ordering::Acquire));
-    }
-
-    /// A resumed download finishes a part whose file was already
-    /// complete before any progress sample arrives — nothing ever
-    /// reported its bytes, and the row read "Complete" beside 0 B.
-    #[test]
-    fn a_part_already_on_disk_reads_as_full() {
-        let p = part(256 * 1024);
-        p.mark_finished();
-        assert_eq!(seen(&p), (256 * 1024, 256 * 1024));
     }
 
     /// Server that answers every GET with `503` + a long `Retry-After`,
