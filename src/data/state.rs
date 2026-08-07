@@ -1878,6 +1878,17 @@ impl AppState {
         if let Ok(mut g) = entry.last_error.write() {
             *g = None;
         }
+        // …and whatever it was made of. odl re-announces every part at
+        // the start of a run, under fresh ulids, including the ones
+        // already complete on disk. Keeping the old rows meant a
+        // resumed 1 MB download listing nine segments totalling several
+        // megabytes — the previous run's alongside this one's.
+        if let Ok(mut parts) = entry.parts.write() {
+            parts.clear();
+        }
+        if let Ok(mut retrying) = entry.retrying_parts.lock() {
+            retrying.clear();
+        }
         let manager = self.manager.read().await.clone();
         let events = self.events.clone();
         let bridge: Arc<dyn LiveBridge> = Arc::new(StateLiveBridge {
