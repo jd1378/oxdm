@@ -1622,13 +1622,13 @@ fn info_tab(st: &State) -> Element<'_, Msg> {
             row![
                 // `.lg-dot.cur` is clay-400 — the colour of the line
                 // itself, whatever the theme does with the accent.
-                legend_item("Current", format_speed(speed), color::clay::C400),
+                legend_item("Current", format_speed(speed), t2.clay.c400),
                 legend_item(
                     "Avg",
                     format_speed(avg as f64),
                     color::with_alpha(t2.fg_3, 0.9)
                 ),
-                legend_item("Peak", format_speed(st.peak as f64), t2.clay_700()),
+                legend_item("Peak", format_speed(st.peak as f64), t2.clay.c700),
                 iced::widget::Space::new().width(Length::Fill),
                 Btn::new("")
                     .toolbar()

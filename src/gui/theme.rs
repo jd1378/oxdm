@@ -119,6 +119,12 @@ where
 pub struct Tokens {
     pub theme: ResolvedTheme,
 
+    /// The clay ramp as this theme resolves it. Ask for the shade the
+    /// design names (`t.clay.c700`) rather than a palette constant: the
+    /// dark theme remaps part of this scale, and a constant would be
+    /// right in one theme and wrong in another.
+    pub clay: crate::gui::color::Ramp,
+
     /// Mirror of `Settings.reduce_motion` (W6). Not a design token, but
     /// it rides with them: it gates rendering exactly like one, and
     /// `Tokens` is already the bundle every widget helper receives, so
@@ -193,22 +199,7 @@ impl Tokens {
     /// hole. Shared by every control that can hold the same choice, so
     /// "selected" reads identically wherever it lands.
     pub fn pill_selected(&self) -> (Color, Color, Color) {
-        match self.theme {
-            ResolvedTheme::Dark => (clay::DARK_C50, clay::DARK_C700, clay::DARK_C200),
-            _ => (clay::C50, clay::C700, clay::C200),
-        }
-    }
-
-    /// `clay-700` as this theme resolves it. `tokens.css` remaps the
-    /// deep end of the clay ramp under the dark theme — a colour that
-    /// separates from clay-400 by being darker on paper has to do it by
-    /// being lighter on a dark surface, and it is the same token either
-    /// way.
-    pub fn clay_700(&self) -> Color {
-        match self.theme {
-            ResolvedTheme::Dark => clay::DARK_C700,
-            _ => clay::C700,
-        }
+        (self.clay.c50, self.clay.c700, self.clay.c200)
     }
 
     /// Light theme — sources from `theme-utility` in
@@ -216,6 +207,7 @@ impl Tokens {
     pub fn light() -> Self {
         Self {
             theme: ResolvedTheme::Light,
+            clay: clay::ramp(),
             reduce_motion: false,
             fg_1: gray::G800,
             fg_2: gray::G500,
@@ -272,6 +264,7 @@ impl Tokens {
     pub fn warm() -> Self {
         Self {
             theme: ResolvedTheme::Warm,
+            clay: clay::ramp(),
             reduce_motion: false,
             fg_1: earth::E800,
             fg_2: earth::E600,
@@ -329,6 +322,7 @@ impl Tokens {
         // dark warm tints, clay-700 inverts to light clay for paired text.
         Self {
             theme: ResolvedTheme::Dark,
+            clay: clay::dark_ramp(),
             reduce_motion: false,
             fg_1: hex(0xF0EEE8),
             fg_2: hex(0xB8B5AC),

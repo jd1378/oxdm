@@ -43,6 +43,26 @@ pub mod earth {
     pub const E900: Color = hex(0x1A140D);
 }
 
+/// One family of the palette, resolved for a theme.
+///
+/// The design's ramps are not fixed hexes: `tokens.css` remaps part of
+/// the clay scale under the dark theme, so "clay-700" names a role in a
+/// ramp rather than a colour. Carrying the whole ramp on `Tokens` lets a
+/// call site ask for the shade it means — `t.clay.c700` — and get
+/// whatever this theme resolves that to, instead of every remapped
+/// shade needing an accessor of its own.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Ramp {
+    pub c50: Color,
+    pub c100: Color,
+    pub c200: Color,
+    pub c300: Color,
+    pub c400: Color,
+    pub c500: Color,
+    pub c600: Color,
+    pub c700: Color,
+}
+
 pub mod clay {
     use super::*;
     pub const C50: Color = hex(0xFBEFE7);
@@ -62,6 +82,34 @@ pub mod clay {
     pub const DARK_C100: Color = hex(0x3A2A20);
     pub const DARK_C200: Color = hex(0x4F3525);
     pub const DARK_C700: Color = hex(0xE9B595);
+
+    /// The ramp as the light and warm themes read it.
+    pub fn ramp() -> Ramp {
+        Ramp {
+            c50: C50,
+            c100: C100,
+            c200: C200,
+            c300: C300,
+            c400: C400,
+            c500: C500,
+            c600: C600,
+            c700: C700,
+        }
+    }
+
+    /// The dark theme's remap: the light end becomes dark warm tints so
+    /// it does not punch bright holes in dark surfaces, and the dark end
+    /// inverts so text paired with those tints stays readable. The
+    /// middle of the ramp — the accent proper — is unchanged.
+    pub fn dark_ramp() -> Ramp {
+        Ramp {
+            c50: DARK_C50,
+            c100: DARK_C100,
+            c200: DARK_C200,
+            c700: DARK_C700,
+            ..ramp()
+        }
+    }
 }
 
 pub mod moss {
