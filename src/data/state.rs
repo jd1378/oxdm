@@ -918,6 +918,14 @@ impl AppState {
 
     /// Persist the per-job checksum list (Properties dialog →
     /// Checksums tab).
+    /// Replace the job's checksum list.
+    ///
+    /// The caller owns *which* hashes exist; the daemon owns what was
+    /// proven about them. So a row that survives the edit keeps its
+    /// verdict, matched on algorithm and value: a window sends the list
+    /// it last hydrated, and adding one hash to a stale copy would
+    /// otherwise reset every other row to unverified — throwing away a
+    /// check that actually happened.
     pub async fn set_job_checksums(
         &self,
         id: JobId,
@@ -927,6 +935,18 @@ impl AppState {
         let Some(old) = jobs.get(&id).cloned() else {
             return Err(JobError::Other("job not found".into()));
         };
+        let mut checksums = checksums;
+        for c in &mut checksums {
+            if let Some(known) = old
+                .job
+                .checksums
+                .iter()
+                .find(|k| k.algo == c.algo && k.hash.eq_ignore_ascii_case(&c.hash))
+            {
+                c.status = known.status;
+                c.expected = known.expected.clone();
+            }
+        }
         let mut new_job = old.job.clone();
         new_job.checksums = checksums;
         let new_entry = clone_entry_with_job(&old, new_job.clone()).await;
@@ -2874,7 +2894,7 @@ impl LiveBridge for StateLiveBridge {
                         Arc::new(PartCounters {
                             ulid: ulid.clone(),
                             offset: *offset,
-                            size: *size,
+                            size: AtomicU64::new(*size),
                             downloaded: AtomicU64::new(0),
                             speed_bps_bits: AtomicU64::new(0),
                             finished: AtomicBool::new(false),
@@ -2883,7 +2903,9 @@ impl LiveBridge for StateLiveBridge {
                 }
             }
             OdlProgressEvent::PartProgress {
-                ulid, downloaded, ..
+                ulid,
+                downloaded,
+                total,
             } => {
                 if let Ok(jobs) = state.jobs.try_read()
                     && let Some(entry) = jobs.get(&id)
@@ -2892,6 +2914,10 @@ impl LiveBridge for StateLiveBridge {
                         && let Some(p) = parts.get(ulid)
                     {
                         p.downloaded.store(*downloaded, Ordering::Relaxed);
+                        // Follows a split: this is the range the part is
+                        // now responsible for, and what odl will call it
+                        // finished against.
+                        p.size.store(*total, Ordering::Relaxed);
                     }
                     // This part is making progress again — drop it from
                     // the retrying set. Removing by ulid (not a blanket
@@ -2996,6 +3022,40 @@ impl ResumeContext for StateResumeContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Hashing a file once per algorithm, then judging each row against
+    /// it: a row that matches is verified with nothing to show beside
+    /// it, one that does not keeps the digest as its "got" side, and a
+    /// malformed row is left alone — "this is not a hash" is a
+    /// different claim from "this file is wrong".
+    #[tokio::test]
+    async fn hash_rows_judges_each_against_the_file() {
+        use crate::domain::{Algo, Checksum, CsSource, CsStatus};
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("f.bin");
+        std::fs::write(&path, b"hello world").unwrap();
+        const GOOD: &str = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
+        let row = |hash: &str| Checksum {
+            algo: Algo::Sha256,
+            hash: hash.to_owned(),
+            source: CsSource::User,
+            status: CsStatus::Unverified,
+            expected: None,
+        };
+        let rows = vec![row(GOOD), row(&GOOD.replace('b', "a")), row("not-a-hash")];
+
+        let out = hash_against_rows(&path, &rows).await.unwrap();
+
+        assert_eq!(out.len(), 2, "the malformed row is skipped, not judged");
+        assert_eq!(out[0], (0, CsStatus::Verified, None));
+        assert_eq!(out[1].0, 1);
+        assert_eq!(out[1].1, CsStatus::Mismatch);
+        assert_eq!(
+            out[1].2.as_deref(),
+            Some(GOOD),
+            "a mismatch carries what the file actually hashes to",
+        );
+    }
 
     /// The reset sweep must take every per-job dir — including ones
     /// orphaned by a past crash — and nothing else the user parked in

@@ -432,7 +432,7 @@ fn snapshot_counters(id: JobId, entry: &JobEntry) -> JobCounters {
                 .map(|p| PartView {
                     ulid: p.ulid.clone(),
                     offset: p.offset,
-                    size: p.size,
+                    size: p.size.load(AtomicOrd::Relaxed),
                     downloaded: p.downloaded.load(AtomicOrd::Relaxed),
                     speed_bps: f64::from_bits(p.speed_bps_bits.load(AtomicOrd::Relaxed)),
                     finished: p.finished.load(AtomicOrd::Relaxed),

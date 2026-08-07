@@ -30,7 +30,12 @@ pub const FORCED_ENGINE: odl::engine::EnginePreference =
 pub struct PartCounters {
     pub ulid: String,
     pub offset: u64,
-    pub size: u64,
+    /// The part's *current* byte range, not the one it was created
+    /// with. odl splits a live part by handing its tail to a new one,
+    /// which shortens this — and then reports the shortened part
+    /// finished. Held at the original value, a split part reads as
+    /// "Complete" at 56%.
+    pub size: std::sync::atomic::AtomicU64,
     pub downloaded: std::sync::atomic::AtomicU64,
     pub speed_bps_bits: std::sync::atomic::AtomicU64,
     pub finished: std::sync::atomic::AtomicBool,
