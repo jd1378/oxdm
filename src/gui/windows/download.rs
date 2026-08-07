@@ -456,10 +456,17 @@ impl State {
         // only takes up room. Terminal states have no distance left to
         // report, and with no content-length there is no percentage to
         // report at all.
+        //
+        // Keyed on `is_running`, not on `Phase::Downloading`: half a
+        // dozen phases print as "Downloading", so matching the one
+        // variant dropped the percentage for as long as a run sat in
+        // `Evaluating` — a title that says Downloading with nothing
+        // after it, beside a window drawing 45%.
         let started = self.entry.counters.downloaded > 0;
         let show_progress = self.total().is_some()
             && match phase {
-                Phase::Downloading | Phase::Paused | Phase::Reconnecting => true,
+                _ if phase.is_running() => true,
+                Phase::Paused => true,
                 Phase::Queued => started,
                 _ => false,
             };
