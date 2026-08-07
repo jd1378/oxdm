@@ -240,13 +240,17 @@ impl<'a, M: Clone + 'a> TabBtn<'a, M> {
         };
         // A button, not a bare container: its per-status `text_color`
         // is what the label and `icon_current` read, so one style
-        // closure covers idle, hover and press for both.
-        let face = iced::widget::button(
+        // closure covers idle, hover and press for both. Animated, so
+        // the lift eases in over `motion::FAST` rather than snapping —
+        // and `iced_anim` interpolates the whole style, which is how the
+        // icon and the label stay in step.
+        let face = iced_anim::widget::button(
             container(content)
                 .height(Length::Fixed(self.height))
                 .align_y(Alignment::Center),
         )
         .padding([0.0, self.pad_x])
+        .on_press_maybe(self.on_press)
         .style(move |_th, status| iced::widget::button::Style {
             background: None,
             text_color: if active {
@@ -261,7 +265,8 @@ impl<'a, M: Clone + 'a> TabBtn<'a, M> {
             border: iced::Border::default(),
             shadow: iced::Shadow::default(),
             ..Default::default()
-        });
+        })
+        .animation(theme::motion::hover_tint());
 
         // stack sizes to the (shrink) content; the Fill-width underline
         // then matches the content width exactly.
@@ -283,11 +288,11 @@ impl<'a, M: Clone + 'a> TabBtn<'a, M> {
             .align_y(iced::alignment::Vertical::Bottom),
         ];
 
-        let mut area = mouse_area(body).interaction(iced::mouse::Interaction::Pointer);
-        if let Some(msg) = self.on_press {
-            area = area.on_press(msg);
-        }
-        area.into()
+        // No `mouse_area` wrapper: it sits above the button and eats
+        // the pointer, so the button never sees `Hovered` and the tab
+        // stopped reacting at all. The button carries both the press and
+        // the cursor.
+        body.into()
     }
 }
 

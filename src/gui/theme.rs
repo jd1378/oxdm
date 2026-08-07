@@ -540,6 +540,12 @@ pub mod pad {
 #[allow(dead_code)]
 pub mod motion {
     pub const FAST: f32 = 0.14;
+    /// Colour crossfades on hover. `16_animations.md` gives these
+    /// 120ms on `easing_linear`, a shade quicker than the 140ms
+    /// `--duration-fast` the rest of the controls move on: a tint that
+    /// only changes colour reads as sluggish at the same duration as
+    /// one that also moves something.
+    pub const HOVER_TINT: f32 = 0.12;
     pub const BASE: f32 = 0.22;
     pub const SLOW: f32 = 0.36;
 
@@ -550,6 +556,15 @@ pub mod motion {
         iced_anim::transition::Curve::Bezier(iced_anim::transition::bezier::Bezier::new(
             0.22, 1.0, 0.36, 1.0,
         ))
+    }
+
+    /// Hover-tint transition: linear over [`HOVER_TINT`], reversible so
+    /// a pointer that leaves mid-fade runs the fade backwards instead of
+    /// restarting from wherever it had got to.
+    pub fn hover_tint() -> iced_anim::Easing {
+        iced_anim::Easing::new(iced_anim::transition::Curve::Linear)
+            .with_duration(std::time::Duration::from_secs_f32(HOVER_TINT))
+            .reversible(true)
     }
 
     /// The shared control transition: house easing over [`FAST`],

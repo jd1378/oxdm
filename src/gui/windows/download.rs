@@ -359,6 +359,8 @@ pub struct State {
     /// Retries odl has scheduled, keyed by part. The whole-download key
     /// is `None` — a retry of the probe belongs to no segment.
     retries: std::collections::HashMap<Option<String>, Retry>,
+    /// Largest size seen for this download — see `State::total`.
+    total_seen: Option<u64>,
     /// Middle-truncated URL and save path. Owned by the state because a
     /// text input borrows what it shows, and these are derived values —
     /// recomputed whenever the entry changes.
@@ -421,10 +423,23 @@ impl State {
         self.entry.counters.phase
     }
     fn frac(&self) -> f32 {
-        match self.entry.counters.total {
+        match self.total() {
             Some(t) if t > 0 => (self.entry.counters.downloaded as f64 / t as f64) as f32,
             _ => 0.0,
         }
+    }
+
+    /// The download's size — the largest anything has claimed it to be
+    /// while this window has been open.
+    ///
+    /// Sticky on purpose. A run passes through moments where neither
+    /// the live counters nor the spliced job carry a size: odl clears
+    /// the total while it re-evaluates, and the window would drop its
+    /// percentage for a second each time a download starts. A file does
+    /// not change size mid-download, so the last known size is still
+    /// the size.
+    fn total(&self) -> Option<u64> {
+        self.total_seen.filter(|t| *t > 0)
     }
     /// Caption for both the painted titlebar and the OS/taskbar title:
     /// what the download is, then how it is doing. The URL stands in
@@ -438,8 +453,8 @@ impl State {
         // raising the window. The other states have no distance left to
         // report — and with no content-length there is no percentage to
         // report either.
-        let show_progress = matches!(phase, Phase::Downloading | Phase::Paused)
-            && self.entry.counters.total.is_some();
+        let show_progress =
+            matches!(phase, Phase::Downloading | Phase::Paused) && self.total().is_some();
         if show_progress {
             format!(
                 "{name} — {} {}%",
@@ -555,6 +570,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 hash_hover: None,
                 hash_copied: None,
                 retries: std::collections::HashMap::new(),
+                total_seen: None,
                 url_field: String::new(),
                 path_field: String::new(),
                 win_w: WIN_W,
@@ -705,8 +721,15 @@ fn resize_to<M: Send + 'static>(w: f32, h: f32) -> Task<M> {
     })
 }
 
-/// Recompute the derived display strings the read-only fields borrow.
+/// Recompute the derived display strings the read-only fields borrow,
+/// and take note of the download's size if anything has named it.
 fn refresh_fields(st: &mut State) {
+    if let Some(total) = st.entry.counters.total.or(st.entry.job.status.total)
+        && total > 0
+        && st.total_seen.is_none_or(|seen| total > seen)
+    {
+        st.total_seen = Some(total);
+    }
     st.url_field = mid_truncate(st.entry.job.url.as_ref(), PATH_TRUNCATE_CHARS);
     st.path_field = mid_truncate(
         &final_path(&st.entry).display().to_string(),
