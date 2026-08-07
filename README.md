@@ -47,6 +47,12 @@ Outputs:
 - `target/release/oxdm` — main app
 - `target/release/oxdm-native-host` — browser native-messaging bridge
 
+For development there is also `cargo run -p oxdm-testserver`, a local
+server whose endpoints each misbehave in one specific way (no ranges,
+unknown length, wrong checksums, ranges advertised but ignored). Its
+index page at `http://127.0.0.1:8088/` lists them. It is a separate
+workspace member, so release builds do not include it.
+
 ## Uninstall
 
 Linux / macOS:

@@ -1,3 +1,6 @@
+[workspace]
+members = ["testserver"]
+
 [package]
 name = "oxdm"
 description = "a download manager using odl"

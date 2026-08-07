@@ -1,0 +1,16 @@
+[package]
+name = "oxdm-testserver"
+description = "local HTTP server serving deliberately awkward downloads, for testing oxdm"
+version = "0.0.1"
+edition = "2024"
+publish = false
+license = "AGPL-3.0"
+
+[dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "time"] }
+sha1 = "0.10"
+md-5 = "0.10"
+
+[[bin]]
+name = "oxdm-testserver"
+path = "src/main.rs"
