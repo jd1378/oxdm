@@ -3007,7 +3007,7 @@ impl LiveBridge for StateLiveBridge {
                         Arc::new(PartCounters {
                             ulid: ulid.clone(),
                             offset: *offset,
-                            size: AtomicU64::new(*size),
+                            size: AtomicU64::new(crate::data::runner::part_size(*size)),
                             downloaded: AtomicU64::new(0),
                             speed_bps_bits: AtomicU64::new(0),
                             finished: AtomicBool::new(false),

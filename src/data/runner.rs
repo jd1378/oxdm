@@ -41,6 +41,19 @@ pub struct PartCounters {
     pub finished: std::sync::atomic::AtomicBool,
 }
 
+/// A part's size as reported by odl, with "no end in sight" folded
+/// into oxdm's own marker for it.
+///
+/// A server that sends no `Content-Length` gives odl no end to aim
+/// for, and the part's range runs to `u64::MAX`. Rendered literally
+/// that is a segment 16777216 TB long sitting at 0% — so anything in
+/// exabyte territory becomes `0`, which every reader here already
+/// treats as "size not known yet".
+pub fn part_size(reported: u64) -> u64 {
+    const IMPLAUSIBLE: u64 = u64::MAX / 2;
+    if reported >= IMPLAUSIBLE { 0 } else { reported }
+}
+
 impl PartCounters {
     /// A progress sample: bytes so far, and the range the part is
     /// *currently* responsible for. odl shortens that range when it
@@ -49,7 +62,7 @@ impl PartCounters {
     pub fn apply_progress(&self, downloaded: u64, total: u64) {
         use std::sync::atomic::Ordering;
         self.downloaded.store(downloaded, Ordering::Relaxed);
-        self.size.store(total, Ordering::Relaxed);
+        self.size.store(part_size(total), Ordering::Relaxed);
     }
 
     /// odl finished this part.
@@ -489,6 +502,22 @@ mod tests {
         // of the file to answer for.
         p.apply_progress(100 * 1024, 144 * 1024);
         assert_eq!(seen(&p), (100 * 1024, 144 * 1024));
+    }
+
+    /// A server that declares no length leaves odl with a part whose
+    /// range has no end; the size arrives as `u64::MAX` and the table
+    /// drew a 16777216 TB segment stuck at 0%.
+    #[test]
+    fn a_part_with_no_declared_end_reads_as_unknown() {
+        let p = part(0);
+        p.apply_progress(142 * 1024 * 1024, u64::MAX);
+        let (downloaded, size) = seen(&p);
+        assert_eq!(downloaded, 142 * 1024 * 1024);
+        assert_eq!(size, 0, "no end declared is no size, not an exabyte");
+
+        // A real range is still a real range.
+        p.apply_progress(1024, 4096);
+        assert_eq!(seen(&p), (1024, 4096));
     }
 
     /// odl closes a part with a full sample before saying it finished
