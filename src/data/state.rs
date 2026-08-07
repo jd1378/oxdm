@@ -55,6 +55,12 @@ pub struct JobEntry {
     /// Cumulative count of `PartRetrying` events this run. Spliced onto
     /// `Job::retries`.
     pub retries: AtomicU32,
+    /// The parts map still describes the *previous* run. odl
+    /// re-announces every part when a run starts, under fresh ulids, so
+    /// the old rows are dropped as the first new one arrives rather
+    /// than when the run begins — otherwise the table blanks between
+    /// the two.
+    pub parts_stale: AtomicBool,
     /// A daemon-side hash of the saved file is running for this job.
     /// The window that asked can close; the work and its result stay
     /// here.
@@ -155,6 +161,7 @@ impl JobEntry {
             finished_at_ms: AtomicI64::new(finished_at_ms),
             retries: AtomicU32::new(retries),
             interruptions: AtomicU32::new(interruptions),
+            parts_stale: AtomicBool::new(false),
             verifying: AtomicBool::new(false),
             retrying_parts: std::sync::Mutex::new(std::collections::HashSet::new()),
             parts: std::sync::RwLock::new(IndexMap::new()),
@@ -1878,14 +1885,12 @@ impl AppState {
         if let Ok(mut g) = entry.last_error.write() {
             *g = None;
         }
-        // …and whatever it was made of. odl re-announces every part at
-        // the start of a run, under fresh ulids, including the ones
-        // already complete on disk. Keeping the old rows meant a
-        // resumed 1 MB download listing nine segments totalling several
-        // megabytes — the previous run's alongside this one's.
-        if let Ok(mut parts) = entry.parts.write() {
-            parts.clear();
-        }
+        // The previous run's segments are stale, but not worthless:
+        // they are what the table shows until this run says otherwise.
+        // Clearing here would blank it for the second or so before odl
+        // announces the new parts. Marked instead, and swapped out by
+        // the first `PartAdded` — see the bridge.
+        entry.parts_stale.store(true, Ordering::Release);
         if let Ok(mut retrying) = entry.retrying_parts.lock() {
             retrying.clear();
         }
@@ -2717,6 +2722,7 @@ async fn clone_entry_with_job(old: &Arc<JobEntry>, new_job: Job) -> Arc<JobEntry
         finished_at_ms: AtomicI64::new(old.finished_at_ms.load(Ordering::Acquire)),
         retries: AtomicU32::new(old.retries.load(Ordering::Acquire)),
         interruptions: AtomicU32::new(old.interruptions.load(Ordering::Acquire)),
+        parts_stale: AtomicBool::new(old.parts_stale.load(Ordering::Acquire)),
         verifying: AtomicBool::new(old.verifying.load(Ordering::Acquire)),
         retrying_parts: std::sync::Mutex::new(retrying_parts),
         parts: std::sync::RwLock::new(parts),
@@ -2900,6 +2906,12 @@ impl LiveBridge for StateLiveBridge {
                     && let Some(entry) = jobs.get(&id)
                     && let Ok(mut parts) = entry.parts.try_write()
                 {
+                    // First part of a new run: the rows still on screen
+                    // belong to the last one. Swap, rather than leaving
+                    // both sets to pile up.
+                    if entry.parts_stale.swap(false, Ordering::AcqRel) {
+                        parts.clear();
+                    }
                     parts.insert(
                         ulid.clone(),
                         Arc::new(PartCounters {

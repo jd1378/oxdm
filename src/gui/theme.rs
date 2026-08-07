@@ -199,6 +199,18 @@ impl Tokens {
         }
     }
 
+    /// `clay-700` as this theme resolves it. `tokens.css` remaps the
+    /// deep end of the clay ramp under the dark theme — a colour that
+    /// separates from clay-400 by being darker on paper has to do it by
+    /// being lighter on a dark surface, and it is the same token either
+    /// way.
+    pub fn clay_700(&self) -> Color {
+        match self.theme {
+            ResolvedTheme::Dark => clay::DARK_C700,
+            _ => clay::C700,
+        }
+    }
+
     /// Light theme — sources from `theme-utility` in
     /// `design/tokens.css`: cool neutral grays with the clay accent.
     pub fn light() -> Self {

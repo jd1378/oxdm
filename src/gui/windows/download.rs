@@ -1590,9 +1590,12 @@ fn info_tab(st: &State) -> Element<'_, Msg> {
             grid: color::with_alpha(t.fg_4, 170.0 / 255.0),
             label_color: t.fg_3,
         };
+        // Design `.lg-dot`: an 8px square with a 2px radius, not a
+        // circle — it reads as a swatch of the line it labels rather
+        // than as a status light.
         let legend_item = |label: &'static str, value: String, color: iced::Color| {
             row![
-                crate::gui::widget::dot(8.0, color),
+                crate::gui::widget::swatch(8.0, 2.0, color),
                 text(label).font(theme::BODY).size(11.0).color(t2.fg_3),
                 text(value).font(theme::BODY_BOLD).size(11.0).color(t2.fg_1),
             ]
@@ -1617,13 +1620,15 @@ fn info_tab(st: &State) -> Element<'_, Msg> {
                     ..Default::default()
                 }),
             row![
-                legend_item("Current", format_speed(speed), t2.action_primary),
+                // `.lg-dot.cur` is clay-400 — the colour of the line
+                // itself, whatever the theme does with the accent.
+                legend_item("Current", format_speed(speed), color::clay::C400),
                 legend_item(
                     "Avg",
                     format_speed(avg as f64),
                     color::with_alpha(t2.fg_3, 0.9)
                 ),
-                legend_item("Peak", format_speed(st.peak as f64), t2.action_primary),
+                legend_item("Peak", format_speed(st.peak as f64), t2.clay_700()),
                 iced::widget::Space::new().width(Length::Fill),
                 Btn::new("")
                     .toolbar()
