@@ -30,6 +30,18 @@ pub enum DomainEvent {
         id: JobId,
         ulid: String,
     },
+    /// A retry is scheduled (odl `RetryScheduled`): the next attempt
+    /// starts after `delay_ms`. `ulid` is `None` for a whole-download
+    /// step such as the initial probe. The wait is interruptible, so
+    /// this is the current plan rather than a promise.
+    JobRetryScheduled {
+        id: JobId,
+        ulid: Option<String>,
+        attempt: u32,
+        max_attempts: u32,
+        delay_ms: u64,
+        server_requested: bool,
+    },
     JobCompleted {
         id: JobId,
         path: PathBuf,

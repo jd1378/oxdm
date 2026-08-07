@@ -1380,6 +1380,41 @@ impl AppState {
         }
     }
 
+    /// Record what the post-download hash check found on the job's own
+    /// checksum rows, so the verdict survives a restart and the
+    /// completion page can show it.
+    ///
+    /// Only the rows oxdm actually checked are touched — the same
+    /// Server/User set `job_expected_digests` hands the runner. A row
+    /// the user added after the fact keeps saying `Unverified`, which is
+    /// what it is.
+    async fn mark_checksums(self: &Arc<Self>, id: JobId, status: crate::domain::CsStatus) {
+        let Some(entry) = self.job_entry(id).await else {
+            return;
+        };
+        if entry.job.checksums.is_empty() || !entry.job.advanced.auto_verify {
+            return;
+        }
+        let mut job = entry.job.clone();
+        let mut touched = false;
+        for c in &mut job.checksums {
+            if matches!(
+                c.source,
+                crate::domain::CsSource::Server | crate::domain::CsSource::User
+            ) && c.status != status
+            {
+                c.status = status;
+                touched = true;
+            }
+        }
+        if !touched {
+            return;
+        }
+        let fresh = clone_entry_with_job(&entry, job).await;
+        self.jobs.write().await.insert(id, fresh);
+        self.persist_job(id).await;
+    }
+
     /// Insert a new job in `Queued` state. Caller decides whether to
     /// also `start_job` (Download Now) or leave it (Download Later).
     ///
@@ -1549,11 +1584,16 @@ impl AppState {
         let settings = self.settings.read().await.clone();
         let resolver = ProbeResolver;
         let instr = manager
-            .evaluate(odl::download_manager::EvaluateRequest::new(
-                url,
-                settings.fallback_dir(),
-                &resolver,
-            ))
+            .evaluate(
+                odl::download_manager::EvaluateRequest::new(
+                    url,
+                    settings.fallback_dir(),
+                    &resolver,
+                )
+                // Same engine the run will use, or the probe would
+                // describe a file the download never fetches.
+                .engine(crate::data::runner::FORCED_ENGINE),
+            )
             .await
             .map_err(|e| crate::data::mapping::job_error_from_odl(&e))?;
         Ok(ProbeResult {
@@ -1830,6 +1870,12 @@ impl AppState {
             }
             match outcome {
                 Ok(o) => {
+                    // The run only reaches here with every expected
+                    // digest matched — oxdm hashes the finished file
+                    // itself now, so the verdict is ours to keep.
+                    state
+                        .mark_checksums(id, crate::domain::CsStatus::Verified)
+                        .await;
                     entry.set_phase(Phase::Completed);
                     // Stamp the completion time once. `splice_live`
                     // reads this back inside `persist_job` below, so the
@@ -1876,6 +1922,11 @@ impl AppState {
                     entry.reset_live_speed();
                     if let Ok(mut g) = entry.last_error.write() {
                         *g = Some(err.clone());
+                    }
+                    if matches!(err, JobError::ChecksumMismatch { .. }) {
+                        state
+                            .mark_checksums(id, crate::domain::CsStatus::Mismatch)
+                            .await;
                     }
                     state.persist_job(id).await;
                     // NotifyAndPark path: surface the conflict failure

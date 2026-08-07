@@ -35,6 +35,11 @@ pub fn settings_to_download_options(
     proxy_password: Option<&str>,
 ) -> Result<DownloadOptions, String> {
     let mut b = DownloadOptionsBuilder::default();
+    // odl still checks the assembled file's *size*, but hashing is ours
+    // now: doing it after the download lets oxdm decide when to spend
+    // the I/O, keep the result, and show it. odl verifying inline would
+    // fail the job before oxdm ever saw the digest.
+    b.verify_checksums(false);
     // `None` means "Determine automatically"; the per-job overlay set
     // by add_window (size-based suggest_segments) provides the real
     // value. Fall back to 8 here for jobs created without a per-job
@@ -309,6 +314,11 @@ pub fn phase_from_odl(p: OdlPhase) -> Phase {
         OdlPhase::Assembling => Phase::Assembling,
         OdlPhase::Flushing => Phase::Flushing,
         OdlPhase::Verifying => Phase::Verifying,
+        // odl 2.0 added `PostProcessing` for work an external tool does
+        // on the bytes before they are usable (muxing, mostly). oxdm
+        // forces the HTTP engine, which never emits it, and the phase
+        // is open-ended anyway — anything new reads as "still working".
+        _ => Phase::Assembling,
     }
 }
 

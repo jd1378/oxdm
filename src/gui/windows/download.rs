@@ -226,6 +226,28 @@ const PULSE_RATE: f32 = 3.2;
 const RECONNECT_PULSE_MIN: f32 = 0.55;
 const RECONNECT_PULSE_MAX: f32 = 1.0;
 
+/// A retry odl has scheduled. `until_ms` is a wall-clock deadline
+/// rather than a remaining duration, so the countdown survives a window
+/// that repaints at its own pace — and a deadline in the past simply
+/// reads as "any moment now" instead of counting backwards.
+#[derive(Debug, Clone, Copy)]
+struct Retry {
+    until_ms: i64,
+    attempt: u32,
+    max_attempts: u32,
+    server_requested: bool,
+}
+
+impl Retry {
+    /// Seconds left, or `None` once the wait is over. odl's wait is
+    /// interruptible, so an elapsed deadline means "we have stopped
+    /// knowing", not "it is still waiting".
+    fn secs_left(&self) -> Option<u64> {
+        let left = self.until_ms - chrono::Utc::now().timestamp_millis();
+        (left > 0).then(|| ((left + 999) / 1000) as u64)
+    }
+}
+
 /// Which hash line in the integrity table an interaction refers to:
 /// the checksum's index, and whether it is the "got" line of a mismatch
 /// rather than the expected one.
@@ -325,6 +347,9 @@ pub struct State {
     /// check for a moment (`HASH_COPIED_MS`).
     hash_hover: Option<HashLine>,
     hash_copied: Option<HashLine>,
+    /// Retries odl has scheduled, keyed by part. The whole-download key
+    /// is `None` — a retry of the probe belongs to no segment.
+    retries: std::collections::HashMap<Option<String>, Retry>,
     /// Middle-truncated URL and save path. Owned by the state because a
     /// text input borrows what it shows, and these are derived values —
     /// recomputed whenever the entry changes.
@@ -522,6 +547,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 confirm_delete: false,
                 hash_hover: None,
                 hash_copied: None,
+                retries: std::collections::HashMap::new(),
                 url_field: String::new(),
                 path_field: String::new(),
                 win_w: WIN_W,
@@ -704,6 +730,25 @@ fn update_state(st: &mut State, msg: Msg) -> Task<Msg> {
                 if let Some(c) = list.into_iter().find(|c| c.id == st.id) {
                     st.entry.counters = c;
                 }
+                Task::none()
+            }
+            Event::RetryScheduled {
+                ulid,
+                attempt,
+                max_attempts,
+                delay_ms,
+                server_requested,
+                ..
+            } => {
+                st.retries.insert(
+                    ulid,
+                    Retry {
+                        until_ms: chrono::Utc::now().timestamp_millis() + delay_ms as i64,
+                        attempt,
+                        max_attempts,
+                        server_requested,
+                    },
+                );
                 Task::none()
             }
             Event::JobsChanged => refetch(st.client.clone(), st.id),
@@ -1667,7 +1712,31 @@ fn info_tab(st: &State) -> Element<'_, Msg> {
                             .color(t.fg_2)
                     )
                     .width(Length::Fixed(90.0)),
-                    pill_progress(frac, Length::Fill, 6.0, t.progress_track, t.progress_fill),
+                    // A part waiting on a retry says so in place of its
+                    // bar: a frozen bar is what a hung transfer looks
+                    // like, and odl now tells us exactly what the wait
+                    // is for (`RetryScheduled`).
+                    match st
+                        .retries
+                        .get(&Some(p.ulid.clone()))
+                        .and_then(|r| r.secs_left().map(|s| (r, s)))
+                    {
+                        Some((r, secs)) => container(
+                            text(retry_note(r, secs))
+                                .font(theme::BODY)
+                                .size(11.0)
+                                .color(t.status_warning),
+                        )
+                        .width(Length::Fill)
+                        .into(),
+                        None => pill_progress(
+                            frac,
+                            Length::Fill,
+                            6.0,
+                            t.progress_track,
+                            t.progress_fill,
+                        ),
+                    },
                     container(
                         text(format!("{}%", (frac * 100.0).round() as u32))
                             .font(theme::MONO)
@@ -2741,6 +2810,21 @@ fn hash_value<'a>(st: &'a State, hash: &str, line: HashLine, bad: bool) -> Eleme
     .spacing(theme::space::S2)
     .align_y(Alignment::Center)
     .into()
+}
+
+/// What a scheduled retry reads as in a segment row. Says whose wait it
+/// is: a server-supplied `Retry-After` is not something the user can
+/// shorten by clicking anything.
+fn retry_note(r: &Retry, secs: u64) -> String {
+    let who = if r.server_requested {
+        "server asked"
+    } else {
+        "retry"
+    };
+    format!(
+        "{who} in {secs}s · attempt {}/{}",
+        r.attempt, r.max_attempts
+    )
 }
 
 /// Small tinted callout: icon + message on a `*-bg` surface.

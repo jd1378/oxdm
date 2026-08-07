@@ -378,6 +378,18 @@ pub enum Event {
         id: JobId,
         error: JobError,
     },
+    /// odl scheduled a retry: the next attempt starts in `delay_ms`.
+    /// `ulid` names the part it belongs to, or `None` for a
+    /// whole-download step such as the probe. The wait is
+    /// interruptible, so a UI should treat this as the current plan.
+    RetryScheduled {
+        id: JobId,
+        ulid: Option<String>,
+        attempt: u32,
+        max_attempts: u32,
+        delay_ms: u64,
+        server_requested: bool,
+    },
     Updater(UpdaterEvent),
     /// A destructive power action was armed; it executes at
     /// `deadline_ms` (epoch milliseconds) unless cancelled via

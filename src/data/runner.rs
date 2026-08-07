@@ -16,6 +16,14 @@ use crate::data::mapping::{job_error_from_odl, phase_from_odl};
 use crate::data::resolvers::UiResolver;
 use crate::domain::{Job, JobError, JobId, Phase};
 
+/// The engine every oxdm download uses. odl 2.0 can hand media links to
+/// yt-dlp, but oxdm has no UI for format choice, and an engine chosen
+/// per-URL changes what every window is describing — the segment table
+/// and the connection controls mean nothing for a delegated download.
+/// Pinned until the design covers it.
+pub const FORCED_ENGINE: odl::engine::EnginePreference =
+    odl::engine::EnginePreference::Engine(odl::engine::Engine::HttpMultipart);
+
 /// Live counters per part. The aggregate `LiveCounters` lives on the
 /// `JobEntry`; this struct is one entry in `JobEntry::parts`.
 #[derive(Debug)]
@@ -132,7 +140,8 @@ impl JobRunner {
 
         let mut eval_req = EvaluateRequest::new(url, save_dir, &resolver)
             .ctx(&ctx)
-            .options(&overlay);
+            .options(&overlay)
+            .engine(FORCED_ENGINE);
         if let Some(creds) = build_credentials(&job, self.auth_password.as_deref()) {
             eval_req = eval_req.credentials(creds);
         }
@@ -174,11 +183,63 @@ impl JobRunner {
             .await
             .map_err(|e| job_error_from_odl(&e))?;
 
+        // Hashing is oxdm's, not odl's (`verify_checksums(false)`): the
+        // file exists by now, so a mismatch can be reported against a
+        // download the user still has, and the digests we compute are
+        // worth keeping rather than being thrown away inside a verify
+        // step. Reported as its own phase — a large file takes a while
+        // and a silent pause after 100% reads as a hang.
+        let expected = crate::data::mapping::job_expected_digests(&job);
+        if !expected.is_empty() {
+            self.bridge.on_event(
+                self.job_id,
+                &OdlProgressEvent::PhaseChanged(odl::progress::Phase::Verifying),
+            );
+            let _ = self.events.send(DomainEvent::JobUpdated {
+                id: self.job_id,
+                phase: Phase::Verifying,
+            });
+            let _ = verify_file(&path, &expected, &self.cancel).await?;
+        }
+
         Ok(RunOutcome {
             final_path: Some(path),
             already_complete: false,
         })
     }
+}
+
+/// Hash `path` and compare against every digest the job expects,
+/// returning what was computed so the caller can record it.
+///
+/// odl reads the file in 256 KiB blocks off the async runtime, so a
+/// multi-gigabyte hash yields between blocks instead of holding a
+/// worker — the UI keeps painting while `Verifying` is on screen.
+async fn verify_file(
+    path: &std::path::Path,
+    expected: &[odl::hash::HashDigest],
+    cancel: &CancellationToken,
+) -> Result<Vec<odl::hash::HashDigest>, JobError> {
+    let mut computed = Vec::with_capacity(expected.len());
+    for want in expected {
+        // Between files, not inside one: odl's reader has no cancel
+        // hook, and a pause the user asked for should not wait on the
+        // whole list.
+        if cancel.is_cancelled() {
+            return Err(JobError::Cancelled);
+        }
+        let got = odl::hash::HashDigest::from_path(path, want.algorithm(), want.encoding())
+            .await
+            .map_err(|e| JobError::Io(e.to_string()))?;
+        if !got.matches(want) {
+            return Err(JobError::ChecksumMismatch {
+                expected: want.digest().to_string(),
+                actual: got.digest().to_string(),
+            });
+        }
+        computed.push(got);
+    }
+    Ok(computed)
 }
 
 /// Build HTTP Basic credentials from the job's structured fields:
@@ -232,6 +293,22 @@ impl ProgressReporter for BridgeReporter {
                     size: *size,
                 });
             }
+            OdlProgressEvent::RetryScheduled {
+                ulid,
+                attempt,
+                max_attempts,
+                delay,
+                server_requested,
+            } => {
+                let _ = self.events.send(DomainEvent::JobRetryScheduled {
+                    id: self.id,
+                    ulid: ulid.clone(),
+                    attempt: *attempt,
+                    max_attempts: *max_attempts,
+                    delay_ms: delay.as_millis() as u64,
+                    server_requested: *server_requested,
+                });
+            }
             OdlProgressEvent::PartFinished { ulid } => {
                 let _ = self.events.send(DomainEvent::JobPartFinished {
                     id: self.id,
@@ -259,14 +336,11 @@ impl ProgressReporter for BridgeReporter {
                     phase: Phase::Paused,
                 });
             }
-            OdlProgressEvent::Progress { .. }
-            | OdlProgressEvent::Speed { .. }
-            | OdlProgressEvent::PartProgress { .. }
-            | OdlProgressEvent::PartSpeed { .. }
-            | OdlProgressEvent::PartRetrying { .. }
-            | OdlProgressEvent::Message(_) => {
-                // Hot path / UI pulls these from LiveCounters.
-            }
+            // Hot path / UI pulls these from LiveCounters. The wildcard
+            // also absorbs whatever a future odl engine reports:
+            // `ProgressEvent` is `non_exhaustive`, and an event this
+            // build has no notion of is not one it can render.
+            _ => {}
         }
     }
 }

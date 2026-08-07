@@ -343,6 +343,25 @@ fn map_domain_event(filter: SubFilter, ev: DomainEvent) -> Option<Event> {
         | DomainEvent::JobFilenameResolved { .. }
         | DomainEvent::JobPartAdded { .. }
         | DomainEvent::JobPartFinished { .. } => Some(Event::JobsChanged),
+        // The download window renders the countdown from the part rows
+        // it already polls, so this only has to reach the window
+        // watching that job.
+        DomainEvent::JobRetryScheduled {
+            id,
+            ulid,
+            attempt,
+            max_attempts,
+            delay_ms,
+            server_requested,
+        } if matches_filter(filter, id) => Some(Event::RetryScheduled {
+            id,
+            ulid,
+            attempt,
+            max_attempts,
+            delay_ms,
+            server_requested,
+        }),
+        DomainEvent::JobRetryScheduled { .. } => None,
         DomainEvent::JobCompleted { id, path, .. } if matches_filter(filter, id) => {
             Some(Event::JobCompleted { id, path })
         }
