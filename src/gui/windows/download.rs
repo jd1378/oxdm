@@ -55,6 +55,10 @@ const TAMPER_BANNER_H: f32 = 126.0;
 const INTEGRITY_BOX_H: f32 = 80.0;
 /// `.cb-title` is 9.5px, a step under the eyebrows elsewhere.
 const CB_HEAD_SIZE: f32 = 9.5;
+/// One line of an integrity row. Pinned so the algorithm, the chip and
+/// the first value line share a centre — a stacked pair otherwise
+/// leaves them each aligned to something different.
+const CB_LINE_H: f32 = 22.0;
 /// Integrity-table row padding — tighter than a settings row's 12/14.
 const CB_PAD_Y: f32 = 8.0;
 const CB_PAD_X: f32 = 12.0;
@@ -194,6 +198,13 @@ const CB_HASH_CHARS: usize = 24;
 /// share (`Tokens::status_danger_bg`). One warning across three panels
 /// reads as one thing; three shades of rust read as three.
 const DANGER_EDGE: iced::Color = color::rust::R300;
+
+/// `.seg-table` column widths and row metrics.
+const SEG_NUM_W: f32 = 28.0;
+const SEG_STATUS_W: f32 = 96.0;
+const SEG_BYTES_W: f32 = 84.0;
+const SEG_HEAD_H: f32 = 22.0;
+const SEG_ROW_H: f32 = 28.0;
 
 /// `.tamper-banner` — 12/14 padding, a 16px mark, two sizes of copy.
 const TAMPER_PAD_X: f32 = 14.0;
@@ -1639,82 +1650,101 @@ fn info_tab(st: &State) -> Element<'_, Msg> {
             .color(t.fg_3)
             .into()
     } else {
-        let mut rows = column![].spacing(2.0);
+        // Header + one row per part (design `.seg-table`): the columns
+        // are only readable with something naming them, and a segment
+        // that has stopped needs to say so rather than leave a still
+        // bar to be read as either finished or hung.
+        let head = row![
+            container(seg_head(t, "#")).width(Length::Fixed(SEG_NUM_W)),
+            container(seg_head(t, "status")).width(Length::Fixed(SEG_STATUS_W)),
+            container(seg_head(t, "downloaded"))
+                .width(Length::Fixed(SEG_BYTES_W))
+                .align_x(Alignment::End),
+            container(seg_head(t, "total"))
+                .width(Length::Fixed(SEG_BYTES_W))
+                .align_x(Alignment::End),
+            container(seg_head(t, "progress")).width(Length::Fill),
+        ]
+        .spacing(theme::space::S2)
+        .align_y(Alignment::Center)
+        .height(Length::Fixed(SEG_HEAD_H));
+
+        let mut rows = column![head, hairline(t.border_subtle)];
         for (i, p) in c.parts.iter().enumerate() {
             let frac = if p.size > 0 {
                 p.downloaded as f32 / p.size as f32
             } else {
                 0.0
             };
-            let done = p.finished;
-            let dot_color = if done {
-                t.status_success
-            } else if p.speed_bps > 1.0 {
-                t.action_primary
-            } else {
-                t.fg_4
-            };
-            rows = rows.push(
-                row![
-                    container(
-                        text(format!("{}", i + 1))
-                            .font(theme::MONO)
-                            .size(11.0)
-                            .color(t.fg_3)
-                    )
-                    .width(Length::Fixed(28.0)),
-                    container(crate::gui::widget::dot(8.0, dot_color)).width(Length::Fixed(80.0)),
-                    container(
-                        text(format_bytes(p.downloaded))
-                            .font(theme::MONO)
-                            .size(11.0)
-                            .color(t.fg_2)
-                    )
-                    .width(Length::Fixed(100.0)),
-                    container(
-                        text(format_bytes(p.size))
-                            .font(theme::MONO)
-                            .size(11.0)
-                            .color(t.fg_2)
-                    )
-                    .width(Length::Fixed(90.0)),
-                    // A part waiting on a retry says so in place of its
-                    // bar: a frozen bar is what a hung transfer looks
-                    // like, and odl now tells us exactly what the wait
-                    // is for (`RetryScheduled`).
-                    match st
-                        .retries
-                        .get(&Some(p.ulid.clone()))
-                        .and_then(|r| r.secs_left().map(|s| (r, s)))
-                    {
-                        Some((r, secs)) => container(
-                            text(retry_note(r, secs))
-                                .font(theme::BODY)
-                                .size(11.0)
-                                .color(t.status_warning),
-                        )
-                        .width(Length::Fill)
-                        .into(),
-                        None => pill_progress(
-                            frac,
-                            Length::Fill,
-                            6.0,
-                            t.progress_track,
-                            t.progress_fill,
-                        ),
-                    },
+            let waiting = st
+                .retries
+                .get(&Some(p.ulid.clone()))
+                .and_then(|r| r.secs_left().map(|s| (r, s)));
+            let (dot_color, label_color, label) = seg_state(t, p, st.phase(), waiting.is_some());
+            // A waiting segment says when it resumes, in place of a bar
+            // that would sit still and look like a hang.
+            let progress: Element<'_, Msg> = match waiting {
+                Some((r, secs)) => text(retry_note(r, secs))
+                    .font(theme::BODY)
+                    .size(11.0)
+                    .color(t.status_warning)
+                    .into(),
+                None => row![
+                    pill_progress(frac, Length::Fill, 6.0, t.progress_track, t.progress_fill),
                     container(
                         text(format!("{}%", (frac * 100.0).round() as u32))
                             .font(theme::MONO)
                             .size(11.0)
                             .color(t.fg_2)
                     )
-                    .width(Length::Fixed(48.0))
+                    .width(Length::Fixed(40.0))
                     .align_x(Alignment::End),
                 ]
-                .spacing(theme::space::S1)
+                .spacing(theme::space::S2)
                 .align_y(Alignment::Center)
-                .height(Length::Fixed(28.0)),
+                .into(),
+            };
+            rows = rows.push(
+                row![
+                    container(
+                        // Zero-padded so the column stays a column when
+                        // the count reaches double digits.
+                        text(format!("{:02}", i + 1))
+                            .font(theme::MONO)
+                            .size(11.0)
+                            .color(t.fg_3)
+                    )
+                    .width(Length::Fixed(SEG_NUM_W)),
+                    container(
+                        row![
+                            crate::gui::widget::dot(6.0, dot_color),
+                            text(label).font(theme::BODY).size(11.0).color(label_color),
+                        ]
+                        .spacing(6.0)
+                        .align_y(Alignment::Center)
+                    )
+                    .width(Length::Fixed(SEG_STATUS_W)),
+                    container(
+                        text(format_bytes(p.downloaded))
+                            .font(theme::MONO)
+                            .size(11.0)
+                            .color(t.fg_2)
+                    )
+                    .width(Length::Fixed(SEG_BYTES_W))
+                    .align_x(Alignment::End),
+                    container(
+                        text(format_bytes(p.size))
+                            .font(theme::MONO)
+                            .size(11.0)
+                            .color(t.fg_2)
+                    )
+                    .width(Length::Fixed(SEG_BYTES_W))
+                    .align_x(Alignment::End),
+                    container(progress).width(Length::Fill),
+                ]
+                .spacing(theme::space::S2)
+                .align_y(Alignment::Center)
+                .height(Length::Fixed(SEG_ROW_H)),
             );
         }
         crate::gui::widget::vscroll(rows)
@@ -2530,6 +2560,10 @@ fn checksum_box(st: &State) -> Option<Element<'_, Msg>> {
                 .into(),
                 None => hash_value(st, &saved, HashLine { row: i, got: false }, false),
             };
+            // The algorithm and the chip sit on the row's first line,
+            // not at the top of a cell: a stacked expected/got pair
+            // makes the row two lines tall, and top-aligning left them
+            // riding above the line they belong to.
             cb_row(
                 row![
                     container(
@@ -2538,9 +2572,13 @@ fn checksum_box(st: &State) -> Option<Element<'_, Msg>> {
                             .size(CB_ALGO_SIZE)
                             .color(t.fg_1)
                     )
-                    .width(Length::Fixed(CB_ALGO_W)),
+                    .width(Length::Fixed(CB_ALGO_W))
+                    .height(Length::Fixed(CB_LINE_H))
+                    .align_y(Alignment::Center),
                     container(status_chip(icon, label, chip_bg, chip_fg))
-                        .width(Length::Fixed(CB_STATUS_W)),
+                        .width(Length::Fixed(CB_STATUS_W))
+                        .height(Length::Fixed(CB_LINE_H))
+                        .align_y(Alignment::Center),
                     container(values).width(Length::Fill),
                 ]
                 .spacing(theme::space::S2)
@@ -2688,11 +2726,14 @@ fn hash_line<'a>(
                 .size(CB_LABEL_SIZE)
                 .color(if bad { t.status_danger } else { t.fg_3 })
         )
-        .width(Length::Fixed(CB_LABEL_W)),
+        .width(Length::Fixed(CB_LABEL_W))
+        .height(Length::Fixed(CB_LINE_H))
+        .align_y(Alignment::Center),
         hash_value(st, hash, line, bad),
     ]
     .spacing(theme::space::S2)
     .align_y(Alignment::Center)
+    .height(Length::Fixed(CB_LINE_H))
     .into()
 }
 
@@ -2754,6 +2795,40 @@ fn hash_value<'a>(st: &'a State, hash: &str, line: HashLine, bad: bool) -> Eleme
 /// What a scheduled retry reads as in a segment row. Says whose wait it
 /// is: a server-supplied `Retry-After` is not something the user can
 /// shorten by clicking anything.
+fn seg_head<'a>(t: &Tokens, label: &str) -> Element<'a, Msg> {
+    text(tracked(label))
+        .font(theme::BODY_BOLD)
+        .size(9.5)
+        .color(t.fg_3)
+        .into()
+}
+
+/// What a segment is doing, in the design's words and colours
+/// (`.seg-status`). Derived rather than reported: odl says when a part
+/// starts, finishes, retries and how fast it is going, and those four
+/// facts cover every state the table can show.
+fn seg_state(
+    t: &Tokens,
+    p: &crate::ipc_local::protocol::PartView,
+    phase: Phase,
+    waiting: bool,
+) -> (iced::Color, iced::Color, &'static str) {
+    if p.finished {
+        return (color::moss::M400, t.fg_2, "Complete");
+    }
+    if waiting {
+        return (t.status_warning, t.status_warning, "Reconnecting…");
+    }
+    match phase {
+        Phase::Failed => (t.status_danger, t.status_danger, "Failed"),
+        _ if !phase.is_running() => (t.fg_4, t.fg_3, "Paused"),
+        // Moving bytes this sample, versus allocated and waiting its
+        // turn — the rampup starts parts a few at a time.
+        _ if p.speed_bps > 1.0 => (color::clay::C500, color::clay::C300, "Active"),
+        _ => (t.border_default, t.fg_3, "Pending"),
+    }
+}
+
 fn retry_note(r: &Retry, secs: u64) -> String {
     let who = if r.server_requested {
         "server asked"
