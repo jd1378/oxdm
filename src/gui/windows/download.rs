@@ -53,6 +53,8 @@ const WIN_COMPLETE_H: f32 = 326.0;
 /// off the rendered page.
 const TAMPER_BANNER_H: f32 = 126.0;
 const INTEGRITY_BOX_H: f32 = 80.0;
+/// `.cb-title` is 9.5px, a step under the eyebrows elsewhere.
+const CB_HEAD_SIZE: f32 = 9.5;
 /// Integrity-table row padding — tighter than a settings row's 12/14.
 const CB_PAD_Y: f32 = 8.0;
 const CB_PAD_X: f32 = 12.0;
@@ -63,8 +65,6 @@ const CB_COMPUTE_H: f32 = 39.0;
 /// The second line an integrity row grows when it has both an expected
 /// and a got hash to show.
 const CB_DIFF_H: f32 = 26.0;
-/// The stats strip, which a job with no finish time does not draw.
-const STATS_H: f32 = 59.0;
 /// Everything the error view puts around the error card: title bar,
 /// hero, progress bar, the gaps between them and the footer. The card
 /// itself is measured from its own copy — see `error_block_height`.
@@ -619,11 +619,6 @@ fn job_height(job: &crate::domain::Job) -> Option<f32> {
             if job.status.final_path.is_some() {
                 h += CB_COMPUTE_H;
             }
-        }
-        // No finish time, no stats strip — `completion_stats` renders
-        // nothing rather than a row of dashes.
-        if job.finished_at.is_none() {
-            h -= STATS_H;
         }
         return Some(h);
     }
@@ -2437,7 +2432,7 @@ fn checksum_box(st: &State) -> Option<Element<'_, Msg>> {
             ),
             text(tracked("file integrity"))
                 .font(theme::BODY_BOLD)
-                .size(10.0)
+                .size(CB_HEAD_SIZE)
                 .color(t.fg_3),
             iced::widget::Space::new().width(Length::Fill),
             status_dot(head_color, head_label, 10.0),
@@ -2631,8 +2626,9 @@ fn status_chip<'a>(
     )
     .padding([2.0, 6.0])
     .style(move |_| container::Style {
-        // Reads against the box's own tint, which is already rust.
-        background: Some(color::with_alpha(color, 0.20).into()),
+        // The box behind it is already rust; a light wash of the same
+        // hue vanishes into it, so the chip carries a solid tint.
+        background: Some(color::with_alpha(color, 0.28).into()),
         border: iced::Border {
             radius: theme::radius::PILL.into(),
             ..Default::default()
@@ -2646,12 +2642,14 @@ fn status_chip<'a>(
 /// 0.08em`; iced text has no such setting, so the spacing is put in the
 /// string as thin spaces.
 fn tracked(label: &str) -> String {
+    // Hair space, not thin: at this size a thin space overshoots the
+    // design's 0.08em by roughly double.
     label
         .to_uppercase()
         .chars()
         .map(|c| c.to_string())
         .collect::<Vec<_>>()
-        .join("\u{2009}")
+        .join("\u{200a}")
 }
 
 /// The bare digest out of whatever the engine reported. odl phrases a
@@ -2703,17 +2701,32 @@ fn hash_value<'a>(st: &'a State, hash: &str, line: HashLine, bad: bool) -> Eleme
         (false, false) => t.fg_2,
     };
     let owned = hash.to_owned();
-    let value = iced::widget::mouse_area(
+    // The got line is struck through (design `.cb-h-bad`): these bytes
+    // are the ones to discard. `text` has no strikethrough, spans do.
+    let shown: Element<'a, Msg> = if bad {
+        iced::widget::rich_text::<(), Msg, _, _>([iced::widget::span(mid_truncate(
+            hash,
+            CB_HASH_CHARS,
+        ))
+        .strikethrough(true)])
+        .font(theme::MONO)
+        .size(CB_HASH_SIZE)
+        .wrapping(iced::widget::text::Wrapping::None)
+        .color(color)
+        .into()
+    } else {
         text(mid_truncate(hash, CB_HASH_CHARS))
             .font(theme::MONO)
             .size(CB_HASH_SIZE)
             .wrapping(iced::widget::text::Wrapping::None)
-            .color(color),
-    )
-    .on_enter(Msg::HashHover(Some(line)))
-    .on_exit(Msg::HashHover(None))
-    .on_press(Msg::HashCopy(line, owned.clone()))
-    .interaction(iced::mouse::Interaction::Pointer);
+            .color(color)
+            .into()
+    };
+    let value = iced::widget::mouse_area(shown)
+        .on_enter(Msg::HashHover(Some(line)))
+        .on_exit(Msg::HashHover(None))
+        .on_press(Msg::HashCopy(line, owned.clone()))
+        .interaction(iced::mouse::Interaction::Pointer);
 
     row![
         value,
@@ -2870,9 +2883,10 @@ fn completion_stats(st: &State) -> Option<Element<'_, Msg>> {
             .format("%-I:%M %p")
             .to_string()
     });
-    if avg.is_none() && taken.is_none() && finished.is_none() {
-        return None;
-    }
+    // The strip always renders, dashes and all: the design shows it on
+    // every completion page, and a job that failed verification often
+    // has no finish time — hiding the whole strip for that would move
+    // everything below it and say less than three dashes do.
 
     let grid: Element<'_, Msg> = row![
         stat_cell(t, "average speed", avg),
