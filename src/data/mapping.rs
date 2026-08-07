@@ -289,6 +289,67 @@ fn checksum_to_digest(c: &Checksum) -> Option<HashDigest> {
     })
 }
 
+/// oxdm's algorithm enum from odl's, or `None` for one oxdm does not
+/// model.
+fn algo_from_odl(a: odl::hash::HashAlgorithm) -> Option<Algo> {
+    Some(match a {
+        odl::hash::HashAlgorithm::MD5 => Algo::Md5,
+        odl::hash::HashAlgorithm::SHA1 => Algo::Sha1,
+        odl::hash::HashAlgorithm::SHA256 => Algo::Sha256,
+        odl::hash::HashAlgorithm::SHA384 => Algo::Sha384,
+        odl::hash::HashAlgorithm::SHA512 => Algo::Sha512,
+    })
+}
+
+/// Checksums the server advertised on the `evaluate` probe, as job rows.
+///
+/// Read *before* `add_checksums` hands odl the job's own digests —
+/// afterwards the two are indistinguishable, and the job's would come
+/// back labelled as the server's.
+///
+/// Servers write digests in hex or base64 depending on the header;
+/// `Job` stores hex, so everything is normalised through the decoded
+/// bytes. A value that does not decode, or decodes to the wrong length
+/// for its algorithm, asserts nothing and is dropped.
+pub fn server_checksums(instr: &odl::Download) -> Vec<Checksum> {
+    instr
+        .checksums()
+        .iter()
+        .filter_map(|d| {
+            let algo = algo_from_odl(d.algorithm())?;
+            let hex: String = d.raw_bytes()?.iter().map(|b| format!("{b:02x}")).collect();
+            (hex.len() == algo.hex_len()).then(|| Checksum {
+                algo,
+                hash: hex,
+                source: CsSource::Server,
+                status: crate::domain::CsStatus::Unverified,
+                expected: None,
+            })
+        })
+        .collect()
+}
+
+/// Add `incoming` rows the job does not already carry, returning
+/// whether anything changed.
+///
+/// Matched on algorithm *and* value: a server that contradicts a hash
+/// the user typed gets its own row rather than overwriting theirs, so
+/// the failing check names which side was wrong. An identical row is
+/// left untouched — re-running a download must not reset a verdict.
+pub fn merge_checksums(existing: &mut Vec<Checksum>, incoming: Vec<Checksum>) -> bool {
+    let mut added = false;
+    for c in incoming {
+        let known = existing
+            .iter()
+            .any(|k| k.algo == c.algo && k.hash.eq_ignore_ascii_case(&c.hash));
+        if !known {
+            existing.push(c);
+            added = true;
+        }
+    }
+    added
+}
+
 /// Response headers the server sent on the `evaluate` probe, ready for
 /// `Job::captured_response`.
 ///
@@ -655,6 +716,87 @@ mod tests {
         let headers = opts.headers().expect("headers");
         assert_eq!(headers.len(), 1);
         assert_eq!(headers["cookie"], "fresh=2");
+    }
+
+    /// A `Download` carrying `digests`, standing in for what odl's
+    /// header sniffing left on the instruction after `evaluate`.
+    fn instruction_with_checksums(digests: Vec<HashDigest>) -> odl::Download {
+        let mut instr = instruction_with_headers(&[], None);
+        instr.add_checksums(digests);
+        instr
+    }
+
+    #[test]
+    fn server_checksums_normalise_encoding_and_case() {
+        // "hello world": the same MD5 as base64 and as uppercase hex.
+        let instr = instruction_with_checksums(vec![
+            HashDigest::MD5("XrY7u+Ae7tCTyyK7j1rNww==".into(), HashEncoding::Base64),
+            HashDigest::SHA1(
+                "2AAE6C35C94FCFB415DBE95F408B9CE91EE846ED".into(),
+                HashEncoding::Hex,
+            ),
+        ]);
+        let rows = server_checksums(&instr);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|c| c.source == CsSource::Server));
+        assert_eq!(rows[0].algo, Algo::Md5);
+        assert_eq!(rows[0].hash, "5eb63bbbe01eeed093cb22bb8f5acdc3");
+        assert_eq!(rows[1].algo, Algo::Sha1);
+        assert_eq!(rows[1].hash, "2aae6c35c94fcfb415dbe95f408b9ce91ee846ed");
+    }
+
+    #[test]
+    fn server_checksums_drop_values_that_assert_nothing() {
+        let instr = instruction_with_checksums(vec![
+            // Not valid base64.
+            HashDigest::SHA256("not a digest!!".into(), HashEncoding::Base64),
+            // Decodes, but to the wrong length for SHA-256.
+            HashDigest::SHA256("abcd".into(), HashEncoding::Hex),
+        ]);
+        assert!(server_checksums(&instr).is_empty());
+    }
+
+    #[test]
+    fn merge_keeps_known_rows_and_their_verdicts() {
+        let mut existing = vec![Checksum {
+            status: crate::domain::CsStatus::Verified,
+            ..checksum(
+                Algo::Md5,
+                "5eb63bbbe01eeed093cb22bb8f5acdc3",
+                CsSource::User,
+            )
+        }];
+        // Same hash in different case, plus a genuinely new row.
+        let changed = merge_checksums(
+            &mut existing,
+            vec![
+                checksum(
+                    Algo::Md5,
+                    "5EB63BBBE01EEED093CB22BB8F5ACDC3",
+                    CsSource::Server,
+                ),
+                checksum(Algo::Sha256, SHA256_UPPER, CsSource::Server),
+            ],
+        );
+        assert!(changed);
+        assert_eq!(existing.len(), 2);
+        // The user's row survived untouched — same source, same verdict.
+        assert_eq!(existing[0].source, CsSource::User);
+        assert_eq!(existing[0].status, crate::domain::CsStatus::Verified);
+        assert_eq!(existing[1].source, CsSource::Server);
+        assert!(!merge_checksums(&mut existing, vec![]));
+    }
+
+    #[test]
+    fn merge_keeps_a_contradicting_server_hash_as_its_own_row() {
+        // Same algorithm, different value: one of the two is wrong and
+        // the failing check has to be able to name which.
+        let mut existing = vec![checksum(Algo::Md5, &"a".repeat(32), CsSource::User)];
+        assert!(merge_checksums(
+            &mut existing,
+            vec![checksum(Algo::Md5, &"b".repeat(32), CsSource::Server)]
+        ));
+        assert_eq!(existing.len(), 2);
     }
 
     /// Rebuild an instruction the way odl does on resume, so

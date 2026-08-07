@@ -968,6 +968,31 @@ impl AppState {
         Ok(())
     }
 
+    /// Record checksums the server advertised, keeping every row the
+    /// job already carries.
+    ///
+    /// Unlike `set_job_checksums` this is additive: the daemon learns
+    /// these from a response header, not from a user editing a list,
+    /// and must not drop hashes typed in the Properties dialog.
+    pub async fn merge_server_checksums(&self, id: JobId, checksums: Vec<crate::domain::Checksum>) {
+        let mut jobs = self.jobs.write().await;
+        let Some(old) = jobs.get(&id).cloned() else {
+            return;
+        };
+        let mut new_job = old.job.clone();
+        if !crate::data::mapping::merge_checksums(&mut new_job.checksums, checksums) {
+            return;
+        }
+        let phase = old.phase();
+        let new_entry = clone_entry_with_job(&old, new_job.clone()).await;
+        jobs.insert(id, new_entry);
+        drop(jobs);
+        if let Err(e) = self.store.upsert_job(&new_job).await {
+            tracing::warn!(id = %id, error = %e, "could not store server checksums");
+        }
+        let _ = self.events.send(DomainEvent::JobUpdated { id, phase });
+    }
+
     /// Replace only the source URL + destination (save_dir + filename) of
     /// a job. Refused while the job is running — the Properties UI only
     /// offers these fields in paused/queued/cancelled/failed states, and
@@ -2862,6 +2887,7 @@ struct StateLiveBridge {
     state: std::sync::Weak<AppState>,
 }
 
+#[async_trait::async_trait]
 impl LiveBridge for StateLiveBridge {
     fn on_evaluated(&self, id: JobId, is_resumable: bool) {
         let Some(state) = self.state.upgrade() else {
@@ -2886,6 +2912,13 @@ impl LiveBridge for StateLiveBridge {
         {
             *slot = Some(captured);
         }
+    }
+
+    async fn on_server_checksums(&self, id: JobId, checksums: Vec<crate::domain::Checksum>) {
+        let Some(state) = self.state.upgrade() else {
+            return;
+        };
+        state.merge_server_checksums(id, checksums).await;
     }
 
     fn on_event(&self, id: JobId, event: &OdlProgressEvent) {

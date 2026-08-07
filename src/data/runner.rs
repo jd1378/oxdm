@@ -105,6 +105,7 @@ pub struct JobRunner {
 /// Sink the runner uses to push hot per-byte progress to `LiveCounters`.
 /// Defined as a trait so `state.rs` (which owns the counters) is the
 /// only file that knows their layout.
+#[async_trait::async_trait]
 pub trait LiveBridge: Send + Sync + 'static {
     fn on_event(&self, id: JobId, event: &OdlProgressEvent);
     /// Called once after `evaluate` succeeds with the resume-support
@@ -119,12 +120,21 @@ pub trait LiveBridge: Send + Sync + 'static {
     fn on_response_headers(&self, id: JobId, captured: crate::domain::CapturedResponse) {
         let _ = (id, captured);
     }
+    /// Called after `evaluate` with the checksums the server advertised
+    /// in its headers, for the daemon to record on the job. Awaited —
+    /// the digests must be on the job (and in the DB) before the
+    /// download that will be checked against them starts, or a small
+    /// file can finish first and be marked verified against a list that
+    /// does not yet include them.
+    async fn on_server_checksums(&self, id: JobId, checksums: Vec<crate::domain::Checksum>) {
+        let _ = (id, checksums);
+    }
 }
 
 impl JobRunner {
     /// Run the job. The caller has already inserted a `JobEntry` for
     /// `job_id` and stored `cancel`; we just drive ODL.
-    pub async fn run(self, job: Job) -> Result<RunOutcome, JobError> {
+    pub async fn run(self, mut job: Job) -> Result<RunOutcome, JobError> {
         let url = job.url.clone();
         let save_dir = job.save_dir.clone();
 
@@ -183,6 +193,21 @@ impl JobRunner {
             .on_evaluated(self.job_id, instruction.is_resumable());
         if let Some(captured) = crate::data::mapping::captured_response(&instruction) {
             self.bridge.on_response_headers(self.job_id, captured);
+        }
+
+        // What the server advertised in its headers becomes part of the
+        // job before anything is checked against it: odl parses those
+        // digests during `evaluate` and would otherwise drop them on
+        // the floor, since oxdm does its own verification from
+        // `Job::checksums`. Recorded first, then merged into this run's
+        // copy so this download is checked against them too — not only
+        // the next one.
+        let advertised = crate::data::mapping::server_checksums(&instruction);
+        if !advertised.is_empty() {
+            self.bridge
+                .on_server_checksums(self.job_id, advertised.clone())
+                .await;
+            crate::data::mapping::merge_checksums(&mut job.checksums, advertised);
         }
 
         // Feature #14: hand the job's expected checksums to odl so the
@@ -532,15 +557,67 @@ mod tests {
         (format!("http://{addr}/file.bin"), hits)
     }
 
+    /// MD5 of `BODY`, as a server would advertise it.
+    const GOOD_MD5: &str = "5eb63bbbe01eeed093cb22bb8f5acdc3";
+    /// Same length/charset, wrong value.
+    const BAD_MD5: &str = "5eb63bbbe01eeed093cb22bb8f5acdc0";
+
+    /// Serves `BODY` with an `X-Checksum-Md5` header carrying whatever
+    /// digest the test names — odl parses it during `evaluate`, which
+    /// is where oxdm has to pick it up.
+    async fn spawn_checksum_server(md5_hex: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 1024];
+                    loop {
+                        match sock.read(&mut chunk).await {
+                            Ok(0) => return,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                            Err(_) => return,
+                        }
+                        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    let head_only = buf.starts_with(b"HEAD ");
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: \
+                         application/octet-stream\r\nX-Checksum-Md5: \
+                         {md5_hex}\r\nConnection: close\r\n\r\n",
+                        BODY.len()
+                    );
+                    let _ = sock.write_all(header.as_bytes()).await;
+                    if !head_only {
+                        let _ = sock.write_all(BODY).await;
+                    }
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        format!("http://{addr}/file.bin")
+    }
+
     /// Records what the runner hands back after `evaluate`.
     #[derive(Default)]
     struct RecordingBridge {
         captured: std::sync::Mutex<Option<crate::domain::CapturedResponse>>,
+        server_checksums: std::sync::Mutex<Vec<Checksum>>,
     }
+    #[async_trait::async_trait]
     impl LiveBridge for RecordingBridge {
         fn on_event(&self, _id: JobId, _event: &OdlProgressEvent) {}
         fn on_response_headers(&self, _id: JobId, captured: crate::domain::CapturedResponse) {
             *self.captured.lock().unwrap() = Some(captured);
+        }
+        async fn on_server_checksums(&self, _id: JobId, checksums: Vec<Checksum>) {
+            *self.server_checksums.lock().unwrap() = checksums;
         }
     }
 
@@ -647,6 +724,45 @@ mod tests {
             matches!(&err, JobError::ChecksumMismatch { expected, .. }
                 if expected.contains(BAD_SHA256)),
             "expected ChecksumMismatch, got {err:?}"
+        );
+    }
+
+    /// A digest the server advertised is worth nothing if it is not
+    /// written down: oxdm verifies from `Job::checksums`, so a checksum
+    /// that stays inside odl's instruction is never checked and never
+    /// shown in Properties.
+    #[tokio::test]
+    async fn a_server_advertised_checksum_reaches_the_job() {
+        let url = spawn_checksum_server(GOOD_MD5).await;
+        let dir = tempfile::tempdir().unwrap();
+        let job = test_job(&url, dir.path().join("save"), GOOD_SHA256);
+        let bridge = Arc::new(RecordingBridge::default());
+        run_job_with(job, &dir.path().join("work"), bridge.clone())
+            .await
+            .expect("download should verify");
+
+        let rows = bridge.server_checksums.lock().unwrap().clone();
+        assert_eq!(rows.len(), 1, "expected one server row, got {rows:?}");
+        assert_eq!(rows[0].algo, Algo::Md5);
+        assert_eq!(rows[0].hash, GOOD_MD5);
+        assert_eq!(rows[0].source, CsSource::Server);
+    }
+
+    /// And it is checked against *this* run, not merely stored for the
+    /// next one — a small file can finish before anything else looks at
+    /// the list.
+    #[tokio::test]
+    async fn a_wrong_server_checksum_fails_the_same_run() {
+        let url = spawn_checksum_server(BAD_MD5).await;
+        let dir = tempfile::tempdir().unwrap();
+        let job = test_job(&url, dir.path().join("save"), GOOD_SHA256);
+        let err = run_job(job, &dir.path().join("work"))
+            .await
+            .expect_err("a wrong server digest must fail the job");
+        assert!(
+            matches!(&err, JobError::ChecksumMismatch { expected, .. }
+                if expected.contains(BAD_MD5)),
+            "expected ChecksumMismatch on the server digest, got {err:?}"
         );
     }
 
