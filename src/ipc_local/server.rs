@@ -517,6 +517,7 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
             cookies,
             category,
             size,
+            checksums,
         }) => match state
             .add_job(
                 url,
@@ -531,7 +532,7 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
                 proxy_password,
                 cookies,
                 category,
-                size,
+                crate::data::state::ProbeFacts { size, checksums },
             )
             .await
         {

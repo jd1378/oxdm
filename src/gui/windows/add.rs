@@ -241,6 +241,10 @@ impl AddState {
             cookies: opt(&cookies_text),
             category: self.category,
             size: self.detected().and_then(|p| p.size),
+            checksums: self
+                .detected()
+                .map(|p| p.checksums.clone())
+                .unwrap_or_default(),
         })
     }
 }

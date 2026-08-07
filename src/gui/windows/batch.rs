@@ -23,7 +23,9 @@ use crate::ipc_local::protocol::AddJobReq;
 pub struct Row {
     req: CaptureRequest,
     selected: bool,
-    probe: Option<Result<(String, Option<u64>, bool), String>>,
+    /// The probe's whole answer, not a projection of it: every field
+    /// the row shows or forwards to `AddJobReq` comes from here.
+    probe: Option<Result<Box<ProbeResult>, String>>,
 }
 
 #[derive(Clone)]
@@ -191,7 +193,7 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
     match msg {
         Msg::Probed(i, res) => {
             if let Some(r) = st.rows.get_mut(i) {
-                r.probe = Some(res.map(|p| (p.filename, p.size, p.is_resumable)));
+                r.probe = Some(res);
             }
             Task::none()
         }
@@ -222,30 +224,30 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             let queue = st.queue;
             let start_now = st.start_now;
             let save_dir = st.save_dir.clone();
-            // The probe's name *and* its size: a queued row already
-            // knows how big it is, and throwing that away leaves the
-            // list and the download window with nothing to show until
-            // the transfer starts.
-            let reqs: Vec<(CaptureRequest, Option<String>, Option<u64>)> = st
+            // Everything the probe learned rides along: a queued row
+            // already knows how big it is and what it will be checked
+            // against, and throwing that away leaves the list and the
+            // download window with nothing to show until the transfer
+            // starts.
+            let reqs: Vec<(CaptureRequest, Option<Box<ProbeResult>>)> = st
                 .rows
                 .iter()
                 .filter(|r| r.selected)
                 .map(|r| {
                     let probed = r.probe.as_ref().and_then(|p| p.as_ref().ok());
-                    (
-                        r.req.clone(),
-                        probed.map(|(name, _, _)| name.clone()),
-                        probed.and_then(|(_, size, _)| *size),
-                    )
+                    (r.req.clone(), probed.cloned())
                 })
                 .collect();
             Task::perform(
                 async move {
-                    for (req, probed_name, probed_size) in reqs {
+                    for (req, probed) in reqs {
                         let add = AddJobReq {
                             url: req.url.clone(),
                             save_dir: save_dir.clone(),
-                            filename: req.filename.clone().or(probed_name),
+                            filename: req
+                                .filename
+                                .clone()
+                                .or_else(|| probed.as_ref().map(|p| p.filename.clone())),
                             referrer: req.referrer.clone(),
                             headers: req.headers.clone(),
                             max_connections: None,
@@ -255,7 +257,8 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                             proxy_password: None,
                             cookies: req.cookies.clone(),
                             category: None,
-                            size: probed_size,
+                            size: probed.as_ref().and_then(|p| p.size),
+                            checksums: probed.map(|p| p.checksums.clone()).unwrap_or_default(),
                         };
                         let id = client.add_job(add).await?;
                         if let Some(q) = queue {
@@ -390,10 +393,15 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
     for (i, r) in st.rows.iter().enumerate() {
         let detail: Element<'_, Msg> = match &r.probe {
             None => text("…").font(theme::MONO).size(11.0).color(t.fg_3).into(),
-            Some(Ok((name, size, resum))) => text(format!(
-                "{name}  ·  {}  ·  {}",
-                size.map(format_bytes).unwrap_or_else(|| "—".into()),
-                if *resum { "resumable" } else { "no resume" },
+            Some(Ok(p)) => text(format!(
+                "{}  ·  {}  ·  {}",
+                p.filename,
+                p.size.map(format_bytes).unwrap_or_else(|| "—".into()),
+                if p.is_resumable {
+                    "resumable"
+                } else {
+                    "no resume"
+                },
             ))
             .font(theme::BODY)
             .size(11.0)

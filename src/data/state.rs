@@ -728,7 +728,7 @@ impl AppState {
                 None,
                 None,
                 // The updater probes nothing up front.
-                None,
+                ProbeFacts::default(),
             )
             .await?;
         self.hidden_jobs.write().await.insert(id);
@@ -1646,11 +1646,11 @@ impl AppState {
         proxy_password: Option<String>,
         cookies: Option<String>,
         category: Option<Category>,
-        // What the caller's probe said the file weighs, when it made
-        // one. Recorded now so the job knows its size while it is still
-        // queued, instead of the first progress event teaching the UI
-        // something the Add dialog already displayed.
-        size: Option<u64>,
+        // What the caller's probe found. Recorded now so the job knows
+        // its size and its expected digests while it is still queued,
+        // instead of the first run teaching the UI things the Add
+        // dialog already displayed.
+        probe: ProbeFacts,
     ) -> Result<JobId, JobError> {
         let id = JobId::new();
         // Detect the category once at creation when the caller did not
@@ -1702,11 +1702,11 @@ impl AppState {
             interruptions: 0,
             verify_pending: false,
             status: JobStatus {
-                total: size,
+                total: probe.size,
                 ..JobStatus::default()
             },
             advanced: crate::domain::Advanced::default(),
-            checksums: Vec::new(),
+            checksums: probe.checksums,
             category,
             captured_response: None,
         };
@@ -1815,6 +1815,7 @@ impl AppState {
             .await
             .map_err(|e| crate::data::mapping::job_error_from_odl(&e))?;
         Ok(ProbeResult {
+            checksums: crate::data::mapping::server_checksums(&instr),
             filename: instr.filename().to_string(),
             size: instr.size(),
             is_resumable: instr.is_resumable(),
@@ -1882,7 +1883,7 @@ impl AppState {
                 Some(category),
                 // A capture carries no probe of its own; the run
                 // reports the size.
-                None,
+                ProbeFacts::default(),
             )
             .await?;
         if let Some(qid) = settings.category_queues.get(&category).copied()
@@ -2560,6 +2561,21 @@ pub struct ProbeResult {
     pub etag: Option<String>,
     pub last_modified: Option<i64>,
     pub requires_auth: bool,
+    /// Digests the server published in its headers. Carried so a job
+    /// added from a probe already knows what it will be checked
+    /// against, instead of learning it on the first run.
+    pub checksums: Vec<crate::domain::Checksum>,
+}
+
+/// What a caller's probe learned about the file, for `add_job`.
+///
+/// Grouped rather than passed as loose arguments: these all answer the
+/// same question — "what did the probe already tell us?" — and callers
+/// that made no probe say so once with `default()`.
+#[derive(Debug, Clone, Default)]
+pub struct ProbeFacts {
+    pub size: Option<u64>,
+    pub checksums: Vec<crate::domain::Checksum>,
 }
 
 #[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]

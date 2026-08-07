@@ -313,6 +313,11 @@ pub struct AddJobReq {
     /// already knew.
     #[serde(default)]
     pub size: Option<u64>,
+    /// Digests the probe read out of the server's headers, so they are
+    /// on the job before it first runs — visible in Properties, and
+    /// checked even if the very first attempt is what completes it.
+    #[serde(default)]
+    pub checksums: Vec<crate::domain::Checksum>,
 }
 
 // Resolution mirrors of `odl::conflict::*` so the wire is independent
