@@ -52,19 +52,28 @@ impl PartCounters {
         self.size.store(total, Ordering::Relaxed);
     }
 
-    /// odl finished this part.
+    /// odl finished this part. A finished part is a full part, and the
+    /// two counters are reconciled to say so.
     ///
-    /// It finishes against the part's current limit, and a split can
-    /// shorten that between two progress samples — so the size we last
-    /// heard may be a range this part no longer owns, which would show
-    /// as "Complete" beside a half-full bar. What it downloaded is what
-    /// it owned.
+    /// Which one gives depends on how it finished:
+    ///
+    /// - Split mid-flight: odl finishes against the part's *current*
+    ///   limit, which a split can shorten between two progress samples,
+    ///   so the size we last heard is a range this part no longer owns.
+    ///   What it downloaded is what it owned.
+    /// - Already on disk: a resumed download finishes a part whose file
+    ///   is complete before any sample arrives, so nothing ever
+    ///   reported its bytes. The size is the truth there, and the row
+    ///   otherwise reads "Complete" beside 0 B.
     pub fn mark_finished(&self) {
         use std::sync::atomic::Ordering;
         self.finished.store(true, Ordering::Release);
         let done = self.downloaded.load(Ordering::Relaxed);
         if done > 0 {
             self.size.store(done, Ordering::Relaxed);
+        } else {
+            self.downloaded
+                .store(self.size.load(Ordering::Relaxed), Ordering::Relaxed);
         }
     }
 }
@@ -486,14 +495,14 @@ mod tests {
         assert!(p.finished.load(std::sync::atomic::Ordering::Acquire));
     }
 
-    /// A part that finishes having downloaded nothing (an empty range,
-    /// or one already on disk) keeps its stated size rather than
-    /// claiming to be zero bytes long.
+    /// A resumed download finishes a part whose file was already
+    /// complete before any progress sample arrives — nothing ever
+    /// reported its bytes, and the row read "Complete" beside 0 B.
     #[test]
-    fn a_finished_empty_part_keeps_its_size() {
+    fn a_part_already_on_disk_reads_as_full() {
         let p = part(256 * 1024);
         p.mark_finished();
-        assert_eq!(seen(&p), (0, 256 * 1024));
+        assert_eq!(seen(&p), (256 * 1024, 256 * 1024));
     }
 
     /// Server that answers every GET with `503` + a long `Retry-After`,
