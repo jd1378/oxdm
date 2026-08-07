@@ -220,6 +220,10 @@ impl Client {
     pub async fn restart_job(&self, id: JobId) -> Result<(), String> {
         self.expect_ok(Request::RestartJob(id)).await
     }
+    pub async fn verify_checksums(&self, id: JobId) -> Result<(), String> {
+        self.expect_ok(Request::VerifyChecksums(id)).await
+    }
+
     pub async fn delete_final_file(&self, id: JobId) -> Result<(), String> {
         self.expect_ok(Request::DeleteFinalFile(id)).await
     }

@@ -123,7 +123,7 @@ pub enum Msg {
     CsVerify(usize),
     /// Verify finished for the row identified by (algo, saved hash) —
     /// identity, not index, so a concurrent remove can't misfile it.
-    CsVerified(Algo, String, Result<String, String>),
+    CsVerifyFailed(String),
     CsCopy(String),
     // Settings refresh (theme + will-send headers stay current)
     SettingsRefreshed(Box<crate::domain::Settings>),
@@ -195,7 +195,6 @@ pub struct State {
     checksum_hash: text_editor::Content,
     /// Row currently hashing on a blocking thread, identified by
     /// (algo, saved hash).
-    cs_verifying: Option<(Algo, String)>,
     cs_verify_error: Option<String>,
 
     dirty: bool,
@@ -436,7 +435,6 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 cs_algo: Algo::Sha256,
                 cs_auto: true,
                 checksum_hash: text_editor::Content::new(),
-                cs_verifying: None,
                 cs_verify_error: None,
                 dirty: false,
                 dirty_count: 0,
@@ -752,65 +750,39 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             Task::none()
         }
         Msg::CsVerify(i) => {
-            if st.cs_verifying.is_some() {
+            if st.entry.verifying {
                 return Task::none();
             }
-            let Some(cs) = st.checksums.get(i) else {
+            if st.checksums.get(i).is_none() {
                 return Task::none();
-            };
+            }
             // Verification hashes the finished file on disk — only
             // possible once the job has a final path.
-            let Some(path) = st.entry.job.status.final_path.clone() else {
+            if st.entry.job.status.final_path.is_none() {
                 return Task::none();
-            };
-            let algo = cs.algo;
-            let saved = cs.hash.clone();
-            st.cs_verifying = Some((algo, saved.clone()));
-            st.cs_verify_error = None;
-            // Streaming hasher on a blocking thread — never on the
-            // iced executor (precedent: download.rs CsCompute).
-            Task::perform(
-                async move {
-                    tokio::task::spawn_blocking(move || {
-                        crate::domain::checksum::compute_file(&path, algo)
-                            .map_err(|e| e.to_string())
-                    })
-                    .await
-                    .map_err(|e| e.to_string())
-                    .and_then(|r| r)
-                },
-                move |r| Msg::CsVerified(algo, saved.clone(), r),
-            )
-        }
-        Msg::CsVerified(algo, saved, res) => {
-            st.cs_verifying = None;
-            match res {
-                Ok(digest) => {
-                    let Some(cs) = st
-                        .checksums
-                        .iter_mut()
-                        .find(|c| c.algo == algo && c.hash == saved)
-                    else {
-                        return Task::none();
-                    };
-                    if digest.eq_ignore_ascii_case(saved.trim()) {
-                        cs.status = CsStatus::Verified;
-                        cs.expected = None;
-                    } else {
-                        // `expected` carries the digest computed from
-                        // the file on disk — the "Got" side of the
-                        // Expected/Got diff (the saved hash stays the
-                        // "Expected" side).
-                        cs.status = CsStatus::Mismatch;
-                        cs.expected = Some(digest);
-                    }
-                    persist_checksums(st)
-                }
-                Err(e) => {
-                    st.cs_verify_error = Some(e);
-                    Task::none()
-                }
             }
+            st.cs_verify_error = None;
+            let client = st.client.clone();
+            let id = st.id;
+            // Save first: the daemon hashes against the rows it has,
+            // and a hash the user just typed is not one of them yet.
+            // Then hand the work over — it reads a file this window
+            // cannot promise to outlive, and the verdict belongs on the
+            // job rather than in one dialog's local copy.
+            Task::batch([
+                persist_checksums(st),
+                Task::perform(
+                    async move { client.verify_checksums(id).await },
+                    |r| match r {
+                        Ok(()) => Msg::Noop,
+                        Err(e) => Msg::CsVerifyFailed(e),
+                    },
+                ),
+            ])
+        }
+        Msg::CsVerifyFailed(e) => {
+            st.cs_verify_error = Some(e);
+            Task::none()
         }
         Msg::CsCopy(s) => iced::clipboard::write(s),
         Msg::OpenFolder => {
@@ -1630,13 +1602,13 @@ fn checksums_tab(st: &State) -> Element<'_, Msg> {
         let can_verify = st.entry.job.status.final_path.is_some();
         let mut list = column![];
         for (i, cs) in st.checksums.iter().enumerate() {
-            let verifying = st
-                .cs_verifying
-                .as_ref()
-                .is_some_and(|(a, h)| *a == cs.algo && *h == cs.hash);
+            // The daemon hashes the file once for every row it can
+            // check, so "verifying" is a property of the job, not of a
+            // row — and it stays true across a window that closes.
+            let verifying = st.entry.verifying;
             let (status_color, status_label) = if verifying {
-                // Indeterminate row state — compute_file is one-shot,
-                // no live progress exists (honesty decision #5).
+                // Indeterminate: hashing reports no progress, and the
+                // daemon owns the run (honesty decision #5).
                 (t.fg_3, "Verifying…")
             } else {
                 match cs.status {
@@ -1667,7 +1639,7 @@ fn checksums_tab(st: &State) -> Element<'_, Msg> {
                         .icon("shield-check")
                         .size(BtnSize::Sm)
                         .font_size(10.0)
-                        .enabled(can_verify && !verifying && st.cs_verifying.is_none())
+                        .enabled(can_verify && !verifying)
                         .on_press(Msg::CsVerify(i))
                         .view(t),
                 );

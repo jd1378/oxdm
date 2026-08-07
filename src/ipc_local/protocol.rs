@@ -112,6 +112,10 @@ pub enum Request {
     /// itself in the list. `Remove` is the one that forgets the
     /// download; this only reclaims the bytes on disk.
     DeleteFinalFile(JobId),
+    /// Hash the saved file and record the verdict on the job's checksum
+    /// rows. Runs in the daemon: a hash of a large file outlives the
+    /// window that asked for it.
+    VerifyChecksums(JobId),
     Remove(JobId, RemoveOpts),
     SetJobQueue(JobId, QueueId),
     /// Set a job's category explicitly.
@@ -472,4 +476,9 @@ pub struct JobEntryView {
     pub counters: JobCounters,
     pub on_completion: OnCompletion,
     pub session_speed_override: u64,
+    /// A hash of the saved file is running in the daemon right now.
+    /// Lives here rather than in a window so every window agrees, and
+    /// so closing the one that started it changes nothing.
+    #[serde(default)]
+    pub verifying: bool,
 }

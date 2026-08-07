@@ -19,7 +19,7 @@ use crate::gui::icons;
 use crate::gui::ipc::DaemonSignal;
 use crate::gui::shot::Shot;
 use crate::gui::theme::{self, Tokens};
-use crate::gui::widget::error_panel::{error_block, hash_mismatch, mid_truncate};
+use crate::gui::widget::error_panel::{error_block, mid_truncate};
 use crate::gui::widget::striped::striped_progress_hatched;
 use crate::gui::widget::{
     Btn, BtnSize, RateChart, TabBtn, TextInput, collapsible_card, combo, hairline, number_stepper,
@@ -318,7 +318,6 @@ pub enum Msg {
     Reveal(PathBuf),
     // Local checksum compute (hash `final_path` off the UI executor).
     CsCompute,
-    CsComputed(Result<String, String>),
     WinResized(f32, f32),
     WinFocused(bool),
     ShotTick,
@@ -400,23 +399,12 @@ pub struct State {
     /// compare against the job's saved checksum (verify, not compute).
     /// Local "Compute from file" state — drives the button label and the
     /// match/mismatch render once a digest comes back.
-    cs_compute: CsCompute,
 
     /// Gates every animation (reconnect pulse, completion burst). Read
     /// once at boot from `Settings.reduce_motion` (W6).
     reduce_motion: bool,
 
     shot: Option<Shot>,
-}
-
-/// Local-compute lifecycle for the completed-view ChecksumBox.
-#[derive(Default)]
-enum CsCompute {
-    #[default]
-    Idle,
-    Running,
-    /// Digest hex on success, or a short error string.
-    Done(Result<String, String>),
 }
 
 impl State {
@@ -575,7 +563,6 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 power_choice: on_completion.shutdown.unwrap_or(POWER_DEFAULT),
                 power_force: on_completion.force_shutdown,
                 on_completion,
-                cs_compute: CsCompute::Idle,
                 reduce_motion: settings.reduce_motion,
                 shot: Shot::from_env(),
                 client,
@@ -1006,36 +993,15 @@ fn update_state(st: &mut State, msg: Msg) -> Task<Msg> {
             Task::none()
         }
         Msg::CsCompute => {
-            // Hash with the saved checksum's algorithm so the digest is
-            // directly comparable. Run the streaming hasher on a blocking
-            // thread (N3: never on the iced UI executor).
-            let Some(cs) = st.entry.job.checksums.first() else {
-                return Task::none();
-            };
-            let Some(path) = st.entry.job.status.final_path.clone() else {
-                return Task::none();
-            };
-            if matches!(st.cs_compute, CsCompute::Running) {
-                return Task::none();
-            }
-            let algo = cs.algo;
-            st.cs_compute = CsCompute::Running;
-            Task::perform(
-                async move {
-                    tokio::task::spawn_blocking(move || {
-                        crate::domain::checksum::compute_file(&path, algo)
-                            .map_err(|e| e.to_string())
-                    })
-                    .await
-                    .map_err(|e| e.to_string())
-                    .and_then(|r| r)
-                },
-                Msg::CsComputed,
-            )
-        }
-        Msg::CsComputed(res) => {
-            st.cs_compute = CsCompute::Done(res);
-            Task::none()
+            // The daemon owns the hash. It reads a file this window
+            // cannot promise to outlive — a multi-gigabyte check
+            // survives closing every window, and its result lands on the
+            // job where the next window will find it.
+            let client = st.client.clone();
+            let id = st.id;
+            Task::perform(async move { client.verify_checksums(id).await }, |_| {
+                Msg::Noop
+            })
         }
         Msg::Connected(_) | Msg::Window(_) | Msg::Noop => Task::none(),
     }
@@ -2584,26 +2550,22 @@ fn checksum_box(st: &State) -> Option<Element<'_, Msg>> {
         })
         .collect();
 
-    // The local check compares against the first saved hash, which is
-    // the one a single-checksum job has and the strongest one a
-    // multi-checksum job lists first.
-    let first = &st.entry.job.checksums[0];
-    let saved_hash = first.hash.to_lowercase();
     let compute_section: Option<Element<'_, Msg>> =
         st.entry.job.status.final_path.as_ref().map(|_| {
-            let action: Element<'_, Msg> = match &st.cs_compute {
-                CsCompute::Running => Btn::new("Computing…")
+            let action: Element<'_, Msg> = if st.entry.verifying {
+                Btn::new("Checking…")
                     .secondary()
                     .size(BtnSize::Sm)
                     .icon("refresh-cw")
                     .enabled(false)
-                    .view(t),
-                _ => Btn::new("Compute from file")
+                    .view(t)
+            } else {
+                Btn::new("Compute from file")
                     .secondary()
                     .size(BtnSize::Sm)
                     .icon("shield-check")
                     .on_press(Msg::CsCompute)
-                    .view(t),
+                    .view(t)
             };
             let row_el = row![
                 action,
@@ -2615,33 +2577,10 @@ fn checksum_box(st: &State) -> Option<Element<'_, Msg>> {
             .spacing(theme::space::S2)
             .align_y(Alignment::Center);
 
-            match &st.cs_compute {
-                CsCompute::Done(Ok(digest)) => {
-                    let got = digest.to_lowercase();
-                    let result: Element<'_, Msg> = if got == saved_hash {
-                        banner(
-                            t,
-                            t.status_success,
-                            t.status_success_bg,
-                            "circle-check",
-                            format!("File hash matches the saved {} hash.", first.algo.label()),
-                        )
-                    } else {
-                        hash_mismatch(t, first.algo.label(), &saved_hash, &got)
-                    };
-                    column![row_el, result].spacing(theme::space::S2).into()
-                }
-                CsCompute::Done(Err(e)) => column![
-                    row_el,
-                    text(format!("Couldn't read the file: {e}"))
-                        .font(theme::BODY)
-                        .size(11.0)
-                        .color(t.status_warning),
-                ]
-                .spacing(theme::space::S2)
-                .into(),
-                _ => row_el.into(),
-            }
+            // No result block: the verdict lands on the rows above,
+            // which is where a window opened after the check finishes
+            // reads it from too.
+            row_el.into()
         });
 
     // Only the local check remains: pasting a publisher hash asked the
@@ -2925,20 +2864,16 @@ fn reconnect_banner(st: &State) -> Element<'_, Msg> {
 /// reports `Mismatch`, or a locally-computed digest disagrees with the
 /// saved hash. Drives the rust burst + "don't open" warning.
 fn is_tampered(st: &State) -> bool {
-    if checksum_failure(st).is_some() {
-        return true;
-    }
-    let saved_mismatch = st
-        .entry
-        .job
-        .checksums
-        .iter()
-        .any(|c| c.status == CsStatus::Mismatch);
-    let computed_mismatch = match (&st.cs_compute, st.entry.job.checksums.first()) {
-        (CsCompute::Done(Ok(digest)), Some(cs)) => digest.to_lowercase() != cs.hash.to_lowercase(),
-        _ => false,
-    };
-    saved_mismatch || computed_mismatch
+    // Every verdict now comes off the job itself — the daemon records
+    // what it hashed, so a window that was closed during the check
+    // still opens on the answer.
+    checksum_failure(st).is_some()
+        || st
+            .entry
+            .job
+            .checksums
+            .iter()
+            .any(|c| c.status == CsStatus::Mismatch)
 }
 
 /// Completion stat grid (design `.complete-stats`): Avg speed · Time

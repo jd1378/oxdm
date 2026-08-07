@@ -496,6 +496,7 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
                 counters,
                 on_completion,
                 session_speed_override: entry.session_speed_override.load(AtomicOrd::Acquire),
+                verifying: entry.verifying.load(AtomicOrd::Acquire),
             }))
         }
         Request::AddJob(AddJobReq {
@@ -558,6 +559,10 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
             }
         }
         Request::CancelToQueued(id) => match state.cancel_to_queued(id).await {
+            Ok(()) => Reply::Ok,
+            Err(e) => Reply::Err(job_err_string(e)),
+        },
+        Request::VerifyChecksums(id) => match state.verify_checksums(id).await {
             Ok(()) => Reply::Ok,
             Err(e) => Reply::Err(job_err_string(e)),
         },

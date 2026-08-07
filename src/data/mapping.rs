@@ -249,11 +249,29 @@ pub fn job_expected_digests(job: &Job) -> Vec<HashDigest> {
     if !job.advanced.auto_verify {
         return Vec::new();
     }
+    checksum_digests(job)
+}
+
+/// Every digest on the job that is well-formed enough to check against,
+/// regardless of the `auto_verify` preference — that one answers
+/// "check without being asked", not "may be checked".
+pub fn checksum_digests(job: &Job) -> Vec<HashDigest> {
     job.checksums
         .iter()
         .filter(|c| matches!(c.source, CsSource::Server | CsSource::User))
         .filter_map(checksum_to_digest)
         .collect()
+}
+
+/// oxdm's algorithm enum in odl's terms.
+pub fn odl_algorithm(a: Algo) -> odl::hash::HashAlgorithm {
+    match a {
+        Algo::Md5 => odl::hash::HashAlgorithm::MD5,
+        Algo::Sha1 => odl::hash::HashAlgorithm::SHA1,
+        Algo::Sha256 => odl::hash::HashAlgorithm::SHA256,
+        Algo::Sha384 => odl::hash::HashAlgorithm::SHA384,
+        Algo::Sha512 => odl::hash::HashAlgorithm::SHA512,
+    }
 }
 
 fn checksum_to_digest(c: &Checksum) -> Option<HashDigest> {

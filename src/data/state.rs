@@ -55,6 +55,10 @@ pub struct JobEntry {
     /// Cumulative count of `PartRetrying` events this run. Spliced onto
     /// `Job::retries`.
     pub retries: AtomicU32,
+    /// A daemon-side hash of the saved file is running for this job.
+    /// The window that asked can close; the work and its result stay
+    /// here.
+    pub verifying: AtomicBool,
     /// Live mirror of `Job::interruptions` — part retries plus explicit
     /// resumes, the one number the completed view reports.
     pub interruptions: AtomicU32,
@@ -151,6 +155,7 @@ impl JobEntry {
             finished_at_ms: AtomicI64::new(finished_at_ms),
             retries: AtomicU32::new(retries),
             interruptions: AtomicU32::new(interruptions),
+            verifying: AtomicBool::new(false),
             retrying_parts: std::sync::Mutex::new(std::collections::HashSet::new()),
             parts: std::sync::RwLock::new(IndexMap::new()),
             cancel: std::sync::Mutex::new(CancellationToken::new()),
@@ -1380,6 +1385,80 @@ impl AppState {
         }
     }
 
+    /// Hash the saved file and record the verdict, in the daemon.
+    ///
+    /// Returns as soon as the work is scheduled: hashing a large file
+    /// takes minutes, and the caller is a window that must stay
+    /// responsive — and may well be closed before it finishes. Progress
+    /// is published as `JobEntryView::verifying` plus a `JobUpdated`
+    /// at each end of the run, so any window open at the time follows
+    /// along and one opened later sees the result.
+    pub async fn verify_checksums(self: &Arc<Self>, id: JobId) -> Result<(), JobError> {
+        let entry = self
+            .job_entry(id)
+            .await
+            .ok_or_else(|| JobError::Other("job not found".into()))?;
+        let path = entry
+            .final_path
+            .read()
+            .ok()
+            .and_then(|g| g.clone())
+            .or_else(|| entry.job.status.final_path.clone())
+            .ok_or_else(|| JobError::Other("this download has no saved file".into()))?;
+        // Asked for by hand, so `auto_verify` does not gate it: that
+        // preference says whether to check *without being asked*.
+        if crate::data::mapping::checksum_digests(&entry.job).is_empty() {
+            return Err(JobError::Other("nothing to check this file against".into()));
+        }
+        // One run per job: a second click while the first is hashing
+        // would read the same file twice to the same answer.
+        if entry.verifying.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
+
+        let state = self.clone();
+        let phase = entry.phase();
+        tokio::spawn(async move {
+            let _ = state.events.send(DomainEvent::JobUpdated { id, phase });
+            let results = hash_against_rows(&path, &entry.job.checksums).await;
+            if let Some(e) = state.job_entry(id).await {
+                e.verifying.store(false, Ordering::Release);
+            }
+            match results {
+                Ok(rows) => state.apply_checksum_results(id, rows).await,
+                // An unreadable file says nothing about the hashes, so
+                // no row's verdict changes.
+                Err(e) => tracing::warn!(id = %id, error = %e, "checksum verification failed"),
+            }
+            let _ = state.events.send(DomainEvent::JobUpdated { id, phase });
+        });
+        Ok(())
+    }
+
+    /// Write per-row verdicts from a hash run. A mismatched row keeps
+    /// the computed digest in `expected` — that is the "got" side the
+    /// completion page and the Checksums tab both show against it.
+    async fn apply_checksum_results(
+        self: &Arc<Self>,
+        id: JobId,
+        results: Vec<(usize, crate::domain::CsStatus, Option<String>)>,
+    ) {
+        let Some(entry) = self.job_entry(id).await else {
+            return;
+        };
+        let mut job = entry.job.clone();
+        for (i, status, computed) in results {
+            let Some(c) = job.checksums.get_mut(i) else {
+                continue;
+            };
+            c.status = status;
+            c.expected = computed;
+        }
+        let fresh = clone_entry_with_job(&entry, job).await;
+        self.jobs.write().await.insert(id, fresh);
+        self.persist_job(id).await;
+    }
+
     /// Record what the post-download hash check found on the job's own
     /// checksum rows, so the verdict survives a restart and the
     /// completion page can show it.
@@ -1392,7 +1471,7 @@ impl AppState {
         let Some(entry) = self.job_entry(id).await else {
             return;
         };
-        if entry.job.checksums.is_empty() || !entry.job.advanced.auto_verify {
+        if entry.job.checksums.is_empty() {
             return;
         }
         let mut job = entry.job.clone();
@@ -2323,6 +2402,50 @@ pub struct RemoveOpts {
     pub delete_final_file: bool,
 }
 
+/// Hash `path` once per algorithm the rows name, and judge each row
+/// against it. Returns `(row index, verdict, computed digest)`, the
+/// digest only where it disagrees — a matching row has nothing to show
+/// beside itself.
+///
+/// Rows whose hash is malformed are left alone rather than failed:
+/// "this is not a hash" is not the same claim as "this file is wrong".
+async fn hash_against_rows(
+    path: &std::path::Path,
+    rows: &[crate::domain::Checksum],
+) -> Result<Vec<(usize, crate::domain::CsStatus, Option<String>)>, String> {
+    use crate::domain::CsStatus;
+    let mut computed: std::collections::HashMap<crate::domain::Algo, String> =
+        std::collections::HashMap::new();
+    let mut out = Vec::new();
+    for (i, c) in rows.iter().enumerate() {
+        if c.hash.trim().len() != c.algo.hex_len() {
+            continue;
+        }
+        let digest = match computed.get(&c.algo) {
+            Some(d) => d.clone(),
+            None => {
+                let d = odl::hash::HashDigest::from_path(
+                    path,
+                    crate::data::mapping::odl_algorithm(c.algo),
+                    odl::hash::HashEncoding::Hex,
+                )
+                .await
+                .map_err(|e| e.to_string())?
+                .digest()
+                .to_ascii_lowercase();
+                computed.insert(c.algo, d.clone());
+                d
+            }
+        };
+        if digest.eq_ignore_ascii_case(c.hash.trim()) {
+            out.push((i, CsStatus::Verified, None));
+        } else {
+            out.push((i, CsStatus::Mismatch, Some(digest)));
+        }
+    }
+    Ok(out)
+}
+
 /// Per-job working directory under the configured download dir. Holds
 /// `metadata.pb`, `odl.lock`, and every `<ulid>.part` for this job.
 /// Materialise a Job view that reflects live (in-memory) state on top
@@ -2497,6 +2620,7 @@ async fn clone_entry_with_job(old: &Arc<JobEntry>, new_job: Job) -> Arc<JobEntry
         finished_at_ms: AtomicI64::new(old.finished_at_ms.load(Ordering::Acquire)),
         retries: AtomicU32::new(old.retries.load(Ordering::Acquire)),
         interruptions: AtomicU32::new(old.interruptions.load(Ordering::Acquire)),
+        verifying: AtomicBool::new(old.verifying.load(Ordering::Acquire)),
         retrying_parts: std::sync::Mutex::new(retrying_parts),
         parts: std::sync::RwLock::new(parts),
         cancel: std::sync::Mutex::new(cancel_token),

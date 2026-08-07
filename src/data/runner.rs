@@ -177,11 +177,19 @@ impl JobRunner {
         let dl_req = DownloadRequest::new(instruction, &resolver)
             .ctx(&ctx)
             .options(&overlay);
-        let path = self
-            .manager
-            .download(dl_req)
-            .await
-            .map_err(|e| job_error_from_odl(&e))?;
+        let path = self.manager.download(dl_req).await.map_err(|e| {
+            // A run we stopped is stopped, whatever it was doing at the
+            // time. Interrupting a scheduled retry leaves odl's parts
+            // failed rather than cancelled — a race between the two
+            // branches of its run loop — and a pause that reported
+            // "failed" would park the job in the wrong state and invite
+            // the queue to retry it.
+            if self.cancel.is_cancelled() {
+                JobError::Cancelled
+            } else {
+                job_error_from_odl(&e)
+            }
+        })?;
 
         // Hashing is oxdm's, not odl's (`verify_checksums(false)`): the
         // file exists by now, so a mismatch can be reported against a
@@ -404,6 +412,55 @@ mod tests {
         format!("http://{addr}/file.bin")
     }
 
+    /// Server that answers every GET with `503` + a long `Retry-After`,
+    /// counting the attempts. HEAD still succeeds, so the download gets
+    /// as far as scheduling retries. Returns the URL and the counter.
+    async fn spawn_retry_server() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let counter = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                let counter = counter.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 1024];
+                    loop {
+                        match sock.read(&mut chunk).await {
+                            Ok(0) => return,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                            Err(_) => return,
+                        }
+                        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    let head = if buf.starts_with(b"HEAD ") {
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: \
+                             bytes\r\nConnection: close\r\n\r\n",
+                            BODY.len()
+                        )
+                    } else {
+                        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        // Long enough that a test finishing quickly can
+                        // only mean the wait was skipped, not waited out.
+                        "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 30\r\nContent-Length: \
+                         0\r\nConnection: close\r\n\r\n"
+                            .to_owned()
+                    };
+                    let _ = sock.write_all(head.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        (format!("http://{addr}/file.bin"), hits)
+    }
+
     /// Records what the runner hands back after `evaluate`.
     #[derive(Default)]
     struct RecordingBridge {
@@ -463,10 +520,27 @@ mod tests {
         work_dir: &std::path::Path,
         bridge: Arc<dyn LiveBridge>,
     ) -> Result<RunOutcome, JobError> {
+        run_job_cancellable(job, work_dir, bridge, CancellationToken::new()).await
+    }
+
+    async fn run_job_cancellable(
+        job: Job,
+        work_dir: &std::path::Path,
+        bridge: Arc<dyn LiveBridge>,
+        cancel: CancellationToken,
+    ) -> Result<RunOutcome, JobError> {
         let per_job = crate::data::state::per_job_dir(work_dir, job.id);
         tokio::fs::create_dir_all(&per_job).await.expect("mkdir");
+        // Mirror production: retries enabled (so a 503 schedules a
+        // wait rather than failing outright) and hashing left to oxdm.
+        let opts = odl::config::DownloadOptionsBuilder::default()
+            .max_retries(5)
+            .verify_checksums(false)
+            .build()
+            .expect("odl options");
         let cfg = odl::config::ConfigBuilder::default()
             .download_dir(work_dir.to_path_buf())
+            .download(opts)
             .build()
             .expect("odl config");
         let manager = Arc::new(DownloadManager::new(cfg));
@@ -475,7 +549,7 @@ mod tests {
             job_id: job.id,
             manager,
             events,
-            cancel: CancellationToken::new(),
+            cancel,
             bridge,
             interactive: false,
             per_job_dir: Some(per_job),
@@ -534,6 +608,93 @@ mod tests {
             "Set-Cookie must never be captured: {names:?}"
         );
         assert!(captured.probed_at > 0);
+    }
+
+    /// Pausing during a scheduled retry stops the download then, not
+    /// when the server's `Retry-After` expires. The wait is 30s; a run
+    /// that ends in under two is one that was interrupted.
+    #[tokio::test]
+    async fn cancel_during_a_retry_wait_stops_now() {
+        let (url, hits) = spawn_retry_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let job = test_job(&url, dir.path().to_path_buf(), GOOD_SHA256);
+        let cancel = CancellationToken::new();
+        let stopper = cancel.clone();
+        tokio::spawn(async move {
+            // Long enough for the first GET to be refused and the wait
+            // to start; far short of the 30s it asks for.
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            stopper.cancel();
+        });
+
+        let started = std::time::Instant::now();
+        let outcome = run_job_cancellable(
+            job,
+            dir.path(),
+            Arc::new(RecordingBridge::default()),
+            cancel,
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            matches!(outcome, Err(JobError::Cancelled)),
+            "a cancelled run reports as cancelled, got {outcome:?}",
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "cancel waited out the retry delay ({elapsed:?})",
+        );
+        assert!(
+            hits.load(std::sync::atomic::Ordering::Relaxed) >= 1,
+            "the server was never asked",
+        );
+    }
+
+    /// Resuming after that pause tries again immediately rather than
+    /// serving out the delay the previous attempt was told to wait: a
+    /// fresh run carries no memory of it.
+    #[tokio::test]
+    async fn resume_after_a_retry_wait_asks_again_immediately() {
+        let (url, hits) = spawn_retry_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let job = test_job(&url, dir.path().to_path_buf(), GOOD_SHA256);
+
+        let cancel = CancellationToken::new();
+        let stopper = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            stopper.cancel();
+        });
+        let _ = run_job_cancellable(
+            job.clone(),
+            dir.path(),
+            Arc::new(RecordingBridge::default()),
+            cancel,
+        )
+        .await;
+        let before = hits.load(std::sync::atomic::Ordering::Relaxed);
+
+        // Second run, stopped just as quickly. If it had inherited the
+        // 30s wait it would make no request at all in that window.
+        let cancel = CancellationToken::new();
+        let stopper = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            stopper.cancel();
+        });
+        let _ = run_job_cancellable(
+            job,
+            dir.path(),
+            Arc::new(RecordingBridge::default()),
+            cancel,
+        )
+        .await;
+
+        assert!(
+            hits.load(std::sync::atomic::Ordering::Relaxed) > before,
+            "the resumed run served out the old delay instead of asking again",
+        );
     }
 
     #[tokio::test]
