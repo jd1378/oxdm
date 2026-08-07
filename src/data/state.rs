@@ -2913,11 +2913,7 @@ impl LiveBridge for StateLiveBridge {
                     if let Ok(parts) = entry.parts.try_read()
                         && let Some(p) = parts.get(ulid)
                     {
-                        p.downloaded.store(*downloaded, Ordering::Relaxed);
-                        // Follows a split: this is the range the part is
-                        // now responsible for, and what odl will call it
-                        // finished against.
-                        p.size.store(*total, Ordering::Relaxed);
+                        p.apply_progress(*downloaded, *total);
                     }
                     // This part is making progress again — drop it from
                     // the retrying set. Removing by ulid (not a blanket
@@ -2971,7 +2967,7 @@ impl LiveBridge for StateLiveBridge {
                     && let Ok(parts) = entry.parts.try_read()
                     && let Some(p) = parts.get(ulid)
                 {
-                    p.finished.store(true, Ordering::Release);
+                    p.mark_finished();
                 }
             }
             OdlProgressEvent::PhaseChanged(p) => {

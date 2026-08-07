@@ -41,6 +41,34 @@ pub struct PartCounters {
     pub finished: std::sync::atomic::AtomicBool,
 }
 
+impl PartCounters {
+    /// A progress sample: bytes so far, and the range the part is
+    /// *currently* responsible for. odl shortens that range when it
+    /// splits a live part, so the total travels with every sample
+    /// rather than being fixed at creation.
+    pub fn apply_progress(&self, downloaded: u64, total: u64) {
+        use std::sync::atomic::Ordering;
+        self.downloaded.store(downloaded, Ordering::Relaxed);
+        self.size.store(total, Ordering::Relaxed);
+    }
+
+    /// odl finished this part.
+    ///
+    /// It finishes against the part's current limit, and a split can
+    /// shorten that between two progress samples — so the size we last
+    /// heard may be a range this part no longer owns, which would show
+    /// as "Complete" beside a half-full bar. What it downloaded is what
+    /// it owned.
+    pub fn mark_finished(&self) {
+        use std::sync::atomic::Ordering;
+        self.finished.store(true, Ordering::Release);
+        let done = self.downloaded.load(Ordering::Relaxed);
+        if done > 0 {
+            self.size.store(done, Ordering::Relaxed);
+        }
+    }
+}
+
 /// Output of running a job to completion (or failure).
 #[derive(Debug)]
 pub struct RunOutcome {
@@ -407,6 +435,65 @@ mod tests {
             }
         });
         format!("http://{addr}/file.bin")
+    }
+
+    fn part(size: u64) -> PartCounters {
+        PartCounters {
+            ulid: "01ULID".into(),
+            offset: 0,
+            size: std::sync::atomic::AtomicU64::new(size),
+            downloaded: std::sync::atomic::AtomicU64::new(0),
+            speed_bps_bits: std::sync::atomic::AtomicU64::new(0),
+            finished: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn seen(p: &PartCounters) -> (u64, u64) {
+        use std::sync::atomic::Ordering;
+        (
+            p.downloaded.load(Ordering::Relaxed),
+            p.size.load(Ordering::Relaxed),
+        )
+    }
+
+    /// A part that is split keeps the range it still owns, not the one
+    /// it was created with — otherwise its bar reads against bytes that
+    /// now belong to another part.
+    #[test]
+    fn a_split_part_follows_its_new_range() {
+        let p = part(256 * 1024);
+        p.apply_progress(100 * 1024, 256 * 1024);
+        assert_eq!(seen(&p), (100 * 1024, 256 * 1024));
+
+        // odl hands the tail to a new part: same bytes downloaded, less
+        // of the file to answer for.
+        p.apply_progress(100 * 1024, 144 * 1024);
+        assert_eq!(seen(&p), (100 * 1024, 144 * 1024));
+    }
+
+    /// And a part finished between two samples is finished against
+    /// whatever it had, not against a range a split already took away —
+    /// the case that showed "Complete" beside a 56% bar.
+    #[test]
+    fn a_finished_part_reads_as_full() {
+        let p = part(256 * 1024);
+        // Last sample before the split lands.
+        p.apply_progress(144 * 1024, 256 * 1024);
+        p.mark_finished();
+
+        let (downloaded, size) = seen(&p);
+        assert_eq!(downloaded, size, "a finished part is a full part");
+        assert!(p.finished.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    /// A part that finishes having downloaded nothing (an empty range,
+    /// or one already on disk) keeps its stated size rather than
+    /// claiming to be zero bytes long.
+    #[test]
+    fn a_finished_empty_part_keeps_its_size() {
+        let p = part(256 * 1024);
+        p.mark_finished();
+        assert_eq!(seen(&p), (0, 256 * 1024));
     }
 
     /// Server that answers every GET with `503` + a long `Retry-After`,
