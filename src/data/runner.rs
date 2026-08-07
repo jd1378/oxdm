@@ -177,19 +177,11 @@ impl JobRunner {
         let dl_req = DownloadRequest::new(instruction, &resolver)
             .ctx(&ctx)
             .options(&overlay);
-        let path = self.manager.download(dl_req).await.map_err(|e| {
-            // A run we stopped is stopped, whatever it was doing at the
-            // time. Interrupting a scheduled retry leaves odl's parts
-            // failed rather than cancelled — a race between the two
-            // branches of its run loop — and a pause that reported
-            // "failed" would park the job in the wrong state and invite
-            // the queue to retry it.
-            if self.cancel.is_cancelled() {
-                JobError::Cancelled
-            } else {
-                job_error_from_odl(&e)
-            }
-        })?;
+        let path = self
+            .manager
+            .download(dl_req)
+            .await
+            .map_err(|e| job_error_from_odl(&e))?;
 
         // Hashing is oxdm's, not odl's (`verify_checksums(false)`): the
         // file exists by now, so a mismatch can be reported against a
