@@ -150,10 +150,10 @@ pub enum Msg {
     RemoveDeleteOnDisk(bool),
     RemoveDontAsk(bool),
     RemoveConfirm,
-    /// A removal finished: `n` entries gone, plus every file the daemon
-    /// (or Trash) could not get rid of.
+    /// A removal finished: what went (already phrased for the toast),
+    /// plus every file the daemon (or Trash) could not get rid of.
     RemoveDone {
-        n: usize,
+        what: String,
         problems: Vec<String>,
     },
     // Drag-to-add (design `.drag-overlay`)
@@ -606,6 +606,22 @@ pub fn boot() -> (App, Task<Msg>) {
             Msg::Connected,
         ),
     )
+}
+
+/// A filename cut to what a toast can hold, ending in an ellipsis.
+///
+/// Head-truncated, not middle: what distinguishes two downloads in a
+/// list is almost always the start of the name, and a toast is read in
+/// passing rather than studied.
+fn clipped(name: &str) -> String {
+    const MAX: usize = 36;
+    let mut chars = name.chars();
+    let head: String = chars.by_ref().take(MAX).collect();
+    if chars.next().is_none() {
+        head
+    } else {
+        format!("{head}\u{2026}")
+    }
 }
 
 fn act<F>(fut: F) -> Task<Msg>
@@ -1094,7 +1110,14 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             } else {
                 Vec::new()
             };
-            let n = r.ids.len();
+            // Named while the state is still here: "Removed download"
+            // tells the user nothing when three rows were selected and
+            // one of them was the wrong one.
+            let what = if r.ids.len() == 1 {
+                format!("Removed {}", clipped(&r.filename))
+            } else {
+                format!("Removed {} downloads", r.ids.len())
+            };
             let client = m.client.clone();
             let mut settings = m.snap.settings.clone();
             Task::perform(
@@ -1143,16 +1166,14 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                     }
                     problems
                 },
-                move |problems| Msg::RemoveDone { n, problems },
+                move |problems| Msg::RemoveDone {
+                    what: what.clone(),
+                    problems,
+                },
             )
         }
-        Msg::RemoveDone { n, problems } => {
+        Msg::RemoveDone { what, problems } => {
             if problems.is_empty() {
-                let what = if n == 1 {
-                    "Removed download".to_owned()
-                } else {
-                    format!("Removed {n} downloads")
-                };
                 return update_main(m, Msg::Toast(ToastSeverity::Success, what));
             }
             m.remove_problems = problems;
@@ -3234,8 +3255,13 @@ fn context_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>, id: JobId) -> E
             .width(Length::Fill)
     };
 
-    let can_resume = matches!(phase, Phase::Paused | Phase::Cancelled | Phase::Failed);
-    let can_pause = phase.is_running();
+    // One entry, not two: pause and resume are the same switch, and the
+    // download window's footer has always shown it that way. Queued
+    // counts as resumable — the job is holding bytes and waiting for a
+    // slot, and "start it now" is exactly what the user means. Only a
+    // finished download has nothing to resume; `Restart Download`
+    // below is the entry for that.
+    let running = phase.is_running();
     let done = phase == Phase::Completed;
 
     // Destructive row morphs with live modifiers (design: Finder-like):
@@ -3309,10 +3335,24 @@ fn context_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>, id: JobId) -> E
 
     let menu = container(
         column![
-            // Design puts "Show progress…" first and offers it in every
-            // state — the same window carries the completion view, so a
-            // finished download can be reopened after its dialog was
-            // dismissed. The label follows what the window will show.
+            // The action most often wanted sits under the cursor.
+            item(
+                if running { "pause" } else { "play" },
+                if running { "Pause" } else { "Resume" },
+                None,
+                !done,
+                Msg::Context(if running {
+                    ContextAction::Pause
+                } else {
+                    ContextAction::Resume
+                })
+            ),
+            separator(),
+            // Design puts "Show progress…" first among the rest and
+            // offers it in every state — the same window carries the
+            // completion view, so a finished download can be reopened
+            // after its dialog was dismissed. The label follows what
+            // the window will show.
             item(
                 "activity",
                 if done {
@@ -3337,20 +3377,6 @@ fn context_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>, id: JobId) -> E
                 None,
                 true,
                 Msg::Context(ContextAction::OpenFolder)
-            ),
-            item(
-                "play",
-                "Resume",
-                None,
-                can_resume,
-                Msg::Context(ContextAction::Resume)
-            ),
-            item(
-                "pause",
-                "Pause",
-                None,
-                can_pause,
-                Msg::Context(ContextAction::Pause)
             ),
             separator(),
             destruct,

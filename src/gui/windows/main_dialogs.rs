@@ -95,6 +95,13 @@ fn title_row<'a>(t: &Tokens, title: &str) -> Element<'a, Msg> {
         .into()
 }
 
+/// `one` when a single entry is at stake, `many` otherwise. Copy that
+/// says "the file" while three are selected is how a user deletes two
+/// downloads they meant to keep.
+fn plural(n: usize, one: &str, many: &str) -> String {
+    if n == 1 { one.to_owned() } else { many.to_owned() }
+}
+
 // ---------------------------------------------------------------- remove
 
 pub fn remove_confirm<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg> {
@@ -109,45 +116,64 @@ pub fn remove_confirm<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Ms
 
     // Headline/accent/CTA morph with the pre-selected kind (B4: the
     // modifier picked the option, this dialog still confirms it).
+    let n = st.ids.len();
     let (hero_icon, hero_color, message, cta_label, cta_icon): (
         &str,
         iced::Color,
-        &str,
+        String,
         &str,
         &str,
     ) = match st.kind {
         RemoveKind::Trash => (
             "trash-2",
             color::ochre::O400,
-            "The file will be moved to your system Trash (recoverable).",
+            plural(
+                n,
+                "The file will be moved to your system Trash (recoverable).",
+                &format!("All {n} files will be moved to your system Trash (recoverable)."),
+            ),
             "Move to Trash",
             "trash-2",
         ),
         RemoveKind::Permanent => (
             "triangle-alert",
             color::rust::R300,
-            "The file will be permanently deleted from disk. This cannot be undone.",
+            plural(
+                n,
+                "The file will be permanently deleted from disk. This cannot be undone.",
+                &format!(
+                    "All {n} files will be permanently deleted from disk. This cannot be undone."
+                ),
+            ),
             "Delete permanently",
             "trash-2",
         ),
         RemoveKind::Entry if st.clean => (
             "trash-2",
             t.status_danger,
-            "Clears every completed entry from the list. Files stay on disk.",
+            "Clears every completed entry from the list. Files stay on disk.".to_owned(),
             "Clean",
             "trash-2",
         ),
         RemoveKind::Entry if st.completed => (
             "triangle-alert",
             t.status_danger,
-            "This only removes the entry from oxdm.",
+            plural(
+                n,
+                "This only removes the entry from oxdm.",
+                &format!("This only removes the {n} entries from oxdm."),
+            ),
             "Remove",
             "trash-2",
         ),
         RemoveKind::Entry => (
             "triangle-alert",
             t.status_danger,
-            "Partial (.part) files will be deleted from disk.",
+            plural(
+                n,
+                "Partial (.part) files will be deleted from disk.",
+                &format!("Partial (.part) files for all {n} will be deleted from disk."),
+            ),
             "Remove",
             "trash-2",
         ),
@@ -190,12 +216,18 @@ pub fn remove_confirm<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Ms
     ]
     .spacing(theme::space::S3);
 
-    // On-disk delete toggle: meaningful only for completed entries that
-    // aren't going to Trash (Trash moves the file itself).
+    // On-disk delete toggle: meaningful only when EVERY selected entry
+    // is completed (a mixed selection has partials, and there is no
+    // finished file to offer) and they aren't going to Trash, which
+    // moves the files itself.
     if st.completed && !st.clean && st.kind != RemoveKind::Trash {
         card = card.push(checkbox(
             t,
-            "Also delete file on disk",
+            &plural(
+                n,
+                "Also delete file on disk",
+                &format!("Also delete all {n} files on disk"),
+            ),
             st.delete_on_disk,
             true,
             Msg::RemoveDeleteOnDisk,
