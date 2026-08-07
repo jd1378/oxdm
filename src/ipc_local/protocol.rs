@@ -382,6 +382,12 @@ pub enum Event {
         id: JobId,
         error: JobError,
     },
+    /// A hash check could not run: the saved file has moved or cannot
+    /// be read. No checksum row changed — nothing was disproved.
+    VerifyFailed {
+        id: JobId,
+        message: String,
+    },
     /// odl scheduled a retry: the next attempt starts in `delay_ms`.
     /// `ulid` names the part it belongs to, or `None` for a
     /// whole-download step such as the probe. The wait is

@@ -486,6 +486,10 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                 }
                 Task::none()
             }
+            Event::VerifyFailed { id, message } if id == st.id => {
+                st.cs_verify_error = Some(message);
+                Task::none()
+            }
             Event::JobsChanged => {
                 let client = st.client.clone();
                 let id = st.id;

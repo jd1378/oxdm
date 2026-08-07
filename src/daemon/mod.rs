@@ -56,6 +56,15 @@ fn spawn_workers(
 ) {
     let _g = rt.enter();
     {
+        // A hash check the last run did not finish. Nothing waits on
+        // it, and there is normally none — the marker only survives a
+        // daemon that exited mid-check.
+        let s = state.clone();
+        tokio::spawn(async move {
+            s.resume_pending_verifications().await;
+        });
+    }
+    {
         let s = state.clone();
         tokio::spawn(async move {
             if let Err(e) = crate::ipc::serve(s).await {

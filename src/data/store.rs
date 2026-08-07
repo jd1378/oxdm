@@ -14,7 +14,7 @@ use crate::domain::{Job, JobId, Phase, Queue, QueueHook, QueueId, QueueSchedule,
 
 /// Schema version. Bump on every breaking change. Migrations are a
 /// match on the read-back version; tiny enough to keep DIY.
-const SCHEMA_VERSION: i32 = 6;
+const SCHEMA_VERSION: i32 = 7;
 
 /// Async-friendly handle around a blocking `rusqlite::Connection`.
 #[derive(Clone)]
@@ -128,6 +128,7 @@ impl Store {
                      finished_at           TEXT,
                      retries               INTEGER NOT NULL DEFAULT 0,
                      interruptions         INTEGER NOT NULL DEFAULT 0,
+                     verify_pending        INTEGER NOT NULL DEFAULT 0,
                      response_headers_json TEXT NOT NULL DEFAULT 'null',
                      error_json            TEXT NOT NULL DEFAULT 'null',
                      FOREIGN KEY(queue_id) REFERENCES queues(id) ON DELETE RESTRICT
@@ -200,6 +201,20 @@ impl Store {
                         self.with_conn(|conn| {
                             conn.execute_batch(
                                 "ALTER TABLE jobs ADD COLUMN response_headers_json TEXT NOT NULL DEFAULT 'null';",
+                            )
+                        })
+                        .await
+                        .map_err(StoreError::Sql)?;
+                    }
+                    7 => {
+                        // v7: an unfinished hash check. 0 on existing
+                        // rows — a check that was running before this
+                        // column existed is one nothing recorded, and
+                        // hashing every completed file on first launch
+                        // to find out would cost more than it is worth.
+                        self.with_conn(|conn| {
+                            conn.execute_batch(
+                                "ALTER TABLE jobs ADD COLUMN verify_pending INTEGER NOT NULL DEFAULT 0;",
                             )
                         })
                         .await
@@ -515,7 +530,7 @@ impl Store {
                             auth_password_enc, proxy_password_enc, cookies_enc, \
                             advanced_json, checksums_json, category, \
                             started_at, finished_at, retries, interruptions, \
-                            response_headers_json, \
+                            verify_pending, response_headers_json, \
                             error_json \
                      FROM jobs ORDER BY created_at ASC",
                 )?;
@@ -547,10 +562,11 @@ impl Store {
                         finished_at: row.get(23).ok(),
                         retries: row.get(24).unwrap_or(0),
                         interruptions: row.get(25).unwrap_or(0),
+                        verify_pending: row.get(26).unwrap_or(0),
                         response_headers_json: row
-                            .get::<_, String>(26)
+                            .get::<_, String>(27)
                             .unwrap_or_else(|_| "null".into()),
-                        error_json: row.get::<_, String>(27).unwrap_or_else(|_| "null".into()),
+                        error_json: row.get::<_, String>(28).unwrap_or_else(|_| "null".into()),
                     })
                 })?;
                 iter.collect::<Result<Vec<_>, _>>()
@@ -571,9 +587,9 @@ impl Store {
                     downloaded, total, final_path, proxy, auth_user, \
                     auth_password_enc, proxy_password_enc, cookies_enc, \
                     advanced_json, checksums_json, category, \
-                    started_at, finished_at, retries, interruptions, \
+                    started_at, finished_at, retries, interruptions, verify_pending, \
                     response_headers_json, error_json) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29) \
                  ON CONFLICT(id) DO UPDATE SET \
                     url=excluded.url, save_dir=excluded.save_dir, \
                     filename=excluded.filename, referrer=excluded.referrer, \
@@ -597,6 +613,7 @@ impl Store {
                     finished_at=excluded.finished_at, \
                     retries=excluded.retries, \
                     interruptions=excluded.interruptions, \
+                    verify_pending=excluded.verify_pending, \
                     response_headers_json=excluded.response_headers_json, \
                     error_json=excluded.error_json",
                 params![
@@ -626,6 +643,7 @@ impl Store {
                     row.finished_at,
                     row.retries,
                     row.interruptions,
+                    row.verify_pending,
                     row.response_headers_json,
                     row.error_json,
                 ],
@@ -739,6 +757,7 @@ struct JobRow {
     finished_at: Option<String>,
     retries: i64,
     interruptions: i64,
+    verify_pending: i64,
     response_headers_json: String,
     /// Why the last run failed, as JSON (`null` when it did not). The
     /// phase alone says a job failed; this says what to tell the user
@@ -849,6 +868,7 @@ impl JobRow {
             finished_at: job.finished_at.map(|d| d.to_rfc3339()),
             retries: job.retries as i64,
             interruptions: job.interruptions as i64,
+            verify_pending: job.verify_pending as i64,
             response_headers_json: serde_json::to_string(&job.captured_response)
                 .map_err(|e| StoreError::Other(e.to_string()))?,
             error_json: serde_json::to_string(&job.status.error)
@@ -915,6 +935,7 @@ impl JobRow {
         let finished_at = parse_ts(&self.finished_at);
         let retries = self.retries.max(0) as u32;
         let interruptions = self.interruptions.max(0) as u32;
+        let verify_pending = self.verify_pending != 0;
 
         Ok(Job {
             id: JobId(id),
@@ -936,6 +957,7 @@ impl JobRow {
             finished_at,
             retries,
             interruptions,
+            verify_pending,
             status,
             advanced,
             checksums,
@@ -1046,6 +1068,7 @@ mod tests {
             finished_at: None,
             retries: 0,
             interruptions: 0,
+            verify_pending: false,
             status,
             advanced: crate::domain::Advanced::default(),
             checksums: Vec::new(),
@@ -1292,6 +1315,8 @@ mod tests {
         // v6 column: a run that ended before the counter existed has no
         // interruption history to report.
         assert_eq!(j.interruptions, 0);
+        // v7 column: no check was owed by a build that could not owe one.
+        assert!(!j.verify_pending);
         // v4 column: a row written before response capture existed
         // reads as "never probed", not as an empty capture.
         assert_eq!(j.captured_response, None);
@@ -1300,6 +1325,7 @@ mod tests {
         let mut updated = j.clone();
         updated.retries = 4;
         updated.interruptions = 6;
+        updated.verify_pending = true;
         updated.finished_at = Some(chrono::Utc::now());
         updated.captured_response = Some(crate::domain::CapturedResponse {
             headers: vec![crate::domain::ResponseHeader {
@@ -1312,6 +1338,10 @@ mod tests {
         let reread = store.list_jobs().await.unwrap();
         assert_eq!(reread[0].retries, 4);
         assert_eq!(reread[0].interruptions, 6);
+        assert!(
+            reread[0].verify_pending,
+            "an owed hash check survives a restart",
+        );
         assert!(reread[0].finished_at.is_some());
         assert_eq!(reread[0].captured_response, updated.captured_response);
     }

@@ -1410,11 +1410,24 @@ impl AppState {
         if crate::data::mapping::checksum_digests(&entry.job).is_empty() {
             return Err(JobError::Other("nothing to check this file against".into()));
         }
+        // Answer "the file is gone" to the caller's face rather than in
+        // a log line half a second later — the window asking is still
+        // open, and this is the common failure: the user moved it.
+        if tokio::fs::metadata(&path).await.is_err() {
+            return Err(JobError::Other(format!(
+                "the saved file is no longer at {}",
+                path.display()
+            )));
+        }
         // One run per job: a second click while the first is hashing
         // would read the same file twice to the same answer.
         if entry.verifying.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
+        // Written down before the work starts: a hash cannot be resumed
+        // — half a digest is worth nothing — but a daemon that dies
+        // mid-check should know on the next launch that it owes one.
+        self.set_verify_pending(id, true).await;
 
         let state = self.clone();
         let phase = entry.phase();
@@ -1427,12 +1440,64 @@ impl AppState {
             match results {
                 Ok(rows) => state.apply_checksum_results(id, rows).await,
                 // An unreadable file says nothing about the hashes, so
-                // no row's verdict changes.
-                Err(e) => tracing::warn!(id = %id, error = %e, "checksum verification failed"),
+                // no row's verdict changes — but a window that asked
+                // deserves to hear why nothing happened. It can vanish
+                // between the ask and the answer, hence an event rather
+                // than a reply.
+                Err(e) => {
+                    tracing::warn!(id = %id, error = %e, "checksum verification failed");
+                    let _ = state.events.send(DomainEvent::JobVerifyFailed {
+                        id,
+                        message: e.clone(),
+                    });
+                }
             }
+            // Cleared either way: a file we cannot read is not a check
+            // worth retrying on every launch.
+            state.set_verify_pending(id, false).await;
             let _ = state.events.send(DomainEvent::JobUpdated { id, phase });
         });
         Ok(())
+    }
+
+    /// Flip the persisted "a check is owed" marker.
+    async fn set_verify_pending(self: &Arc<Self>, id: JobId, pending: bool) {
+        let Some(entry) = self.job_entry(id).await else {
+            return;
+        };
+        if entry.job.verify_pending == pending {
+            return;
+        }
+        let mut job = entry.job.clone();
+        job.verify_pending = pending;
+        let fresh = clone_entry_with_job(&entry, job).await;
+        self.jobs.write().await.insert(id, fresh);
+        self.persist_job(id).await;
+    }
+
+    /// Re-run every hash check that was interrupted by a daemon exit.
+    ///
+    /// Bounded to jobs that were actually mid-check — normally none, at
+    /// most a handful — rather than re-hashing every completed download
+    /// on the chance that one of them is stale.
+    pub async fn resume_pending_verifications(self: &Arc<Self>) {
+        let owed: Vec<JobId> = self
+            .jobs
+            .read()
+            .await
+            .values()
+            .filter(|e| e.job.verify_pending)
+            .map(|e| e.job.id)
+            .collect();
+        for id in owed {
+            if let Err(e) = self.verify_checksums(id).await {
+                // The file is gone, or there is nothing to check it
+                // against: clear the marker rather than carrying it
+                // forward into every future launch.
+                tracing::info!(id = %id, reason = %e, "dropping an owed checksum check");
+                self.set_verify_pending(id, false).await;
+            }
+        }
     }
 
     /// Write per-row verdicts from a hash run. A mismatched row keeps
@@ -1565,6 +1630,7 @@ impl AppState {
             finished_at: None,
             retries: 0,
             interruptions: 0,
+            verify_pending: false,
             status: JobStatus::default(),
             advanced: crate::domain::Advanced::default(),
             checksums: Vec::new(),

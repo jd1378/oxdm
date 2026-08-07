@@ -273,6 +273,13 @@ pub struct Job {
     /// job restarts from zero.
     #[serde(default)]
     pub interruptions: u32,
+    /// A hash check was asked for and has not finished. Persisted so an
+    /// interrupted check is one the daemon knows to redo: the work
+    /// itself cannot be resumed — a partial hash is worth nothing — but
+    /// the *intent* is worth keeping, and re-running it is bounded to
+    /// the jobs that were actually mid-check.
+    #[serde(default)]
+    pub verify_pending: bool,
     pub status: JobStatus,
     /// Per-job advanced settings (Properties dialog → Advanced /
     /// Connection / Cookies / Headers tabs). Persisted as JSON in the
@@ -647,6 +654,7 @@ mod tests {
             finished_at: None,
             retries: 0,
             interruptions: 0,
+            verify_pending: false,
             status: JobStatus::default(),
             advanced: crate::domain::Advanced::default(),
             checksums: Vec::new(),

@@ -54,6 +54,13 @@ pub enum DomainEvent {
     JobRemoved {
         id: JobId,
     },
+    /// A hash check could not be carried out — the saved file has moved
+    /// or cannot be read. Distinct from a mismatch: nothing was
+    /// disproved, so no row's verdict changes.
+    JobVerifyFailed {
+        id: JobId,
+        message: String,
+    },
     SettingsChanged,
     /// User must answer a server-side conflict (etag changed, not resumable, …).
     /// Carries a token the UI uses when calling `state.resolve_*`.

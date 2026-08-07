@@ -362,6 +362,10 @@ fn map_domain_event(filter: SubFilter, ev: DomainEvent) -> Option<Event> {
             server_requested,
         }),
         DomainEvent::JobRetryScheduled { .. } => None,
+        DomainEvent::JobVerifyFailed { id, message } if matches_filter(filter, id) => {
+            Some(Event::VerifyFailed { id, message })
+        }
+        DomainEvent::JobVerifyFailed { .. } => None,
         DomainEvent::JobCompleted { id, path, .. } if matches_filter(filter, id) => {
             Some(Event::JobCompleted { id, path })
         }
