@@ -589,7 +589,8 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
                 delete_final_file: opts.delete_final_file,
             };
             match state.remove(id, opts).await {
-                Ok(()) => Reply::Ok,
+                Ok(None) => Reply::Ok,
+                Ok(Some(w)) => Reply::Warning(w),
                 Err(e) => Reply::Err(job_err_string(e)),
             }
         }

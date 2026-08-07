@@ -408,6 +408,73 @@ pub fn db_error<'a>(m: &'a Main, base: Element<'a, Msg>, error: &str) -> Element
     modal(t, base, card.into(), 460.0, None)
 }
 
+// -------------------------------------------------- remove warning
+
+/// Shown after a removal that could not take a file with it. The
+/// entries are already gone — this is a report, not a choice, so the
+/// only action is to acknowledge it.
+pub fn remove_warning<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg> {
+    let t = &m.tokens;
+    let t2 = *t;
+    let n = m.remove_problems.len();
+    let headline = if n == 1 {
+        "A file could not be deleted".to_owned()
+    } else {
+        format!("{n} files could not be deleted")
+    };
+
+    let mut list: iced::widget::Column<'_, Msg> = column![].spacing(theme::space::S2);
+    for p in &m.remove_problems {
+        list = list.push(
+            text(p.clone())
+                .font(theme::MONO)
+                .size(11.0)
+                .color(t.fg_2)
+                .wrapping(text::Wrapping::WordOrGlyph),
+        );
+    }
+
+    let card = column![
+        row![
+            icons::icon("triangle-alert", 20.0, t.status_warning),
+            title_row(t, &headline),
+        ]
+        .spacing(theme::space::S2)
+        .align_y(Alignment::Center),
+        text(
+            "The download was removed from the list, but the file is still on \
+             disk. It may be open in another program, on a read-only or \
+             disconnected volume, or owned by another user."
+        )
+        .font(theme::BODY)
+        .size(12.0)
+        .color(t.fg_2),
+        container(vscroll(Element::from(list)))
+            .max_height(160.0)
+            .width(Length::Fill)
+            .padding(theme::space::S3)
+            .style(move |_| container::Style {
+                background: Some(t2.bg_sunken.into()),
+                border: iced::Border {
+                    color: t2.border_subtle,
+                    width: 1.0,
+                    radius: theme::surface::RADIUS.into(),
+                },
+                ..Default::default()
+            }),
+        row![
+            iced::widget::Space::new().width(Length::Fill),
+            Btn::new("Close")
+                .primary()
+                .on_press(Msg::CloseOverlay)
+                .view(t),
+        ]
+        .align_y(Alignment::Center),
+    ]
+    .spacing(theme::space::S3);
+    modal(t, base, card.into(), 460.0, Some(Msg::CloseOverlay))
+}
+
 // ------------------------------------------------------ browser extensions
 
 // Each vendor's extension store landing page (design §3.8). We do NOT

@@ -150,6 +150,12 @@ pub enum Msg {
     RemoveDeleteOnDisk(bool),
     RemoveDontAsk(bool),
     RemoveConfirm,
+    /// A removal finished: `n` entries gone, plus every file the daemon
+    /// (or Trash) could not get rid of.
+    RemoveDone {
+        n: usize,
+        problems: Vec<String>,
+    },
     // Drag-to-add (design `.drag-overlay`)
     DragHover(bool),
     DragDropped(std::path::PathBuf),
@@ -277,6 +283,9 @@ pub enum Overlay {
     Welcome,
     DbError,
     SecretsLocked,
+    /// The entries were removed, but some of their files are still on
+    /// disk. Shown after the fact — the removal already happened.
+    RemoveWarning,
 }
 
 pub enum App {
@@ -309,6 +318,8 @@ pub struct Main {
     pub hovered_row: Option<JobId>,
     pub overlay: Overlay,
     pub remove: Option<RemoveState>,
+    /// Files a removal was asked to delete and could not, one line each.
+    pub remove_problems: Vec<String>,
     pub db_error: Option<String>,
     pub modifiers: iced::keyboard::Modifiers,
     pub cursor: (f32, f32),
@@ -397,6 +408,7 @@ impl Main {
             hovered_row: None,
             overlay: Overlay::None,
             remove: None,
+            remove_problems: Vec::new(),
             db_error: None,
             modifiers: iced::keyboard::Modifiers::default(),
             cursor: (0.0, 0.0),
@@ -834,6 +846,9 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             if m.overlay == Overlay::Welcome {
                 return update_main(m, Msg::WelcomeDismiss);
             }
+            if m.overlay == Overlay::RemoveWarning {
+                m.remove_problems.clear();
+            }
             if !matches!(m.overlay, Overlay::DbError | Overlay::SecretsLocked) {
                 m.overlay = Overlay::None;
             }
@@ -1084,21 +1099,24 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             let mut settings = m.snap.settings.clone();
             Task::perform(
                 async move {
-                    // N4: surface the FIRST trash failure as an error
-                    // toast (no DBus / cross-device → never silent). The
-                    // entry is still removed below so the list stays sane.
-                    let mut trash_err: Option<String> = None;
+                    // N4: a file that survives the removal is never
+                    // silent — no DBus, cross-device, read-only, still
+                    // open. The entries go either way (a half-done
+                    // removal is worse), and what is left behind is
+                    // collected for the dialog afterwards.
+                    let mut problems: Vec<String> = Vec::new();
                     for p in trash_paths {
+                        let shown = p.display().to_string();
                         let res = tokio::task::spawn_blocking(move || trash::delete(&p))
                             .await
                             .map_err(|e| e.to_string())
                             .and_then(|r| r.map_err(|e| e.to_string()));
                         if let Err(e) = res {
-                            trash_err.get_or_insert(e);
+                            problems.push(format!("{shown}: {e}"));
                         }
                     }
                     for id in &r.ids {
-                        let _ = client
+                        if let Ok(Some(w)) = client
                             .remove(
                                 *id,
                                 crate::data::RemoveOpts {
@@ -1108,7 +1126,10 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                                     delete_final_file: r.completed && r.delete_on_disk && !trash,
                                 },
                             )
-                            .await;
+                            .await
+                        {
+                            problems.push(w);
+                        }
                     }
                     if r.dont_ask_again {
                         if r.clean {
@@ -1120,22 +1141,23 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                         }
                         let _ = client.update_settings(settings).await;
                     }
-                    trash_err
+                    problems
                 },
-                move |trash_err| match trash_err {
-                    Some(e) => {
-                        Msg::Toast(ToastSeverity::Error, format!("Couldn't move to Trash: {e}"))
-                    }
-                    None => {
-                        let what = if n == 1 {
-                            "Removed download".to_owned()
-                        } else {
-                            format!("Removed {n} downloads")
-                        };
-                        Msg::Toast(ToastSeverity::Success, what)
-                    }
-                },
+                move |problems| Msg::RemoveDone { n, problems },
             )
+        }
+        Msg::RemoveDone { n, problems } => {
+            if problems.is_empty() {
+                let what = if n == 1 {
+                    "Removed download".to_owned()
+                } else {
+                    format!("Removed {n} downloads")
+                };
+                return update_main(m, Msg::Toast(ToastSeverity::Success, what));
+            }
+            m.remove_problems = problems;
+            m.overlay = Overlay::RemoveWarning;
+            Task::none()
         }
         Msg::Conflict(id, token, kind, choice) => {
             let client = m.client.clone();
@@ -1336,6 +1358,11 @@ fn handle_key(
         // status, so Enter is gated on the confirm overlay being open.
         Key::Named(Named::Enter) if m.overlay == Overlay::Remove => {
             update_main(m, Msg::RemoveConfirm)
+        }
+        // Nothing to confirm — the removal already happened; Enter
+        // acknowledges the report the same way the Close button does.
+        Key::Named(Named::Enter) if m.overlay == Overlay::RemoveWarning => {
+            update_main(m, Msg::CloseOverlay)
         }
         Key::Named(Named::Escape) => update_main(m, Msg::CloseOverlay),
         _ => Task::none(),
@@ -1663,6 +1690,7 @@ fn main_view(m: &Main) -> Element<'_, Msg> {
                 main_dialogs::db_error(m, base, &err)
             }
             Overlay::SecretsLocked => main_dialogs::secrets_locked(m, base),
+            Overlay::RemoveWarning => main_dialogs::remove_warning(m, base),
             _ => base,
         }
     };

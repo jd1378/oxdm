@@ -127,6 +127,21 @@ pub struct JobEntry {
 }
 
 impl JobEntry {
+    /// Where this job's assembled file is, live value first.
+    ///
+    /// The runner writes the path it actually produced into the atomic
+    /// slot as soon as the download lands; `job.status` catches up on
+    /// the next persist. Reading only the persisted side misses a file
+    /// that exists — which, for anything that deletes, means silently
+    /// leaving it behind.
+    pub fn saved_file(&self) -> Option<std::path::PathBuf> {
+        self.final_path
+            .read()
+            .ok()
+            .and_then(|g| g.clone())
+            .or_else(|| self.job.status.final_path.clone())
+    }
+
     /// Per-job completion prefs are passed in rather than defaulted:
     /// they live in memory only, so every boot re-seeds them from the
     /// current global setting, and from then on the job's own answer is
@@ -1453,11 +1468,7 @@ impl AppState {
             .await
             .ok_or_else(|| JobError::Other("job not found".into()))?;
         let path = entry
-            .final_path
-            .read()
-            .ok()
-            .and_then(|g| g.clone())
-            .or_else(|| entry.job.status.final_path.clone())
+            .saved_file()
             .ok_or_else(|| JobError::Other("this download has no saved file".into()))?;
         // Asked for by hand, so `auto_verify` does not gate it: that
         // preference says whether to check *without being asked*.
@@ -2300,11 +2311,7 @@ impl AppState {
             .await
             .ok_or_else(|| JobError::Other("job not found".into()))?;
         let path = entry
-            .final_path
-            .read()
-            .ok()
-            .and_then(|g| g.clone())
-            .or_else(|| entry.job.status.final_path.clone())
+            .saved_file()
             .ok_or_else(|| JobError::Other("this download has no saved file".into()))?;
         match tokio::fs::remove_file(&path).await {
             Ok(()) => {}
@@ -2319,9 +2326,20 @@ impl AppState {
         Ok(())
     }
 
-    /// Remove a job. `delete_files` decides whether to also wipe
-    /// `metadata.pb` + `.part` + (if completed) the assembled file.
-    pub async fn remove(self: &Arc<Self>, id: JobId, opts: RemoveOpts) -> Result<(), JobError> {
+    /// Remove a job. `opts` decides whether to also wipe `metadata.pb`
+    /// + `.part` + (if completed) the assembled file.
+    ///
+    /// `Ok(Some(msg))` means the entry is gone but the file the caller
+    /// asked to delete is still on disk — read-only, in use, on a
+    /// mount that vanished. The list has to lose the row either way (a
+    /// removal that half-happens is worse), but a delete that quietly
+    /// did not delete is exactly the kind of thing the user finds out
+    /// about a month later, so it is handed back to be shown.
+    pub async fn remove(
+        self: &Arc<Self>,
+        id: JobId,
+        opts: RemoveOpts,
+    ) -> Result<Option<String>, JobError> {
         let entry = self
             .job_entry(id)
             .await
@@ -2340,10 +2358,20 @@ impl AppState {
             let dir = per_job_dir(&settings.work_dir, id);
             let _ = tokio::fs::remove_dir_all(&dir).await;
         }
+        let mut warning = None;
         if opts.delete_final_file
-            && let Some(p) = entry.job.status.final_path.as_ref()
+            && let Some(p) = entry.saved_file()
         {
-            let _ = tokio::fs::remove_file(p).await;
+            match tokio::fs::remove_file(&p).await {
+                Ok(()) => {}
+                // Already gone is the state the user asked for.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    tracing::warn!(id = %id, path = %p.display(), error = %e,
+                        "could not delete the file while removing the job");
+                    warning = Some(format!("{}: {e}", p.display()));
+                }
+            }
         }
 
         self.store
@@ -2356,7 +2384,7 @@ impl AppState {
         let _ = entry;
         self.jobs.write().await.shift_remove(&id);
         let _ = self.events.send(DomainEvent::JobRemoved { id });
-        Ok(())
+        Ok(warning)
     }
 
     // ── conflict resolution callbacks (driven from UI) ─────────────

@@ -228,8 +228,19 @@ impl Client {
         self.expect_ok(Request::DeleteFinalFile(id)).await
     }
 
-    pub async fn remove(&self, id: JobId, opts: RemoveOpts) -> Result<(), String> {
-        self.expect_ok(Request::Remove(id, opts)).await
+    /// `Ok(Some(msg))`: the job is gone, but the file it was asked to
+    /// delete is still there and `msg` says why.
+    pub async fn remove(&self, id: JobId, opts: RemoveOpts) -> Result<Option<String>, String> {
+        match self
+            .request(Request::Remove(id, opts))
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            Reply::Ok => Ok(None),
+            Reply::Warning(w) => Ok(Some(w)),
+            Reply::Err(e) => Err(e),
+            _ => unreachable!("remove reply"),
+        }
     }
     pub async fn set_job_queue(&self, id: JobId, qid: QueueId) -> Result<(), String> {
         self.expect_ok(Request::SetJobQueue(id, qid)).await
@@ -496,7 +507,7 @@ impl Client {
 
     async fn expect_ok(&self, req: Request) -> Result<(), String> {
         match self.request(req).await.map_err(|e| e.to_string())? {
-            Reply::Ok => Ok(()),
+            Reply::Ok | Reply::Warning(_) => Ok(()),
             Reply::Err(e) => Err(e),
             _ => unreachable!("ok reply"),
         }

@@ -347,6 +347,11 @@ pub enum FinalFileRes {
 pub enum Reply {
     Ok,
     Err(String),
+    /// The request was carried out, but something inside it went wrong
+    /// in a way the user should hear about — the entry was removed and
+    /// the file it was meant to take with it is still on disk. Distinct
+    /// from `Err`, which means nothing happened.
+    Warning(String),
     Snapshot(SnapshotData),
     JobEntry(Option<JobEntryView>),
     JobAdded(JobId),

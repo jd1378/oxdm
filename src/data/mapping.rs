@@ -318,7 +318,7 @@ pub fn server_checksums(instr: &odl::Download) -> Vec<Checksum> {
         .filter_map(|d| {
             let algo = algo_from_odl(d.algorithm())?;
             let hex: String = d.raw_bytes()?.iter().map(|b| format!("{b:02x}")).collect();
-            (hex.len() == algo.hex_len()).then(|| Checksum {
+            (hex.len() == algo.hex_len()).then_some(Checksum {
                 algo,
                 hash: hex,
                 source: CsSource::Server,
