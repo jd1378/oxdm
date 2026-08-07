@@ -448,13 +448,21 @@ impl State {
         let job = &self.entry.job;
         let name = job.filename.as_deref().unwrap_or(job.url.as_str());
         let phase = self.phase();
-        // A transfer in flight or held mid-way carries its progress into
-        // the title, so the taskbar answers "how far along?" without
-        // raising the window. The other states have no distance left to
-        // report — and with no content-length there is no percentage to
-        // report either.
-        let show_progress =
-            matches!(phase, Phase::Downloading | Phase::Paused) && self.total().is_some();
+        // A transfer in flight or held mid-way carries its progress
+        // into the title, so the taskbar answers "how far along?"
+        // without raising the window. Queued counts when it is holding
+        // bytes — a cancelled-to-queued download is stopped at 45% the
+        // same way a paused one is — but not at zero, where "Queued 0%"
+        // only takes up room. Terminal states have no distance left to
+        // report, and with no content-length there is no percentage to
+        // report at all.
+        let started = self.entry.counters.downloaded > 0;
+        let show_progress = self.total().is_some()
+            && match phase {
+                Phase::Downloading | Phase::Paused | Phase::Reconnecting => true,
+                Phase::Queued => started,
+                _ => false,
+            };
         if show_progress {
             format!(
                 "{name} — {} {}%",
