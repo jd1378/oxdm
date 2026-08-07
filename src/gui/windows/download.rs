@@ -1201,7 +1201,13 @@ fn header_card(st: &State) -> Element<'_, Msg> {
             ..Default::default()
         });
 
-    let pct = format!("{}%", (st.frac() * 100.0).round() as u32);
+    // A dash, not "0%", when nothing has said how big the file is:
+    // zero-of-unknown is not zero percent, and the stat strip beside
+    // this already draws "—" for the same gap.
+    let pct = match st.total() {
+        Some(_) => format!("{}%", (st.frac() * 100.0).round() as u32),
+        None => "—".to_owned(),
+    };
 
     container(
         row![

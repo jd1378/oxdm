@@ -306,6 +306,13 @@ pub struct AddJobReq {
     /// daemon detect it from the filename + user settings.
     #[serde(default)]
     pub category: Option<Category>,
+    /// Size the Add dialog's probe reported, if it got one. Carried so a
+    /// queued job knows how big it is before it has ever run — the
+    /// window and the list can show a size and a percentage instead of
+    /// waiting for the first progress event to tell them what the probe
+    /// already knew.
+    #[serde(default)]
+    pub size: Option<u64>,
 }
 
 // Resolution mirrors of `odl::conflict::*` so the wire is independent

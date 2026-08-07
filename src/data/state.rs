@@ -712,6 +712,8 @@ impl AppState {
                 None,
                 None,
                 None,
+                // The updater probes nothing up front.
+                None,
             )
             .await?;
         self.hidden_jobs.write().await.insert(id);
@@ -1608,6 +1610,11 @@ impl AppState {
         proxy_password: Option<String>,
         cookies: Option<String>,
         category: Option<Category>,
+        // What the caller's probe said the file weighs, when it made
+        // one. Recorded now so the job knows its size while it is still
+        // queued, instead of the first progress event teaching the UI
+        // something the Add dialog already displayed.
+        size: Option<u64>,
     ) -> Result<JobId, JobError> {
         let id = JobId::new();
         // Detect the category once at creation when the caller did not
@@ -1658,7 +1665,10 @@ impl AppState {
             retries: 0,
             interruptions: 0,
             verify_pending: false,
-            status: JobStatus::default(),
+            status: JobStatus {
+                total: size,
+                ..JobStatus::default()
+            },
             advanced: crate::domain::Advanced::default(),
             checksums: Vec::new(),
             category,
@@ -1834,6 +1844,9 @@ impl AppState {
                 None,
                 cookies,
                 Some(category),
+                // A capture carries no probe of its own; the run
+                // reports the size.
+                None,
             )
             .await?;
         if let Some(qid) = settings.category_queues.get(&category).copied()

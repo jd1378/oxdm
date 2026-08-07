@@ -516,6 +516,7 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
             proxy_password,
             cookies,
             category,
+            size,
         }) => match state
             .add_job(
                 url,
@@ -530,6 +531,7 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
                 proxy_password,
                 cookies,
                 category,
+                size,
             )
             .await
         {

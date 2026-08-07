@@ -222,23 +222,26 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             let queue = st.queue;
             let start_now = st.start_now;
             let save_dir = st.save_dir.clone();
-            let reqs: Vec<(CaptureRequest, Option<String>)> = st
+            // The probe's name *and* its size: a queued row already
+            // knows how big it is, and throwing that away leaves the
+            // list and the download window with nothing to show until
+            // the transfer starts.
+            let reqs: Vec<(CaptureRequest, Option<String>, Option<u64>)> = st
                 .rows
                 .iter()
                 .filter(|r| r.selected)
                 .map(|r| {
+                    let probed = r.probe.as_ref().and_then(|p| p.as_ref().ok());
                     (
                         r.req.clone(),
-                        r.probe
-                            .as_ref()
-                            .and_then(|p| p.as_ref().ok())
-                            .map(|(name, _, _)| name.clone()),
+                        probed.map(|(name, _, _)| name.clone()),
+                        probed.and_then(|(_, size, _)| *size),
                     )
                 })
                 .collect();
             Task::perform(
                 async move {
-                    for (req, probed_name) in reqs {
+                    for (req, probed_name, probed_size) in reqs {
                         let add = AddJobReq {
                             url: req.url.clone(),
                             save_dir: save_dir.clone(),
@@ -252,6 +255,7 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                             proxy_password: None,
                             cookies: req.cookies.clone(),
                             category: None,
+                            size: probed_size,
                         };
                         let id = client.add_job(add).await?;
                         if let Some(q) = queue {
