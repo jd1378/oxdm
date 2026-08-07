@@ -22,9 +22,9 @@ use crate::gui::theme::{self, Tokens};
 use crate::gui::widget::error_panel::{error_block, hash_mismatch, mid_truncate};
 use crate::gui::widget::striped::striped_progress_hatched;
 use crate::gui::widget::{
-    Btn, BtnSize, RateChart, TabBtn, TextInput, collapsible_card, combo, eyebrow, hairline,
-    number_stepper, pill_progress, rate_chart, segmented, set_row, set_row_panel, set_rows,
-    sibling, status_dot, surface, toggle, vdivider,
+    Btn, BtnSize, RateChart, TabBtn, TextInput, collapsible_card, combo, hairline, number_stepper,
+    pill_progress, rate_chart, segmented, set_row, set_row_panel, set_rows, sibling, status_dot,
+    surface, toggle, vdivider,
 };
 use crate::gui::windows::add::footer;
 use crate::ipc_local::Client;
@@ -52,11 +52,14 @@ const WIN_COMPLETE_H: f32 = 326.0;
 /// with no saved hash left a screenful of empty surface. All measured
 /// off the rendered page.
 const TAMPER_BANNER_H: f32 = 126.0;
-const INTEGRITY_BOX_H: f32 = 96.0;
+const INTEGRITY_BOX_H: f32 = 80.0;
+/// Integrity-table row padding — tighter than a settings row's 12/14.
+const CB_PAD_Y: f32 = 8.0;
+const CB_PAD_X: f32 = 12.0;
 /// Every checksum past the first adds a row to the table.
-const CB_EXTRA_ROW_H: f32 = 47.0;
+const CB_EXTRA_ROW_H: f32 = 39.0;
 /// The "Compute from file" row, which a job with no saved file omits.
-const CB_COMPUTE_H: f32 = 47.0;
+const CB_COMPUTE_H: f32 = 39.0;
 /// The second line an integrity row grows when it has both an expected
 /// and a got hash to show.
 const CB_DIFF_H: f32 = 26.0;
@@ -153,7 +156,7 @@ fn tamper_banner<'a>(t: &Tokens) -> Element<'a, Msg> {
     .style(move |_| container::Style {
         background: Some(t2.status_danger_bg.into()),
         border: iced::Border {
-            color: color::rust::R100,
+            color: DANGER_EDGE,
             width: 1.0,
             radius: theme::surface::RADIUS.into(),
         },
@@ -186,6 +189,11 @@ const CB_LABEL_SIZE: f32 = 9.0;
 /// must never wrap: the copy button shares the row, and a second line
 /// pushes it out of the box.
 const CB_HASH_CHARS: usize = 24;
+
+/// The edge every failed-integrity panel carries, and the fill they
+/// share (`Tokens::status_danger_bg`). One warning across three panels
+/// reads as one thing; three shades of rust read as three.
+const DANGER_EDGE: iced::Color = color::rust::R300;
 
 /// `.tamper-banner` — 12/14 padding, a 16px mark, two sizes of copy.
 const TAMPER_PAD_X: f32 = 14.0;
@@ -2125,13 +2133,10 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
     );
     // `.is-bad` swaps the card's edge for rust and tints its fill: the
     // whole object reads as the problem, not one line inside it.
+    // The card, the banner and the integrity box are one warning split
+    // across three panels: same fill, same edge.
     let header = if tampered {
-        surface(
-            color::mix(t.bg_surface, accent, 0.08),
-            color::rust::R300,
-            0.0,
-            card,
-        )
+        surface(t.status_danger_bg, DANGER_EDGE, 0.0, card)
     } else {
         set_rows(t, vec![card])
     };
@@ -2419,7 +2424,7 @@ fn checksum_box(st: &State) -> Option<Element<'_, Msg>> {
         (t.fg_3, "unverified")
     };
 
-    let head = set_row_panel(
+    let head = cb_row(
         row![
             icons::icon(
                 if overall_mismatch {
@@ -2430,7 +2435,10 @@ fn checksum_box(st: &State) -> Option<Element<'_, Msg>> {
                 13.0,
                 head_color,
             ),
-            eyebrow(t, "file integrity"),
+            text(tracked("file integrity"))
+                .font(theme::BODY_BOLD)
+                .size(10.0)
+                .color(t.fg_3),
             iced::widget::Space::new().width(Length::Fill),
             status_dot(head_color, head_label, 10.0),
         ]
@@ -2457,7 +2465,7 @@ fn checksum_box(st: &State) -> Option<Element<'_, Msg>> {
             });
             let mismatch = mine.is_some() || cs.status == CsStatus::Mismatch;
             let (color, label, icon) = if mismatch {
-                (t.status_danger, "mismatch", "x")
+                (color::rust::R200, "mismatch", "x")
             } else if cs.status == CsStatus::Verified {
                 (t.status_success, "verified", "check")
             } else {
@@ -2487,7 +2495,7 @@ fn checksum_box(st: &State) -> Option<Element<'_, Msg>> {
                 .into(),
                 None => hash_value(st, &saved, HashLine { row: i, got: false }, false),
             };
-            set_row_panel(
+            cb_row(
                 row![
                     container(
                         text(cs.algo.label())
@@ -2578,10 +2586,7 @@ fn checksum_box(st: &State) -> Option<Element<'_, Msg>> {
     // than `set_rows` only because a mismatch tints the whole box, and
     // `set_rows` fixes those colors.
     let (bg, border) = if overall_mismatch {
-        (
-            color::mix(t.bg_surface, t.status_danger, 0.06),
-            color::with_alpha(t.status_danger, 0.4),
-        )
+        (t.status_danger_bg, DANGER_EDGE)
     } else {
         (t.bg_surface, t.border_subtle)
     };
@@ -2590,9 +2595,19 @@ fn checksum_box(st: &State) -> Option<Element<'_, Msg>> {
         content = content.push(hairline(border)).push(r);
     }
     if let Some(compute) = compute_section {
-        content = content.push(hairline(border)).push(set_row_panel(compute));
+        content = content.push(hairline(border)).push(cb_row(compute));
     }
     Some(surface(bg, border, 0.0, content.into()))
+}
+
+/// A row of the integrity table. Tighter than the settings row it sits
+/// beside: the table is a dense list of values, not a list of settings
+/// with room for a control on the right.
+fn cb_row<'a>(content: Element<'a, Msg>) -> Element<'a, Msg> {
+    container(content)
+        .width(Length::Fill)
+        .padding([CB_PAD_Y, CB_PAD_X])
+        .into()
 }
 
 /// Status chip in a table row: a glyph and a word on a tinted pill.
@@ -2616,7 +2631,8 @@ fn status_chip<'a>(
     )
     .padding([2.0, 6.0])
     .style(move |_| container::Style {
-        background: Some(color::with_alpha(color, 0.12).into()),
+        // Reads against the box's own tint, which is already rust.
+        background: Some(color::with_alpha(color, 0.20).into()),
         border: iced::Border {
             radius: theme::radius::PILL.into(),
             ..Default::default()
@@ -2624,6 +2640,18 @@ fn status_chip<'a>(
         ..Default::default()
     })
     .into()
+}
+
+/// Uppercase with tracking. CSS gives these eyebrows `letter-spacing:
+/// 0.08em`; iced text has no such setting, so the spacing is put in the
+/// string as thin spaces.
+fn tracked(label: &str) -> String {
+    label
+        .to_uppercase()
+        .chars()
+        .map(|c| c.to_string())
+        .collect::<Vec<_>>()
+        .join("\u{2009}")
 }
 
 /// The bare digest out of whatever the engine reported. odl phrases a
