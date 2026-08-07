@@ -295,7 +295,6 @@ pub enum Msg {
     LimitSettled(u64),
     LimitUnit(bool),  // false = KB/s, true = MB/s
     SpeedPreset(u64), // quick-set value, in KB/s
-    RememberLimit(bool),
     MaxConn(String),
     ApplyConns,
     // Completion tab form
@@ -388,7 +387,6 @@ pub struct State {
     use_limiter: bool,
     limit_kbs: String,
     limit_unit_mb: bool,
-    remember_limit: bool,
     /// Bumped on every edit of `limit_kbs`; a settle timer only applies
     /// its value if it is still the newest edit when it fires.
     limit_edit: u64,
@@ -434,7 +432,23 @@ impl State {
     fn window_title(&self) -> String {
         let job = &self.entry.job;
         let name = job.filename.as_deref().unwrap_or(job.url.as_str());
-        format!("{name} — {}", self.phase().label())
+        let phase = self.phase();
+        // A transfer in flight or held mid-way carries its progress into
+        // the title, so the taskbar answers "how far along?" without
+        // raising the window. The other states have no distance left to
+        // report — and with no content-length there is no percentage to
+        // report either.
+        let show_progress = matches!(phase, Phase::Downloading | Phase::Paused)
+            && self.entry.counters.total.is_some();
+        if show_progress {
+            format!(
+                "{name} — {} {}%",
+                phase.label(),
+                (self.frac() * 100.0).round() as u32
+            )
+        } else {
+            format!("{name} — {}", phase.label())
+        }
     }
 }
 
@@ -469,19 +483,13 @@ fn apply_limit(st: &State) -> Task<Msg> {
     };
     let client = st.client.clone();
     let id = st.id;
-    let persist = st.remember_limit;
+    // Always stored. A limit the user set on this download is a fact
+    // about this download — asking them to also say "and mean it" was a
+    // question with one sensible answer, and the session-only variant
+    // it guarded left the same dialog showing a different number after
+    // a restart.
     Task::perform(
-        async move {
-            if persist {
-                client.set_persistent_speed_limit(id, bps).await
-            } else {
-                // "Remember" off means no stored override, so clear any
-                // earlier one instead of leaving it to outlive the
-                // session limit we set next.
-                client.set_persistent_speed_limit(id, None).await?;
-                client.set_session_speed_limit(id, bps).await
-            }
-        },
+        async move { client.set_persistent_speed_limit(id, bps).await },
         |_| Msg::Noop,
     )
 }
@@ -563,7 +571,6 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                     .map(|b| (b / 1024).to_string())
                     .unwrap_or_else(|| "100".to_owned()),
                 limit_unit_mb: false,
-                remember_limit: limit.is_some(),
                 limit_edit: 0,
                 max_conn: entry
                     .job
@@ -839,10 +846,6 @@ fn update_state(st: &mut State, msg: Msg) -> Task<Msg> {
             // A preset *is* the finished edit — retire any settle timer
             // still pending from typing, so it cannot re-fire behind it.
             st.limit_edit += 1;
-            apply_limit(st)
-        }
-        Msg::RememberLimit(v) => {
-            st.remember_limit = v;
             apply_limit(st)
         }
         Msg::MaxConn(v) => {
@@ -1643,17 +1646,32 @@ fn info_tab(st: &State) -> Element<'_, Msg> {
     };
 
     let n_parts = c.parts.len();
-    let segments_right = text(format!("{} parallel connections", c.parts.len().max(1)))
-        .font(theme::BODY)
-        .size(11.0)
-        .color(t.fg_3);
+    // Counts what is open, and says nothing when nothing is. Rounding
+    // an empty table up to "1 parallel connections" claimed a
+    // connection that did not exist and contradicted the Speed tab's
+    // allowance.
+    let segments_right = text(match n_parts {
+        0 => String::new(),
+        1 => "1 connection".to_owned(),
+        n => format!("{n} parallel connections"),
+    })
+    .font(theme::BODY)
+    .size(11.0)
+    .color(t.fg_3);
 
     let segments_body: Element<'_, Msg> = if n_parts == 0 {
-        text("No segment data yet.")
-            .font(theme::BODY)
-            .size(12.0)
-            .color(t.fg_3)
-            .into()
+        // Not "no segments" — the download has them, on disk, and odl
+        // announces them when a run starts. Until then this window has
+        // never been told what they are.
+        text(if st.phase().is_running() {
+            "Opening connections…"
+        } else {
+            "Segments appear once this download is running."
+        })
+        .font(theme::BODY)
+        .size(12.0)
+        .color(t.fg_3)
+        .into()
     } else {
         // Header + one row per part (design `.seg-table`): the columns
         // are only readable with something naming them, and a segment
@@ -1889,12 +1907,6 @@ fn speed_tab(st: &State) -> Element<'_, Msg> {
             ),
             set_row(t, "Limit to", None, value_row.into()),
             set_row(t, "Quick set", None, presets.into()),
-            set_row(
-                t,
-                "Remember for this file",
-                Some("Keep the limit after this session ends."),
-                toggle(t, st.remember_limit, limited, Msg::RememberLimit),
-            ),
         ],
     )
 }
@@ -3072,16 +3084,10 @@ pub fn launch_download(id: JobId) {
     let height = launch_size(id);
     let _ = LAUNCH_H.set(height);
     let mut app = iced::application(boot, update, view)
+        // Taskbar/switcher entry, and the same string the in-window
+        // title bar draws — one implementation, or the two drift.
         .title(|app: &App| match app {
-            // Taskbar/switcher entry: identity first, then the phase,
-            // which is the one thing the window body shows but the
-            // title bar doesn't. The URL stands in until evaluation
-            // resolves a filename.
-            App::Ready(st) => {
-                let job = &st.entry.job;
-                let name = job.filename.as_deref().unwrap_or(job.url.as_str());
-                format!("{name} — {}", st.phase().label())
-            }
+            App::Ready(st) => st.window_title(),
             _ => "oxdm — download".to_owned(),
         })
         .theme(|app: &App| match app {

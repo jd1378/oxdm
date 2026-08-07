@@ -36,7 +36,18 @@ pub fn toggle<'a, M: Clone + 'a>(
     on_toggle: impl Fn(bool) -> M + 'a,
 ) -> Element<'a, M> {
     let t = *t;
-    let alpha = if enabled { 1.0 } else { 0.5 };
+    // Disabled mutes by mixing toward the surface, not by going
+    // translucent. A half-alpha knob lets the track through it and
+    // stops reading as a knob at all — the switch turns into one washed
+    // blob. Mixed, every part keeps its own shape and just loses
+    // contrast, which is what "disabled" should look like.
+    let mute = move |c: Color| {
+        if enabled {
+            c
+        } else {
+            mix(t.bg_surface, c, 0.45)
+        }
+    };
     // Resolved once: the builder closure re-runs per animation frame,
     // and `on_toggle` is only `Fn(bool) -> M`, not `Copy`.
     let press = enabled.then(|| on_toggle(!on));
@@ -47,9 +58,12 @@ pub fn toggle<'a, M: Clone + 'a>(
         // pair, which lightens to clay-300 under the dark theme.
         let pill = canvas(Switch {
             progress: p,
-            track: with_alpha(mix(t.bg_sunken, clay::C400, p), alpha),
-            track_border: with_alpha(mix(t.border_default, clay::C500, p), alpha),
-            knob: with_alpha(Color::WHITE, alpha),
+            track: mute(mix(t.bg_sunken, clay::C400, p)),
+            track_border: mute(mix(t.border_default, clay::C500, p)),
+            knob: mute(Color::WHITE),
+            // The thumb's lift is a cue about pressing it. Nothing to
+            // press here.
+            shadow: enabled,
         })
         .width(Length::Fixed(TRACK_W))
         .height(Length::Fixed(TRACK_H));
@@ -77,6 +91,7 @@ struct Switch {
     track: Color,
     track_border: Color,
     knob: Color,
+    shadow: bool,
 }
 
 impl<M> canvas::Program<M> for Switch {
@@ -124,10 +139,12 @@ impl<M> canvas::Program<M> for Switch {
         // crescent along the bottom. The literal 2px blur radius reads as
         // a smudge at this size; the crescent is the part that carries
         // the depth cue.
-        frame.fill(
-            &canvas::Path::circle(Point::new(center.x, center.y + SHADOW_OFFSET_Y), knob / 2.0),
-            with_alpha(Color::BLACK, 0.25 * self.knob.a),
-        );
+        if self.shadow {
+            frame.fill(
+                &canvas::Path::circle(Point::new(center.x, center.y + SHADOW_OFFSET_Y), knob / 2.0),
+                with_alpha(Color::BLACK, 0.25),
+            );
+        }
 
         frame.fill(&canvas::Path::circle(center, knob / 2.0), self.knob);
 

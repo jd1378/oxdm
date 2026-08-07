@@ -251,6 +251,8 @@ fn inputs_page(t: &theme::Tokens) -> Element<'static, Msg> {
         row![
             toggle(t, true, true, |_| Msg::Frame),
             toggle(t, false, true, |_| Msg::Frame),
+            toggle(t, true, false, |_| Msg::Frame),
+            toggle(t, false, false, |_| Msg::Frame),
             widget::checkbox(t, "Use speed limiter", true, true, |_| Msg::Frame),
             widget::checkbox(t, "Disabled", false, false, |_| Msg::Frame),
         ]
@@ -339,11 +341,42 @@ fn inputs_page(t: &theme::Tokens) -> Element<'static, Msg> {
     .into()
 }
 
+/// Every switch state at once, labelled — the page to eyeball when the
+/// question is "does disabled still look like a switch".
+fn switches_page(t: &theme::Tokens) -> Element<'static, Msg> {
+    let cell = |label: &'static str, on: bool, enabled: bool| {
+        column![
+            toggle(t, on, enabled, |_| Msg::Frame),
+            iced::widget::text(label)
+                .font(theme::BODY)
+                .size(11.0)
+                .color(t.fg_3),
+        ]
+        .spacing(theme::space::S2)
+        .align_x(iced::Alignment::Center)
+    };
+    column![
+        eyebrow_label(t, "switch — every state"),
+        row![
+            cell("on", true, true),
+            cell("off", false, true),
+            cell("on · disabled", true, false),
+            cell("off · disabled", false, false),
+        ]
+        .spacing(theme::space::S6)
+        .align_y(iced::Alignment::Center),
+    ]
+    .spacing(theme::space::S4)
+    .padding(theme::space::S5)
+    .into()
+}
+
 fn view(state: &Probe) -> Element<'_, Msg> {
     let t = state.tokens;
     match state.page.as_str() {
         "buttons" => return page_bg(&t, buttons_page(&t)),
         "inputs" => return page_bg(&t, inputs_page(&t)),
+        "switches" => return page_bg(&t, switches_page(&t)),
         "canvas" => {
             return iced::widget::canvas(DebugCanvas)
                 .width(Length::Fill)

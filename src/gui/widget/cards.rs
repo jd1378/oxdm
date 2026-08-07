@@ -204,20 +204,20 @@ impl<'a, M: Clone + 'a> TabBtn<'a, M> {
     }
 
     pub fn view(self, t: &Tokens) -> Element<'a, M> {
-        let fg = if self.active { t.fg_1 } else { t.fg_3 };
+        let t2 = *t;
+        let active = self.active;
         let mut content = row![].spacing(6.0).align_y(Alignment::Center);
+        // Icon and label both take the colour the button hands down, so
+        // hovering lifts the whole tab at once and instantly. Tinting
+        // the icon on its own hover state lit up half the tab, a beat
+        // late — the icon has an animated tint, the label had none.
         if let Some(icon) = self.icon {
-            content = content.push(if self.active {
-                icons::icon(icon, self.icon_size, fg)
-            } else {
-                icons::icon_dyn(icon, self.icon_size, fg, t.fg_1)
-            });
+            content = content.push(icons::icon_current(icon, self.icon_size));
         }
         content = content.push(
             text(self.label.to_owned())
                 .font(theme::BODY_BOLD)
-                .size(self.font_size)
-                .color(fg),
+                .size(self.font_size),
         );
         if let Some(n) = self.count {
             let (bg, fg) = if self.active {
@@ -238,17 +238,37 @@ impl<'a, M: Clone + 'a> TabBtn<'a, M> {
         } else {
             Color::TRANSPARENT
         };
+        // A button, not a bare container: its per-status `text_color`
+        // is what the label and `icon_current` read, so one style
+        // closure covers idle, hover and press for both.
+        let face = iced::widget::button(
+            container(content)
+                .height(Length::Fixed(self.height))
+                .align_y(Alignment::Center),
+        )
+        .padding([0.0, self.pad_x])
+        .style(move |_th, status| iced::widget::button::Style {
+            background: None,
+            text_color: if active {
+                t2.fg_1
+            } else {
+                match status {
+                    iced::widget::button::Status::Hovered
+                    | iced::widget::button::Status::Pressed => t2.fg_1,
+                    _ => t2.fg_3,
+                }
+            },
+            border: iced::Border::default(),
+            shadow: iced::Shadow::default(),
+            ..Default::default()
+        });
+
         // stack sizes to the (shrink) content; the Fill-width underline
         // then matches the content width exactly.
         let body = iced::widget::stack![
-            container(
-                container(content)
-                    .height(Length::Fixed(self.height))
-                    .align_y(Alignment::Center)
-            )
-            .height(Length::Fixed(self.height + self.bottom_gap))
-            .padding([0.0, self.pad_x])
-            .align_y(iced::alignment::Vertical::Top),
+            container(face)
+                .height(Length::Fixed(self.height + self.bottom_gap))
+                .align_y(iced::alignment::Vertical::Top),
             container(
                 container(iced::widget::Space::new())
                     .width(Length::Fill)
