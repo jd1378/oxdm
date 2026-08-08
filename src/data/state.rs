@@ -2011,10 +2011,8 @@ impl AppState {
         // resume actually run instead of returning Cancelled instantly.
         let token = CancellationToken::new();
         *entry.cancel.lock().expect("cancel mutex poisoned") = token.clone();
-        // A new run supersedes whatever the last one failed with.
-        if let Ok(mut g) = entry.last_error.write() {
-            *g = None;
-        }
+        // Whatever the last run concluded is no longer about this job.
+        let entry = self.supersede_last_run(id, entry).await;
         // The previous run's segments are stale, but not worthless:
         // they are what the table shows until this run says otherwise.
         // Clearing here would blank it for the second or so before odl
@@ -2313,6 +2311,42 @@ impl AppState {
         Ok(())
     }
 
+    /// Retire everything the previous run concluded: the error it
+    /// failed with, the file it produced, and every verdict about that
+    /// file.
+    ///
+    /// A new run replaces all three. Left behind, a checksum that
+    /// failed two runs ago keeps describing a file this run is busy
+    /// overwriting — the list reads "Integrity check failed" over a
+    /// download in flight, and Resume refuses a job with nothing yet
+    /// wrong with it. Returns the entry to use from here on, which is a
+    /// fresh one whenever the verdicts had to be rewritten.
+    async fn supersede_last_run(&self, id: JobId, entry: Arc<JobEntry>) -> Arc<JobEntry> {
+        if let Ok(mut g) = entry.last_error.write() {
+            *g = None;
+        }
+        if let Ok(mut g) = entry.final_path.write() {
+            *g = None;
+        }
+        let stale_verdicts = entry
+            .job
+            .checksums
+            .iter()
+            .any(|c| c.status != crate::domain::CsStatus::Unverified);
+        if !stale_verdicts {
+            return entry;
+        }
+        let mut job = entry.job.clone();
+        for c in &mut job.checksums {
+            c.status = crate::domain::CsStatus::Unverified;
+            c.expected = None;
+        }
+        job.status.final_path = None;
+        let fresh = clone_entry_with_job(&entry, job).await;
+        self.jobs.write().await.insert(id, fresh.clone());
+        fresh
+    }
+
     /// Refuse anything that would interrupt, delete or re-read a final
     /// file while it is being written.
     ///
@@ -2448,37 +2482,10 @@ impl AppState {
         entry.reset_live_speed();
         entry.counters.reset_progress();
         entry.reset_run_stats();
-        if let Ok(mut g) = entry.final_path.write() {
-            *g = None;
-        }
-        // The old run's verdict goes with the old run's bytes. Left
-        // behind, the failed check would still be on the job — the row
-        // saying "Integrity check failed" while the file downloads
-        // again, and Resume refusing a job that has nothing wrong with
-        // it yet.
-        if let Ok(mut g) = entry.last_error.write() {
-            *g = None;
-        }
-        let mut job = entry.job.clone();
-        let had_verdicts = job
-            .checksums
-            .iter()
-            .any(|c| c.status != crate::domain::CsStatus::Unverified);
-        if had_verdicts {
-            for c in &mut job.checksums {
-                c.status = crate::domain::CsStatus::Unverified;
-                c.expected = None;
-            }
-        }
+        // The rest of the previous run's conclusions — its error, its
+        // file, its verdicts — are retired by `start_job` below, which
+        // every path into a run goes through.
         entry.set_phase(Phase::Queued);
-        let entry = if had_verdicts {
-            let fresh = clone_entry_with_job(&entry, job).await;
-            self.jobs.write().await.insert(id, fresh.clone());
-            fresh
-        } else {
-            entry
-        };
-        let _ = &entry;
         self.persist_job(id).await;
         let _ = self.events.send(DomainEvent::JobUpdated {
             id,
