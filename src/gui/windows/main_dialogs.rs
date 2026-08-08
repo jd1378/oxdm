@@ -8,6 +8,7 @@ use iced::widget::{column, container, mouse_area, row, text};
 use iced::{Alignment, Element, Length};
 
 use crate::data::ConflictKind;
+use crate::gui::format::format_bytes;
 use crate::gui::theme::{self, Tokens};
 use crate::gui::widget::{Btn, BtnSize, checkbox, vscroll};
 use crate::gui::{color, icons};
@@ -457,6 +458,78 @@ pub fn db_error<'a>(m: &'a Main, base: Element<'a, Msg>, error: &str) -> Element
     ]
     .spacing(theme::space::S3);
     modal(t, base, card.into(), 460.0, None)
+}
+
+// -------------------------------------------------- restart confirm
+
+/// "Start over?" — asked before a restart because every byte already
+/// fetched is thrown away, and for a download that finished, the file
+/// on disk goes with it. The same question the download window's own
+/// Restart puts, in the same words.
+pub fn restart_confirm<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg> {
+    let t = &m.tokens;
+    let n = m.restart_ids.len();
+    let what = if n == 1 {
+        m.snap
+            .jobs
+            .iter()
+            .find(|j| j.id == m.restart_ids[0])
+            .and_then(|j| j.filename.clone())
+            .unwrap_or_else(|| "This download".to_owned())
+    } else {
+        format!("{n} downloads")
+    };
+    let bytes: u64 = m
+        .snap
+        .jobs
+        .iter()
+        .filter(|j| m.restart_ids.contains(&j.id))
+        .map(|j| j.status.downloaded)
+        .sum();
+    let already = if bytes > 0 {
+        format!(" The {} already fetched is discarded.", format_bytes(bytes))
+    } else {
+        String::new()
+    };
+
+    let card = column![
+        row![
+            icons::icon("rotate-cw", 20.0, t.action_primary),
+            title_row(
+                t,
+                &plural(
+                    n,
+                    "Start this download over?",
+                    "Start these downloads over?"
+                )
+            ),
+        ]
+        .spacing(theme::space::S2)
+        .align_y(Alignment::Center),
+        text(format!(
+            "{what} is deleted from your disk if it finished, and fetched again from the \
+             beginning.{already}"
+        ))
+        .font(theme::BODY)
+        .size(12.0)
+        .color(t.fg_2),
+        row![
+            iced::widget::Space::new().width(Length::Fill),
+            Btn::new("Cancel")
+                .ghost()
+                .on_press(Msg::CloseOverlay)
+                .view(t),
+            Btn::new("Restart download")
+                .primary()
+                .icon("rotate-cw")
+                .on_press(Msg::RestartConfirmed)
+                .view(t),
+        ]
+        .spacing(theme::space::S2)
+        .align_y(Alignment::Center),
+    ]
+    .spacing(theme::space::S3);
+    modal(t, base, card.into(), 440.0, Some(Msg::CloseOverlay))
 }
 
 // -------------------------------------------------- remove warning

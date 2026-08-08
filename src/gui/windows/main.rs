@@ -150,6 +150,8 @@ pub enum Msg {
     RemoveDeleteOnDisk(bool),
     RemoveDontAsk(bool),
     RemoveConfirm,
+    /// The restart confirmation was accepted.
+    RestartConfirmed,
     /// A removal finished: what went (already phrased for the toast),
     /// plus every file the daemon (or Trash) could not get rid of.
     RemoveDone {
@@ -286,6 +288,9 @@ pub enum Overlay {
     /// The entries were removed, but some of their files are still on
     /// disk. Shown after the fact — the removal already happened.
     RemoveWarning,
+    /// "Start these downloads over?" — asked before, because it throws
+    /// away every byte already fetched.
+    RestartConfirm,
 }
 
 pub enum App {
@@ -320,6 +325,8 @@ pub struct Main {
     pub remove: Option<RemoveState>,
     /// Files a removal was asked to delete and could not, one line each.
     pub remove_problems: Vec<String>,
+    /// Downloads a confirmed restart will start over from zero.
+    pub restart_ids: Vec<JobId>,
     pub db_error: Option<String>,
     pub modifiers: iced::keyboard::Modifiers,
     pub cursor: (f32, f32),
@@ -409,6 +416,7 @@ impl Main {
             overlay: Overlay::None,
             remove: None,
             remove_problems: Vec::new(),
+            restart_ids: Vec::new(),
             db_error: None,
             modifiers: iced::keyboard::Modifiers::default(),
             cursor: (0.0, 0.0),
@@ -871,6 +879,9 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             if m.overlay == Overlay::RemoveWarning {
                 m.remove_problems.clear();
             }
+            if m.overlay == Overlay::RestartConfirm {
+                m.restart_ids.clear();
+            }
             if !matches!(m.overlay, Overlay::DbError | Overlay::SecretsLocked) {
                 m.overlay = Overlay::None;
             }
@@ -1177,6 +1188,21 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                     problems,
                 },
             )
+        }
+        Msg::RestartConfirmed => {
+            m.overlay = Overlay::None;
+            let ids = std::mem::take(&mut m.restart_ids);
+            let client = m.client.clone();
+            act(async move {
+                for id in ids {
+                    // The file goes first: `restart_job` clears the
+                    // work directory but not the finished file, and the
+                    // new run would arrive at a name already taken.
+                    let _ = client.delete_final_file(id).await;
+                    client.restart_job(id).await?;
+                }
+                Ok(())
+            })
         }
         Msg::RemoveDone { what, problems } => {
             if problems.is_empty() {
@@ -1525,12 +1551,14 @@ fn context_action(m: &mut Main, action: ContextAction) -> Task<Msg> {
             }
             Ok(())
         }),
-        ContextAction::Restart => act(async move {
-            for id in ids {
-                client.restart_job(id).await?;
-            }
-            Ok(())
-        }),
+        // Restarting throws away everything already fetched, so it
+        // asks first — the same question the download window's own
+        // Restart puts, in the same words.
+        ContextAction::Restart => {
+            m.restart_ids = ids;
+            m.overlay = Overlay::RestartConfirm;
+            Task::none()
+        }
         ContextAction::CopyUrl => {
             let urls: Vec<String> = m
                 .snap
@@ -1732,6 +1760,7 @@ fn main_view(m: &Main) -> Element<'_, Msg> {
             }
             Overlay::SecretsLocked => main_dialogs::secrets_locked(m, base),
             Overlay::RemoveWarning => main_dialogs::remove_warning(m, base),
+            Overlay::RestartConfirm => main_dialogs::restart_confirm(m, base),
             _ => base,
         }
     };
