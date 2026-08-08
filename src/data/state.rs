@@ -657,12 +657,15 @@ impl AppState {
         let global = self.settings.read().await.max_concurrent_downloads;
         let cap = queue.max_concurrent.unwrap_or(global).max(1);
 
+        // Same rule as `resume_all`: a failed integrity check is not
+        // work this queue can carry on with, it is a file the user has
+        // to decide about.
         let snapshot: Vec<(JobId, Phase)> = self
             .jobs
             .read()
             .await
             .values()
-            .filter(|e| e.job.queue_id == id)
+            .filter(|e| e.job.queue_id == id && !e.job.integrity_failed())
             .map(|e| (e.job.id, e.phase()))
             .collect();
         let running_now = snapshot.iter().filter(|(_, p)| p.is_running()).count();
@@ -1652,8 +1655,13 @@ impl AppState {
             c.expected = computed;
         }
         let fresh = clone_entry_with_job(&entry, job).await;
+        let phase = fresh.phase();
         self.jobs.write().await.insert(id, fresh);
         self.persist_job(id).await;
+        // A verdict changes what every window says about the job —
+        // whether it is tampered, whether it can be resumed. Silence
+        // here leaves them rendering the answer from before the check.
+        let _ = self.events.send(DomainEvent::JobUpdated { id, phase });
     }
 
     /// Record what the post-download hash check found on the job's own
@@ -2714,12 +2722,16 @@ impl AppState {
     /// ones included, same rule as `start_queue`: "resume everything"
     /// that silently skips the failures is not what it says.
     pub async fn resume_all(self: &Arc<Self>) {
+        // A download whose checksum failed is skipped: it has every
+        // byte already, so "resume" would silently fetch the whole file
+        // again — a decision the user makes with Restart, not one a
+        // bulk command makes for them.
         let ids: Vec<JobId> = self
             .jobs
             .read()
             .await
             .values()
-            .filter(|e| e.phase().is_startable())
+            .filter(|e| e.phase().is_startable() && !e.job.integrity_failed())
             .map(|e| e.job.id)
             .collect();
         for id in ids {

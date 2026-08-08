@@ -310,14 +310,20 @@ impl Job {
     ///
     /// Worth telling apart from every other failure. Those are missing
     /// part of the file and can be resumed, so what is on disk is
-    /// progress; this one has nothing left to fetch and a finished
-    /// file to deal with.
+    /// progress; this one has nothing left to fetch and a finished file
+    /// to deal with.
+    ///
+    /// A mismatched checksum row counts only when there is a saved file
+    /// for it to be about — a verdict outlives the run that produced
+    /// it, and on its own it would condemn a download that is at this
+    /// moment fetching the file again.
     pub fn integrity_failed(&self) -> bool {
         matches!(self.status.error, Some(JobError::ChecksumMismatch { .. }))
-            || self
-                .checksums
-                .iter()
-                .any(|c| c.status == crate::domain::CsStatus::Mismatch)
+            || (self.has_saved_file()
+                && self
+                    .checksums
+                    .iter()
+                    .any(|c| c.status == crate::domain::CsStatus::Mismatch))
     }
 
     /// Whether the job left an assembled file behind — the thing a
@@ -662,6 +668,46 @@ mod tests {
             category: Category::Other,
             captured_response: None,
         }
+    }
+
+    fn mismatched_row() -> crate::domain::Checksum {
+        crate::domain::Checksum {
+            algo: crate::domain::Algo::Md5,
+            hash: "5eb63bbbe01eeed093cb22bb8f5acdc3".into(),
+            source: crate::domain::CsSource::Server,
+            status: crate::domain::CsStatus::Mismatch,
+            expected: None,
+        }
+    }
+
+    /// A verdict outlives the run that produced it. On its own it would
+    /// condemn a download that is at this moment fetching the file
+    /// again — paused at 62%, with Resume refused and a bar the app
+    /// claimed not to show.
+    #[test]
+    fn a_stale_verdict_does_not_condemn_a_download_in_flight() {
+        let mut job = sample_job();
+        job.checksums = vec![mismatched_row()];
+        job.status.phase = Phase::Paused;
+        assert!(!job.integrity_failed(), "no saved file, so nothing failed");
+
+        // The same verdict, once there is a file it can be about.
+        job.status.final_path = Some(std::path::PathBuf::from("/tmp/oxdm-test/file.zip"));
+        assert!(job.integrity_failed());
+    }
+
+    /// The run's own outcome needs no file on record to count.
+    #[test]
+    fn a_failed_check_this_run_is_an_integrity_failure() {
+        let mut job = sample_job();
+        job.status.error = Some(JobError::ChecksumMismatch {
+            expected: "a".into(),
+            actual: "b".into(),
+        });
+        assert!(job.integrity_failed());
+
+        job.status.error = Some(JobError::Io("disk full".into()));
+        assert!(!job.integrity_failed(), "an ordinary failure is resumable");
     }
 
     #[test]
