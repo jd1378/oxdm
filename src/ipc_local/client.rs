@@ -481,6 +481,11 @@ impl Client {
     pub async fn window_focused(&self, focused: bool) -> Result<(), String> {
         self.expect_ok(Request::WindowFocused(focused)).await
     }
+    /// Open the batch-triage window for a pasted or dropped list.
+    pub async fn open_batch_window(&self, urls: Vec<url::Url>) -> Result<(), String> {
+        self.expect_ok(Request::OpenBatchWindow(urls)).await
+    }
+
     pub async fn open_add_window(
         &self,
         edit_id: Option<JobId>,

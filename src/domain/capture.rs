@@ -59,6 +59,28 @@ fn default_true() -> bool {
     true
 }
 
+impl CaptureRequest {
+    /// A capture that is nothing but a link — what a pasted or
+    /// dropped list gives us, with every other field left for the
+    /// probe to fill in.
+    pub fn from_url(url: url::Url) -> Self {
+        Self {
+            url,
+            filename: None,
+            referrer: None,
+            cookies: None,
+            user_agent: None,
+            headers: IndexMap::new(),
+            size: None,
+            mime_type: None,
+            interactive: true,
+            queue: None,
+            queue_name: None,
+            auto_start_queue: false,
+        }
+    }
+}
+
 /// Response sent back to the extension after a capture is accepted.
 ///
 /// `id` echoes the request's correlation id when one was sent. The v1

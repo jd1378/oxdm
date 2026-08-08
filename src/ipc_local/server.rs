@@ -838,6 +838,22 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
             crate::daemon::tray::spawn_add_gui(edit_id, prefill_url.as_deref());
             Reply::Ok
         }
+        Request::OpenBatchWindow(urls) => {
+            let items: Vec<crate::domain::CaptureRequest> = urls
+                .into_iter()
+                .map(crate::domain::CaptureRequest::from_url)
+                .collect();
+            if items.is_empty() {
+                return Reply::Err("no links to open".into());
+            }
+            match crate::ipc::batch::stage_for_dialog(&items) {
+                Ok(path) => {
+                    crate::daemon::tray::spawn_batch_gui(&path);
+                    Reply::Ok
+                }
+                Err(e) => Reply::Err(format!("batch stage failed: {e}")),
+            }
+        }
         Request::FindJobByFilename(name) => {
             match state.store().find_job_id_by_filename(&name).await {
                 Ok(v) => Reply::JobIdOpt(v),

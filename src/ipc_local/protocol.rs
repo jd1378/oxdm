@@ -240,6 +240,12 @@ pub enum Request {
         prefill_url: Option<String>,
     },
 
+    /// Open the batch-triage window for a list of links the user
+    /// pasted or dropped. The daemon stages them the same way the
+    /// browser bridge does — the dialog reads a file, not argv, because
+    /// a hundred URLs do not fit on a command line.
+    OpenBatchWindow(Vec<Url>),
+
     /// Look up a job id by filename via the persistent store. Returns
     /// `Reply::JobIdOpt` with the first match (sqlite query, no
     /// in-memory scan).

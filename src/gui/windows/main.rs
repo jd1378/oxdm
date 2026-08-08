@@ -161,6 +161,8 @@ pub enum Msg {
     // Drag-to-add (design `.drag-overlay`)
     DragHover(bool),
     DragDropped(std::path::PathBuf),
+    /// Ctrl+V, or a dropped text file: whatever links the text held.
+    LinksPasted(Vec<url::Url>),
     // Toasts (design `.toast`)
     Toast(ToastSeverity, String),
     ToastExpired(u64),
@@ -1070,14 +1072,45 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
         }
         Msg::DragDropped(path) => {
             m.drag_hover = false;
-            // iced only delivers file drops (paths); a path string is a
-            // valid Add prefill (the Add flow resolves URLs vs files).
+            // A dropped text file is a list of links, not a download:
+            // read it and treat it exactly like a paste. Anything else
+            // — or a file with no links in it — goes to the Add dialog
+            // as a path, which is what it was before.
             let prefill = path.to_string_lossy().into_owned();
             if prefill.trim().is_empty() {
                 return Task::none();
             }
             let client = m.client.clone();
-            act(async move { client.open_add_window(None, Some(prefill)).await })
+            Task::perform(
+                async move {
+                    let links = tokio::task::spawn_blocking(move || {
+                        crate::gui::clipboard::links_in_file(&path)
+                    })
+                    .await
+                    .unwrap_or_default();
+                    if links.is_empty() {
+                        let _ = client.open_add_window(None, Some(prefill)).await;
+                    }
+                    links
+                },
+                Msg::LinksPasted,
+            )
+        }
+        Msg::LinksPasted(urls) => {
+            let client = m.client.clone();
+            match urls.len() {
+                // Pressing paste and having nothing happen is
+                // indistinguishable from a shortcut that does not work.
+                0 => update_main(m, Msg::Toast(ToastSeverity::Info, "No links to add".into())),
+                // One link is a download the user is about to describe;
+                // several are a list to triage, which is what the batch
+                // window is for.
+                1 => {
+                    let one = urls[0].to_string();
+                    act(async move { client.open_add_window(None, Some(one)).await })
+                }
+                _ => act(async move { client.open_batch_window(urls).await }),
+            }
         }
         Msg::Toast(severity, message) => spawn_toast(m, severity, message),
         Msg::ToastExpired(id) | Msg::ToastDismissed(id) => {
@@ -1326,9 +1359,20 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
         Msg::Toolbar(action) => {
             let client = m.client.clone();
             match action {
-                ToolbarAction::AddUrl => {
-                    act(async move { client.open_add_window(None, None).await })
-                }
+                // Opened by hand with a link on the clipboard: fill it
+                // in. It is what the user came to paste, and the dialog
+                // has always had a Paste button saying so — this saves
+                // the press without taking the decision away, since the
+                // field is still theirs to edit.
+                ToolbarAction::AddUrl => act(async move {
+                    let prefill = tokio::task::spawn_blocking(|| {
+                        crate::gui::clipboard::read_url_from_clipboard().map(|u| u.to_string())
+                    })
+                    .await
+                    .ok()
+                    .flatten();
+                    client.open_add_window(None, prefill).await
+                }),
                 ToolbarAction::ToggleRun => match m.filter {
                     // Queue scope: direction keyed on `active_queues`
                     // membership (design §3.1 Start/Stop queue).
@@ -1396,6 +1440,21 @@ fn handle_key(
         Key::Character("n") if mods.command() => {
             update_main(m, Msg::Toolbar(ToolbarAction::AddUrl))
         }
+        // Paste is how a link arrives from a browser, and the list is
+        // where the user is looking when they copy one. Reading the
+        // clipboard is blocking on X11, so it goes off the UI thread.
+        Key::Character("v") if mods.command() => Task::perform(
+            async {
+                tokio::task::spawn_blocking(|| {
+                    crate::gui::clipboard::read_text()
+                        .map(|t| crate::gui::clipboard::extract_http_urls(&t))
+                        .unwrap_or_default()
+                })
+                .await
+                .unwrap_or_default()
+            },
+            Msg::LinksPasted,
+        ),
         Key::Character("q") if mods.command() => {
             let client = m.client.clone();
             Task::perform(async move { client.daemon_quit().await }, |_| Msg::Noop)
@@ -1590,45 +1649,47 @@ pub fn subscription(app: &App) -> Subscription<Msg> {
         subs.push(
             crate::gui::ipc::all_events(crate::ipc_local::protocol::GuiKind::Main).map(Msg::Daemon),
         );
-        subs.push(iced::event::listen_with(
-            |event, _status, _id| match event {
-                iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
-                    key, modifiers, ..
-                }) => Some(Msg::KeyPressed(key, modifiers)),
-                iced::Event::Keyboard(iced::keyboard::Event::ModifiersChanged(mods)) => {
-                    Some(Msg::Modifiers(mods))
-                }
-                iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
-                    Some(Msg::CursorMoved(position.x, position.y))
-                }
-                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
-                    iced::mouse::Button::Left,
-                )) => Some(Msg::MouseReleased),
-                // A drag can end without a release ever reaching us —
-                // the pointer leaves the window, or the compositor takes
-                // focus away mid-gesture. Without this the header keeps
-                // previewing an order the table never adopts.
-                iced::Event::Mouse(iced::mouse::Event::CursorLeft)
-                | iced::Event::Window(iced::window::Event::Unfocused) => Some(Msg::DragCancelled),
-                iced::Event::Window(iced::window::Event::Resized(size)) => {
-                    Some(Msg::WindowResized(size.width, size.height))
-                }
-                // Drag-to-add (design `.drag-overlay`). NOTE: file-drop
-                // events are compositor-dependent and may not deliver on
-                // all Wayland/X11 setups — the code is correct but cannot
-                // be verified headless.
-                iced::Event::Window(iced::window::Event::FileHovered(_)) => {
-                    Some(Msg::DragHover(true))
-                }
-                iced::Event::Window(iced::window::Event::FilesHoveredLeft) => {
-                    Some(Msg::DragHover(false))
-                }
-                iced::Event::Window(iced::window::Event::FileDropped(path)) => {
-                    Some(Msg::DragDropped(path))
-                }
-                _ => None,
-            },
-        ));
+        subs.push(iced::event::listen_with(|event, status, _id| match event {
+            // A key a widget has already used is not a shortcut:
+            // Ctrl+V in the search field is a paste into the field,
+            // and the window must not also read it as "add these
+            // links".
+            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. })
+                if status == iced::event::Status::Ignored =>
+            {
+                Some(Msg::KeyPressed(key, modifiers))
+            }
+            iced::Event::Keyboard(iced::keyboard::Event::ModifiersChanged(mods)) => {
+                Some(Msg::Modifiers(mods))
+            }
+            iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                Some(Msg::CursorMoved(position.x, position.y))
+            }
+            iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => {
+                Some(Msg::MouseReleased)
+            }
+            // A drag can end without a release ever reaching us —
+            // the pointer leaves the window, or the compositor takes
+            // focus away mid-gesture. Without this the header keeps
+            // previewing an order the table never adopts.
+            iced::Event::Mouse(iced::mouse::Event::CursorLeft)
+            | iced::Event::Window(iced::window::Event::Unfocused) => Some(Msg::DragCancelled),
+            iced::Event::Window(iced::window::Event::Resized(size)) => {
+                Some(Msg::WindowResized(size.width, size.height))
+            }
+            // Drag-to-add (design `.drag-overlay`). NOTE: file-drop
+            // events are compositor-dependent and may not deliver on
+            // all Wayland/X11 setups — the code is correct but cannot
+            // be verified headless.
+            iced::Event::Window(iced::window::Event::FileHovered(_)) => Some(Msg::DragHover(true)),
+            iced::Event::Window(iced::window::Event::FilesHoveredLeft) => {
+                Some(Msg::DragHover(false))
+            }
+            iced::Event::Window(iced::window::Event::FileDropped(path)) => {
+                Some(Msg::DragDropped(path))
+            }
+            _ => None,
+        }));
         if m.shot.is_some() {
             subs.push(Shot::frames().map(|_| Msg::ShotTick));
         }
@@ -1807,11 +1868,11 @@ fn drag_overlay<'a>(_m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg> {
     let tile = container(
         column![
             icons::icon("download", 44.0, iced::Color::WHITE),
-            text("Drop a file to add")
+            text("Drop to add")
                 .font(theme::DISPLAY)
                 .size(22.0)
                 .color(iced::Color::WHITE),
-            text("Release to open the Add dialog")
+            text("A file, or a text file of links")
                 .font(theme::BODY)
                 .size(13.0)
                 .color(color::with_alpha(iced::Color::WHITE, 0.85)),
