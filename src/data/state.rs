@@ -3355,6 +3355,19 @@ impl LiveBridge for StateLiveBridge {
                     && let Some(entry) = jobs.get(&id)
                 {
                     let phase = crate::data::mapping::phase_from_odl(*p);
+                    // The transfer is over the moment the file starts
+                    // being assembled: odl only gets there once every
+                    // part is complete, so every byte is on disk
+                    // whatever the last sample happened to say. Left as
+                    // it was, the count keeps whatever arrived last —
+                    // 896 MB of a gigabyte — and the window spends the
+                    // assembling and the hashing insisting the download
+                    // is at 88%.
+                    if phase.is_post_transfer()
+                        && let Some(total) = entry.counters.total()
+                    {
+                        entry.counters.set_downloaded(total);
+                    }
                     // First Downloading transition of the run stamps
                     // started_at (set-once; `0` = unset).
                     if phase == Phase::Downloading {

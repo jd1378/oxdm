@@ -431,7 +431,11 @@ fn snapshot_counters(id: JobId, entry: &JobEntry) -> JobCounters {
     let phase = entry.phase();
     let downloaded = entry.counters.downloaded();
     let total = entry.counters.total();
-    let speed_bps = if phase.is_running() {
+    // No transfer, no speed: what the sampler reports while a file is
+    // being assembled is the local copy's rate, and "3.9 GB/s" under a
+    // download reads as a lie even though the disk really did move
+    // that fast.
+    let speed_bps = if phase.is_running() && !phase.is_post_transfer() {
         entry.counters.speed_bps()
     } else {
         0.0
