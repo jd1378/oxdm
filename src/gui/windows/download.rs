@@ -415,10 +415,8 @@ pub struct State {
 }
 
 /// The pseudo-part odl reports assembly through, so a consumer can
-/// draw it the way it draws a connection. Mirrored here because odl
-/// keeps the constant in a private module; the name is part of its
-/// event contract.
-const ASSEMBLY_PART: &str = "_assemble";
+/// draw it the way it draws a connection.
+use odl::progress::ASSEMBLY_ULID as ASSEMBLY_PART;
 
 impl State {
     fn phase(&self) -> Phase {

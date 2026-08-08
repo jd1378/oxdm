@@ -2047,6 +2047,17 @@ impl AppState {
             events.clone(),
             interactive,
             entry.counters.clone(),
+            {
+                let entry = entry.clone();
+                let events = events.clone();
+                Box::new(move || {
+                    entry.is_resumable.store(-1, Ordering::Release);
+                    let _ = events.send(DomainEvent::JobUpdated {
+                        id,
+                        phase: entry.phase(),
+                    });
+                })
+            },
         ));
         *entry.resolver.write().await = Some(resolver.clone());
 
@@ -3081,6 +3092,22 @@ impl LiveBridge for StateLiveBridge {
                             finished: AtomicBool::new(false),
                         }),
                     );
+                }
+            }
+            // A restart re-split the download: the ulids announced so
+            // far name nothing, and no `PartFinished` is coming for
+            // them. Their bytes went with them, so the job's own count
+            // goes back to zero rather than counting a transfer that
+            // was thrown away.
+            OdlProgressEvent::PartsCleared => {
+                if let Ok(jobs) = state.jobs.try_read()
+                    && let Some(entry) = jobs.get(&id)
+                {
+                    if let Ok(mut parts) = entry.parts.try_write() {
+                        parts.clear();
+                    }
+                    entry.parts_stale.store(false, Ordering::Release);
+                    entry.counters.set_downloaded(0);
                 }
             }
             OdlProgressEvent::PartProgress {

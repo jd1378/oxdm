@@ -41,11 +41,11 @@ pub struct UiResolver {
     /// The job's live byte count — what a restart would throw away.
     /// A conflict that costs the user nothing is not worth a dialog.
     progress: Arc<LiveCounters>,
-    /// The caller has already decided to start over — a forced
-    /// single-connection retry after the server ignored `Range`. The
-    /// next not-resumable question is answered from that decision
-    /// instead of being put to the user, who did not make it.
-    expect_restart: std::sync::atomic::AtomicBool,
+    /// Called when the server proves it will not resume. The headers
+    /// go on advertising `accept-ranges` and odl only writes the
+    /// correction to disk, so the run in front of the user would keep
+    /// promising a resume it cannot deliver.
+    observed_not_resumable: Box<dyn Fn() + Send + Sync>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -62,6 +62,7 @@ impl UiResolver {
         events: broadcast::Sender<DomainEvent>,
         interactive: bool,
         progress: Arc<LiveCounters>,
+        observed_not_resumable: Box<dyn Fn() + Send + Sync>,
     ) -> Self {
         Self {
             job_id,
@@ -70,15 +71,8 @@ impl UiResolver {
             next_token: std::sync::atomic::AtomicU64::new(1),
             interactive,
             progress,
-            expect_restart: std::sync::atomic::AtomicBool::new(false),
+            observed_not_resumable,
         }
-    }
-
-    /// Answer the next not-resumable conflict with `Restart`, without
-    /// asking.
-    pub fn expect_restart(&self) {
-        self.expect_restart
-            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Whether this job has bytes a restart would discard.
@@ -126,16 +120,15 @@ impl ServerConflictResolver for UiResolver {
     }
 
     async fn resolve_not_resumable(&self, _i: &Download) -> NotResumableResolution {
+        // Whatever is decided below, the server has answered the
+        // question the banner asks.
+        (self.observed_not_resumable)();
         // With nothing downloaded, "the server will not resume" is not
         // a question: there is nothing to resume, and the answer is the
         // single-connection download the user already asked for. The
         // window says so in its banner. Only bytes already on disk make
         // this a decision worth interrupting for.
-        if self
-            .expect_restart
-            .swap(false, std::sync::atomic::Ordering::AcqRel)
-            || !self.has_bytes_to_lose()
-        {
+        if !self.has_bytes_to_lose() {
             return NotResumableResolution::Restart;
         }
         // Sensible default: restart (treat as single-connection download).

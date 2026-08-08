@@ -185,120 +185,85 @@ impl JobRunner {
 
         let resolver = self.resolver.clone();
 
-        // Servers that advertise ranges and then ignore them make odl
-        // refuse the response: a `200` cannot be written into a part
-        // that does not start at byte zero, and the run fails as
-        // NotResumable before a single byte is kept. That is not a dead
-        // end — the same file downloads fine on one connection — so the
-        // run is retried exactly once that way, and the window is told
-        // the download is not resumable so its banner says so.
-        let mut single_connection = false;
-        let path = loop {
-            // Built per attempt: the retry differs from the first only
-            // in its connection count, and that lives in the options
-            // odl splits from — `LiveControls` moves the cap of a
-            // running download, not the plan it starts with.
-            let mut attempt_job = job.clone();
-            if single_connection {
-                attempt_job.max_connections = Some(1);
-            }
-            let overlay = crate::data::mapping::job_overlay_options(
-                self.manager.config().download(),
-                &attempt_job,
-                self.proxy_password.as_deref(),
-                self.cookies.as_deref(),
-                self.auth_password.as_deref(),
-            )
-            .map_err(JobError::Other)?;
+        // Build per-job options overlay (proxy / headers /
+        // max_connections from `Job`) on top of the manager's defaults.
+        let overlay = crate::data::mapping::job_overlay_options(
+            self.manager.config().download(),
+            &job,
+            self.proxy_password.as_deref(),
+            self.cookies.as_deref(),
+            self.auth_password.as_deref(),
+        )
+        .map_err(JobError::Other)?;
 
-            let mut eval_req = EvaluateRequest::new(url.clone(), save_dir.clone(), &*resolver)
-                .ctx(&ctx)
-                .options(&overlay)
-                .engine(FORCED_ENGINE);
-            if let Some(creds) = build_credentials(&job, self.auth_password.as_deref()) {
-                eval_req = eval_req.credentials(creds);
-            }
-            let mut instruction = self
-                .manager
-                .evaluate(eval_req)
-                .await
-                .map_err(|e| job_error_from_odl(&e))?;
+        let mut eval_req = EvaluateRequest::new(url, save_dir, &*resolver)
+            .ctx(&ctx)
+            .options(&overlay)
+            .engine(FORCED_ENGINE);
+        if let Some(creds) = build_credentials(&job, self.auth_password.as_deref()) {
+            eval_req = eval_req.credentials(creds);
+        }
+        let mut instruction = self
+            .manager
+            .evaluate(eval_req)
+            .await
+            .map_err(|e| job_error_from_odl(&e))?;
 
-            // On the retry the header says resumable and the server has
-            // already proved otherwise; the window follows the server.
-            self.bridge.on_evaluated(
-                self.job_id,
-                instruction.is_resumable() && !single_connection,
-            );
-            if let Some(captured) = crate::data::mapping::captured_response(&instruction) {
-                self.bridge.on_response_headers(self.job_id, captured);
-            }
+        // odl 2.1 keeps `is_resumable: false` on a download that watched
+        // the server ignore `Range`, outranking the `accept-ranges` the
+        // headers go on advertising — so this is the server's own
+        // record, not the header's claim.
+        self.bridge
+            .on_evaluated(self.job_id, instruction.is_resumable());
+        if let Some(captured) = crate::data::mapping::captured_response(&instruction) {
+            self.bridge.on_response_headers(self.job_id, captured);
+        }
 
-            // What the server advertised in its headers becomes part of
-            // the job before anything is checked against it: odl parses
-            // those digests during `evaluate` and would otherwise drop
-            // them on the floor, since oxdm does its own verification
-            // from `Job::checksums`. Recorded first, then merged into
-            // this run's copy so this download is checked against them
-            // too — not only the next one.
-            let advertised = crate::data::mapping::server_checksums(&instruction);
-            if !advertised.is_empty() {
-                self.bridge
-                    .on_server_checksums(self.job_id, advertised.clone())
-                    .await;
-                crate::data::mapping::merge_checksums(&mut job.checksums, advertised);
-            }
+        // What the server advertised in its headers becomes part of the
+        // job before anything is checked against it: odl parses those
+        // digests during `evaluate` and would otherwise drop them on the
+        // floor, since oxdm does its own verification from
+        // `Job::checksums`. Recorded first, then merged into this run's
+        // copy so this download is checked against them too — not only
+        // the next one.
+        let advertised = crate::data::mapping::server_checksums(&instruction);
+        if !advertised.is_empty() {
+            self.bridge
+                .on_server_checksums(self.job_id, advertised.clone())
+                .await;
+            crate::data::mapping::merge_checksums(&mut job.checksums, advertised);
+        }
 
-            // Feature #14: hand the job's expected checksums to odl so
-            // the Verifying phase actually compares — a mismatch
-            // surfaces as `JobError::ChecksumMismatch` through the
-            // existing error path. Gating (auto_verify) + source
-            // filtering (Server/User only) live in
-            // `mapping::job_expected_digests`.
-            let digests = crate::data::mapping::job_expected_digests(&job);
-            if !digests.is_empty() {
-                instruction.add_checksums(digests);
-            }
+        // Feature #14: hand the job's expected checksums to odl so the
+        // Verifying phase actually compares — a mismatch surfaces as
+        // `JobError::ChecksumMismatch` through the existing error path.
+        // Gating (auto_verify) + source filtering (Server/User only)
+        // live in `mapping::job_expected_digests`.
+        let digests = crate::data::mapping::job_expected_digests(&job);
+        if !digests.is_empty() {
+            instruction.add_checksums(digests);
+        }
 
-            // Per-job working directory inside the configured
-            // download_dir. Keeps `metadata.pb` / `.part` files isolated
-            // so Remove can clean up just this job without touching
-            // others. See PLAN §4.5.
-            if let Some(per_job) = self.per_job_dir.clone() {
-                instruction.set_download_dir(per_job);
-            }
+        // Per-job working directory inside the configured download_dir.
+        // Keeps `metadata.pb` / `.part` files isolated so Remove can
+        // clean up just this job without touching others. See PLAN §4.5.
+        if let Some(per_job) = self.per_job_dir.clone() {
+            instruction.set_download_dir(per_job);
+        }
 
-            let dl_req = DownloadRequest::new(instruction, &*resolver)
-                .ctx(&ctx)
-                .options(&overlay);
-            match self.manager.download(dl_req).await {
-                Ok(p) => break p,
-                Err(e) => {
-                    let err = job_error_from_odl(&e);
-                    if single_connection || !matches!(err, JobError::NotResumable(_)) {
-                        return Err(err);
-                    }
-                    tracing::info!(
-                        id = %self.job_id,
-                        "server ignored Range; retrying on a single connection"
-                    );
-                    single_connection = true;
-                    self.live_controls.set_max_connections(1);
-                    resolver.expect_restart();
-                    // The parts on disk were written against a plan the
-                    // server would not honour, and its metadata still
-                    // claims the file is resumable — resume it and odl
-                    // asks for byte 900000000 again, gets the whole file
-                    // again, and refuses again. Cleared so the retry
-                    // starts from zero on one connection, which is the
-                    // only shape this server answers correctly.
-                    if let Some(dir) = self.per_job_dir.as_ref() {
-                        let _ = tokio::fs::remove_dir_all(dir).await;
-                        let _ = tokio::fs::create_dir_all(dir).await;
-                    }
-                }
-            }
-        };
+        // A server that stops honouring `Range` mid-download is odl's
+        // problem to recover from since 2.1: it asks the resolver, and
+        // on `Restart` discards the parts and re-fetches the file whole
+        // on one connection. oxdm used to catch the failure, wipe the
+        // work directory and re-run — that is gone.
+        let dl_req = DownloadRequest::new(instruction, &*resolver)
+            .ctx(&ctx)
+            .options(&overlay);
+        let path = self
+            .manager
+            .download(dl_req)
+            .await
+            .map_err(|e| job_error_from_odl(&e))?;
 
         // Hashing is oxdm's, not odl's (`verify_checksums(false)`): the
         // file exists by now, so a mismatch can be reported against a
@@ -791,6 +756,7 @@ mod tests {
                 events2,
                 false,
                 crate::domain::LiveCounters::new(),
+                Box::new(|| {}),
             )),
         };
         tokio::time::timeout(Duration::from_secs(60), runner.run(job))
