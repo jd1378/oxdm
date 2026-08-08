@@ -2748,15 +2748,19 @@ fn checksum_box(st: &State) -> Option<Element<'_, Msg>> {
             } else {
                 (t.bg_page, t.fg_3, "unverified", "minus")
             };
-            let got = mine
-                .map(|(_, actual)| digest_hex(actual))
-                .or_else(|| cs.expected.as_ref().map(|_| saved.clone()));
-            let expected = match (&got, &cs.expected) {
-                // A stored `expected` is what the publisher said; the
-                // saved hash is then what we have.
-                (Some(_), Some(e)) => e.to_lowercase(),
-                _ => saved.clone(),
-            };
+            // What the row claims is always the expected side; what the
+            // check computed is always the got side. `Checksum::expected`
+            // holds the computed digest (see `apply_checksum_results`),
+            // and the run's error carries the same thing for the row it
+            // named — either way the pair reads publisher-then-ours.
+            // Printed the other way round, a mismatch showed the same
+            // value twice.
+            let got = cs
+                .expected
+                .as_ref()
+                .map(|d| d.to_lowercase())
+                .or_else(|| mine.map(|(_, actual)| digest_hex(actual)));
+            let expected = saved.clone();
             let values: Element<'_, Msg> = match got {
                 Some(got) => column![
                     hash_line(

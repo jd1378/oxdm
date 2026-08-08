@@ -156,6 +156,16 @@ pub trait LiveBridge: Send + Sync + 'static {
     async fn on_server_checksums(&self, id: JobId, checksums: Vec<crate::domain::Checksum>) {
         let _ = (id, checksums);
     }
+    /// Called with one verdict per checksum row the run checked, so the
+    /// job records what was true of each rather than one answer for all
+    /// of them.
+    async fn on_checksum_results(
+        &self,
+        id: JobId,
+        results: Vec<(usize, crate::domain::CsStatus, Option<String>)>,
+    ) {
+        let _ = (id, results);
+    }
 }
 
 impl JobRunner {
@@ -288,8 +298,8 @@ impl JobRunner {
         // worth keeping rather than being thrown away inside a verify
         // step. Reported as its own phase — a large file takes a while
         // and a silent pause after 100% reads as a hang.
-        let expected = crate::data::mapping::job_expected_digests(&job);
-        if !expected.is_empty() {
+        let rows = crate::data::mapping::checksum_rows_to_verify(&job);
+        if !rows.is_empty() {
             self.bridge.on_event(
                 self.job_id,
                 &OdlProgressEvent::PhaseChanged(odl::progress::Phase::Verifying),
@@ -302,8 +312,11 @@ impl JobRunner {
             // block, and oxdm forwards that as a row of its own — the
             // same shape assembly already uses — so the bar moves
             // instead of sitting at 100% hoping.
-            let size = tokio::fs::metadata(&path).await.map(|m| m.len()).ok();
-            if let Some(size) = size.filter(|s| *s > 0) {
+            let size = tokio::fs::metadata(&path)
+                .await
+                .map(|m| m.len())
+                .unwrap_or(0);
+            if size > 0 {
                 self.bridge.on_event(
                     self.job_id,
                     &OdlProgressEvent::PartAdded {
@@ -313,12 +326,12 @@ impl JobRunner {
                     },
                 );
             }
-            let outcome = verify_file(
+            let outcome = verify_rows(
                 &path,
-                &expected,
+                &job.checksums,
+                &rows,
                 &self.cancel,
-                size.unwrap_or(0),
-                expected.len(),
+                size,
                 |done, total| {
                     self.bridge.on_event(
                         self.job_id,
@@ -337,7 +350,23 @@ impl JobRunner {
                     ulid: odl::progress::VERIFY_ULID.to_string(),
                 },
             );
-            let _ = outcome?;
+            let results = outcome?;
+            // Every row's own verdict, before the run's outcome: a job
+            // with a good MD5 and a bad SHA-1 has one of each, and
+            // painting them both with the failure told the user their
+            // MD5 was wrong when it was the only thing that matched.
+            let failed = results.iter().find_map(|(i, status, computed)| {
+                (*status == crate::domain::CsStatus::Mismatch).then(|| {
+                    (
+                        job.checksums[*i].hash.to_ascii_lowercase(),
+                        computed.clone().unwrap_or_default(),
+                    )
+                })
+            });
+            self.bridge.on_checksum_results(self.job_id, results).await;
+            if let Some((expected, actual)) = failed {
+                return Err(JobError::ChecksumMismatch { expected, actual });
+            }
         }
 
         Ok(RunOutcome {
@@ -347,28 +376,43 @@ impl JobRunner {
     }
 }
 
-/// Hash `path` and compare against every digest the job expects,
-/// returning what was computed so the caller can record it.
+/// Hash `path` once per algorithm and judge every row against it.
+///
+/// Returns `(row index, verdict, computed digest)` — the shape
+/// `AppState::apply_checksum_results` records — so a job carrying two
+/// checksums gets two answers instead of one verdict painted over
+/// both. Stopping at the first failure is what made a correct MD5
+/// beside a wrong SHA-1 read as two failures.
 ///
 /// odl reads the file in 256 KiB blocks off the async runtime, so a
 /// multi-gigabyte hash yields between blocks instead of holding a
-/// worker — the UI keeps painting while `Verifying` is on screen.
-/// `on_progress(done, total)` is called as the file is read, where
-/// `total` spans *every* digest: two checksums means reading the file
-/// twice, and a bar that restarts halfway through the check would be
-/// measuring the wrong thing.
-async fn verify_file(
+/// worker — the UI keeps painting while `Checking integrity` is on
+/// screen. `on_progress(done, total)` spans every *algorithm*: two
+/// checksums of different algorithms means reading the file twice, and
+/// a bar that restarted halfway would be measuring the wrong thing.
+async fn verify_rows(
     path: &std::path::Path,
-    expected: &[odl::hash::HashDigest],
+    rows: &[crate::domain::Checksum],
+    to_check: &[usize],
     cancel: &CancellationToken,
     size: u64,
-    passes: usize,
     mut on_progress: impl FnMut(u64, u64) + Send,
-) -> Result<Vec<odl::hash::HashDigest>, JobError> {
-    let total = size.saturating_mul(passes as u64);
+) -> Result<Vec<(usize, crate::domain::CsStatus, Option<String>)>, JobError> {
+    use crate::domain::CsStatus;
+
+    let mut algos: Vec<crate::domain::Algo> = Vec::new();
+    for i in to_check {
+        let algo = rows[*i].algo;
+        if !algos.contains(&algo) {
+            algos.push(algo);
+        }
+    }
+    let total = size.saturating_mul(algos.len() as u64);
+
+    let mut digests: std::collections::HashMap<crate::domain::Algo, String> =
+        std::collections::HashMap::new();
     let mut done_before = 0u64;
-    let mut computed = Vec::with_capacity(expected.len());
-    for want in expected {
+    for algo in &algos {
         // Between files, not inside one: odl's reader has no cancel
         // hook, and a pause the user asked for should not wait on the
         // whole list.
@@ -378,8 +422,8 @@ async fn verify_file(
         let mut read_so_far = 0u64;
         let got = odl::hash::HashDigest::from_path_with_progress(
             path,
-            want.algorithm(),
-            want.encoding(),
+            crate::data::mapping::odl_algorithm(*algo),
+            odl::hash::HashEncoding::Hex,
             |n| {
                 read_so_far = read_so_far.saturating_add(n);
                 on_progress(done_before.saturating_add(read_so_far), total);
@@ -387,19 +431,25 @@ async fn verify_file(
         )
         .await
         .map_err(|e| JobError::Io(e.to_string()))?;
+        digests.insert(*algo, got.digest().to_ascii_lowercase());
         done_before = done_before.saturating_add(size);
-        if !got.matches(want) {
-            return Err(JobError::ChecksumMismatch {
-                expected: want.digest().to_string(),
-                actual: got.digest().to_string(),
-            });
-        }
-        computed.push(got);
     }
-    Ok(computed)
+
+    Ok(to_check
+        .iter()
+        .map(|i| {
+            let row = &rows[*i];
+            let got = digests.get(&row.algo).cloned().unwrap_or_default();
+            if got.eq_ignore_ascii_case(row.hash.trim()) {
+                (*i, CsStatus::Verified, None)
+            } else {
+                (*i, CsStatus::Mismatch, Some(got))
+            }
+        })
+        .collect())
 }
 
-/// Build HTTP Basic credentials from the job's structured fields:
+/// Build HTTP Basic credentials from the job's structured fields:/// Build HTTP Basic credentials from the job's structured fields:
 /// `auth_user` from `Job` (persisted), `auth_password` decrypted from
 /// the store (loaded by `state::start_job`). Returns `None` when no
 /// per-job Basic auth is configured. When the job's advanced scheme is

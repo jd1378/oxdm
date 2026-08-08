@@ -252,6 +252,26 @@ pub fn job_expected_digests(job: &Job) -> Vec<HashDigest> {
     checksum_digests(job)
 }
 
+/// Which of the job's checksum rows this run should check, by index.
+///
+/// The same gate and the same sources as `job_expected_digests` — the
+/// `auto_verify` preference, and only `Server`/`User` rows, since a
+/// `Computed` one describes a previous run's bytes — but it keeps the
+/// row indices, so each row can be given its own verdict instead of
+/// one verdict being painted across all of them.
+pub fn checksum_rows_to_verify(job: &Job) -> Vec<usize> {
+    if !job.advanced.auto_verify {
+        return Vec::new();
+    }
+    job.checksums
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| matches!(c.source, CsSource::Server | CsSource::User))
+        .filter(|(_, c)| checksum_to_digest(c).is_some())
+        .map(|(i, _)| i)
+        .collect()
+}
+
 /// Every digest on the job that is well-formed enough to check against,
 /// regardless of the `auto_verify` preference — that one answers
 /// "check without being asked", not "may be checked".

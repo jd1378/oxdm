@@ -1664,41 +1664,6 @@ impl AppState {
         let _ = self.events.send(DomainEvent::JobUpdated { id, phase });
     }
 
-    /// Record what the post-download hash check found on the job's own
-    /// checksum rows, so the verdict survives a restart and the
-    /// completion page can show it.
-    ///
-    /// Only the rows oxdm actually checked are touched — the same
-    /// Server/User set `job_expected_digests` hands the runner. A row
-    /// the user added after the fact keeps saying `Unverified`, which is
-    /// what it is.
-    async fn mark_checksums(self: &Arc<Self>, id: JobId, status: crate::domain::CsStatus) {
-        let Some(entry) = self.job_entry(id).await else {
-            return;
-        };
-        if entry.job.checksums.is_empty() {
-            return;
-        }
-        let mut job = entry.job.clone();
-        let mut touched = false;
-        for c in &mut job.checksums {
-            if matches!(
-                c.source,
-                crate::domain::CsSource::Server | crate::domain::CsSource::User
-            ) && c.status != status
-            {
-                c.status = status;
-                touched = true;
-            }
-        }
-        if !touched {
-            return;
-        }
-        let fresh = clone_entry_with_job(&entry, job).await;
-        self.jobs.write().await.insert(id, fresh);
-        self.persist_job(id).await;
-    }
-
     /// Insert a new job in `Queued` state. Caller decides whether to
     /// also `start_job` (Download Now) or leave it (Download Later).
     ///
@@ -2211,12 +2176,9 @@ impl AppState {
             }
             match outcome {
                 Ok(o) => {
-                    // The run only reaches here with every expected
-                    // digest matched — oxdm hashes the finished file
-                    // itself now, so the verdict is ours to keep.
-                    state
-                        .mark_checksums(id, crate::domain::CsStatus::Verified)
-                        .await;
+                    // Row verdicts came from the run itself, which
+                    // checked each one and said so — nothing to stamp
+                    // here.
                     entry.set_phase(Phase::Completed);
                     // Stamp the completion time once. `splice_live`
                     // reads this back inside `persist_job` below, so the
@@ -2227,8 +2189,18 @@ impl AppState {
                     // Progress(downloaded == total) before the Completed
                     // event, leaving the dialog and queue showing the
                     // last in-flight number.
-                    if let Some(total) = entry.counters.total() {
-                        entry.counters.set_downloaded(total);
+                    match entry.counters.total() {
+                        Some(total) => entry.counters.set_downloaded(total),
+                        // A server that declared no length left the size
+                        // unknown for the whole transfer, and the list
+                        // showed "—" against a file that is now sitting
+                        // on disk. What arrived is how big it is.
+                        None => {
+                            let got = entry.counters.downloaded();
+                            if got > 0 {
+                                entry.counters.set_total(Some(got));
+                            }
+                        }
                     }
                     let final_path = o.final_path.clone().unwrap_or_default();
                     if let Ok(mut g) = entry.final_path.write() {
@@ -2276,13 +2248,13 @@ impl AppState {
                             entry.counters.set_downloaded(total);
                         }
                     }
+                    // No blanket verdict here: the run already recorded
+                    // one per row. A job with a good MD5 and a bad
+                    // SHA-1 has one of each, and painting them both
+                    // with the failure said the MD5 was wrong when it
+                    // was the only thing that matched.
                     if let Ok(mut g) = entry.last_error.write() {
                         *g = Some(err.clone());
-                    }
-                    if matches!(err, JobError::ChecksumMismatch { .. }) {
-                        state
-                            .mark_checksums(id, crate::domain::CsStatus::Mismatch)
-                            .await;
                     }
                     state.persist_job(id).await;
                     // NotifyAndPark path: surface the conflict failure
@@ -3178,6 +3150,17 @@ impl LiveBridge for StateLiveBridge {
         {
             *slot = Some(captured);
         }
+    }
+
+    async fn on_checksum_results(
+        &self,
+        id: JobId,
+        results: Vec<(usize, crate::domain::CsStatus, Option<String>)>,
+    ) {
+        let Some(state) = self.state.upgrade() else {
+            return;
+        };
+        state.apply_checksum_results(id, results).await;
     }
 
     fn on_final_path(&self, id: JobId, path: std::path::PathBuf) {
