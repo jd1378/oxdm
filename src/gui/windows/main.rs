@@ -3295,6 +3295,13 @@ fn context_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>, id: JobId) -> E
     // Assembly writes the final file; interrupting it leaves a file
     // that looks finished and is not. It ends on its own.
     let assembling = phase == Phase::Assembling;
+    // A failed integrity check has no missing bytes to go back for.
+    // Restart Download, below, is the only way forward.
+    let integrity_failed = m
+        .snap
+        .jobs
+        .iter()
+        .any(|j| j.id == id && j.integrity_failed());
 
     // Destructive row morphs with live modifiers (design: Finder-like):
     // default neutral "Remove from list" → ⇧ ochre "Move to Trash" →
@@ -3377,7 +3384,7 @@ fn context_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>, id: JobId) -> E
                 if running { "pause" } else { "play" },
                 if running { "Pause" } else { "Resume" },
                 None,
-                !done && !assembling,
+                !done && !assembling && !(integrity_failed && !running),
                 Msg::Context(if running {
                     ContextAction::Pause
                 } else {

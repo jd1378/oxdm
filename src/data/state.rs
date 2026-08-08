@@ -2353,6 +2353,15 @@ impl AppState {
             .job_entry(id)
             .await
             .ok_or_else(|| JobError::Other("job not found".into()))?;
+        // Nothing to resume: the transfer finished and the file it
+        // produced is not the promised one. Fetching the missing bytes
+        // is not the answer, because none are missing — the whole file
+        // has to come again, which is Restart.
+        if entry.job.integrity_failed() {
+            return Err(JobError::Other(
+                "this file failed its integrity check; restart the download instead".into(),
+            ));
+        }
         // Picking a stopped transfer back up is an interruption too —
         // whether the user paused it or a failure did. A job that never
         // started has nothing to interrupt.
@@ -2434,7 +2443,34 @@ impl AppState {
         if let Ok(mut g) = entry.final_path.write() {
             *g = None;
         }
+        // The old run's verdict goes with the old run's bytes. Left
+        // behind, the failed check would still be on the job — the row
+        // saying "Integrity check failed" while the file downloads
+        // again, and Resume refusing a job that has nothing wrong with
+        // it yet.
+        if let Ok(mut g) = entry.last_error.write() {
+            *g = None;
+        }
+        let mut job = entry.job.clone();
+        let had_verdicts = job
+            .checksums
+            .iter()
+            .any(|c| c.status != crate::domain::CsStatus::Unverified);
+        if had_verdicts {
+            for c in &mut job.checksums {
+                c.status = crate::domain::CsStatus::Unverified;
+                c.expected = None;
+            }
+        }
         entry.set_phase(Phase::Queued);
+        let entry = if had_verdicts {
+            let fresh = clone_entry_with_job(&entry, job).await;
+            self.jobs.write().await.insert(id, fresh.clone());
+            fresh
+        } else {
+            entry
+        };
+        let _ = &entry;
         self.persist_job(id).await;
         let _ = self.events.send(DomainEvent::JobUpdated {
             id,
