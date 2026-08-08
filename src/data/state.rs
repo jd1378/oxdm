@@ -3199,13 +3199,19 @@ impl LiveBridge for StateLiveBridge {
                     // showed 100% beside segments at 40%.
                     //
                     // Two samples are not this download's progress and
-                    // are dropped rather than believed: `0`, which odl
+                    // are dropped rather than believed. `0`, which odl
                     // emits while re-evaluating a resume before it has
-                    // read the part offsets back off disk, and anything
-                    // during assembly, which measures the copy into the
-                    // final file — the assembly bar reads that from the
-                    // pseudo-part odl reports it through.
-                    if *downloaded > 0 && entry.phase() != Phase::Assembling {
+                    // read the part offsets back off disk. And anything
+                    // once the transfer is over: assembly counts the
+                    // copy into the final file from zero through the
+                    // same event, so a sample landing while the phase
+                    // reads Assembling — or Flushing, or Verifying,
+                    // since a late one can arrive after the phase has
+                    // moved on — would drag the download back to the
+                    // middle just as it finished. The assembly bar
+                    // reads that count from the pseudo-part odl reports
+                    // it through.
+                    if *downloaded > 0 && !entry.phase().is_post_transfer() {
                         entry.counters.set_downloaded(*downloaded);
                     }
                     entry.counters.set_total(*total);

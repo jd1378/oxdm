@@ -96,6 +96,16 @@ impl Phase {
         )
     }
 
+    /// The transfer is over and the job is doing something else with
+    /// the bytes: writing the final file, flushing it, hashing it.
+    ///
+    /// Progress reported in these phases measures that work, not the
+    /// download — odl's assembly counter starts again from zero — so a
+    /// consumer showing "downloaded" must stop listening here.
+    pub fn is_post_transfer(self) -> bool {
+        matches!(self, Self::Assembling | Self::Flushing | Self::Verifying)
+    }
+
     pub fn is_running(self) -> bool {
         matches!(
             self,
@@ -708,6 +718,22 @@ mod tests {
 
         job.status.error = Some(JobError::Io("disk full".into()));
         assert!(!job.integrity_failed(), "an ordinary failure is resumable");
+    }
+
+    /// The byte count belongs to the transfer. Everything after it —
+    /// assembling, flushing, hashing — reports its own progress through
+    /// the same event, and believing those made the download appear to
+    /// jump backwards just as it finished.
+    #[test]
+    fn work_after_the_transfer_is_not_the_transfer() {
+        assert!(Phase::Assembling.is_post_transfer());
+        assert!(Phase::Flushing.is_post_transfer());
+        assert!(Phase::Verifying.is_post_transfer());
+
+        assert!(!Phase::Downloading.is_post_transfer());
+        assert!(!Phase::Reconnecting.is_post_transfer());
+        assert!(!Phase::Completed.is_post_transfer());
+        assert!(!Phase::Paused.is_post_transfer());
     }
 
     #[test]
