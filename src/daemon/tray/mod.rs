@@ -354,31 +354,27 @@ pub fn quit_daemon(rt: &tokio::runtime::Handle, state: &Arc<AppState>) {
     // explicit handle the daemon passed into the tray.
     rt.spawn(async move {
         use crate::ipc_local::protocol::GuiKind;
-        // Whether anything could still reach assembly. With nothing
-        // running there is nothing to wait for, and an idle daemon
-        // should be gone the moment it is asked to go.
-        let had_running = !s.running_job_ids().await.is_empty();
         s.halt_for_exit().await;
 
-        // Which windows may stay is not a single snapshot: a download
-        // that was mid-flush when the quit landed reaches `Assembling`
-        // a moment later, and its window has to come back. So the rule
-        // is re-applied on every poll of the wait, and each job's
-        // window is opened once.
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
-        // Long enough for a run that finished downloading as the quit
-        // arrived to reach assembly. Only that case is worth waiting
-        // for; with nothing running the loop falls straight through.
-        let settle = tokio::time::Instant::now()
-            + if had_running {
-                std::time::Duration::from_secs(2)
-            } else {
-                std::time::Duration::ZERO
-            };
+        // Driven by the runs themselves, not by a clock: every run task
+        // signals when it ends, so a paused transfer winds down in
+        // milliseconds and an assembly holds the exit for exactly as
+        // long as the copy takes. The two deadlines below are
+        // backstops, not the mechanism — a paused runner that never
+        // acknowledges must not hold the exit as long as a real
+        // assembly legitimately can.
+        let now = tokio::time::Instant::now();
+        let winding_down = now + std::time::Duration::from_secs(5);
+        let assembling_deadline = now + std::time::Duration::from_secs(300);
         let mut shown: std::collections::HashSet<JobId> = std::collections::HashSet::new();
-        let mut polls: u32 = 0;
         loop {
-            polls += 1;
+            // Armed before the state is read: a run ending in between
+            // would otherwise notify nobody and leave this waiting for
+            // a signal already sent.
+            let ended = s.run_finished();
+            tokio::pin!(ended);
+
+            let running = s.running_job_ids().await;
             let assembling = s.assembling_jobs().await;
             let keep: Vec<GuiKind> = assembling.iter().map(|id| GuiKind::Download(*id)).collect();
             crate::ipc_local::server::close_all_except(&keep);
@@ -386,35 +382,33 @@ pub fn quit_daemon(rt: &tokio::runtime::Handle, state: &Arc<AppState>) {
             // to the tray, or its process may still hold an IPC
             // connection with nothing on screen. A fresh one is the
             // only way to be sure the user sees what the exit is
-            // waiting for. Once per job — `shown` keeps the poll from
-            // reopening it every 250ms.
-            // Not on the first look: assembling a gigabyte off a local
-            // disk can take well under a second, and a window that
-            // flashes up and is killed again explains nothing.
+            // waiting for. Once per job.
             for id in &assembling {
-                if polls > 2 && shown.insert(*id) {
+                if shown.insert(*id) {
                     tracing::info!(job = %id, "opening the window that is holding the exit");
                     spawn_download_gui(*id);
                 }
             }
-            let now = tokio::time::Instant::now();
-            if assembling.is_empty() && now >= settle {
+            if running.is_empty() {
                 break;
             }
-            if now >= deadline {
+            tracing::info!(
+                running = running.len(),
+                assembling = assembling.len(),
+                "waiting for runs to end before exit"
+            );
+            let deadline = if assembling.is_empty() {
+                winding_down
+            } else {
+                assembling_deadline
+            };
+            if tokio::time::timeout_at(deadline, ended).await.is_err() {
                 tracing::warn!(
-                    assembling = assembling.len(),
-                    "still assembling at shutdown deadline; exiting anyway"
+                    running = running.len(),
+                    "runs still going at the shutdown deadline; exiting anyway"
                 );
                 break;
             }
-            if !assembling.is_empty() {
-                tracing::info!(
-                    assembling = assembling.len(),
-                    "waiting for assembly before exit"
-                );
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         }
 
         // Assembly is done; anything still running gets the pause it
