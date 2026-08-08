@@ -284,6 +284,10 @@ pub struct AppState {
     /// reuse the regular runner + download window for it but want the
     /// queue page and bulk operations to ignore it.
     hidden_jobs: RwLock<std::collections::HashSet<JobId>>,
+    /// Fired when a run task ends, whatever its outcome. The shutdown
+    /// waits on this instead of polling: a run finishes when it
+    /// finishes, and only the run knows when that is.
+    run_finished: tokio::sync::Notify,
     /// Set once the daemon has been asked to quit and never cleared:
     /// the process is on its way out, waiting only for whatever cannot
     /// be interrupted. Everything that would start new work checks it,
@@ -429,6 +433,7 @@ impl AppState {
             ext_token: RwLock::new(token),
             dialog_visible_for: RwLock::new(None),
             hidden_jobs: RwLock::new(std::collections::HashSet::new()),
+            run_finished: tokio::sync::Notify::new(),
             exiting: AtomicBool::new(false),
             main_queue_id,
             queues: RwLock::new(queues),
@@ -453,6 +458,16 @@ impl AppState {
     /// this is set.
     pub fn is_exiting(&self) -> bool {
         self.exiting.load(Ordering::Acquire)
+    }
+
+    /// Wait for the next run to end.
+    ///
+    /// Arm it *before* reading the state you are waiting on — a run
+    /// that ends in the gap between the two would otherwise notify
+    /// nobody and leave the caller waiting for a signal that has
+    /// already been sent.
+    pub fn run_finished(&self) -> tokio::sync::futures::Notified<'_> {
+        self.run_finished.notified()
     }
 
     /// Jobs currently writing their final file. These are the only
@@ -2154,6 +2169,13 @@ impl AppState {
         }
         tokio::spawn(async move {
             let outcome = runner.run(job_clone).await;
+            // Re-read the entry: anything that rebuilds a job — a
+            // checksum merge, a settings edit, a queue move — replaces
+            // the `Arc` in the map, and the one captured at spawn time
+            // is then an orphan. Writing the outcome into it left the
+            // job stuck on its last live phase, with the failure
+            // recorded nowhere the UI reads.
+            let entry = state.job_entry(id).await.unwrap_or(entry);
             entry.running.store(false, Ordering::Release);
             // The run is over; a conflict answer arriving now belongs
             // to nothing. Dropped so the next run publishes its own.
@@ -2233,6 +2255,17 @@ impl AppState {
                 Err(err) => {
                     entry.set_phase(Phase::Failed);
                     entry.reset_live_speed();
+                    // A failed integrity check is a failure *after* the
+                    // last byte arrived — the file is whole, it is just
+                    // not the file that was promised. Leaving the count
+                    // at the last mid-transfer sample put "Failed · 88%"
+                    // in the list beside a window explaining that the
+                    // download had finished.
+                    if matches!(err, JobError::ChecksumMismatch { .. })
+                        && let Some(total) = entry.counters.total()
+                    {
+                        entry.counters.set_downloaded(total);
+                    }
                     if let Ok(mut g) = entry.last_error.write() {
                         *g = Some(err.clone());
                     }
@@ -2263,6 +2296,10 @@ impl AppState {
                 }
             }
             let _ = token; // keep alive for the run
+            // Last thing the task does: whoever is waiting for runs to
+            // drain — the shutdown — hears it here rather than
+            // discovering it on a timer.
+            state.run_finished.notify_waiters();
         });
 
         Ok(())
