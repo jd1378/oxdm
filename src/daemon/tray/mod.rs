@@ -354,6 +354,10 @@ pub fn quit_daemon(rt: &tokio::runtime::Handle, state: &Arc<AppState>) {
     // explicit handle the daemon passed into the tray.
     rt.spawn(async move {
         use crate::ipc_local::protocol::GuiKind;
+        // Whether anything could still reach assembly. With nothing
+        // running there is nothing to wait for, and an idle daemon
+        // should be gone the moment it is asked to go.
+        let had_running = !s.running_job_ids().await.is_empty();
         s.halt_for_exit().await;
 
         // Which windows may stay is not a single snapshot: a download
@@ -363,9 +367,14 @@ pub fn quit_daemon(rt: &tokio::runtime::Handle, state: &Arc<AppState>) {
         // window is opened once.
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
         // Long enough for a run that finished downloading as the quit
-        // arrived to reach assembly, short enough that an idle daemon
-        // exits promptly.
-        let settle = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        // arrived to reach assembly. Only that case is worth waiting
+        // for; with nothing running the loop falls straight through.
+        let settle = tokio::time::Instant::now()
+            + if had_running {
+                std::time::Duration::from_secs(2)
+            } else {
+                std::time::Duration::ZERO
+            };
         let mut shown: std::collections::HashSet<JobId> = std::collections::HashSet::new();
         let mut polls: u32 = 0;
         loop {

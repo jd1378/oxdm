@@ -1270,35 +1270,7 @@ fn running_view(st: &State) -> Element<'_, Msg> {
         Some(crate::domain::JobError::FileChanged(_) | crate::domain::JobError::NotResumable(_))
     );
     let hatch = restart_required.then_some(color::rust::R300);
-    let (track, fill, gradient) = match phase {
-        Phase::Failed if restart_required => (
-            color::with_alpha(t.status_danger_bg, 0.55),
-            color::with_alpha(color::rust::R200, 0.55),
-            None,
-        ),
-        Phase::Failed => (t.status_danger_bg, t.status_danger, None),
-        // Reconnecting reads ochre (design `is-reconnecting`), pairing
-        // with the banner above; still striped (it's a running phase).
-        Phase::Reconnecting => (
-            t.progress_track,
-            t.status_warning,
-            Some((color::ochre::O400, color::ochre::O300)),
-        ),
-        // Assembly is a different job from downloading — no network,
-        // no speed the user can act on — so it gets its own colour
-        // rather than a clay bar that appears to restart at 0%.
-        Phase::Assembling => (
-            t.progress_track,
-            color::moss::M400,
-            Some((color::moss::M400, color::moss::M300)),
-        ),
-        p if p.is_running() => (
-            t.progress_track,
-            t.progress_fill,
-            Some((color::clay::C400, color::clay::C300)),
-        ),
-        _ => (t.progress_track, t.fg_4, None),
-    };
+    let (track, fill, gradient) = bar_look(t, phase, restart_required);
 
     // A severe error replaces the tabs + pane entirely (design §3.3
     // "Severe error"): friendly title → detail → what-to-check → quiet
@@ -1424,10 +1396,7 @@ fn running_view(st: &State) -> Element<'_, Msg> {
     }
     hero = hero
         .push(sibling(striped_progress_hatched(
-            match st.assembly() {
-                Some((done, total)) => done as f32 / total as f32,
-                None => st.frac(),
-            },
+            bar_frac(st.assembly(), st.frac()),
             Length::Fill,
             10.0,
             track,
@@ -2718,6 +2687,61 @@ fn cb_row<'a>(content: Element<'a, Msg>) -> Element<'a, Msg> {
         .into()
 }
 
+/// What the hero bar measures: the assembly copy while one is running,
+/// the transfer otherwise.
+fn bar_frac(assembly: Option<(u64, u64)>, downloaded: f32) -> f32 {
+    match assembly {
+        Some((done, total)) if total > 0 => done as f32 / total as f32,
+        _ => downloaded,
+    }
+}
+
+/// Track, fill and stripe gradient for the hero bar.
+///
+/// Split out of the view so the states that are hard to catch on
+/// screen — assembly lasts under a second on a fast disk — can be
+/// asserted instead of screenshotted.
+fn bar_look(
+    t: &Tokens,
+    phase: Phase,
+    restart_required: bool,
+) -> (iced::Color, iced::Color, Option<(iced::Color, iced::Color)>) {
+    // Design §3.3 gives the bar three interrupted looks:
+    //   is-reconnecting → ochre, still trying (below, a running phase)
+    //   is-errored      → rust on a rust-tinted track, frozen
+    //   is-will-restart → dimmed rust struck through: the bytes under
+    //                     the bar are going to be thrown away
+    match phase {
+        Phase::Failed if restart_required => (
+            color::with_alpha(t.status_danger_bg, 0.55),
+            color::with_alpha(color::rust::R200, 0.55),
+            None,
+        ),
+        Phase::Failed => (t.status_danger_bg, t.status_danger, None),
+        // Reconnecting reads ochre (design `is-reconnecting`), pairing
+        // with the banner above; still striped (it's a running phase).
+        Phase::Reconnecting => (
+            t.progress_track,
+            t.status_warning,
+            Some((color::ochre::O400, color::ochre::O300)),
+        ),
+        // Assembly is a different job from downloading — no network, no
+        // speed the user can act on — so it gets its own colour rather
+        // than a clay bar that appears to restart at 0%.
+        Phase::Assembling => (
+            t.progress_track,
+            color::moss::M400,
+            Some((color::moss::M400, color::moss::M300)),
+        ),
+        p if p.is_running() => (
+            t.progress_track,
+            t.progress_fill,
+            Some((color::clay::C400, color::clay::C300)),
+        ),
+        _ => (t.progress_track, t.fg_4, None),
+    }
+}
+
 /// Status chip in a table row: a glyph and a word on a solid pill.
 fn status_chip<'a>(
     icon: &'a str,
@@ -3154,5 +3178,41 @@ pub fn launch_download(id: JobId) {
     if let Err(e) = app.run() {
         eprintln!("gui error: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tokens() -> Tokens {
+        Tokens::dark()
+    }
+
+    /// Assembly is its own kind of work and says so: moss, not the clay
+    /// of a transfer. It lasts under a second on a fast disk, which is
+    /// exactly why this is asserted rather than eyeballed.
+    #[test]
+    fn assembly_paints_the_bar_in_moss() {
+        let t = tokens();
+        let (_, fill, gradient) = bar_look(&t, Phase::Assembling, false);
+        assert_eq!(fill, color::moss::M400);
+        assert_eq!(gradient, Some((color::moss::M400, color::moss::M300)));
+
+        // Every other running phase keeps the accent.
+        let (_, fill, _) = bar_look(&t, Phase::Downloading, false);
+        assert_eq!(fill, t.progress_fill);
+    }
+
+    /// While assembling, the bar measures the copy — the transfer is
+    /// over and its own fraction would sit at 100% saying nothing.
+    #[test]
+    fn the_bar_follows_assembly_while_it_runs() {
+        assert_eq!(bar_frac(Some((250, 1000)), 1.0), 0.25);
+        // No assembly in flight: the download's own fraction stands.
+        assert_eq!(bar_frac(None, 0.5), 0.5);
+        // A zero-length assembly cannot divide; the caller filters it,
+        // and the fallback is what the download reported.
+        assert_eq!(bar_frac(Some((0, 0)), 0.75), 0.75);
     }
 }

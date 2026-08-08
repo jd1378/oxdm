@@ -1518,6 +1518,7 @@ impl AppState {
             .job_entry(id)
             .await
             .ok_or_else(|| JobError::Other("job not found".into()))?;
+        Self::refuse_while_assembling(&entry)?;
         let path = entry
             .saved_file()
             .ok_or_else(|| JobError::Other("this download has no saved file".into()))?;
@@ -2267,21 +2268,30 @@ impl AppState {
         Ok(())
     }
 
-    pub async fn pause(self: &Arc<Self>, id: JobId) -> Result<(), JobError> {
-        let entry = self
-            .job_entry(id)
-            .await
-            .ok_or_else(|| JobError::Other("job not found".into()))?;
-        // Assembly writes the final file from the parts. Stopping it
-        // half-way leaves a file that looks finished and is not, and
-        // there is nothing to gain: the network is already idle and the
-        // copy ends on its own. Refused here rather than only in the
-        // UI, so no path — window, list, tray, IPC — can do it.
+    /// Refuse anything that would interrupt, delete or re-read a final
+    /// file while it is being written.
+    ///
+    /// Assembly copies the parts into the finished file. Cut it short
+    /// and what is left looks finished and is not — the right length,
+    /// the wrong contents, and nothing on screen to say so. There is
+    /// nothing to gain either: the network is already idle and the copy
+    /// ends on its own. Refused in the daemon rather than only in the
+    /// UI, so no path — window, list, tray, IPC — can do it.
+    fn refuse_while_assembling(entry: &JobEntry) -> Result<(), JobError> {
         if entry.phase() == Phase::Assembling {
             return Err(JobError::Other(
                 "the final file is being assembled; this finishes on its own".into(),
             ));
         }
+        Ok(())
+    }
+
+    pub async fn pause(self: &Arc<Self>, id: JobId) -> Result<(), JobError> {
+        let entry = self
+            .job_entry(id)
+            .await
+            .ok_or_else(|| JobError::Other("job not found".into()))?;
+        Self::refuse_while_assembling(&entry)?;
         let handle = JobHandle {
             id,
             cancel: entry.cancel.lock().expect("cancel mutex poisoned").clone(),
@@ -2366,12 +2376,16 @@ impl AppState {
     /// had completed) is left alone — caller decides via Remove if they
     /// want it gone.
     pub async fn restart_job(self: &Arc<Self>, id: JobId) -> Result<(), JobError> {
-        // Best-effort pause; ignore "not running" errors.
-        let _ = self.pause(id).await;
         let entry = self
             .job_entry(id)
             .await
             .ok_or_else(|| JobError::Other("job not found".into()))?;
+        // Before the pause, whose error this path deliberately ignores:
+        // restarting deletes the work directory, and doing that under a
+        // running assembly pulls the parts out from under the copy.
+        Self::refuse_while_assembling(&entry)?;
+        // Best-effort pause; ignore "not running" errors.
+        let _ = self.pause(id).await;
 
         let settings = self.settings.read().await.clone();
         let dir = per_job_dir(&settings.work_dir, id);
@@ -2402,6 +2416,9 @@ impl AppState {
             .job_entry(id)
             .await
             .ok_or_else(|| JobError::Other("job not found".into()))?;
+        // A job that ran before has a path on record; deleting it now
+        // would delete the file this run is in the middle of writing.
+        Self::refuse_while_assembling(&entry)?;
         let path = entry
             .saved_file()
             .ok_or_else(|| JobError::Other("this download has no saved file".into()))?;
@@ -3271,6 +3288,62 @@ impl ResumeContext for StateResumeContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn entry_in(phase: Phase) -> JobEntry {
+        let mut job = Job {
+            id: JobId::new(),
+            url: url::Url::parse("http://example.invalid/f.bin").unwrap(),
+            save_dir: std::path::PathBuf::from("/tmp"),
+            filename: Some("f.bin".into()),
+            referrer: None,
+            headers: indexmap::IndexMap::new(),
+            max_connections: None,
+            proxy: None,
+            auth_user: None,
+            enc_auth_password: None,
+            enc_proxy_password: None,
+            enc_cookies: None,
+            speed_limit_override: None,
+            queue_id: crate::domain::QueueId::new(),
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            finished_at: None,
+            retries: 0,
+            interruptions: 0,
+            verify_pending: false,
+            status: JobStatus::default(),
+            advanced: crate::domain::Advanced::default(),
+            checksums: Vec::new(),
+            category: crate::domain::Category::Other,
+            captured_response: None,
+        };
+        job.status.phase = phase;
+        JobEntry::with_completion(job, crate::domain::OnCompletion::default())
+    }
+
+    /// Writing the final file is the one thing no command may cut
+    /// short: what survives is the right length and the wrong contents,
+    /// with nothing on screen to say so. Pause, cancel, restart, delete
+    /// and re-verify all go through this.
+    #[test]
+    fn nothing_may_interrupt_an_assembly() {
+        let assembling = entry_in(Phase::Assembling);
+        assert!(AppState::refuse_while_assembling(&assembling).is_err());
+
+        for phase in [
+            Phase::Downloading,
+            Phase::Paused,
+            Phase::Queued,
+            Phase::Completed,
+            Phase::Failed,
+            Phase::Verifying,
+        ] {
+            assert!(
+                AppState::refuse_while_assembling(&entry_in(phase)).is_ok(),
+                "{phase:?} is interruptible"
+            );
+        }
+    }
 
     /// Hashing a file once per algorithm, then judging each row against
     /// it: a row that matches is verified with nothing to show beside
