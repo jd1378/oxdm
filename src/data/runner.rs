@@ -41,17 +41,20 @@ pub struct PartCounters {
     pub finished: std::sync::atomic::AtomicBool,
 }
 
-/// A part's size as reported by odl, with "no end in sight" folded
-/// into oxdm's own marker for it.
+/// A part's size as reported by odl, with its "no end in sight"
+/// sentinel folded into oxdm's own marker for the same thing.
 ///
 /// A server that sends no `Content-Length` gives odl no end to aim
-/// for, and the part's range runs to `u64::MAX`. Rendered literally
-/// that is a segment 16777216 TB long sitting at 0% — so anything in
-/// exabyte territory becomes `0`, which every reader here already
-/// treats as "size not known yet".
+/// for; it stores `Download::UNKNOWN_PART_SIZE` and streams until EOF.
+/// Rendered literally that is a segment 16777216 TB long sitting at
+/// 0%, so it becomes `0` here — which every reader already treats as
+/// "size not known yet".
 pub fn part_size(reported: u64) -> u64 {
-    const IMPLAUSIBLE: u64 = u64::MAX / 2;
-    if reported >= IMPLAUSIBLE { 0 } else { reported }
+    if reported == odl::Download::UNKNOWN_PART_SIZE {
+        0
+    } else {
+        reported
+    }
 }
 
 impl PartCounters {
@@ -93,7 +96,6 @@ pub struct JobRunner {
     pub cancel: CancellationToken,
     /// Bridge that forwards `odl::ProgressEvent` to oxdm.
     pub bridge: Arc<dyn LiveBridge>,
-    pub interactive: bool,
     /// Per-job override for the metadata / parts directory. `None` ⇒
     /// use the manager's global `download_dir`.
     pub per_job_dir: Option<std::path::PathBuf>,
@@ -113,6 +115,11 @@ pub struct JobRunner {
     /// runner. Injected as a `Cookie` header in the per-run overlay;
     /// never persisted in `Job.headers`. `None` ⇒ no cookies.
     pub cookies: Option<String>,
+    /// Answers odl's conflict questions. Built by the caller, which
+    /// also publishes it on the `JobEntry` — a resolver the UI cannot
+    /// reach leaves every dialog answering into the void, and the run
+    /// waiting for a reply that can never arrive.
+    pub resolver: Arc<UiResolver>,
 }
 
 /// Sink the runner uses to push hot per-byte progress to `LiveCounters`.
@@ -176,78 +183,122 @@ impl JobRunner {
             .with_url(url.clone())
             .with_live(self.live_controls.clone());
 
-        let resolver = UiResolver::new(self.job_id, self.events.clone(), self.interactive);
+        let resolver = self.resolver.clone();
 
-        // Build per-job options overlay (proxy / headers / max_connections
-        // from `Job`) on top of the manager's defaults.
-        let overlay = crate::data::mapping::job_overlay_options(
-            self.manager.config().download(),
-            &job,
-            self.proxy_password.as_deref(),
-            self.cookies.as_deref(),
-            self.auth_password.as_deref(),
-        )
-        .map_err(JobError::Other)?;
+        // Servers that advertise ranges and then ignore them make odl
+        // refuse the response: a `200` cannot be written into a part
+        // that does not start at byte zero, and the run fails as
+        // NotResumable before a single byte is kept. That is not a dead
+        // end — the same file downloads fine on one connection — so the
+        // run is retried exactly once that way, and the window is told
+        // the download is not resumable so its banner says so.
+        let mut single_connection = false;
+        let path = loop {
+            // Built per attempt: the retry differs from the first only
+            // in its connection count, and that lives in the options
+            // odl splits from — `LiveControls` moves the cap of a
+            // running download, not the plan it starts with.
+            let mut attempt_job = job.clone();
+            if single_connection {
+                attempt_job.max_connections = Some(1);
+            }
+            let overlay = crate::data::mapping::job_overlay_options(
+                self.manager.config().download(),
+                &attempt_job,
+                self.proxy_password.as_deref(),
+                self.cookies.as_deref(),
+                self.auth_password.as_deref(),
+            )
+            .map_err(JobError::Other)?;
 
-        let mut eval_req = EvaluateRequest::new(url, save_dir, &resolver)
-            .ctx(&ctx)
-            .options(&overlay)
-            .engine(FORCED_ENGINE);
-        if let Some(creds) = build_credentials(&job, self.auth_password.as_deref()) {
-            eval_req = eval_req.credentials(creds);
-        }
-        let mut instruction = self
-            .manager
-            .evaluate(eval_req)
-            .await
-            .map_err(|e| job_error_from_odl(&e))?;
+            let mut eval_req = EvaluateRequest::new(url.clone(), save_dir.clone(), &*resolver)
+                .ctx(&ctx)
+                .options(&overlay)
+                .engine(FORCED_ENGINE);
+            if let Some(creds) = build_credentials(&job, self.auth_password.as_deref()) {
+                eval_req = eval_req.credentials(creds);
+            }
+            let mut instruction = self
+                .manager
+                .evaluate(eval_req)
+                .await
+                .map_err(|e| job_error_from_odl(&e))?;
 
-        self.bridge
-            .on_evaluated(self.job_id, instruction.is_resumable());
-        if let Some(captured) = crate::data::mapping::captured_response(&instruction) {
-            self.bridge.on_response_headers(self.job_id, captured);
-        }
+            // On the retry the header says resumable and the server has
+            // already proved otherwise; the window follows the server.
+            self.bridge.on_evaluated(
+                self.job_id,
+                instruction.is_resumable() && !single_connection,
+            );
+            if let Some(captured) = crate::data::mapping::captured_response(&instruction) {
+                self.bridge.on_response_headers(self.job_id, captured);
+            }
 
-        // What the server advertised in its headers becomes part of the
-        // job before anything is checked against it: odl parses those
-        // digests during `evaluate` and would otherwise drop them on
-        // the floor, since oxdm does its own verification from
-        // `Job::checksums`. Recorded first, then merged into this run's
-        // copy so this download is checked against them too — not only
-        // the next one.
-        let advertised = crate::data::mapping::server_checksums(&instruction);
-        if !advertised.is_empty() {
-            self.bridge
-                .on_server_checksums(self.job_id, advertised.clone())
-                .await;
-            crate::data::mapping::merge_checksums(&mut job.checksums, advertised);
-        }
+            // What the server advertised in its headers becomes part of
+            // the job before anything is checked against it: odl parses
+            // those digests during `evaluate` and would otherwise drop
+            // them on the floor, since oxdm does its own verification
+            // from `Job::checksums`. Recorded first, then merged into
+            // this run's copy so this download is checked against them
+            // too — not only the next one.
+            let advertised = crate::data::mapping::server_checksums(&instruction);
+            if !advertised.is_empty() {
+                self.bridge
+                    .on_server_checksums(self.job_id, advertised.clone())
+                    .await;
+                crate::data::mapping::merge_checksums(&mut job.checksums, advertised);
+            }
 
-        // Feature #14: hand the job's expected checksums to odl so the
-        // Verifying phase actually compares — a mismatch surfaces as
-        // `JobError::ChecksumMismatch` through the existing error path.
-        // Gating (auto_verify) + source filtering (Server/User only)
-        // live in `mapping::job_expected_digests`.
-        let digests = crate::data::mapping::job_expected_digests(&job);
-        if !digests.is_empty() {
-            instruction.add_checksums(digests);
-        }
+            // Feature #14: hand the job's expected checksums to odl so
+            // the Verifying phase actually compares — a mismatch
+            // surfaces as `JobError::ChecksumMismatch` through the
+            // existing error path. Gating (auto_verify) + source
+            // filtering (Server/User only) live in
+            // `mapping::job_expected_digests`.
+            let digests = crate::data::mapping::job_expected_digests(&job);
+            if !digests.is_empty() {
+                instruction.add_checksums(digests);
+            }
 
-        // Per-job working directory inside the configured download_dir.
-        // Keeps `metadata.pb` / `.part` files isolated so Remove can
-        // clean up just this job without touching others. See PLAN §4.5.
-        if let Some(per_job) = self.per_job_dir.clone() {
-            instruction.set_download_dir(per_job);
-        }
+            // Per-job working directory inside the configured
+            // download_dir. Keeps `metadata.pb` / `.part` files isolated
+            // so Remove can clean up just this job without touching
+            // others. See PLAN §4.5.
+            if let Some(per_job) = self.per_job_dir.clone() {
+                instruction.set_download_dir(per_job);
+            }
 
-        let dl_req = DownloadRequest::new(instruction, &resolver)
-            .ctx(&ctx)
-            .options(&overlay);
-        let path = self
-            .manager
-            .download(dl_req)
-            .await
-            .map_err(|e| job_error_from_odl(&e))?;
+            let dl_req = DownloadRequest::new(instruction, &*resolver)
+                .ctx(&ctx)
+                .options(&overlay);
+            match self.manager.download(dl_req).await {
+                Ok(p) => break p,
+                Err(e) => {
+                    let err = job_error_from_odl(&e);
+                    if single_connection || !matches!(err, JobError::NotResumable(_)) {
+                        return Err(err);
+                    }
+                    tracing::info!(
+                        id = %self.job_id,
+                        "server ignored Range; retrying on a single connection"
+                    );
+                    single_connection = true;
+                    self.live_controls.set_max_connections(1);
+                    resolver.expect_restart();
+                    // The parts on disk were written against a plan the
+                    // server would not honour, and its metadata still
+                    // claims the file is resumable — resume it and odl
+                    // asks for byte 900000000 again, gets the whole file
+                    // again, and refuses again. Cleared so the retry
+                    // starts from zero on one connection, which is the
+                    // only shape this server answers correctly.
+                    if let Some(dir) = self.per_job_dir.as_ref() {
+                        let _ = tokio::fs::remove_dir_all(dir).await;
+                        let _ = tokio::fs::create_dir_all(dir).await;
+                    }
+                }
+            }
+        };
 
         // Hashing is oxdm's, not odl's (`verify_checksums(false)`): the
         // file exists by now, so a mismatch can be reported against a
@@ -510,7 +561,7 @@ mod tests {
     #[test]
     fn a_part_with_no_declared_end_reads_as_unknown() {
         let p = part(0);
-        p.apply_progress(142 * 1024 * 1024, u64::MAX);
+        p.apply_progress(142 * 1024 * 1024, odl::Download::UNKNOWN_PART_SIZE);
         let (downloaded, size) = seen(&p);
         assert_eq!(downloaded, 142 * 1024 * 1024);
         assert_eq!(size, 0, "no end declared is no size, not an exabyte");
@@ -723,18 +774,24 @@ mod tests {
             .expect("odl config");
         let manager = Arc::new(DownloadManager::new(cfg));
         let (events, _rx) = broadcast::channel(64);
+        let events2 = events.clone();
         let runner = JobRunner {
             job_id: job.id,
             manager,
             events,
             cancel,
             bridge,
-            interactive: false,
             per_job_dir: Some(per_job),
             live_controls: odl::progress::LiveControls::new(),
             auth_password: None,
             proxy_password: None,
             cookies: None,
+            resolver: Arc::new(UiResolver::new(
+                job.id,
+                events2,
+                false,
+                crate::domain::LiveCounters::new(),
+            )),
         };
         tokio::time::timeout(Duration::from_secs(60), runner.run(job))
             .await

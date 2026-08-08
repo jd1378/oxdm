@@ -3263,6 +3263,9 @@ fn context_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>, id: JobId) -> E
     // below is the entry for that.
     let running = phase.is_running();
     let done = phase == Phase::Completed;
+    // Assembly writes the final file; interrupting it leaves a file
+    // that looks finished and is not. It ends on its own.
+    let assembling = phase == Phase::Assembling;
 
     // Destructive row morphs with live modifiers (design: Finder-like):
     // default neutral "Remove from list" → ⇧ ochre "Move to Trash" →
@@ -3340,7 +3343,7 @@ fn context_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>, id: JobId) -> E
                 if running { "pause" } else { "play" },
                 if running { "Pause" } else { "Resume" },
                 None,
-                !done,
+                !done && !assembling,
                 Msg::Context(if running {
                     ContextAction::Pause
                 } else {

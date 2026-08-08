@@ -2039,18 +2039,29 @@ impl AppState {
             None
         };
 
+        // Built here, not inside the runner: the UI answers conflicts
+        // through `JobEntry::resolver`, so the same instance odl asks
+        // has to be the one the dialog can reach.
+        let resolver = Arc::new(UiResolver::new(
+            id,
+            events.clone(),
+            interactive,
+            entry.counters.clone(),
+        ));
+        *entry.resolver.write().await = Some(resolver.clone());
+
         let runner = JobRunner {
             job_id: id,
             manager: runner_manager,
             events: events.clone(),
             cancel: token.clone(),
             bridge,
-            interactive,
             per_job_dir,
             live_controls: entry.live_controls.clone(),
             auth_password,
             proxy_password,
             cookies,
+            resolver,
         };
 
         let job_clone = entry.job.clone();
@@ -2076,6 +2087,9 @@ impl AppState {
         tokio::spawn(async move {
             let outcome = runner.run(job_clone).await;
             entry.running.store(false, Ordering::Release);
+            // The run is over; a conflict answer arriving now belongs
+            // to nothing. Dropped so the next run publishes its own.
+            *entry.resolver.write().await = None;
             // Tally before the finish watcher: the job that empties the
             // queue must be part of the counts its own completion
             // reports.
@@ -2191,6 +2205,16 @@ impl AppState {
             .job_entry(id)
             .await
             .ok_or_else(|| JobError::Other("job not found".into()))?;
+        // Assembly writes the final file from the parts. Stopping it
+        // half-way leaves a file that looks finished and is not, and
+        // there is nothing to gain: the network is already idle and the
+        // copy ends on its own. Refused here rather than only in the
+        // UI, so no path — window, list, tray, IPC — can do it.
+        if entry.phase() == Phase::Assembling {
+            return Err(JobError::Other(
+                "the final file is being assembled; this finishes on its own".into(),
+            ));
+        }
         let handle = JobHandle {
             id,
             cancel: entry.cancel.lock().expect("cancel mutex poisoned").clone(),
@@ -2504,6 +2528,39 @@ impl AppState {
             .filter(|e| e.running.load(Ordering::Acquire))
             .map(|e| e.job.id)
             .collect()
+    }
+
+    /// Block until nothing is writing a final file, or `budget` runs
+    /// out.
+    ///
+    /// Shutdown cancels every runner, and a cancelled assembly leaves a
+    /// final file that is the right length and the wrong contents. The
+    /// copy is local I/O with a known end, so waiting for it is short
+    /// and bounded — but it is bounded, because a quit that never
+    /// finishes is its own kind of broken.
+    pub async fn await_assembly(self: &Arc<Self>, budget: std::time::Duration) {
+        let deadline = tokio::time::Instant::now() + budget;
+        loop {
+            let assembling = self
+                .jobs
+                .read()
+                .await
+                .values()
+                .filter(|e| e.phase() == Phase::Assembling)
+                .count();
+            if assembling == 0 {
+                return;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    assembling,
+                    "still assembling at shutdown deadline; exiting anyway"
+                );
+                return;
+            }
+            tracing::info!(assembling, "waiting for final-file assembly before exit");
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
     }
 
     pub async fn pause_all(self: &Arc<Self>) {
@@ -3001,6 +3058,17 @@ impl LiveBridge for StateLiveBridge {
                     // both sets to pile up.
                     if entry.parts_stale.swap(false, Ordering::AcqRel) {
                         parts.clear();
+                        // A run that cannot resume starts at byte zero:
+                        // whatever the last attempt fetched went with
+                        // it. The monotonic guard on `Progress` exists
+                        // for the transient zero odl emits while
+                        // re-evaluating a resume, and would otherwise
+                        // hold the old figure here — leaving the window
+                        // claiming 176 MB while its only segment reads
+                        // 52 MB and the file on disk is empty.
+                        if entry.is_resumable.load(Ordering::Acquire) < 0 {
+                            entry.counters.set_downloaded(0);
+                        }
                     }
                     parts.insert(
                         ulid.clone(),

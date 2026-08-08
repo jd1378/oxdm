@@ -15,7 +15,7 @@
 
 use async_trait::async_trait;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, oneshot};
 
 use odl::Download;
@@ -25,7 +25,7 @@ use odl::conflict::{
 };
 
 use crate::data::events::{ConflictKind, DomainEvent};
-use crate::domain::JobId;
+use crate::domain::{JobId, LiveCounters};
 
 /// Picks resolutions for a single job. Construct one per `evaluate`/`download`
 /// call; do not share across jobs.
@@ -38,6 +38,14 @@ pub struct UiResolver {
     /// `NotifyAndPark` — the resolver returns the abort variant instead of
     /// awaiting user input. The caller (runner) handles the park.
     interactive: bool,
+    /// The job's live byte count — what a restart would throw away.
+    /// A conflict that costs the user nothing is not worth a dialog.
+    progress: Arc<LiveCounters>,
+    /// The caller has already decided to start over — a forced
+    /// single-connection retry after the server ignored `Range`. The
+    /// next not-resumable question is answered from that decision
+    /// instead of being put to the user, who did not make it.
+    expect_restart: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -49,14 +57,33 @@ pub enum Resolution {
 }
 
 impl UiResolver {
-    pub fn new(job_id: JobId, events: broadcast::Sender<DomainEvent>, interactive: bool) -> Self {
+    pub fn new(
+        job_id: JobId,
+        events: broadcast::Sender<DomainEvent>,
+        interactive: bool,
+        progress: Arc<LiveCounters>,
+    ) -> Self {
         Self {
             job_id,
             events,
             pending: Mutex::new(HashMap::new()),
             next_token: std::sync::atomic::AtomicU64::new(1),
             interactive,
+            progress,
+            expect_restart: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Answer the next not-resumable conflict with `Restart`, without
+    /// asking.
+    pub fn expect_restart(&self) {
+        self.expect_restart
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Whether this job has bytes a restart would discard.
+    fn has_bytes_to_lose(&self) -> bool {
+        self.progress.downloaded() > 0
     }
 
     /// Used by `AppState::resolve_*` to satisfy a pending request.
@@ -99,6 +126,18 @@ impl ServerConflictResolver for UiResolver {
     }
 
     async fn resolve_not_resumable(&self, _i: &Download) -> NotResumableResolution {
+        // With nothing downloaded, "the server will not resume" is not
+        // a question: there is nothing to resume, and the answer is the
+        // single-connection download the user already asked for. The
+        // window says so in its banner. Only bytes already on disk make
+        // this a decision worth interrupting for.
+        if self
+            .expect_restart
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+            || !self.has_bytes_to_lose()
+        {
+            return NotResumableResolution::Restart;
+        }
         // Sensible default: restart (treat as single-connection download).
         // IDM behavior; matches user expectation.
         match self.emit_and_wait(ConflictKind::NotResumable) {

@@ -414,9 +414,33 @@ pub struct State {
     shot: Option<Shot>,
 }
 
+/// The pseudo-part odl reports assembly through, so a consumer can
+/// draw it the way it draws a connection. Mirrored here because odl
+/// keeps the constant in a private module; the name is part of its
+/// event contract.
+const ASSEMBLY_PART: &str = "_assemble";
+
 impl State {
     fn phase(&self) -> Phase {
         self.entry.counters.phase
+    }
+
+    /// Bytes written of the final file, while it is being assembled.
+    ///
+    /// Assembly is real work — a gigabyte of parts is a gigabyte of
+    /// copying — and reporting it as a bar frozen at 100% makes the
+    /// last stretch of a download look like a hang.
+    fn assembly(&self) -> Option<(u64, u64)> {
+        if self.phase() != Phase::Assembling {
+            return None;
+        }
+        self.entry
+            .counters
+            .parts
+            .iter()
+            .find(|p| p.ulid == ASSEMBLY_PART)
+            .filter(|p| p.size > 0)
+            .map(|p| (p.downloaded, p.size))
     }
     fn frac(&self) -> f32 {
         match self.total() {
@@ -1262,6 +1286,14 @@ fn running_view(st: &State) -> Element<'_, Msg> {
             t.status_warning,
             Some((color::ochre::O400, color::ochre::O300)),
         ),
+        // Assembly is a different job from downloading — no network,
+        // no speed the user can act on — so it gets its own colour
+        // rather than a clay bar that appears to restart at 0%.
+        Phase::Assembling => (
+            t.progress_track,
+            color::moss::M400,
+            Some((color::moss::M400, color::moss::M300)),
+        ),
         p if p.is_running() => (
             t.progress_track,
             t.progress_fill,
@@ -1349,6 +1381,10 @@ fn running_view(st: &State) -> Element<'_, Msg> {
     let footer_right: Element<'_, Msg> = match &error {
         Some(err) => error_footer(t, err),
         None => row![
+            // Assembly cannot be interrupted: the final file is being
+            // written from the parts, and stopping half-way leaves
+            // something that looks finished and is not. It ends on its
+            // own — the daemon refuses these two anyway.
             Btn::new(if phase.is_running() {
                 "Pause"
             } else {
@@ -1356,11 +1392,13 @@ fn running_view(st: &State) -> Element<'_, Msg> {
             })
             .primary()
             .icon(if phase.is_running() { "pause" } else { "play" })
+            .enabled(phase != Phase::Assembling)
             .on_press(Msg::PauseResume)
             .view(t),
             Btn::new("Cancel")
                 .danger()
                 .icon("x")
+                .enabled(phase != Phase::Assembling)
                 .on_press(Msg::Cancel)
                 .view(t),
         ]
@@ -1388,7 +1426,10 @@ fn running_view(st: &State) -> Element<'_, Msg> {
     }
     hero = hero
         .push(sibling(striped_progress_hatched(
-            st.frac(),
+            match st.assembly() {
+                Some((done, total)) => done as f32 / total as f32,
+                None => st.frac(),
+            },
             Length::Fill,
             10.0,
             track,
@@ -1670,7 +1711,7 @@ fn info_tab(st: &State) -> Element<'_, Msg> {
         .spacing(theme::space::S2)
     };
 
-    let n_parts = c.parts.len();
+    let n_parts = c.parts.iter().filter(|p| p.ulid != ASSEMBLY_PART).count();
     // Counts what is open, and says nothing when nothing is. Rounding
     // an empty table up to "1 parallel connections" claimed a
     // connection that did not exist and contradicted the Speed tab's
@@ -1718,7 +1759,15 @@ fn info_tab(st: &State) -> Element<'_, Msg> {
         .height(Length::Fixed(SEG_HEAD_H));
 
         let mut rows = column![head, hairline(t.border_subtle)];
-        for (i, p) in c.parts.iter().enumerate() {
+        // The assembly pseudo-part is not a connection; it is drawn on
+        // the hero bar, and listing it here would put a row in the
+        // table that no server ever answered.
+        for (i, p) in c
+            .parts
+            .iter()
+            .filter(|p| p.ulid != ASSEMBLY_PART)
+            .enumerate()
+        {
             // A part whose end the server never declared has no
             // fraction to report — a bar pinned at 0% while bytes
             // arrive reads as a stall.

@@ -343,6 +343,10 @@ pub fn quit_daemon(rt: &tokio::runtime::Handle, state: &Arc<AppState>) {
     // muda silently swallows the panic — leaving Quit a no-op. Use the
     // explicit handle the daemon passed into the tray.
     rt.spawn(async move {
+        // Assembly first: cancelling a runner mid-copy leaves a final
+        // file of the right length and the wrong contents, and there is
+        // no way to tell afterwards.
+        s.await_assembly(std::time::Duration::from_secs(300)).await;
         s.pause_all().await;
         // pause_all returns once each runner has acknowledged the
         // pause; LiveCounters + .part files are now in a consistent

@@ -99,7 +99,11 @@ fn title_row<'a>(t: &Tokens, title: &str) -> Element<'a, Msg> {
 /// says "the file" while three are selected is how a user deletes two
 /// downloads they meant to keep.
 fn plural(n: usize, one: &str, many: &str) -> String {
-    if n == 1 { one.to_owned() } else { many.to_owned() }
+    if n == 1 {
+        one.to_owned()
+    } else {
+        many.to_owned()
+    }
 }
 
 // ---------------------------------------------------------------- remove
