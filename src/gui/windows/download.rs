@@ -317,6 +317,11 @@ pub enum Msg {
     HashCopied(HashLine),
     /// Delete the saved file, via the confirmation.
     DeleteAsk,
+    /// Escape: closes whichever confirmation is open.
+    Escape,
+    RestartAsk,
+    RestartCancel,
+    RestartConfirm,
     DeleteCancel,
     DeleteConfirm,
     CloseWin,
@@ -347,6 +352,8 @@ pub struct State {
     tab: Tab,
     /// The "delete the saved file?" confirmation is up.
     confirm_delete: bool,
+    /// The "start this download over?" confirmation is up.
+    confirm_restart: bool,
     /// Hash line under the pointer, and the one that was just copied —
     /// the design highlights on hover and flips the copy mark to a
     /// check for a moment (`HASH_COPIED_MS`).
@@ -617,6 +624,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 id: entry.job.id,
                 tab: Tab::Info,
                 confirm_delete: false,
+                confirm_restart: false,
                 hash_hover: None,
                 hash_copied: None,
                 retries: std::collections::HashMap::new(),
@@ -1014,6 +1022,36 @@ fn update_state(st: &mut State, msg: Msg) -> Task<Msg> {
                 Msg::CloseWin
             })
         }
+        Msg::Escape => {
+            st.confirm_delete = false;
+            st.confirm_restart = false;
+            Task::none()
+        }
+        Msg::RestartAsk => {
+            st.confirm_restart = true;
+            Task::none()
+        }
+        Msg::RestartCancel => {
+            st.confirm_restart = false;
+            Task::none()
+        }
+        Msg::RestartConfirm => {
+            st.confirm_restart = false;
+            let client = st.client.clone();
+            let id = st.id;
+            // The file goes first. `restart_job` clears the work
+            // directory but not the finished file, and leaving it there
+            // means the new run arrives at a name that is already taken
+            // — a save conflict raised over a file the user has just
+            // agreed to replace.
+            Task::perform(
+                async move {
+                    let _ = client.delete_final_file(id).await;
+                    client.restart_job(id).await
+                },
+                |_| Msg::Noop,
+            )
+        }
         Msg::OpenFolder => {
             crate::platform::open_path(&st.entry.job.save_dir);
             Task::none()
@@ -1107,13 +1145,13 @@ pub fn subscription(app: &App) -> Subscription<Msg> {
             // only needs to when the user isn't already looking at it.
             iced::Event::Window(iced::window::Event::Focused) => Some(Msg::WinFocused(true)),
             iced::Event::Window(iced::window::Event::Unfocused) => Some(Msg::WinFocused(false)),
-            // Escape backs out of the delete confirmation. Enter is
+            // Escape backs out of either confirmation. Enter is
             // deliberately NOT wired to confirm: a stray keypress must
-            // not be what deletes a file.
+            // not be what deletes a file or throws a gigabyte away.
             iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
                 key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
                 ..
-            }) => Some(Msg::DeleteCancel),
+            }) => Some(Msg::Escape),
             _ => None,
         }),
         crate::gui::ipc::all_events(crate::ipc_local::protocol::GuiKind::Download(st.id))
@@ -1153,7 +1191,7 @@ pub fn view(app: &App) -> Element<'_, Msg> {
             // under a different parent, and the scrollable loses its
             // state with it — the page would jump back to the top the
             // moment the confirmation opened.
-            delete_overlay(st, page)
+            restart_overlay(st, delete_overlay(st, page))
         }
     })
 }
@@ -2388,10 +2426,23 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
                 .icon("trash-2")
                 .on_press(Msg::DeleteAsk)
                 .view(t),
-            Btn::new("Keep anyway")
-                .ghost()
-                .on_press(Msg::CloseWin)
-                .view(t),
+            // Fetching the file again is the way out of this page, so it
+            // is the primary action. Same icon the list's Restart
+            // Download carries, because it is the same thing.
+            row![
+                Btn::new("Keep anyway")
+                    .ghost()
+                    .on_press(Msg::CloseWin)
+                    .view(t),
+                Btn::new("Restart download")
+                    .primary()
+                    .icon("rotate-cw")
+                    .on_press(Msg::RestartAsk)
+                    .view(t),
+            ]
+            .spacing(theme::space::S2)
+            .align_y(Alignment::Center)
+            .into(),
         )
     } else {
         footer(
@@ -2446,6 +2497,45 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
     )
 }
 
+/// "Start this download over?" confirmation. Says what it costs — the
+/// file on disk and every byte already fetched — because the button
+/// that opens it sits under a page explaining that the file is wrong,
+/// where "do it again" is easy to press without reading.
+fn restart_overlay<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a, Msg> {
+    if !st.confirm_restart {
+        return stack![base].into();
+    }
+    let t = &st.tokens;
+    let name = st
+        .entry
+        .job
+        .filename
+        .clone()
+        .unwrap_or_else(|| "This file".to_owned());
+    let size = st
+        .total()
+        .map(|b| format!(" All {} of it comes down again.", format_bytes(b)))
+        .unwrap_or_default();
+    let card = confirm_card(
+        t,
+        ("rotate-cw", t.action_primary, "Start this download over?"),
+        format!(
+            "{name} is deleted from your disk and fetched again from the beginning.\
+             {size} Nothing that has been downloaded is kept."
+        ),
+        Btn::new("Cancel")
+            .ghost()
+            .on_press(Msg::RestartCancel)
+            .view(t),
+        Btn::new("Restart download")
+            .primary()
+            .icon("rotate-cw")
+            .on_press(Msg::RestartConfirm)
+            .view(t),
+    );
+    modal_over(t, base, card)
+}
+
 /// "Delete the saved file?" confirmation (pattern: queues
 /// `delete_overlay`). Names the file and says what survives, since the
 /// download keeps its row in the list either way.
@@ -2460,43 +2550,60 @@ fn delete_overlay<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a, Msg>
         return stack![base].into();
     }
     let t = &st.tokens;
-    let t2 = *t;
     let name = st
         .entry
         .job
         .filename
         .clone()
         .unwrap_or_else(|| "This file".to_owned());
-    let card = container(
+    let card = confirm_card(
+        t,
+        ("trash-2", t.status_danger, "Delete this file?"),
+        format!(
+            "{name} is permanently deleted from your disk. This download keeps its \
+             place in the list, so you can fetch it again from the same address."
+        ),
+        Btn::new("Cancel")
+            .ghost()
+            .on_press(Msg::DeleteCancel)
+            .view(t),
+        Btn::new("Delete file")
+            .danger_filled()
+            .icon("trash-2")
+            .on_press(Msg::DeleteConfirm)
+            .view(t),
+    );
+    modal_over(t, base, card)
+}
+
+/// The card both confirmations use: icon and question, what it costs in
+/// prose, then Cancel and the action itself.
+fn confirm_card<'a>(
+    t: &Tokens,
+    head: (&'a str, iced::Color, &'a str),
+    body: String,
+    cancel: Element<'a, Msg>,
+    confirm: Element<'a, Msg>,
+) -> Element<'a, Msg> {
+    let t2 = *t;
+    let (icon_name, icon_color, title) = head;
+    container(
         column![
             row![
-                icons::icon("trash-2", 20.0, t.status_danger),
-                text("Delete this file?")
-                    .font(theme::BODY_BOLD)
-                    .size(14.0)
-                    .color(t.fg_1),
+                icons::icon(icon_name, 20.0, icon_color),
+                text(title).font(theme::BODY_BOLD).size(14.0).color(t.fg_1),
             ]
             .spacing(theme::space::S2)
             .align_y(Alignment::Center),
-            text(format!(
-                "{name} is permanently deleted from your disk. This download keeps its \
-                 place in the list, so you can fetch it again from the same address."
-            ))
-            .font(theme::BODY)
-            .size(12.0)
-            .color(t.fg_2)
-            .line_height(iced::widget::text::LineHeight::Relative(1.4)),
+            text(body)
+                .font(theme::BODY)
+                .size(12.0)
+                .color(t.fg_2)
+                .line_height(iced::widget::text::LineHeight::Relative(1.4)),
             row![
                 iced::widget::Space::new().width(Length::Fill),
-                Btn::new("Cancel")
-                    .ghost()
-                    .on_press(Msg::DeleteCancel)
-                    .view(t),
-                Btn::new("Delete file")
-                    .danger_filled()
-                    .icon("trash-2")
-                    .on_press(Msg::DeleteConfirm)
-                    .view(t),
+                cancel,
+                confirm,
             ]
             .spacing(theme::space::S2)
             .align_y(Alignment::Center),
@@ -2518,8 +2625,14 @@ fn delete_overlay<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a, Msg>
             blur_radius: 16.0,
         },
         ..Default::default()
-    });
+    })
+    .into()
+}
 
+/// Scrim + centred card over the page. The page keeps its widget state
+/// — scroll position first among them — because it stays in the same
+/// place in the tree either way.
+fn modal_over<'a>(_t: &Tokens, base: Element<'a, Msg>, card: Element<'a, Msg>) -> Element<'a, Msg> {
     let scrim = iced::widget::opaque(
         iced::widget::mouse_area(
             container(iced::widget::Space::new())
@@ -2530,7 +2643,7 @@ fn delete_overlay<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a, Msg>
                     ..Default::default()
                 }),
         )
-        .on_press(Msg::DeleteCancel),
+        .on_press(Msg::Escape),
     );
 
     stack![
