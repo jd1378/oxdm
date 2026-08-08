@@ -489,10 +489,15 @@ impl State {
                 _ => false,
             };
         if show_progress {
+            // The same number the bar is drawing: while a file is being
+            // assembled that is the copy's progress, not the
+            // transfer's, and a title reading 100% over a bar at 40%
+            // makes the user pick one to believe.
+            let frac = bar_frac(self.assembly(), self.frac());
             format!(
                 "{name} — {} {}%",
                 phase.label(),
-                (self.frac() * 100.0).round() as u32
+                (frac * 100.0).round() as u32
             )
         } else {
             format!("{name} — {}", phase.label())
@@ -1231,7 +1236,13 @@ fn header_card(st: &State) -> Element<'_, Msg> {
     // zero-of-unknown is not zero percent, and the stat strip beside
     // this already draws "—" for the same gap.
     let pct = match st.total() {
-        Some(_) => format!("{}%", (st.frac() * 100.0).round() as u32),
+        // The bar's number, not the transfer's: during assembly they
+        // are different, and a hero reading 100% above a bar at 35%
+        // asks the user to pick one.
+        Some(_) => format!(
+            "{}%",
+            (bar_frac(st.assembly(), st.frac()) * 100.0).round() as u32
+        ),
         None => "—".to_owned(),
     };
 
@@ -2733,10 +2744,12 @@ fn bar_look(
             t.status_warning,
             Some((color::ochre::O400, color::ochre::O300)),
         ),
-        // Assembly is a different job from downloading — no network, no
-        // speed the user can act on — so it gets its own colour rather
-        // than a clay bar that appears to restart at 0%.
-        Phase::Assembling => (
+        // Everything after the transfer is a different job from
+        // downloading — no network, no speed the user can act on — so
+        // it gets its own colour. Assembling carries the copy's own
+        // fraction; hashing has none to report and holds at full width,
+        // where the colour and the label are what say it is working.
+        p if p.is_post_transfer() => (
             t.progress_track,
             color::moss::M400,
             Some((color::moss::M400, color::moss::M300)),
@@ -3201,11 +3214,13 @@ mod tests {
     /// of a transfer. It lasts under a second on a fast disk, which is
     /// exactly why this is asserted rather than eyeballed.
     #[test]
-    fn assembly_paints_the_bar_in_moss() {
+    fn work_after_the_transfer_paints_the_bar_in_moss() {
         let t = tokens();
-        let (_, fill, gradient) = bar_look(&t, Phase::Assembling, false);
-        assert_eq!(fill, color::moss::M400);
-        assert_eq!(gradient, Some((color::moss::M400, color::moss::M300)));
+        for phase in [Phase::Assembling, Phase::Flushing, Phase::Verifying] {
+            let (_, fill, gradient) = bar_look(&t, phase, false);
+            assert_eq!(fill, color::moss::M400, "{phase:?}");
+            assert_eq!(gradient, Some((color::moss::M400, color::moss::M300)));
+        }
 
         // Every other running phase keeps the accent.
         let (_, fill, _) = bar_look(&t, Phase::Downloading, false);
