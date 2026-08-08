@@ -140,6 +140,13 @@ pub trait LiveBridge: Send + Sync + 'static {
     fn on_response_headers(&self, id: JobId, captured: crate::domain::CapturedResponse) {
         let _ = (id, captured);
     }
+    /// Called the moment the assembled file exists, before anything is
+    /// checked against it. A verification failure is still a failure
+    /// with a file on disk, and a job that does not know where that
+    /// file is cannot offer to delete it.
+    fn on_final_path(&self, id: JobId, path: std::path::PathBuf) {
+        let _ = (id, path);
+    }
     /// Called after `evaluate` with the checksums the server advertised
     /// in its headers, for the daemon to record on the job. Awaited —
     /// the digests must be on the job (and in the DB) before the
@@ -273,6 +280,7 @@ impl JobRunner {
             .download(dl_req)
             .await
             .map_err(|e| job_error_from_odl(&e))?;
+        self.bridge.on_final_path(self.job_id, path.clone());
 
         // Hashing is oxdm's, not odl's (`verify_checksums(false)`): the
         // file exists by now, so a mismatch can be reported against a

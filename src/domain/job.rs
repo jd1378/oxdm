@@ -304,6 +304,29 @@ pub struct Job {
     pub captured_response: Option<CapturedResponse>,
 }
 
+impl Job {
+    /// Every byte is here and the file is not what was promised: the
+    /// download finished, then failed its checksum.
+    ///
+    /// Worth telling apart from every other failure. Those are missing
+    /// part of the file and can be resumed, so what is on disk is
+    /// progress; this one has nothing left to fetch and a finished
+    /// file to deal with.
+    pub fn integrity_failed(&self) -> bool {
+        matches!(self.status.error, Some(JobError::ChecksumMismatch { .. }))
+            || self
+                .checksums
+                .iter()
+                .any(|c| c.status == crate::domain::CsStatus::Mismatch)
+    }
+
+    /// Whether the job left an assembled file behind — the thing a
+    /// removal can offer to delete.
+    pub fn has_saved_file(&self) -> bool {
+        self.status.final_path.is_some()
+    }
+}
+
 fn default_category() -> Category {
     Category::Other
 }

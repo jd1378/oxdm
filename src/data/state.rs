@@ -3112,6 +3112,18 @@ impl LiveBridge for StateLiveBridge {
         }
     }
 
+    fn on_final_path(&self, id: JobId, path: std::path::PathBuf) {
+        let Some(state) = self.state.upgrade() else {
+            return;
+        };
+        if let Ok(jobs) = state.jobs.try_read()
+            && let Some(entry) = jobs.get(&id)
+            && let Ok(mut slot) = entry.final_path.write()
+        {
+            *slot = Some(path);
+        }
+    }
+
     async fn on_server_checksums(&self, id: JobId, checksums: Vec<crate::domain::Checksum>) {
         let Some(state) = self.state.upgrade() else {
             return;

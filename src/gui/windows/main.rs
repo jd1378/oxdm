@@ -733,7 +733,13 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                 }
                 Task::none()
             }
+            // `JobFailed` included: the row's phase rides the counter
+            // stream, but *why* it failed lives on the job, and without
+            // a re-fetch the list keeps rendering the job as it was
+            // before it failed — a progress bar under a download that
+            // has already given up.
             Event::JobsChanged
+            | Event::JobFailed { .. }
             | Event::QueuesChanged
             | Event::SettingsChanged
             | Event::ActiveQueuesChanged
@@ -1146,7 +1152,7 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                                     purge_partial: !r.completed,
                                     // Trash already moved the file; never
                                     // double-delete on disk.
-                                    delete_final_file: r.completed && r.delete_on_disk && !trash,
+                                    delete_final_file: r.has_files && r.delete_on_disk && !trash,
                                 },
                             )
                             .await
@@ -1157,7 +1163,7 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                     if r.dont_ask_again {
                         if r.clean {
                             settings.remove_confirm_clean = false;
-                        } else if r.completed {
+                        } else if r.completed || r.has_files {
                             settings.remove_confirm_completed = false;
                         } else {
                             settings.remove_confirm_incomplete = false;
@@ -1416,6 +1422,8 @@ fn request_clean(m: &mut Main) -> Task<Msg> {
             format!("{n} finished downloads")
         },
         completed: true,
+        // Clean never touches files, whatever the rows left behind.
+        has_files: false,
         kind: RemoveKind::Entry,
         delete_on_disk: false,
         dont_ask_again: false,
@@ -1438,7 +1446,18 @@ fn request_remove(m: &mut Main, kind: RemoveKind) -> Task<Msg> {
         return Task::none();
     }
     let completed = ids.iter().all(|id| m.phase(*id) == Phase::Completed);
-    let need_confirm = if completed {
+    // What can be deleted from disk is not the same question as what
+    // finished: an integrity failure has the whole file, and the user
+    // is more likely to want that one gone than any other.
+    let has_files = ids.iter().all(|id| {
+        m.snap
+            .jobs
+            .iter()
+            .any(|j| j.id == *id && j.has_saved_file())
+    });
+    // A file on disk is the thing worth confirming about, whether or
+    // not the download is `Completed`.
+    let need_confirm = if completed || has_files {
         m.snap.settings.remove_confirm_completed
     } else {
         m.snap.settings.remove_confirm_incomplete
@@ -1457,10 +1476,11 @@ fn request_remove(m: &mut Main, kind: RemoveKind) -> Task<Msg> {
         ids,
         filename,
         completed,
+        has_files,
         kind,
-        // Permanent pre-checks "also delete file on disk" for completed
-        // entries; the user can still untick before confirming.
-        delete_on_disk: matches!(kind, RemoveKind::Permanent) && completed,
+        // Permanent pre-checks "also delete file on disk" when there is
+        // one; the user can still untick before confirming.
+        delete_on_disk: matches!(kind, RemoveKind::Permanent) && has_files,
         dont_ask_again: false,
         clean: false,
     });
@@ -2843,7 +2863,11 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
         _ if !phase.is_running() => ProgressTone::Paused,
         _ => ProgressTone::Active,
     };
-    let stopped_with_progress = frac > 0.0 && phase != Phase::Completed;
+    // An integrity failure has every byte on disk and nothing to
+    // resume, so a bar at 100% measures work that is over and offers a
+    // number where the answer is "this file is wrong".
+    let integrity_failed = job.integrity_failed();
+    let stopped_with_progress = frac > 0.0 && phase != Phase::Completed && !integrity_failed;
     let status_cell: Element<'_, Msg> = if phase.is_running() || stopped_with_progress {
         let (_, label) = phase_style(t, phase);
         cell(
@@ -2853,6 +2877,11 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
         )
     } else {
         let (color, label) = phase_style(t, phase);
+        let label = if integrity_failed {
+            "Integrity check failed".to_owned()
+        } else {
+            label
+        };
         cell(
             status_mark(phase_mark(phase), color, label, 12.0),
             Length::Fixed(m.columns.width(SortColumn::Status as usize)),
@@ -3273,15 +3302,20 @@ fn context_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>, id: JobId) -> E
     // confirm (B4) — the modifier only PRE-SELECTS the option.
     //
     // Trash/Permanent act on the FINISHED file, so they're only offered
-    // when EVERY selected job is Completed. For any non-completed job
-    // there is no final file and removal would purge its `.part`
-    // (irrecoverable) — which would betray the "recoverable" promise —
-    // so non-completed selections get entry-only removal regardless of
-    // modifiers.
+    // when EVERY selected job has one. A job still missing bytes has no
+    // final file and removal would purge its `.part` (irrecoverable) —
+    // which would betray the "recoverable" promise — so those
+    // selections get entry-only removal regardless of modifiers.
+    // Completion is not the test: a download that failed its integrity
+    // check has the whole file, and is the one most likely to be
+    // thrown away.
     let all_done = !m.selection.is_empty()
-        && m.selection
-            .iter()
-            .all(|sid| m.phase(*sid) == Phase::Completed);
+        && m.selection.iter().all(|sid| {
+            m.snap
+                .jobs
+                .iter()
+                .any(|j| j.id == *sid && j.has_saved_file())
+        });
     let destruct: Element<'a, Msg> = {
         let morph = if all_done {
             (m.modifiers.shift(), m.modifiers.alt())

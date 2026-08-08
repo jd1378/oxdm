@@ -21,6 +21,11 @@ pub struct RemoveState {
     pub ids: Vec<crate::domain::JobId>,
     pub filename: String,
     pub completed: bool,
+    /// Every selected job left a file on disk. Not the same as
+    /// `completed`: a download that failed its integrity check has all
+    /// of its bytes and a file to deal with, and refusing to offer that
+    /// deletion leaves the user to find it by hand.
+    pub has_files: bool,
     /// Destructive disposition pre-selected by the context-menu morph.
     pub kind: RemoveKind,
     pub delete_on_disk: bool,
@@ -29,6 +34,16 @@ pub struct RemoveState {
     /// set was assembled for the user, so the dialog says how many and
     /// the "don't ask again" answers for Clean alone.
     pub clean: bool,
+}
+
+impl RemoveState {
+    /// Whether the removal has a finished file at stake. A download
+    /// that failed its integrity check is not `Completed`, but every
+    /// byte of it is on disk — for the question this dialog asks, it
+    /// belongs with the finished ones, not with the half-transferred.
+    pub fn finished(&self) -> bool {
+        self.completed || self.has_files
+    }
 }
 
 // ---------------------------------------------------------------- scaffolding
@@ -159,7 +174,7 @@ pub fn remove_confirm<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Ms
             "Clean",
             "trash-2",
         ),
-        RemoveKind::Entry if st.completed => (
+        RemoveKind::Entry if st.finished() => (
             "triangle-alert",
             t.status_danger,
             plural(
@@ -184,7 +199,7 @@ pub fn remove_confirm<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Ms
     };
     let dont_label = if st.clean {
         "Don't ask again when cleaning"
-    } else if st.completed {
+    } else if st.finished() {
         "Don't ask again for completed downloads"
     } else {
         "Don't ask again for incomplete downloads"
@@ -221,10 +236,10 @@ pub fn remove_confirm<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Ms
     .spacing(theme::space::S3);
 
     // On-disk delete toggle: meaningful only when EVERY selected entry
-    // is completed (a mixed selection has partials, and there is no
-    // finished file to offer) and they aren't going to Trash, which
+    // has a finished file (a mixed selection has partials, and there is
+    // nothing to offer for those) and they aren't going to Trash, which
     // moves the files itself.
-    if st.completed && !st.clean && st.kind != RemoveKind::Trash {
+    if st.has_files && !st.clean && st.kind != RemoveKind::Trash {
         card = card.push(checkbox(
             t,
             &plural(
