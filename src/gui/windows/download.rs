@@ -414,29 +414,41 @@ pub struct State {
     shot: Option<Shot>,
 }
 
-/// The pseudo-part odl reports assembly through, so a consumer can
-/// draw it the way it draws a connection.
-use odl::progress::ASSEMBLY_ULID as ASSEMBLY_PART;
+/// The pseudo-parts odl reports post-transfer work through — the copy
+/// into the final file, and the hashing of it — so a consumer can draw
+/// them the way it draws a connection.
+use odl::progress::{ASSEMBLY_ULID as ASSEMBLY_PART, VERIFY_ULID as VERIFY_PART};
+
+/// Neither is a connection: they are drawn on the hero bar, and a row
+/// in the segments table would claim a server answered them.
+fn is_pseudo_part(ulid: &str) -> bool {
+    ulid == ASSEMBLY_PART || ulid == VERIFY_PART
+}
 
 impl State {
     fn phase(&self) -> Phase {
         self.entry.counters.phase
     }
 
-    /// Bytes written of the final file, while it is being assembled.
+    /// How far the work *after* the transfer has got: bytes written of
+    /// the final file while it is assembled, bytes read back while it
+    /// is hashed.
     ///
-    /// Assembly is real work — a gigabyte of parts is a gigabyte of
-    /// copying — and reporting it as a bar frozen at 100% makes the
-    /// last stretch of a download look like a hang.
+    /// Both are real work — a gigabyte of parts is a gigabyte of
+    /// copying, then a gigabyte of reading per checksum — and reporting
+    /// either as a bar frozen at 100% makes the last stretch of a
+    /// download look like a hang.
     fn assembly(&self) -> Option<(u64, u64)> {
-        if self.phase() != Phase::Assembling {
-            return None;
-        }
+        let ulid = match self.phase() {
+            Phase::Assembling => ASSEMBLY_PART,
+            Phase::Verifying => VERIFY_PART,
+            _ => return None,
+        };
         self.entry
             .counters
             .parts
             .iter()
-            .find(|p| p.ulid == ASSEMBLY_PART)
+            .find(|p| p.ulid == ulid)
             .filter(|p| p.size > 0)
             .map(|p| (p.downloaded, p.size))
     }
@@ -1697,7 +1709,7 @@ fn info_tab(st: &State) -> Element<'_, Msg> {
         .spacing(theme::space::S2)
     };
 
-    let n_parts = c.parts.iter().filter(|p| p.ulid != ASSEMBLY_PART).count();
+    let n_parts = c.parts.iter().filter(|p| !is_pseudo_part(&p.ulid)).count();
     // Counts what is open, and says nothing when nothing is. Rounding
     // an empty table up to "1 parallel connections" claimed a
     // connection that did not exist and contradicted the Speed tab's
@@ -1745,13 +1757,10 @@ fn info_tab(st: &State) -> Element<'_, Msg> {
         .height(Length::Fixed(SEG_HEAD_H));
 
         let mut rows = column![head, hairline(t.border_subtle)];
-        // The assembly pseudo-part is not a connection; it is drawn on
-        // the hero bar, and listing it here would put a row in the
-        // table that no server ever answered.
         for (i, p) in c
             .parts
             .iter()
-            .filter(|p| p.ulid != ASSEMBLY_PART)
+            .filter(|p| !is_pseudo_part(&p.ulid))
             .enumerate()
         {
             // A part whose end the server never declared has no

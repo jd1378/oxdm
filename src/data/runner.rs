@@ -298,7 +298,46 @@ impl JobRunner {
                 id: self.job_id,
                 phase: Phase::Verifying,
             });
-            let _ = verify_file(&path, &expected, &self.cancel).await?;
+            // Hashing a gigabyte takes seconds. odl 2.2 reports it per
+            // block, and oxdm forwards that as a row of its own — the
+            // same shape assembly already uses — so the bar moves
+            // instead of sitting at 100% hoping.
+            let size = tokio::fs::metadata(&path).await.map(|m| m.len()).ok();
+            if let Some(size) = size.filter(|s| *s > 0) {
+                self.bridge.on_event(
+                    self.job_id,
+                    &OdlProgressEvent::PartAdded {
+                        ulid: odl::progress::VERIFY_ULID.to_string(),
+                        offset: 0,
+                        size,
+                    },
+                );
+            }
+            let outcome = verify_file(
+                &path,
+                &expected,
+                &self.cancel,
+                size.unwrap_or(0),
+                expected.len(),
+                |done, total| {
+                    self.bridge.on_event(
+                        self.job_id,
+                        &OdlProgressEvent::PartProgress {
+                            ulid: odl::progress::VERIFY_ULID.to_string(),
+                            downloaded: done,
+                            total,
+                        },
+                    );
+                },
+            )
+            .await;
+            self.bridge.on_event(
+                self.job_id,
+                &OdlProgressEvent::PartFinished {
+                    ulid: odl::progress::VERIFY_ULID.to_string(),
+                },
+            );
+            let _ = outcome?;
         }
 
         Ok(RunOutcome {
@@ -314,11 +353,20 @@ impl JobRunner {
 /// odl reads the file in 256 KiB blocks off the async runtime, so a
 /// multi-gigabyte hash yields between blocks instead of holding a
 /// worker — the UI keeps painting while `Verifying` is on screen.
+/// `on_progress(done, total)` is called as the file is read, where
+/// `total` spans *every* digest: two checksums means reading the file
+/// twice, and a bar that restarts halfway through the check would be
+/// measuring the wrong thing.
 async fn verify_file(
     path: &std::path::Path,
     expected: &[odl::hash::HashDigest],
     cancel: &CancellationToken,
+    size: u64,
+    passes: usize,
+    mut on_progress: impl FnMut(u64, u64) + Send,
 ) -> Result<Vec<odl::hash::HashDigest>, JobError> {
+    let total = size.saturating_mul(passes as u64);
+    let mut done_before = 0u64;
     let mut computed = Vec::with_capacity(expected.len());
     for want in expected {
         // Between files, not inside one: odl's reader has no cancel
@@ -327,9 +375,19 @@ async fn verify_file(
         if cancel.is_cancelled() {
             return Err(JobError::Cancelled);
         }
-        let got = odl::hash::HashDigest::from_path(path, want.algorithm(), want.encoding())
-            .await
-            .map_err(|e| JobError::Io(e.to_string()))?;
+        let mut read_so_far = 0u64;
+        let got = odl::hash::HashDigest::from_path_with_progress(
+            path,
+            want.algorithm(),
+            want.encoding(),
+            |n| {
+                read_so_far = read_so_far.saturating_add(n);
+                on_progress(done_before.saturating_add(read_so_far), total);
+            },
+        )
+        .await
+        .map_err(|e| JobError::Io(e.to_string()))?;
+        done_before = done_before.saturating_add(size);
         if !got.matches(want) {
             return Err(JobError::ChecksumMismatch {
                 expected: want.digest().to_string(),

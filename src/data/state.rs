@@ -3205,20 +3205,14 @@ impl LiveBridge for StateLiveBridge {
                     // finished, failed its check and was started again
                     // showed 100% beside segments at 40%.
                     //
-                    // Two samples are not this download's progress and
-                    // are dropped rather than believed. `0`, which odl
-                    // emits while re-evaluating a resume before it has
-                    // read the part offsets back off disk. And anything
-                    // once the transfer is over: assembly counts the
-                    // copy into the final file from zero through the
-                    // same event, so a sample landing while the phase
-                    // reads Assembling — or Flushing, or Verifying,
-                    // since a late one can arrive after the phase has
-                    // moved on — would drag the download back to the
-                    // middle just as it finished. The assembly bar
-                    // reads that count from the pseudo-part odl reports
-                    // it through.
-                    if *downloaded > 0 && !entry.phase().is_post_transfer() {
+                    // Since 2.2 the aggregate belongs to the transfer
+                    // alone — assembly and verification report on their
+                    // own rows — and the downloader closes it with one
+                    // final sample at the full size. Only the `0` odl
+                    // emits while re-evaluating a resume, before it has
+                    // read the part offsets back off disk, is still
+                    // dropped.
+                    if *downloaded > 0 {
                         entry.counters.set_downloaded(*downloaded);
                     }
                     entry.counters.set_total(*total);
@@ -3355,19 +3349,6 @@ impl LiveBridge for StateLiveBridge {
                     && let Some(entry) = jobs.get(&id)
                 {
                     let phase = crate::data::mapping::phase_from_odl(*p);
-                    // The transfer is over the moment the file starts
-                    // being assembled: odl only gets there once every
-                    // part is complete, so every byte is on disk
-                    // whatever the last sample happened to say. Left as
-                    // it was, the count keeps whatever arrived last —
-                    // 896 MB of a gigabyte — and the window spends the
-                    // assembling and the hashing insisting the download
-                    // is at 88%.
-                    if phase.is_post_transfer()
-                        && let Some(total) = entry.counters.total()
-                    {
-                        entry.counters.set_downloaded(total);
-                    }
                     // First Downloading transition of the run stamps
                     // started_at (set-once; `0` = unset).
                     if phase == Phase::Downloading {
