@@ -84,6 +84,21 @@ pub fn try_close(kind: GuiKind) -> bool {
     tx.try_send(Event::Close).is_ok()
 }
 
+/// Ask every GUI subprocess except the listed kinds to exit.
+///
+/// Used by the shutdown sequence: the windows go now, and whatever is
+/// still holding the daemon open stays on screen to say why.
+pub fn close_all_except(keep: &[GuiKind]) {
+    let Ok(reg) = registry().lock() else {
+        return;
+    };
+    let doomed: Vec<GuiKind> = reg.keys().filter(|k| !keep.contains(k)).copied().collect();
+    drop(reg);
+    for kind in doomed {
+        try_close(kind);
+    }
+}
+
 /// Bind the IPC socket and run the accept loop until the daemon
 /// terminates. Designed to be `tokio::spawn`ed by the daemon main.
 pub async fn serve(state: Arc<AppState>) -> std::io::Result<()> {

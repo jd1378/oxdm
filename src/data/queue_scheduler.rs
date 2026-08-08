@@ -38,6 +38,11 @@ pub fn spawn(state: Arc<AppState>) {
         let mut last_active: HashMap<QueueId, bool> = HashMap::new();
         let mut cmd_polls: HashMap<QueueId, CmdPoll> = HashMap::new();
         loop {
+            // A scheduled window opening during shutdown would start
+            // the very downloads the exit just paused.
+            if state.is_exiting() {
+                return;
+            }
             let queues = state.queues_snapshot().await;
             // Runtime capability set (e.g. AcPower only with a battery
             // present); unavailable conditions are neither probed nor

@@ -161,9 +161,18 @@ impl Tray for OxdmTray {
             }
         }
         items.push(M::Separator);
+        // Once the exit is scheduled it cannot be asked for again —
+        // and saying so beats a menu item that looks live and does
+        // nothing while the app waits on an assembly.
+        let exiting = self.state.is_exiting();
         items.push(
             StandardItem {
-                label: "Quit".into(),
+                label: if exiting {
+                    "Exiting\u{2026}".into()
+                } else {
+                    "Quit".into()
+                },
+                enabled: !exiting,
                 activate: Box::new(|t: &mut Self| quit_daemon(&t.rt, &t.state)),
                 ..Default::default()
             }

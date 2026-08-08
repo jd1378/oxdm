@@ -96,7 +96,12 @@ fn spawn_workers(
     {
         let s = state.clone();
         tokio::spawn(async move {
-            if tokio::signal::ctrl_c().await.is_ok() {
+            // Looped, not awaited once: a handler that finishes after
+            // the first signal hands the second back to the default
+            // disposition, which kills the process outright — the one
+            // moment that must not happen is while a final file is
+            // being assembled. Repeats are dropped by `begin_exit`.
+            while tokio::signal::ctrl_c().await.is_ok() {
                 tray::quit_daemon(&tokio::runtime::Handle::current(), &s);
             }
         });
@@ -106,10 +111,10 @@ fn spawn_workers(
         let s = state.clone();
         tokio::spawn(async move {
             use tokio::signal::unix::{SignalKind, signal};
-            if let Ok(mut sig) = signal(SignalKind::terminate())
-                && sig.recv().await.is_some()
-            {
-                tray::quit_daemon(&tokio::runtime::Handle::current(), &s);
+            if let Ok(mut sig) = signal(SignalKind::terminate()) {
+                while sig.recv().await.is_some() {
+                    tray::quit_daemon(&tokio::runtime::Handle::current(), &s);
+                }
             }
         });
     }

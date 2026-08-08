@@ -326,33 +326,94 @@ fn kill_living_gui_children() {
 
 /// Orderly shutdown of the daemon.
 ///
-/// Sequence:
-///   1. `pause_all` — gracefully halts every active runner so partial
-///      files + metadata are flushed and resumable next launch.
-///   2. Drop IPC connections so every live GUI subprocess detects
-///      `daemon_lost` and exits.
-///   3. `process::exit(0)`.
+/// Quitting is a schedule, not an instant: a download being assembled
+/// into its final file cannot be interrupted without leaving a file
+/// that is the right length and the wrong contents, so the exit waits
+/// for it.
 ///
-/// Steps 1-2 happen on the tokio runtime so we don't block the tray
-/// callback thread; the brief sleep before exit gives the GUIs a
-/// chance to wind down on their own.
+/// Sequence:
+///   1. Claim the shutdown. A second request — tray, `--quit`, another
+///      signal — is dropped rather than starting a second sequence.
+///   2. Stop every queue and pause every running download, so nothing
+///      new starts while we wind down.
+///   3. Close every window except the download windows for jobs still
+///      assembling, and open those that are not already on screen: the
+///      app is refusing to exit, and the user is owed the reason.
+///   4. Wait for assembly to finish (bounded — a quit that never
+///      returns is its own kind of broken).
+///   5. Cancel any straggling runner, close the rest, exit.
 pub fn quit_daemon(rt: &tokio::runtime::Handle, state: &Arc<AppState>) {
+    if !state.begin_exit() {
+        tracing::info!("quit already in progress; ignoring");
+        return;
+    }
     let s = state.clone();
     // Tray callbacks fire on the tray-owner thread, which is *not* a
     // tokio runtime context, so bare `tokio::spawn` would panic and
     // muda silently swallows the panic — leaving Quit a no-op. Use the
     // explicit handle the daemon passed into the tray.
     rt.spawn(async move {
-        // Assembly first: cancelling a runner mid-copy leaves a final
-        // file of the right length and the wrong contents, and there is
-        // no way to tell afterwards.
-        s.await_assembly(std::time::Duration::from_secs(300)).await;
+        use crate::ipc_local::protocol::GuiKind;
+        s.halt_for_exit().await;
+
+        // Which windows may stay is not a single snapshot: a download
+        // that was mid-flush when the quit landed reaches `Assembling`
+        // a moment later, and its window has to come back. So the rule
+        // is re-applied on every poll of the wait, and each job's
+        // window is opened once.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
+        // Long enough for a run that finished downloading as the quit
+        // arrived to reach assembly, short enough that an idle daemon
+        // exits promptly.
+        let settle = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut shown: std::collections::HashSet<JobId> = std::collections::HashSet::new();
+        let mut polls: u32 = 0;
+        loop {
+            polls += 1;
+            let assembling = s.assembling_jobs().await;
+            let keep: Vec<GuiKind> = assembling.iter().map(|id| GuiKind::Download(*id)).collect();
+            crate::ipc_local::server::close_all_except(&keep);
+            // Spawned, not merely spared: the window may be minimised
+            // to the tray, or its process may still hold an IPC
+            // connection with nothing on screen. A fresh one is the
+            // only way to be sure the user sees what the exit is
+            // waiting for. Once per job — `shown` keeps the poll from
+            // reopening it every 250ms.
+            // Not on the first look: assembling a gigabyte off a local
+            // disk can take well under a second, and a window that
+            // flashes up and is killed again explains nothing.
+            for id in &assembling {
+                if polls > 2 && shown.insert(*id) {
+                    tracing::info!(job = %id, "opening the window that is holding the exit");
+                    spawn_download_gui(*id);
+                }
+            }
+            let now = tokio::time::Instant::now();
+            if assembling.is_empty() && now >= settle {
+                break;
+            }
+            if now >= deadline {
+                tracing::warn!(
+                    assembling = assembling.len(),
+                    "still assembling at shutdown deadline; exiting anyway"
+                );
+                break;
+            }
+            if !assembling.is_empty() {
+                tracing::info!(
+                    assembling = assembling.len(),
+                    "waiting for assembly before exit"
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+
+        // Assembly is done; anything still running gets the pause it
+        // already refused, then the belt-and-braces cancel for runners
+        // that did not observe it in time.
         s.pause_all().await;
-        // pause_all returns once each runner has acknowledged the
-        // pause; LiveCounters + .part files are now in a consistent
-        // on-disk state. cancel_all_runners is a belt-and-braces
-        // catch for runners that didn't observe the pause in time.
         s.cancel_all_runners();
+        crate::ipc_local::server::close_all_except(&[]);
         // Brief grace so GUIs see the IPC stream close and exit on
         // their own (`gui_state::daemon_lost` poll).
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;

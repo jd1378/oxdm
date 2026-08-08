@@ -82,7 +82,14 @@ fn run_owner(rt: Handle, state: Arc<AppState>, jobs_rx: mpsc::Receiver<Vec<Job>>
 
     let mut last_jobs: Vec<Job> = Vec::new();
     let mut last_theme = crate::gui::theme::system_theme();
-    rebuild_now(&tray, &mut actions, &mut dyn_map, &last_jobs, last_theme);
+    rebuild_now(
+        &tray,
+        &mut actions,
+        &mut dyn_map,
+        &last_jobs,
+        last_theme,
+        state.is_exiting(),
+    );
 
     let menu_chan = muda::MenuEvent::receiver();
     let tray_chan = TrayIconEvent::receiver();
@@ -98,12 +105,26 @@ fn run_owner(rt: Handle, state: Arc<AppState>, jobs_rx: mpsc::Receiver<Vec<Job>>
         }
         if let Some(jobs) = latest {
             last_jobs = jobs;
-            rebuild_now(&tray, &mut actions, &mut dyn_map, &last_jobs, last_theme);
+            rebuild_now(
+                &tray,
+                &mut actions,
+                &mut dyn_map,
+                &last_jobs,
+                last_theme,
+                state.is_exiting(),
+            );
         }
         let cur_theme = crate::gui::theme::system_theme();
         if cur_theme != last_theme {
             last_theme = cur_theme;
-            rebuild_now(&tray, &mut actions, &mut dyn_map, &last_jobs, last_theme);
+            rebuild_now(
+                &tray,
+                &mut actions,
+                &mut dyn_map,
+                &last_jobs,
+                last_theme,
+                state.is_exiting(),
+            );
         }
 
         while let Ok(ev) = menu_chan.try_recv() {
@@ -170,12 +191,20 @@ fn rebuild_now(
     dyn_map: &mut HashMap<MenuId, JobId>,
     jobs: &[Job],
     theme: crate::gui::theme::ResolvedTheme,
+    exiting: bool,
 ) {
     let menu = Menu::new();
     let open = MenuItem::new("Open", true, None);
     let pause_all = MenuItem::new("Pause all", true, None);
     let resume_all = MenuItem::new("Resume all", true, None);
-    let quit = MenuItem::new("Quit", true, None);
+    // Once the exit is scheduled it cannot be asked for again — and
+    // saying so beats a menu item that looks live and does nothing
+    // while the app waits on an assembly.
+    let quit = if exiting {
+        MenuItem::new("Exiting\u{2026}", false, None)
+    } else {
+        MenuItem::new("Quit", true, None)
+    };
     let new_actions = ActionIds {
         open: Some(open.id().clone()),
         pause_all: Some(pause_all.id().clone()),

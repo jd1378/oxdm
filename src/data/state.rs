@@ -284,6 +284,12 @@ pub struct AppState {
     /// reuse the regular runner + download window for it but want the
     /// queue page and bulk operations to ignore it.
     hidden_jobs: RwLock<std::collections::HashSet<JobId>>,
+    /// Set once the daemon has been asked to quit and never cleared:
+    /// the process is on its way out, waiting only for whatever cannot
+    /// be interrupted. Everything that would start new work checks it,
+    /// and a second quit request is a no-op rather than a second
+    /// shutdown racing the first.
+    exiting: AtomicBool,
     /// Cached id of the built-in Main queue. Resolved once at boot so
     /// `add_job` does not have to round-trip the DB.
     main_queue_id: QueueId,
@@ -423,6 +429,7 @@ impl AppState {
             ext_token: RwLock::new(token),
             dialog_visible_for: RwLock::new(None),
             hidden_jobs: RwLock::new(std::collections::HashSet::new()),
+            exiting: AtomicBool::new(false),
             main_queue_id,
             queues: RwLock::new(queues),
             active_queues: RwLock::new(std::collections::HashMap::new()),
@@ -431,6 +438,43 @@ impl AppState {
             db_error: RwLock::new(db_error),
             power,
         })
+    }
+
+    /// Claim the shutdown. `false` means one is already under way and
+    /// this request should be dropped — the user cannot ask twice, and
+    /// two shutdown sequences racing each other is how a half-written
+    /// file gets left behind.
+    pub fn begin_exit(&self) -> bool {
+        !self.exiting.swap(true, Ordering::AcqRel)
+    }
+
+    /// Whether the daemon is on its way out. Anything that starts work
+    /// — the queue scheduler, a resume, a fresh job — refuses while
+    /// this is set.
+    pub fn is_exiting(&self) -> bool {
+        self.exiting.load(Ordering::Acquire)
+    }
+
+    /// Jobs currently writing their final file. These are the only
+    /// reason a shutdown waits.
+    pub async fn assembling_jobs(&self) -> Vec<JobId> {
+        self.jobs
+            .read()
+            .await
+            .values()
+            .filter(|e| e.phase() == Phase::Assembling)
+            .map(|e| e.job.id)
+            .collect()
+    }
+
+    /// Stop every queue from starting anything else, and pause the jobs
+    /// already running. Assembly refuses to pause and is left alone.
+    pub async fn halt_for_exit(self: &Arc<Self>) {
+        let queues: Vec<QueueId> = self.active_queue_ids().await.into_iter().collect();
+        for q in queues {
+            let _ = self.stop_queue(q).await;
+        }
+        self.pause_all().await;
     }
 
     pub async fn push_conflict(&self, id: JobId, kind: crate::data::ConflictKind, token: u64) {
@@ -641,12 +685,19 @@ impl AppState {
     /// Pause every running job in the queue. Emits `QueueFinished` on
     /// the active→inactive transition.
     pub async fn stop_queue(self: &Arc<Self>, id: QueueId) -> Result<(), String> {
+        // Assembly is excluded rather than asked and refused: writing
+        // the final file is not a transfer this queue can stop, and a
+        // pause it will reject is not worth sending.
         let ids: Vec<JobId> = self
             .jobs
             .read()
             .await
             .values()
-            .filter(|e| e.job.queue_id == id && e.running.load(Ordering::Acquire))
+            .filter(|e| {
+                e.job.queue_id == id
+                    && e.running.load(Ordering::Acquire)
+                    && e.phase() != Phase::Assembling
+            })
             .map(|e| e.job.id)
             .collect();
         for jid in ids {
@@ -1919,6 +1970,11 @@ impl AppState {
     }
 
     pub async fn start_job(self: &Arc<Self>, id: JobId) -> Result<(), JobError> {
+        // The daemon is winding down; starting a transfer now would
+        // either be paused a moment later or hold the exit open.
+        if self.is_exiting() {
+            return Err(JobError::Other("oxdm is shutting down".into()));
+        }
         let entry = self
             .job_entry(id)
             .await
@@ -2522,6 +2578,12 @@ impl AppState {
     pub fn cancel_all_runners(&self) {
         if let Ok(jobs) = self.jobs.try_read() {
             for entry in jobs.values() {
+                // Cancelling mid-assembly leaves a final file of the
+                // right length and the wrong contents. Nothing is
+                // gained either: the copy is local and ends on its own.
+                if entry.phase() == Phase::Assembling {
+                    continue;
+                }
                 if let Ok(token) = entry.cancel.lock() {
                     token.cancel();
                 }
@@ -2541,46 +2603,16 @@ impl AppState {
             .collect()
     }
 
-    /// Block until nothing is writing a final file, or `budget` runs
-    /// out.
-    ///
-    /// Shutdown cancels every runner, and a cancelled assembly leaves a
-    /// final file that is the right length and the wrong contents. The
-    /// copy is local I/O with a known end, so waiting for it is short
-    /// and bounded — but it is bounded, because a quit that never
-    /// finishes is its own kind of broken.
-    pub async fn await_assembly(self: &Arc<Self>, budget: std::time::Duration) {
-        let deadline = tokio::time::Instant::now() + budget;
-        loop {
-            let assembling = self
-                .jobs
-                .read()
-                .await
-                .values()
-                .filter(|e| e.phase() == Phase::Assembling)
-                .count();
-            if assembling == 0 {
-                return;
-            }
-            if tokio::time::Instant::now() >= deadline {
-                tracing::warn!(
-                    assembling,
-                    "still assembling at shutdown deadline; exiting anyway"
-                );
-                return;
-            }
-            tracing::info!(assembling, "waiting for final-file assembly before exit");
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        }
-    }
-
     pub async fn pause_all(self: &Arc<Self>) {
+        // A job writing its final file is left alone: `pause` refuses
+        // it anyway, and asking is how a shutdown ends up logging an
+        // error for doing the right thing.
         let ids: Vec<JobId> = self
             .jobs
             .read()
             .await
             .values()
-            .filter(|e| e.running.load(Ordering::Acquire))
+            .filter(|e| e.running.load(Ordering::Acquire) && e.phase() != Phase::Assembling)
             .map(|e| e.job.id)
             .collect();
         for id in ids {
