@@ -3078,9 +3078,22 @@ impl LiveBridge for StateLiveBridge {
                 if let Ok(jobs) = state.jobs.try_read()
                     && let Some(entry) = jobs.get(&id)
                 {
-                    // Monotonic: skips the brief Progress(0, total) odl
-                    // can emit while re-evaluating an in-flight resume.
-                    entry.counters.advance_downloaded(*downloaded);
+                    // odl's sample is what this run has; it replaces
+                    // whatever was on screen. A monotonic rule kept the
+                    // *previous* run's byte count — a download that
+                    // finished, failed its check and was started again
+                    // showed 100% beside segments at 40%.
+                    //
+                    // Two samples are not this download's progress and
+                    // are dropped rather than believed: `0`, which odl
+                    // emits while re-evaluating a resume before it has
+                    // read the part offsets back off disk, and anything
+                    // during assembly, which measures the copy into the
+                    // final file — the assembly bar reads that from the
+                    // pseudo-part odl reports it through.
+                    if *downloaded > 0 && entry.phase() != Phase::Assembling {
+                        entry.counters.set_downloaded(*downloaded);
+                    }
                     entry.counters.set_total(*total);
                 }
             }

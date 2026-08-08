@@ -411,32 +411,10 @@ impl LiveCounters {
         self.downloaded.store(v, Ordering::Relaxed);
     }
 
-    /// Monotonic update: only advance forward. Used by the runner's
-    /// progress reporter so a transient `Progress(downloaded = 0)` odl
-    /// emits during resume re-evaluation does not roll the UI back to
-    /// 0% before it discovers the existing `.part` offsets. Explicit
-    /// resets (cancel-to-queued, remove) bypass this via
-    /// `reset_progress` / `set_downloaded`.
-    pub fn advance_downloaded(&self, v: u64) {
-        let mut cur = self.downloaded.load(Ordering::Relaxed);
-        while v > cur {
-            match self.downloaded.compare_exchange_weak(
-                cur,
-                v,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return,
-                Err(actual) => cur = actual,
-            }
-        }
-    }
-
     /// Hard reset: zero progress + total. Called when a job leaves the
     /// completed/in-flight state and goes back to a clean Queued
-    /// (cancel-to-queued, remove). Without this, monotonic
-    /// `advance_downloaded` would keep the old number visible after a
-    /// genuine restart of the same job.
+    /// (cancel-to-queued, remove), so nothing of the old run is left on
+    /// screen before the new one reports anything.
     pub fn reset_progress(&self) {
         self.downloaded.store(0, Ordering::Relaxed);
         self.total.store(0, Ordering::Relaxed);
