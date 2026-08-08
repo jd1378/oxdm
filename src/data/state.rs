@@ -2263,14 +2263,18 @@ impl AppState {
                     entry.reset_live_speed();
                     // A failed integrity check is a failure *after* the
                     // last byte arrived — the file is whole, it is just
-                    // not the file that was promised. Leaving the count
-                    // at the last mid-transfer sample put "Failed · 88%"
-                    // in the list beside a window explaining that the
-                    // download had finished.
-                    if matches!(err, JobError::ChecksumMismatch { .. })
-                        && let Some(total) = entry.counters.total()
-                    {
-                        entry.counters.set_downloaded(total);
+                    // not the file that was promised. So the run has an
+                    // end, and the count is the whole of it. Without
+                    // both, the page that explains the failure sits
+                    // above three dashes where the speed it managed,
+                    // the time it took and the moment it finished
+                    // should be — facts the run collected and then
+                    // threw away for want of a timestamp.
+                    if matches!(err, JobError::ChecksumMismatch { .. }) {
+                        entry.finished_at_ms.store(now_ms(), Ordering::Relaxed);
+                        if let Some(total) = entry.counters.total() {
+                            entry.counters.set_downloaded(total);
+                        }
                     }
                     if let Ok(mut g) = entry.last_error.write() {
                         *g = Some(err.clone());
@@ -2322,6 +2326,15 @@ impl AppState {
     /// wrong with it. Returns the entry to use from here on, which is a
     /// fresh one whenever the verdicts had to be rewritten.
     async fn supersede_last_run(&self, id: JobId, entry: Arc<JobEntry>) -> Arc<JobEntry> {
+        // Including when it started and ended. These are per-run by
+        // definition — `started_at` is the first `Downloading` of *this*
+        // run — but only restart cleared them, so a job that was paused
+        // and picked up again measured itself from the first attempt:
+        // "time taken 03:10:09" for half a minute of transferring, with
+        // the average speed divided by the hours it spent idle.
+        entry.started_at_ms.store(0, Ordering::Release);
+        entry.finished_at_ms.store(0, Ordering::Release);
+        entry.retries.store(0, Ordering::Release);
         if let Ok(mut g) = entry.last_error.write() {
             *g = None;
         }
