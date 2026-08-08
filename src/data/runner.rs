@@ -244,6 +244,15 @@ impl JobRunner {
             instruction.add_checksums(digests);
         }
 
+        // The name the user chose. odl derives one from the URL or
+        // `Content-Disposition`, which is right for a job that was never
+        // renamed and wrong for every one that was: the list, the
+        // window and Properties all say `Job::filename`, and without
+        // this the bytes land under a different name entirely.
+        if let Some(name) = job.filename.as_deref().filter(|n| !n.trim().is_empty()) {
+            instruction.set_filename(name.to_owned());
+        }
+
         // Per-job working directory inside the configured download_dir.
         // Keeps `metadata.pb` / `.part` files isolated so Remove can
         // clean up just this job without touching others. See PLAN §4.5.

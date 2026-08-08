@@ -1062,11 +1062,19 @@ fn update_state(st: &mut State, msg: Msg) -> Task<Msg> {
     }
 }
 
+/// Where the file is, or where it will be.
+///
+/// The recorded path wins: it is what the run actually wrote, and a
+/// window that names a file the user cannot find is worse than one
+/// that names nothing. Falls back to the destination a job that has
+/// not run yet is aiming at.
 fn final_path(entry: &JobEntryView) -> PathBuf {
-    entry
-        .job
-        .save_dir
-        .join(entry.job.filename.as_deref().unwrap_or(""))
+    entry.job.status.final_path.clone().unwrap_or_else(|| {
+        entry
+            .job
+            .save_dir
+            .join(entry.job.filename.as_deref().unwrap_or(""))
+    })
 }
 
 pub fn subscription(app: &App) -> Subscription<Msg> {
