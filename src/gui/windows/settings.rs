@@ -143,6 +143,7 @@ pub enum Msg {
     FixedRetries(String),
     RetryWait(String),
     UseServerTime(bool),
+    DynamicSplit(bool),
     ConfirmIncomplete(bool),
     ConfirmCompleted(bool),
     ConfirmClean(bool),
@@ -369,6 +370,7 @@ fn copy_section(dst: &mut Settings, src: &Settings, section: Section) {
         Section::Downloads => {
             dst.work_dir = src.work_dir.clone();
             dst.use_server_time = src.use_server_time;
+            dst.dynamic_split = src.dynamic_split;
             dst.max_retries = src.max_retries;
             dst.n_fixed_retries = src.n_fixed_retries;
             dst.wait_between_retries = src.wait_between_retries;
@@ -699,6 +701,10 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
         }
         Msg::UseServerTime(v) => {
             st.s.use_server_time = v;
+            Task::none()
+        }
+        Msg::DynamicSplit(v) => {
+            st.s.dynamic_split = v;
             Task::none()
         }
         Msg::ConfirmIncomplete(v) => {
@@ -1665,6 +1671,21 @@ fn downloads_section(st: &State) -> Element<'_, Msg> {
                     Some("Stamp saved files with the time the server reports."),
                     st.s.use_server_time,
                     Msg::UseServerTime
+                )]
+            ),
+            set_section(
+                t,
+                "Connections",
+                vec![toggle_row(
+                    t,
+                    "Split parts while downloading",
+                    Some(
+                        "Let oxdm break up a slow part when other connections finish \
+                         early, instead of leaving one connection to finish alone. \
+                         Turn off for servers that object to reconnects."
+                    ),
+                    st.s.dynamic_split,
+                    Msg::DynamicSplit
                 )]
             ),
             set_section(

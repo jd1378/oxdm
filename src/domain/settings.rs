@@ -44,6 +44,16 @@ pub struct Settings {
     #[serde(default)]
     pub enc_proxy_password: Option<String>,
     pub use_server_time: bool,
+    /// Let odl subdivide a long-running part mid-download when other
+    /// connections have gone idle, instead of leaving the part layout
+    /// as it was decided at the start.
+    ///
+    /// On by default, and worth leaving on: the tail of a download is
+    /// otherwise one connection finishing alone while the rest sit
+    /// there. Off is for servers that count reconnects, or anyone who
+    /// wants the segment table to stay as they set it.
+    #[serde(default = "yes_default")]
+    pub dynamic_split: bool,
     pub accept_invalid_certs: bool,
     pub speed_limit: Option<u64>,
     #[serde(with = "humantime_serde")]
@@ -411,6 +421,7 @@ impl Default for Settings {
             proxy: default_proxy(),
             enc_proxy_password: None,
             use_server_time: false,
+            dynamic_split: true,
             accept_invalid_certs: false,
             speed_limit: None,
             connect_timeout: Some(Duration::from_secs(5)),

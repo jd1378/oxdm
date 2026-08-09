@@ -54,6 +54,7 @@ pub fn settings_to_download_options(
         // and the password comes straight from the secret store.
         .proxy(global_proxy_url(s, proxy_password)?)
         .use_server_time(s.use_server_time)
+        .dynamic_split(s.dynamic_split)
         .accept_invalid_certs(s.accept_invalid_certs)
         .speed_limit(s.speed_limit)
         .connect_timeout(s.connect_timeout);
@@ -592,6 +593,29 @@ mod tests {
             matches!(&digests[0], HashDigest::SHA256(h, HashEncoding::Hex)
             if h == &SHA256_UPPER.to_ascii_lowercase())
         );
+    }
+
+    /// The setting has to reach odl, and reach it through the per-job
+    /// overlay too — a job that overrides its connection count must not
+    /// quietly get the default back.
+    #[test]
+    fn dynamic_split_travels_from_settings_into_the_job_overlay() {
+        let mut s = Settings::default();
+        assert!(s.dynamic_split, "on unless the user says otherwise");
+        assert!(
+            settings_to_download_options(&s, None)
+                .unwrap()
+                .dynamic_split()
+        );
+
+        s.dynamic_split = false;
+        let base = settings_to_download_options(&s, None).unwrap();
+        assert!(!base.dynamic_split());
+
+        let mut job = sample_job();
+        job.max_connections = Some(4);
+        let overlay = job_overlay_options(&base, &job, None, None, None).unwrap();
+        assert!(!overlay.dynamic_split());
     }
 
     #[test]
