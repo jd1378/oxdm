@@ -89,3 +89,57 @@ impl<M> canvas::Program<M> for Dashed {
         vec![frame.into_geometry()]
     }
 }
+
+/// A 1px dashed horizontal rule, full width.
+///
+/// Separates rows that sit directly on the page instead of inside a
+/// bordered card: with no surface to divide, a solid hairline reads as
+/// the edge of something, while a dashed one reads as a break between
+/// two things on the same surface.
+pub fn dashed_rule<'a, M: 'a>(color: Color) -> Element<'a, M> {
+    canvas(Rule { color })
+        .width(Length::Fill)
+        .height(Length::Fixed(1.0))
+        .into()
+}
+
+struct Rule {
+    color: Color,
+}
+
+impl<M> canvas::Program<M> for Rule {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &iced::Renderer,
+        _theme: &iced::Theme,
+        bounds: Rectangle,
+        _cursor: iced::mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        // The same stipple the empty-card outline uses, so the two read
+        // as one idea at two sizes.
+        const DASH: f32 = 2.0;
+        const GAP: f32 = 3.0;
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let mut path = canvas::path::Builder::new();
+        // Half a pixel down: a 1px line drawn on the boundary straddles
+        // two rows of pixels and renders as a 2px smudge.
+        path.move_to(Point::new(0.0, 0.5));
+        path.line_to(Point::new(bounds.width, 0.5));
+        frame.stroke(
+            &path.build(),
+            canvas::Stroke {
+                style: canvas::Style::Solid(self.color),
+                width: 1.0,
+                line_dash: canvas::LineDash {
+                    segments: &[DASH, GAP],
+                    offset: 0,
+                },
+                ..Default::default()
+            },
+        );
+        vec![frame.into_geometry()]
+    }
+}

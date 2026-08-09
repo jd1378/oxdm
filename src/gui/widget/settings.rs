@@ -46,13 +46,35 @@ pub fn set_row<'a, M: 'a>(
     hint: Option<&str>,
     control: Element<'a, M>,
 ) -> Element<'a, M> {
+    labelled_row(t, label, hint, control, ROW_PAD_X)
+}
+
+/// `set_row` for a pane that has no card around it: the same row on the
+/// same vertical rhythm, with its label flush to the pane's own edge
+/// rather than inset by a border that isn't there.
+pub fn set_row_flat<'a, M: 'a>(
+    t: &Tokens,
+    label: &str,
+    hint: Option<&str>,
+    control: Element<'a, M>,
+) -> Element<'a, M> {
+    labelled_row(t, label, hint, control, 0.0)
+}
+
+fn labelled_row<'a, M: 'a>(
+    t: &Tokens,
+    label: &str,
+    hint: Option<&str>,
+    control: Element<'a, M>,
+    pad_x: f32,
+) -> Element<'a, M> {
     container(
         row![label_col(t, label, hint), control]
             .spacing(ROW_GAP)
             .align_y(Alignment::Center),
     )
     .width(Length::Fill)
-    .padding(Padding::from([ROW_PAD_Y, ROW_PAD_X]))
+    .padding(Padding::from([ROW_PAD_Y, pad_x]))
     .into()
 }
 
@@ -145,6 +167,24 @@ pub fn set_section_danger<'a, M: 'a>(
 /// short enough that a header would only name what the rows already say.
 pub fn set_rows<'a, M: 'a>(t: &Tokens, rows: Vec<Element<'a, M>>) -> Element<'a, M> {
     rows_surface(t, t.border_subtle, rows)
+}
+
+/// Rows with no surface at all: they sit on the page's own background,
+/// divided by a dashed rule.
+///
+/// For panes that are nothing but settings, where a card around every
+/// group draws a box around the obvious — the tab is already the group.
+/// A dashed divider says "these are separate" without the solid line's
+/// claim to be the edge of something.
+pub fn set_rows_flat<'a, M: 'a>(t: &Tokens, rows: Vec<Element<'a, M>>) -> Element<'a, M> {
+    let mut body = column![].width(Length::Fill);
+    for (i, r) in rows.into_iter().enumerate() {
+        if i > 0 {
+            body = body.push(crate::gui::widget::dashed_rule(t.border_default));
+        }
+        body = body.push(r);
+    }
+    body.width(Length::Fill).into()
 }
 
 /// Header + arbitrary body, with no rows surface. For groups whose body

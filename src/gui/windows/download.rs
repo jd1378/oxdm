@@ -23,8 +23,8 @@ use crate::gui::widget::error_panel::{error_block, mid_truncate};
 use crate::gui::widget::striped::striped_progress_hatched;
 use crate::gui::widget::{
     Btn, BtnSize, RateChart, TRACKING_EM, TabBtn, TextInput, collapsible_card, combo, hairline,
-    number_stepper, pill_progress, rate_chart, segmented, set_row, set_row_panel, set_rows,
-    sibling, status_dot, surface, toggle, tracked_caps, vdivider,
+    number_stepper, pill_progress, rate_chart, segmented, set_row_flat, set_row_panel, set_rows,
+    set_rows_flat, sibling, status_dot, surface, toggle, tracked_caps, vdivider,
 };
 use crate::gui::windows::add::footer;
 use crate::ipc_local::Client;
@@ -36,6 +36,24 @@ const CHART_SAMPLES: usize = 120;
 /// The window opens at its floor height: the tab bodies scroll, so extra
 /// launch height only ever showed empty surface.
 const WIN_W: f32 = 540.0;
+/// Heights the settings tabs want, measured off the rendered panes at
+/// the default width: the point where the last row's padding ends, plus
+/// the page's own trailing gap and the footer band.
+///
+/// The window grows into them and never shrinks back — a tab switch
+/// that took height away would move the buttons under the pointer, and
+/// the user's own resize outranks ours either way.
+/// Both carry a few pixels over what the last row measures. A row ends
+/// in padding that paints nothing, so a height read off a screenshot
+/// lands a hair short — and a pane that scrolls by two pixels is worse
+/// than one with two pixels to spare.
+const SPEED_TAB_H: f32 = 451.0;
+const COMPLETION_TAB_H: f32 = 423.0;
+/// The destructive-action warning, which only some states show: the
+/// panel's own chrome, plus a line per thing it promises.
+const COMPLETION_WARN_H: f32 = 88.0;
+const COMPLETION_WARN_LINE_H: f32 = 24.0;
+
 const WIN_MIN_W: f32 = 530.0;
 /// Floor height, minus the bottom gap that moved inside the scroll port
 /// and so no longer has to be reserved by the frame.
@@ -382,6 +400,7 @@ pub struct State {
     path_field: String,
     /// Live window width, so a height correction can leave it alone.
     win_w: f32,
+    win_h: f32,
     /// The minimum height currently in force. Tracks what was handed to
     /// the window manager: the transfer view's floor, or a shorter
     /// completion page's own height. Clamping against the static floor
@@ -644,6 +663,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 url_field: String::new(),
                 path_field: String::new(),
                 win_w: WIN_W,
+                win_h: WIN_MIN_H,
                 min_h: LAUNCH_H.get().copied().unwrap_or(WIN_MIN_H).min(WIN_MIN_H),
                 imposed_h: LAUNCH_H.get().copied(),
                 rate_open: false,
@@ -772,6 +792,45 @@ fn fit_window(st: &mut State) -> Task<Msg> {
     resize_to(st.win_w, h)
 }
 
+/// The height the current tab's contents want, or `None` for a tab
+/// that scrolls by nature.
+fn tab_height(st: &State) -> Option<f32> {
+    let content = match st.tab {
+        // The transfer view is a live page with a chart and a segment
+        // table in it; there is no height that "fits" it.
+        Tab::Info => return None,
+        Tab::Speed => SPEED_TAB_H,
+        Tab::OnCompletion => {
+            let items = completion_warn_items(&st.on_completion).len() as f32;
+            let warn = if items > 0.0 {
+                COMPLETION_WARN_H + COMPLETION_WARN_LINE_H * items
+            } else {
+                0.0
+            };
+            COMPLETION_TAB_H + warn
+        }
+    };
+    Some(content + chrome::overhead_h())
+}
+
+/// Give a settings tab the height its contents need, without ever
+/// taking height away.
+///
+/// Growth only, and the floor is left alone: the window the user sized
+/// is theirs, and a minimum raised to fit a tab would follow them back
+/// to the transfer view and refuse to shrink.
+fn grow_for_tab(st: &mut State) -> Task<Msg> {
+    let Some(wanted) = tab_height(st) else {
+        return Task::none();
+    };
+    if st.win_h >= wanted {
+        return Task::none();
+    }
+    st.win_h = wanted;
+    let size = iced::Size::new(st.win_w, wanted);
+    iced::window::latest().and_then(move |id| iced::window::resize(id, size))
+}
+
 fn resize_to<M: Send + 'static>(w: f32, h: f32) -> Task<M> {
     let size = iced::Size::new(w, h);
     // The minimum has to come down with the height: the completion page
@@ -866,7 +925,7 @@ fn update_state(st: &mut State, msg: Msg) -> Task<Msg> {
         },
         Msg::SetTab(tab) => {
             st.tab = tab;
-            Task::none()
+            grow_for_tab(st)
         }
         Msg::ToggleRate => {
             st.rate_open = !st.rate_open;
@@ -957,14 +1016,14 @@ fn update_state(st: &mut State, msg: Msg) -> Task<Msg> {
         }
         Msg::ExitDone(v) => {
             st.on_completion.exit_app = v;
-            apply_completion(st)
+            Task::batch([apply_completion(st), grow_for_tab(st)])
         }
         Msg::PowerEnabled(v) => {
             // The switch is the only thing that arms the action; it
             // commits whatever the picker is showing.
             st.on_completion.shutdown = v.then_some(st.power_choice);
             st.on_completion.force_shutdown = v && st.power_force;
-            apply_completion(st)
+            Task::batch([apply_completion(st), grow_for_tab(st)])
         }
         Msg::PowerAction(s) => {
             let (action, force) = parse_power_label(&s);
@@ -975,13 +1034,13 @@ fn update_state(st: &mut State, msg: Msg) -> Task<Msg> {
             if st.on_completion.shutdown.is_some() {
                 st.on_completion.shutdown = Some(action);
                 st.on_completion.force_shutdown = force;
-                return apply_completion(st);
+                return Task::batch([apply_completion(st), grow_for_tab(st)]);
             }
             Task::none()
         }
         Msg::Disconnect(v) => {
             st.on_completion.disconnect = v;
-            apply_completion(st)
+            Task::batch([apply_completion(st), grow_for_tab(st)])
         }
         Msg::PauseResume => {
             let client = st.client.clone();
@@ -1105,6 +1164,7 @@ fn update_state(st: &mut State, msg: Msg) -> Task<Msg> {
         }
         Msg::WinResized(w, h) => {
             st.win_w = w;
+            st.win_h = h;
             chrome::enforce_min_size(iced::Size::new(w, h), iced::Size::new(WIN_MIN_W, st.min_h))
         }
         Msg::ShotTick => {
@@ -2038,23 +2098,23 @@ fn speed_tab(st: &State) -> Element<'_, Msg> {
             .view(t),
     );
 
-    set_rows(
+    set_rows_flat(
         t,
         vec![
-            set_row(
+            set_row_flat(
                 t,
                 "Max parallel connections",
                 Some("Auto lets oxdm choose; applying reconnects active segments."),
                 conn_controls.into(),
             ),
-            set_row(
+            set_row_flat(
                 t,
                 "Speed limit",
                 Some("Cap this job's throughput. Takes effect as you change it."),
                 toggle(t, limited, true, Msg::UseLimiter),
             ),
-            set_row(t, "Limit to", None, value_row.into()),
-            set_row(t, "Quick set", None, presets.into()),
+            set_row_flat(t, "Limit to", None, value_row.into()),
+            set_row_flat(t, "Quick set", None, presets.into()),
         ],
     )
 }
@@ -2127,19 +2187,19 @@ fn completion_tab(st: &State) -> Element<'_, Msg> {
     .align_y(Alignment::Center);
 
     let mut rows = vec![
-        set_row(
+        set_row_flat(
             t,
             "Show completion dialog when done",
             None,
             toggle(t, oc.show_dialog, true, Msg::NotifyDone),
         ),
-        set_row(
+        set_row_flat(
             t,
             "Exit oxdm when done",
             None,
             toggle(t, oc.exit_app, true, Msg::ExitDone),
         ),
-        set_row(
+        set_row_flat(
             t,
             "Power action",
             Some("Runs after a 60-second cancellable countdown."),
@@ -2150,16 +2210,23 @@ fn completion_tab(st: &State) -> Element<'_, Msg> {
     // it is the consequence of what was just armed, so it reads as part
     // of that control rather than as a banner over the whole pane.
     if let Some(warn) = completion_warn(st) {
-        rows.push(set_row_panel(warn));
+        // The warning keeps the row grid but not the inset: on a flat
+        // pane there is no card edge for it to sit inside of.
+        rows.push(
+            container(warn)
+                .width(Length::Fill)
+                .padding(iced::Padding::from([theme::space::S3, 0.0]))
+                .into(),
+        );
     }
-    rows.push(set_row(
+    rows.push(set_row_flat(
         t,
         "Disconnect from network when done",
         Some("Superseded by a power action when one is set."),
         toggle(t, oc.disconnect, !power_on, Msg::Disconnect),
     ));
 
-    set_rows(t, rows)
+    set_rows_flat(t, rows)
 }
 
 /// Destructive-action warning panel (design `.pane-warn`, rust). Lists
@@ -2167,11 +2234,10 @@ fn completion_tab(st: &State) -> Element<'_, Msg> {
 /// prompt (`SHUTDOWN_GRACE_SECS` = 60 s; F4 reconciliation of the
 /// mock's 30 s vs 60 s contradiction).
 /// Built from the real `OnCompletion` / `ShutdownAction` values.
-fn completion_warn(st: &State) -> Option<Element<'_, Msg>> {
-    let t = &st.tokens;
-    let t2 = *t;
-    let oc = &st.on_completion;
-
+/// What is about to happen to the machine, in the order it happens.
+/// Split out from the panel because the window's height depends on how
+/// many of these there are.
+fn completion_warn_items(oc: &crate::domain::OnCompletion) -> Vec<&'static str> {
     let mut items: Vec<&'static str> = Vec::new();
     match oc.shutdown {
         Some(ShutdownAction::ShutDown) => items.push("Your computer will shut down."),
@@ -2191,6 +2257,15 @@ fn completion_warn(st: &State) -> Option<Element<'_, Msg>> {
         items
             .push("Your network connection will be turned off. Other running transfers will fail.");
     }
+    items
+}
+
+fn completion_warn(st: &State) -> Option<Element<'_, Msg>> {
+    let t = &st.tokens;
+    let t2 = *t;
+    let oc = &st.on_completion;
+
+    let items = completion_warn_items(oc);
     if items.is_empty() {
         return None;
     }
