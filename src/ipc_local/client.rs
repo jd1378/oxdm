@@ -264,6 +264,9 @@ impl Client {
     pub async fn start_queue(&self, id: QueueId) -> Result<(), String> {
         self.expect_ok(Request::StartQueue(id)).await
     }
+    pub async fn reorder_queue(&self, queue: QueueId, ids: Vec<JobId>) -> Result<(), String> {
+        self.expect_ok(Request::ReorderQueue { queue, ids }).await
+    }
     pub async fn stop_queue(&self, id: QueueId) -> Result<(), String> {
         self.expect_ok(Request::StopQueue(id)).await
     }

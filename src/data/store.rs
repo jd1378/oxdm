@@ -598,6 +598,33 @@ impl Store {
         Ok(())
     }
 
+    /// Write an explicit run order for a set of jobs.
+    ///
+    /// Positions start after everything already placed, so a reordered
+    /// queue keeps its own order across a restart without renumbering
+    /// jobs the user never touched.
+    pub async fn set_queue_order(&self, ids: &[JobId]) -> Result<(), StoreError> {
+        let ids: Vec<String> = ids.iter().map(|id| id.0.to_string()).collect();
+        self.with_conn(move |conn| {
+            let tx = conn.transaction()?;
+            let base: i64 = tx.query_row(
+                "SELECT COALESCE(MAX(queue_position), 0) FROM jobs",
+                [],
+                |r| r.get(0),
+            )?;
+            for (i, id) in ids.iter().enumerate() {
+                tx.execute(
+                    "UPDATE jobs SET queue_position = ?1 WHERE id = ?2",
+                    rusqlite::params![base + 1 + i as i64, id],
+                )?;
+            }
+            tx.commit()
+        })
+        .await
+        .map_err(StoreError::Sql)?;
+        Ok(())
+    }
+
     pub async fn upsert_job(&self, job: &Job) -> Result<(), StoreError> {
         let row = JobRow::from_job(job)?;
         self.with_conn(move |conn| {

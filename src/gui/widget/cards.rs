@@ -62,6 +62,52 @@ pub fn section_card<'a, M: 'a>(
     )
 }
 
+/// `section_card` with a count beside the title.
+///
+/// The number belongs in the header rather than the body: it says how
+/// much there is of what the card is about, which is the first thing
+/// the eye asks of a list.
+pub fn section_card_count<'a, M: 'a>(
+    t: &Tokens,
+    icon: &str,
+    title: &str,
+    count: usize,
+    body: Element<'a, M>,
+) -> Element<'a, M> {
+    let t2 = *t;
+    let badge = container(
+        text(count.to_string())
+            .font(theme::MONO_SEMIBOLD)
+            .size(10.5)
+            .color(t.fg_2),
+    )
+    .padding([1.0, 6.0])
+    .style(move |_| container::Style {
+        background: Some(t2.bg_sunken.into()),
+        border: iced::Border {
+            color: t2.border_subtle,
+            width: 1.0,
+            radius: 999.0.into(),
+        },
+        ..Default::default()
+    });
+    let header = row![
+        icons::icon(icon, 17.0, t.fg_2),
+        text(title.to_owned())
+            .font(theme::BODY_BOLD)
+            .size(13.0)
+            .color(t.fg_1),
+        badge,
+    ]
+    .spacing(theme::space::S2)
+    .align_y(Alignment::Center);
+    card(
+        t,
+        theme::space::S3,
+        column![header, body].spacing(theme::space::S3).into(),
+    )
+}
+
 /// Collapsible card. Open state lives in window state; emits
 /// `on_toggle` when the header is clicked.
 pub fn collapsible_card<'a, M: Clone + 'a>(

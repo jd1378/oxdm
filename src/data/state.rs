@@ -1355,6 +1355,54 @@ impl AppState {
         *self.dialog_visible_for.write().await = id;
     }
 
+    /// Put a queue's pending downloads in the order the user just gave.
+    ///
+    /// Order is all this touches. Nothing is started, nothing is
+    /// paused: a queue already running keeps running exactly what it
+    /// was running, and the new order decides what goes next when a
+    /// slot comes free.
+    ///
+    /// Ids not in `queue` are ignored, and jobs in the queue the caller
+    /// left out keep their place after the listed ones — the window
+    /// lists only what is waiting, and a download that finished while
+    /// the user was dragging must not be dropped from the order.
+    pub async fn reorder_queue(self: &Arc<Self>, queue: QueueId, ids: Vec<JobId>) {
+        let ordered: Vec<JobId> = {
+            let jobs = self.jobs.read().await;
+            let mut seen = std::collections::HashSet::new();
+            let mut out: Vec<JobId> = ids
+                .into_iter()
+                .filter(|id| {
+                    jobs.get(id).is_some_and(|e| e.job.queue_id == queue) && seen.insert(*id)
+                })
+                .collect();
+            out.extend(
+                jobs.values()
+                    .filter(|e| e.job.queue_id == queue && !seen.contains(&e.job.id))
+                    .map(|e| e.job.id),
+            );
+            out
+        };
+        if ordered.is_empty() {
+            return;
+        }
+        {
+            // Re-inserting moves a key to the back of the map, so
+            // walking the new order front to back leaves the queue's
+            // jobs in exactly that order behind everyone else's.
+            let mut jobs = self.jobs.write().await;
+            for id in &ordered {
+                if let Some(entry) = jobs.shift_remove(id) {
+                    jobs.insert(*id, entry);
+                }
+            }
+        }
+        if let Err(e) = self.store.set_queue_order(&ordered).await {
+            tracing::warn!(queue = %queue, error = %e, "could not store the queue order");
+        }
+        let _ = self.events.send(DomainEvent::QueuesChanged);
+    }
+
     /// Send a job to the back of its queue.
     ///
     /// A download that stops — the user paused it, or it failed — is no

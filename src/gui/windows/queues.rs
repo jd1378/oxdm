@@ -10,8 +10,8 @@ use iced::widget::{button, column, container, mouse_area, row, text};
 use iced::{Alignment, Element, Length, Subscription, Task};
 
 use crate::domain::{
-    CMD_INTERVAL_RANGE, CondCombine, CondCommand, CondKind, CondSet, IDLE_MINUTES_RANGE, Queue,
-    QueueHook, QueueId, QueueSchedule, ShutdownAction, WeekDayMask,
+    CMD_INTERVAL_RANGE, CondCombine, CondCommand, CondKind, CondSet, IDLE_MINUTES_RANGE, JobId,
+    Queue, QueueHook, QueueId, QueueSchedule, ShutdownAction, WeekDayMask,
 };
 use crate::gui::chrome::{self, WindowControl, titlebar};
 use crate::gui::color;
@@ -19,7 +19,9 @@ use crate::gui::icons;
 use crate::gui::ipc::DaemonSignal;
 use crate::gui::shot::Shot;
 use crate::gui::theme::{self, Tokens};
-use crate::gui::widget::{Btn, TextInput, hairline, number_stepper, section_card, toggle};
+use crate::gui::widget::{
+    Btn, TextInput, hairline, number_stepper, section_card, section_card_count, toggle,
+};
 use crate::ipc_local::Client;
 use crate::ipc_local::protocol::Event;
 
@@ -215,11 +217,22 @@ pub enum Msg {
                 Vec<Queue>,
                 crate::domain::Settings,
                 Vec<CondKind>,
+                Vec<crate::domain::Job>,
             )>,
             String,
         >,
     ),
     Queues(Vec<Queue>),
+    /// Everything the pending-order table lists, refreshed whenever the
+    /// daemon says a job changed.
+    Jobs(Vec<crate::domain::Job>),
+    /// Row clicked, or picked up to drag.
+    PickJob(JobId),
+    /// The pointer entered this row while a drag is in flight.
+    DragOver(JobId),
+    DragEnd,
+    /// Move the selected row: to the top, one step, or to the end.
+    Move(MoveWhere),
     Daemon(DaemonSignal),
     Window(WindowControl),
     Select(QueueId),
@@ -272,6 +285,15 @@ pub enum App {
     Ready(Box<State>),
 }
 
+/// Where a Move button sends the selected download.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveWhere {
+    Top,
+    Up,
+    Down,
+    Bottom,
+}
+
 pub struct State {
     client: Arc<Client>,
     tokens: Tokens,
@@ -319,10 +341,80 @@ pub struct State {
     color_open: bool,
     win_size: (f32, f32),
 
+    /// Every job the daemon knows about; the pending-order table reads
+    /// the selected queue's share of it.
+    jobs: Vec<crate::domain::Job>,
+    /// Row the move buttons act on.
+    sel_job: Option<JobId>,
+    /// Row being dragged, if any.
+    drag_job: Option<JobId>,
+
     confirm_delete: bool,
     shot: Option<Shot>,
     /// How many fields of the selected queue differ from what is saved.
     dirty: usize,
+}
+
+/// Phases that are waiting rather than running: what the order table
+/// lists, and what the daemon's own refill picks from.
+fn is_pending(phase: crate::domain::Phase) -> bool {
+    use crate::domain::Phase;
+    matches!(phase, Phase::Queued | Phase::Paused | Phase::Failed)
+}
+
+impl State {
+    /// The selected queue's waiting downloads, in run order.
+    fn pending(&self) -> Vec<&crate::domain::Job> {
+        let Some(q) = self.selected else {
+            return Vec::new();
+        };
+        self.jobs
+            .iter()
+            .filter(|j| j.queue_id == q && is_pending(j.status.phase))
+            .collect()
+    }
+}
+
+/// Move one row and tell the daemon the whole new order.
+///
+/// The list moves under the user's hand rather than after a round trip:
+/// the daemon is authoritative, but a table that waits for it to answer
+/// before showing the row where it was dropped feels broken.
+fn reorder(st: &mut State, from: usize, to: usize) -> Task<Msg> {
+    if from == to {
+        return Task::none();
+    }
+    let mut ids: Vec<JobId> = st.pending().iter().map(|j| j.id).collect();
+    if from >= ids.len() || to >= ids.len() {
+        return Task::none();
+    }
+    let moved = ids.remove(from);
+    ids.insert(to, moved);
+    // Mirror the new order locally by rebuilding the job list with the
+    // pending rows in their new sequence, leaving everything else where
+    // it is — the same slots-only rewrite the daemon does.
+    let slots: Vec<usize> = st
+        .jobs
+        .iter()
+        .enumerate()
+        .filter(|(_, j)| Some(j.queue_id) == st.selected && is_pending(j.status.phase))
+        .map(|(i, _)| i)
+        .collect();
+    let mut ordered: Vec<crate::domain::Job> = ids
+        .iter()
+        .filter_map(|id| st.jobs.iter().find(|j| j.id == *id).cloned())
+        .collect();
+    for (slot, job) in slots.iter().zip(ordered.drain(..)) {
+        st.jobs[*slot] = job;
+    }
+    let client = st.client.clone();
+    let Some(queue) = st.selected else {
+        return Task::none();
+    };
+    Task::perform(
+        async move { client.reorder_queue(queue, ids).await },
+        |_| Msg::Noop,
+    )
 }
 
 /// `#RRGGBB` for the hex mirror.
@@ -525,6 +617,7 @@ pub fn boot() -> (App, Task<Msg>) {
                     snap.queues,
                     snap.settings,
                     snap.cond_available,
+                    snap.jobs,
                 )))
             },
             Msg::Connected,
@@ -535,7 +628,7 @@ pub fn boot() -> (App, Task<Msg>) {
 pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
     match msg {
         Msg::Connected(Ok(boxed)) => {
-            let (client, queues, settings, cond_avail) = *boxed;
+            let (client, queues, settings, cond_avail, jobs) = *boxed;
             let mut st = State {
                 tokens: Tokens::from_settings(&settings),
                 selected: queues.first().map(|q| q.id),
@@ -566,6 +659,9 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 color_hex: String::new(),
                 color_open: false,
                 win_size: (0.0, 0.0),
+                jobs,
+                sel_job: None,
+                drag_job: None,
                 confirm_delete: false,
                 shot: Shot::from_env(),
                 dirty: 0,
@@ -615,12 +711,74 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
             }
             Task::none()
         }
+        Msg::Jobs(jobs) => {
+            st.jobs = jobs;
+            // A row that finished, failed away or moved queue is no
+            // longer something the move buttons can act on.
+            if st
+                .sel_job
+                .is_some_and(|id| !st.pending().iter().any(|j| j.id == id))
+            {
+                st.sel_job = None;
+            }
+            Task::none()
+        }
+        Msg::PickJob(id) => {
+            st.sel_job = Some(id);
+            st.drag_job = Some(id);
+            Task::none()
+        }
+        Msg::DragEnd => {
+            st.drag_job = None;
+            Task::none()
+        }
+        Msg::DragOver(over) => {
+            let Some(dragged) = st.drag_job.filter(|d| *d != over) else {
+                return Task::none();
+            };
+            let pending = st.pending();
+            let (Some(from), Some(to)) = (
+                pending.iter().position(|j| j.id == dragged),
+                pending.iter().position(|j| j.id == over),
+            ) else {
+                return Task::none();
+            };
+            reorder(st, from, to)
+        }
+        Msg::Move(whence) => {
+            let pending = st.pending();
+            let Some(from) = st
+                .sel_job
+                .and_then(|id| pending.iter().position(|j| j.id == id))
+            else {
+                return Task::none();
+            };
+            let last = pending.len().saturating_sub(1);
+            let to = match whence {
+                MoveWhere::Top => 0,
+                MoveWhere::Up => from.saturating_sub(1),
+                MoveWhere::Down => (from + 1).min(last),
+                MoveWhere::Bottom => last,
+            };
+            reorder(st, from, to)
+        }
         Msg::Daemon(DaemonSignal::Lost) => iced::exit(),
         Msg::Daemon(DaemonSignal::Event(ev)) => match ev {
             Event::QueuesChanged => {
                 let client = st.client.clone();
                 Task::perform(async move { client.snapshot().await }, |r| match r {
                     Ok(s) => Msg::Queues(s.queues),
+                    Err(_) => Msg::Noop,
+                })
+            }
+            // The order table is a view of the job list, so it follows
+            // every change to it — one finishing is what makes the next
+            // one start, and this window is where the user is watching
+            // that happen.
+            Event::JobsChanged => {
+                let client = st.client.clone();
+                Task::perform(async move { client.snapshot().await }, |r| match r {
+                    Ok(s) => Msg::Jobs(s.jobs),
                     Err(_) => Msg::Noop,
                 })
             }
@@ -1804,14 +1962,17 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
     let on_finish = section_card(t, "clock", "When the queue finishes", finish_col.into());
 
     let editor = crate::gui::widget::vscroll(
-        container(column![head, concurrency, schedule, on_finish].spacing(theme::space::S3))
-            .padding(iced::Padding {
-                top: theme::space::S4,
-                bottom: theme::space::S4,
-                left: theme::space::S4,
-                right: theme::space::S4 - crate::gui::widget::SCROLL_GUTTER,
-            })
-            .width(Length::Fill),
+        container(
+            column![head, concurrency, pending_order(st), schedule, on_finish]
+                .spacing(theme::space::S3),
+        )
+        .padding(iced::Padding {
+            top: theme::space::S4,
+            bottom: theme::space::S4,
+            left: theme::space::S4,
+            right: theme::space::S4 - crate::gui::widget::SCROLL_GUTTER,
+        })
+        .width(Length::Fill),
     )
     .height(Length::Fill);
 
@@ -2314,4 +2475,227 @@ pub fn launch_queues() {
         eprintln!("gui error: {e}");
         std::process::exit(1);
     }
+}
+
+// ── pending order ───────────────────────────────────────────────────
+
+/// Rows visible before the table scrolls (design: a compact table, at
+/// most eight rows at a time).
+const ORDER_ROWS_VISIBLE: usize = 8;
+const ORDER_ROW_H: f32 = 26.0;
+const ORDER_HEAD_H: f32 = 22.0;
+/// Column widths. The name takes what is left.
+const ORDER_GRIP_W: f32 = 18.0;
+const ORDER_IDX_W: f32 = 22.0;
+const ORDER_SIZE_W: f32 = 68.0;
+const ORDER_STATUS_W: f32 = 62.0;
+const ORDER_FONT: f32 = 11.5;
+
+/// The queue's waiting downloads, in the order they will run, with the
+/// controls to change it.
+///
+/// Order is the only thing this touches. Nothing here starts or pauses
+/// a download: the queue keeps running whatever it is running, and the
+/// order decides what goes next when a slot frees.
+fn pending_order(st: &State) -> Element<'_, Msg> {
+    let t = &st.tokens;
+    let pending = st.pending();
+    let count = pending.len();
+    let sel_idx = st
+        .sel_job
+        .and_then(|id| pending.iter().position(|j| j.id == id));
+
+    if count == 0 {
+        let empty = row![
+            icons::icon("inbox", 13.0, t.fg_3),
+            text("Nothing waiting in this queue.")
+                .font(theme::BODY)
+                .size(12.0)
+                .color(t.fg_3),
+        ]
+        .spacing(theme::space::S2)
+        .align_y(Alignment::Center);
+        return section_card_count(t, "list", "Pending order", 0, empty.into());
+    }
+
+    // How many of these start the moment the queue does — the same
+    // number the concurrency section is set to.
+    let starting = st.max_concurrent.min(count);
+    let help = if starting == 1 {
+        "Waiting downloads start from the top. The next one starts as soon as the queue does."
+            .to_owned()
+    } else {
+        format!(
+            "Waiting downloads start from the top. The first {starting} start as soon as the \
+             queue does."
+        )
+    };
+
+    let head = container(
+        row![
+            iced::widget::Space::new().width(Length::Fixed(ORDER_GRIP_W)),
+            cell("#", ORDER_IDX_W, t.fg_3),
+            text("Name")
+                .font(theme::BODY_BOLD)
+                .size(10.0)
+                .color(t.fg_3)
+                .width(Length::Fill),
+            cell("Size", ORDER_SIZE_W, t.fg_3),
+            cell("Status", ORDER_STATUS_W, t.fg_3),
+        ]
+        .spacing(theme::space::S2)
+        .align_y(Alignment::Center),
+    )
+    .height(Length::Fixed(ORDER_HEAD_H))
+    .padding([0.0, theme::space::S2])
+    .align_y(Alignment::Center);
+
+    let mut rows = column![].width(Length::Fill);
+    for (i, job) in pending.iter().enumerate() {
+        rows = rows.push(order_row(st, i, job, sel_idx));
+    }
+    let body = crate::gui::widget::vscroll(rows)
+        .height(Length::Fixed(ORDER_ROW_H * ORDER_ROWS_VISIBLE as f32));
+
+    let t2 = *t;
+    let table = container(column![head, hairline(t.border_subtle), body])
+        .width(Length::Fill)
+        .style(move |_| container::Style {
+            background: Some(t2.bg_sunken.into()),
+            border: iced::Border {
+                color: t2.border_subtle,
+                width: 1.0,
+                radius: theme::radius::SM.into(),
+            },
+            ..Default::default()
+        });
+
+    let hint = match sel_idx {
+        Some(i) => format!("Position {} of {count}", i + 1),
+        None => "Select a download to move it, or drag a row.".to_owned(),
+    };
+    let at_top = sel_idx.is_none_or(|i| i == 0);
+    let at_end = sel_idx.is_none_or(|i| i + 1 == count);
+    let tools = row![
+        move_btn(t, "chevrons-up", !at_top, MoveWhere::Top),
+        move_btn(t, "chevron-up", !at_top, MoveWhere::Up),
+        move_btn(t, "chevron-down", !at_end, MoveWhere::Down),
+        move_btn(t, "chevrons-down", !at_end, MoveWhere::Bottom),
+        text(hint).font(theme::BODY).size(11.0).color(t.fg_3),
+    ]
+    .spacing(theme::space::S2)
+    .align_y(Alignment::Center);
+
+    section_card_count(
+        t,
+        "list",
+        "Pending order",
+        count,
+        column![
+            text(help).font(theme::BODY).size(12.0).color(t.fg_3),
+            table,
+            tools,
+        ]
+        .spacing(theme::space::S2)
+        .into(),
+    )
+}
+
+/// One draggable row. Press picks it up and selects it; dragging over
+/// another row swaps them as the pointer passes, which is what makes
+/// the list follow the hand instead of jumping on release.
+fn order_row<'a>(
+    st: &'a State,
+    i: usize,
+    job: &'a crate::domain::Job,
+    sel_idx: Option<usize>,
+) -> Element<'a, Msg> {
+    let t = &st.tokens;
+    let t2 = *t;
+    let selected = sel_idx == Some(i);
+    let dragging = st.drag_job == Some(job.id);
+    // The ones a running queue is about to pick up, marked so the
+    // dividing line between "now" and "later" is visible.
+    let next_up = i < st.max_concurrent;
+    let (status, status_color) = match job.status.phase {
+        crate::domain::Phase::Paused => ("Paused", t.fg_2),
+        crate::domain::Phase::Failed => ("Failed", t.status_danger),
+        _ => ("Queued", t.fg_3),
+    };
+    let name = job.filename.clone().unwrap_or_else(|| job.url.to_string());
+
+    let body = row![
+        container(icons::icon("grip-vertical", 13.0, t.fg_3))
+            .width(Length::Fixed(ORDER_GRIP_W))
+            .align_x(Alignment::Center),
+        cell(&(i + 1).to_string(), ORDER_IDX_W, t.fg_3),
+        container(crate::gui::widget::ellipsized(
+            name,
+            theme::BODY,
+            ORDER_FONT,
+            if next_up { t.fg_1 } else { t.fg_2 },
+        ))
+        .width(Length::Fill),
+        cell(
+            &crate::gui::format::format_bytes_opt(job.status.total),
+            ORDER_SIZE_W,
+            t.fg_3
+        ),
+        cell(status, ORDER_STATUS_W, status_color),
+    ]
+    .spacing(theme::space::S2)
+    .align_y(Alignment::Center);
+
+    let surface = container(body)
+        .width(Length::Fill)
+        .height(Length::Fixed(ORDER_ROW_H))
+        .padding([0.0, theme::space::S2])
+        .align_y(Alignment::Center)
+        .style(move |_| container::Style {
+            background: Some(if dragging {
+                t2.bg_raised.into()
+            } else if selected {
+                t2.bg_surface.into()
+            } else {
+                iced::Color::TRANSPARENT.into()
+            }),
+            border: iced::Border {
+                color: if selected {
+                    t2.action_primary
+                } else {
+                    iced::Color::TRANSPARENT
+                },
+                width: 1.0,
+                radius: theme::radius::XS.into(),
+            },
+            ..Default::default()
+        });
+
+    iced::widget::mouse_area(surface)
+        .on_press(Msg::PickJob(job.id))
+        .on_release(Msg::DragEnd)
+        .on_enter(Msg::DragOver(job.id))
+        .into()
+}
+
+/// Fixed-width table cell.
+fn cell<'a>(s: &str, width: f32, color: iced::Color) -> Element<'a, Msg> {
+    text(s.to_owned())
+        .font(theme::BODY)
+        .size(ORDER_FONT)
+        .color(color)
+        .width(Length::Fixed(width))
+        .into()
+}
+
+/// One of the four move controls. Icon only — the four of them in a
+/// row read as a set, and a label on each would be four words saying
+/// what four arrows already say.
+fn move_btn<'a>(t: &Tokens, icon: &'a str, enabled: bool, whence: MoveWhere) -> Element<'a, Msg> {
+    Btn::new("")
+        .toolbar()
+        .icon(icon)
+        .enabled(enabled)
+        .on_press(Msg::Move(whence))
+        .view(t)
 }

@@ -650,6 +650,10 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
             Ok(()) => Reply::Ok,
             Err(e) => Reply::Err(e),
         },
+        Request::ReorderQueue { queue, ids } => {
+            state.reorder_queue(queue, ids).await;
+            Reply::Ok
+        }
         Request::StopQueue(id) => match state.stop_queue(id).await {
             Ok(()) => Reply::Ok,
             Err(e) => Reply::Err(e),

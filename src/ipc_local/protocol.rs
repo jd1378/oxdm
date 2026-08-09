@@ -133,6 +133,13 @@ pub enum Request {
     // ── queues ─────────────────────────────────────────────────────
     StartQueue(QueueId),
     StopQueue(QueueId),
+    /// The order pending downloads should run in, as the queue window
+    /// left it. Ids outside `queue` are ignored; anything in the queue
+    /// the caller did not list keeps its place behind them.
+    ReorderQueue {
+        queue: QueueId,
+        ids: Vec<JobId>,
+    },
     PauseAll,
     /// Pause everything *and* end every queue run — the toolbar's Stop
     /// all, as opposed to the tray's Pause all.
