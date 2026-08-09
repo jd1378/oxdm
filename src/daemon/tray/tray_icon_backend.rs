@@ -14,13 +14,14 @@ use muda::{Menu, MenuId, MenuItem, PredefinedMenuItem};
 use tokio::runtime::Handle;
 use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
-use super::{label_for, quit_daemon, spawn_download_gui, spawn_main_gui};
+use super::{label_for, quit_daemon, spawn_download_gui, spawn_main_gui, spawn_settings_gui};
 use crate::data::AppState;
 use crate::domain::{Job, JobId, Phase};
 
 #[derive(Default, Clone)]
 struct ActionIds {
     open: Option<MenuId>,
+    settings: Option<MenuId>,
     pause_all: Option<MenuId>,
     resume_all: Option<MenuId>,
     quit: Option<MenuId>,
@@ -139,6 +140,8 @@ fn run_owner(rt: Handle, state: Arc<AppState>, jobs_rx: mpsc::Receiver<Vec<Job>>
                 quit_daemon(&rt, &state);
             } else if actions.open.as_ref() == Some(id) {
                 spawn_main_gui();
+            } else if actions.settings.as_ref() == Some(id) {
+                spawn_settings_gui(None, false);
             } else if let Some(jid) = dyn_map.get(id).copied() {
                 spawn_download_gui(jid);
             }
@@ -195,6 +198,7 @@ fn rebuild_now(
 ) {
     let menu = Menu::new();
     let open = MenuItem::new("Open", true, None);
+    let settings = MenuItem::new("Settings", true, None);
     let pause_all = MenuItem::new("Pause all", true, None);
     let resume_all = MenuItem::new("Resume all", true, None);
     // Once the exit is scheduled it cannot be asked for again — and
@@ -207,11 +211,12 @@ fn rebuild_now(
     };
     let new_actions = ActionIds {
         open: Some(open.id().clone()),
+        settings: Some(settings.id().clone()),
         pause_all: Some(pause_all.id().clone()),
         resume_all: Some(resume_all.id().clone()),
         quit: Some(quit.id().clone()),
     };
-    let _ = menu.append_items(&[&open, &pause_all, &resume_all]);
+    let _ = menu.append_items(&[&open, &settings, &pause_all, &resume_all]);
 
     let active: Vec<&Job> = jobs
         .iter()

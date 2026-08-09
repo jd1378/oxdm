@@ -7,7 +7,7 @@ use ksni::{Tray, TrayMethods};
 use tokio::runtime::Handle;
 use tokio::sync::OnceCell;
 
-use super::{label_for, quit_daemon, spawn_download_gui, spawn_main_gui};
+use super::{label_for, quit_daemon, spawn_download_gui, spawn_main_gui, spawn_settings_gui};
 use crate::data::{AppState, DomainEvent};
 use crate::domain::{JobId, Phase};
 
@@ -120,6 +120,14 @@ impl Tray for OxdmTray {
             StandardItem {
                 label: "Open".into(),
                 activate: Box::new(|_t: &mut Self| spawn_main_gui()),
+                ..Default::default()
+            }
+            .into(),
+        );
+        items.push(
+            StandardItem {
+                label: "Settings".into(),
+                activate: Box::new(|_t: &mut Self| spawn_settings_gui(None, false)),
                 ..Default::default()
             }
             .into(),
