@@ -201,6 +201,19 @@ async fn handle_conn(stream: IpcStream, state: Arc<AppState>) -> Result<(), Code
     let stream = Arc::new(stream);
     let writer = Arc::new(Mutex::new(()));
     let mut conn_state = ConnState::default();
+    // Requests are answered concurrently. A probe of an unreachable
+    // host waits out its connect timeout, and answering in order meant
+    // that one link froze every request behind it — the batch window
+    // showing "checking the link…" against hosts that had answered
+    // instantly, and the window's own buttons dead until it gave up.
+    // Frames carry their request id and the client matches replies by
+    // it, so out-of-order answers were always on the wire's terms.
+    //
+    // Bounded, because a window can ask for a hundred probes at once
+    // and each is a socket: enough permits that a slow one cannot
+    // block the interactive requests behind it, not so many that a
+    // pasted list opens a hundred connections at the same moment.
+    let slots = Arc::new(tokio::sync::Semaphore::new(16));
 
     loop {
         let frame: Frame = {
@@ -265,10 +278,17 @@ async fn handle_conn(stream: IpcStream, state: Arc<AppState>) -> Result<(), Code
             continue;
         }
 
-        let reply = dispatch(&state, req).await;
-        let _g = writer.lock().await;
-        let mut w = &*stream;
-        write_frame(&mut w, &Frame::Reply(req_id, reply)).await?;
+        let state = state.clone();
+        let stream = stream.clone();
+        let writer = writer.clone();
+        let slots = slots.clone();
+        tokio::spawn(async move {
+            let _permit = slots.acquire().await;
+            let reply = dispatch(&state, req).await;
+            let _g = writer.lock().await;
+            let mut w = &*stream;
+            let _ = write_frame(&mut w, &Frame::Reply(req_id, reply)).await;
+        });
     }
 }
 

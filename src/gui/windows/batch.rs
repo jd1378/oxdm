@@ -1,6 +1,6 @@
 //! Batch-capture triage window (`oxdm gui batch <staged-json-path>`):
 //! row per captured link with probe status, queue selector, select
-//! all, Start-now toggle, "Send N to oxdm" footer.
+//! all, Start-now toggle, "Add N" footer.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -363,8 +363,11 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
     let all = n_sel == n_total && n_total > 0;
 
     let header = row![
+        // Not "send to oxdm": whoever the links came from, they are in
+        // oxdm now and this window is oxdm asking which of them to
+        // keep.
         text(format!(
-            "Send {n_sel} of {n_total} link{} to oxdm",
+            "Add {n_sel} of {n_total} link{}",
             if n_total == 1 { "" } else { "s" }
         ))
         .font(theme::BODY_BOLD)
@@ -392,7 +395,19 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
     list = list.push(hairline(t.border_subtle));
     for (i, r) in st.rows.iter().enumerate() {
         let detail: Element<'_, Msg> = match &r.probe {
-            None => text("…").font(theme::MONO).size(11.0).color(t.fg_3).into(),
+            // Each row is really probed — the same HEAD the Add dialog
+            // makes — and on a slow host that takes a while. A bare
+            // ellipsis left the row looking empty rather than busy.
+            None => row![
+                crate::gui::icons::icon("ellipsis", 11.0, t.fg_3),
+                text("checking the link\u{2026}")
+                    .font(theme::BODY)
+                    .size(11.0)
+                    .color(t.fg_3),
+            ]
+            .spacing(theme::space::S1)
+            .align_y(Alignment::Center)
+            .into(),
             Some(Ok(p)) => text(format!(
                 "{}  ·  {}  ·  {}",
                 p.filename,
@@ -445,7 +460,7 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
         .spacing(theme::space::S3)
         .align_y(Alignment::Center)
         .into(),
-        Btn::new(format!("Send {n_sel} to oxdm"))
+        Btn::new(format!("Add {n_sel}"))
             .primary()
             .icon("download")
             .enabled(n_sel > 0)
@@ -454,7 +469,7 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
     );
 
     let page = column![
-        titlebar::titlebar(t, "Send to oxdm", false, Msg::Window),
+        titlebar::titlebar(t, "Add links", false, Msg::Window),
         container(
             column![
                 sibling(header.into()),
@@ -486,7 +501,7 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
 
 pub fn launch_batch(_path: PathBuf) {
     let mut app = iced::application(boot, update, view)
-        .title(|_: &App| "oxdm — Send to oxdm".to_owned())
+        .title(|_: &App| "oxdm — Add links".to_owned())
         .theme(|app: &App| match app {
             App::Ready(st) => st.tokens.iced_theme(),
             _ => Tokens::dark().iced_theme(),
