@@ -10,7 +10,6 @@ use iced::{Alignment, Color, Element, Length, Padding};
 use crate::gui::color;
 use crate::gui::theme::{self, Tokens};
 use crate::gui::widget::cards::hairline;
-use crate::gui::widget::pills::spaced_upper;
 
 // ---- design constants (no magic numbers) ----------------------------
 
@@ -187,12 +186,12 @@ fn rows_surface<'a, M: 'a>(
 }
 
 fn head<'a, M: 'a>(title: &str, color: Color) -> Element<'a, M> {
-    container(
-        text(spaced_upper(title))
-            .font(theme::BODY_BOLD)
-            .size(HEAD_SIZE)
-            .color(color),
-    )
+    container(crate::gui::widget::tracked_caps(
+        title,
+        HEAD_SIZE,
+        crate::gui::widget::TRACKING_EM,
+        color,
+    ))
     .padding(Padding {
         top: 0.0,
         right: 0.0,

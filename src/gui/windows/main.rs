@@ -17,7 +17,7 @@ use crate::gui::shot::Shot;
 use crate::gui::theme::{self, Tokens};
 use crate::gui::widget::{
     Btn, BtnSize, ProgressTone, TabBtn, col_header_sortable, hairline, inline_progress,
-    search_field, status_dot, status_mark, swatch, vdivider,
+    search_field, status_dot, status_mark, swatch, tracked_caps, vdivider,
 };
 use crate::gui::{color, icons};
 use crate::ipc_local::Client;
@@ -2078,23 +2078,6 @@ const NAV_INDENT: f32 = 22.0;
 const SEC_HEAD_SIZE: f32 = 10.0;
 const SEC_HEAD_TRACKING: f32 = SEC_HEAD_SIZE * 0.1;
 
-/// Uppercase label with letter-spacing. iced's `text` has no tracking,
-/// so lay the glyphs out one per cell — fine for the three short,
-/// static section labels, and the only way to honour the design's
-/// `letter-spacing: 0.1em`.
-fn tracked_caps<'a>(label: &str, size: f32, tracking: f32, color: iced::Color) -> Element<'a, Msg> {
-    let mut r = row![].spacing(tracking).align_y(Alignment::Center);
-    for ch in label.to_uppercase().chars() {
-        r = r.push(
-            text(ch.to_string())
-                .font(theme::BODY_BOLD)
-                .size(size)
-                .color(color),
-        );
-    }
-    r.into()
-}
-
 /// Quiet period after the last resize event before the size is
 /// persisted — long enough to cover a drag, short enough to survive a
 /// close right afterwards.
@@ -2118,7 +2101,12 @@ fn section_header<'a>(
     let t2 = *t;
     let mut head = row![
         icons::icon(chev, 14.0, color::with_alpha(t.fg_3, 0.85)),
-        tracked_caps(label, SEC_HEAD_SIZE, SEC_HEAD_TRACKING, t.fg_3),
+        tracked_caps(
+            label,
+            SEC_HEAD_SIZE,
+            SEC_HEAD_TRACKING / SEC_HEAD_SIZE,
+            t.fg_3
+        ),
     ]
     .spacing(6.0)
     .align_y(Alignment::Center);

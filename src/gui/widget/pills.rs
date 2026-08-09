@@ -399,26 +399,51 @@ pub(crate) fn fill_path(track: Size, frac: f32, inset: f32) -> iced::widget::can
 
 /// Uppercase 10px bold section label, fg_3.
 pub fn eyebrow<'a, M: 'a>(t: &Tokens, label: &str) -> Element<'a, M> {
-    text(spaced_upper(label))
-        .font(theme::BODY_BOLD)
-        .size(10.0)
-        .color(t.fg_3)
-        .into()
+    tracked_caps(label, 10.0, TRACKING_EM, t.fg_3)
 }
 
 /// Uppercase 11px bold field label, fg_2.
 pub fn field_label<'a, M: 'a>(t: &Tokens, label: &str) -> Element<'a, M> {
-    text(spaced_upper(label))
-        .font(theme::BODY_BOLD)
-        .size(11.0)
-        .color(t.fg_2)
-        .into()
+    tracked_caps(label, 11.0, TRACKING_EM, t.fg_2)
 }
 
-/// Uppercase with a hair of letter-spacing. iced text has no
-/// letter-spacing; interleave U+2009 (thin space) sparingly? No —
-/// that breaks copy/selection. Plain uppercase reads close enough at
-/// 10–11px with Jakarta SemiBold.
-pub(crate) fn spaced_upper(s: &str) -> String {
-    s.to_uppercase()
+/// The design's eyebrow tracking (`letter-spacing: 0.08em`). The main
+/// window's section heads ask for `0.1em` and pass their own.
+pub const TRACKING_EM: f32 = 0.08;
+/// Gap between words, as a fraction of the size, *on top of* the
+/// tracking either side of it. A space that only carries the tracking
+/// reads as one more letter gap, which is what turns "FILE TRACKING"
+/// into a single run of capitals.
+const WORD_EM: f32 = 0.22;
+
+/// Uppercase label with real letter-spacing.
+///
+/// iced's `text` has no tracking, so the glyphs are laid out one per
+/// cell with the gap as row spacing. The alternative — padding the
+/// string with thin spaces — can only step in whatever widths the font
+/// happens to define, and at 10px those overshoot by roughly double.
+///
+/// Every uppercase label in the app comes through here, so the tracking
+/// is one number rather than a habit each window keeps its own way.
+pub fn tracked_caps<'a, M: 'a>(
+    label: &str,
+    size: f32,
+    tracking: f32,
+    color: Color,
+) -> Element<'a, M> {
+    let mut r = row![].spacing(size * tracking).align_y(Alignment::Center);
+    for (i, word) in label.to_uppercase().split_whitespace().enumerate() {
+        if i > 0 {
+            r = r.push(iced::widget::Space::new().width(Length::Fixed(size * WORD_EM)));
+        }
+        for ch in word.chars() {
+            r = r.push(
+                text(ch.to_string())
+                    .font(theme::BODY_BOLD)
+                    .size(size)
+                    .color(color),
+            );
+        }
+    }
+    r.into()
 }

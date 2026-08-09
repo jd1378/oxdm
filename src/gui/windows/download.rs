@@ -22,9 +22,9 @@ use crate::gui::theme::{self, Tokens};
 use crate::gui::widget::error_panel::{error_block, mid_truncate};
 use crate::gui::widget::striped::striped_progress_hatched;
 use crate::gui::widget::{
-    Btn, BtnSize, RateChart, TabBtn, TextInput, collapsible_card, combo, hairline, number_stepper,
-    pill_progress, rate_chart, segmented, set_row, set_row_panel, set_rows, sibling, status_dot,
-    surface, toggle, vdivider,
+    Btn, BtnSize, RateChart, TRACKING_EM, TabBtn, TextInput, collapsible_card, combo, hairline,
+    number_stepper, pill_progress, rate_chart, segmented, set_row, set_row_panel, set_rows,
+    sibling, status_dot, surface, toggle, tracked_caps, vdivider,
 };
 use crate::gui::windows::add::footer;
 use crate::ipc_local::Client;
@@ -1823,11 +1823,7 @@ fn info_tab(st: &State) -> Element<'_, Msg> {
                     .size(11.0)
                     .color(t.status_warning)
                     .into(),
-                None if !known => text(tracked("size unknown"))
-                    .font(theme::BODY)
-                    .size(10.0)
-                    .color(t.fg_3)
-                    .into(),
+                None if !known => tracked_caps("size unknown", 10.0, TRACKING_EM, t.fg_3),
                 None => row![
                     pill_progress(frac, Length::Fill, 6.0, t.progress_track, t.progress_fill),
                     container(
@@ -2707,10 +2703,7 @@ fn checksum_box(st: &State) -> Option<Element<'_, Msg>> {
                 13.0,
                 head_color,
             ),
-            text(tracked("file integrity"))
-                .font(theme::BODY_BOLD)
-                .size(CB_HEAD_SIZE)
-                .color(t.fg_3),
+            tracked_caps("file integrity", CB_HEAD_SIZE, TRACKING_EM, t.fg_3),
             iced::widget::Space::new().width(Length::Fill),
             status_dot(head_color, head_label, 10.0),
         ]
@@ -2916,20 +2909,6 @@ fn status_chip<'a>(
     .into()
 }
 
-/// Uppercase with tracking. CSS gives these eyebrows `letter-spacing:
-/// 0.08em`; iced text has no such setting, so the spacing is put in the
-/// string as thin spaces.
-fn tracked(label: &str) -> String {
-    // Hair space, not thin: at this size a thin space overshoots the
-    // design's 0.08em by roughly double.
-    label
-        .to_uppercase()
-        .chars()
-        .map(|c| c.to_string())
-        .collect::<Vec<_>>()
-        .join("\u{200a}")
-}
-
 /// The bare digest out of whatever the engine reported. odl phrases a
 /// mismatch as `md5("<hex>", hex)`; the table wants the hex, and the
 /// wrapper reads as noise beside the expected value next to it.
@@ -3028,11 +3007,7 @@ fn hash_value<'a>(st: &'a State, hash: &str, line: HashLine, bad: bool) -> Eleme
 /// is: a server-supplied `Retry-After` is not something the user can
 /// shorten by clicking anything.
 fn seg_head<'a>(t: &Tokens, label: &str) -> Element<'a, Msg> {
-    text(tracked(label))
-        .font(theme::BODY_BOLD)
-        .size(9.5)
-        .color(t.fg_3)
-        .into()
+    tracked_caps(label, 9.5, TRACKING_EM, t.fg_3)
 }
 
 /// What a segment is doing, in the design's words and colours

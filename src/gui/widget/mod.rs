@@ -23,8 +23,8 @@ pub use dashed::dashed_frame;
 pub use ellipsis::ellipsized;
 pub use inputs::{FileInput, PasswordInput, TextInput, search_field};
 pub use pills::{
-    Mark, ProgressTone, chip, dot, eyebrow, field_label, inline_progress, pill_count,
-    pill_progress, status_dot, status_mark, swatch,
+    Mark, ProgressTone, TRACKING_EM, chip, dot, eyebrow, field_label, inline_progress, pill_count,
+    pill_progress, status_dot, status_mark, swatch, tracked_caps,
 };
 pub use settings::{
     SECTION_GAP, set_group, set_note, set_row, set_row_panel, set_row_stack, set_rows, set_section,
