@@ -364,6 +364,12 @@ pub struct State {
     sel_job: Option<JobId>,
     /// Row being dragged, if any.
     drag_job: Option<JobId>,
+    /// A row that has been pressed but not yet carried anywhere:
+    /// `(row, where the pointer was when it was pressed)`. A press is a
+    /// selection until the pointer travels — without that, clicking a
+    /// row to use the move buttons started a drag, and a drag near the
+    /// table's edge scrolled the list out from under the click.
+    drag_armed: Option<(JobId, Option<(f32, f32)>)>,
     /// Pointer position in window space, for drawing the drag ghost
     /// under it.
     cursor: (f32, f32),
@@ -730,6 +736,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 jobs,
                 sel_job: None,
                 drag_job: None,
+                drag_armed: None,
                 cursor: (0.0, 0.0),
                 order_scroll: (0.0, 0.0),
                 order_preview: None,
@@ -797,11 +804,24 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
         }
         Msg::PickJob(id) => {
             st.sel_job = Some(id);
-            st.drag_job = Some(id);
+            // Armed, not dragging: the pointer has to travel first.
+            st.drag_armed = Some((id, None));
             Task::none()
         }
         Msg::CursorMoved(x, y) => {
             st.cursor = (x, y);
+            if let Some((id, anchor)) = st.drag_armed {
+                match anchor {
+                    // The press itself carries no position — the first
+                    // move after it is where the gesture started.
+                    None => st.drag_armed = Some((id, Some((x, y)))),
+                    Some((ax, ay)) if (x - ax).hypot(y - ay) >= DRAG_SLOP => {
+                        st.drag_armed = None;
+                        st.drag_job = Some(id);
+                    }
+                    Some(_) => {}
+                }
+            }
             Task::none()
         }
         Msg::OrderScrolled(vp) => {
@@ -862,7 +882,11 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
             })
         }
         Msg::DragEnd => {
+            if st.drag_job.is_none() && st.drag_armed.is_none() {
+                return Task::none();
+            }
             st.drag_job = None;
+            st.drag_armed = None;
             st.order_edge = None;
             // One commit for the whole gesture, and only if it changed
             // anything.
@@ -1176,6 +1200,9 @@ pub fn subscription(app: &App) -> Subscription<Msg> {
     let App::Ready(st) = app else {
         return Subscription::none();
     };
+    // One `listen_with`, not two: iced identifies a subscription by its
+    // recipe, and a second `listen_with` next to this one is dropped as
+    // a duplicate — silently, and the mouse events never arrive.
     let mut subs = vec![
         iced::event::listen_with(|event, status, _id| match event {
             iced::Event::Window(iced::window::Event::Resized(size)) => {
@@ -1184,24 +1211,17 @@ pub fn subscription(app: &App) -> Subscription<Msg> {
             iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) => Some(
                 Msg::KeyPressed(key, matches!(status, iced::event::Status::Captured)),
             ),
+            iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                Some(Msg::CursorMoved(position.x, position.y))
+            }
+            // A release anywhere ends a drag, including outside any row.
+            iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => {
+                Some(Msg::DragEnd)
+            }
             _ => None,
         }),
         crate::gui::ipc::all_events(crate::ipc_local::protocol::GuiKind::Queues).map(Msg::Daemon),
     ];
-    if st.drag_job.is_some() {
-        subs.push(iced::event::listen_with(
-            |event, _status, _id| match event {
-                iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
-                    Some(Msg::CursorMoved(position.x, position.y))
-                }
-                // A release anywhere ends the drag, including outside any row.
-                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
-                    iced::mouse::Button::Left,
-                )) => Some(Msg::DragEnd),
-                _ => None,
-            },
-        ));
-    }
     if st.drag_job.is_some() && st.order_edge.is_some() {
         subs.push(iced::time::every(ORDER_EDGE_EVERY).map(|_| Msg::OrderEdgeTick));
     }
@@ -2669,6 +2689,11 @@ const ORDER_EDGE_H: f32 = 20.0;
 /// Rows built above and below the viewport, so a flick has something to
 /// show before the next scroll event lands.
 const ORDER_OVERSCAN: usize = 4;
+/// How far the pointer must travel with the button down before a press
+/// on a row stops being a selection and becomes a drag. Same idea as
+/// the main window's column headers, which sort on a click and reorder
+/// on a drag.
+const DRAG_SLOP: f32 = 5.0;
 const ORDER_EDGE_STEP: f32 = ORDER_ROW_H;
 const ORDER_EDGE_EVERY: Duration = Duration::from_millis(110);
 

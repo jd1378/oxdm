@@ -1035,6 +1035,12 @@ fn splash<'a>(msg: String) -> Element<'a, Msg> {
 
 /// Design `.settings-nav .s-item`: 500 12.5px, 600 when selected.
 const NAV_FONT: f32 = 12.5;
+/// The label's line box reserves descender room below the baseline that
+/// a word like "General" never uses, so centring the *boxes* leaves the
+/// lettering sitting above the icon beside it. Measured against the
+/// icon's own ink: 3px puts "General" dead on it, and the words with
+/// descenders within half a pixel.
+const NAV_LABEL_SINK: f32 = 3.0;
 
 fn ready_view(st: &State) -> Element<'_, Msg> {
     let t = &st.tokens;
@@ -1057,7 +1063,8 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
             iced::widget::button(
                 row![
                     icons::icon(icon, 15.0, icon_color),
-                    text(label).font(label_font).size(NAV_FONT).color(fg),
+                    container(text(label).font(label_font).size(NAV_FONT).color(fg))
+                        .padding(iced::Padding::default().top(NAV_LABEL_SINK)),
                 ]
                 .spacing(theme::space::S2)
                 // `button` does not centre its content the way the
