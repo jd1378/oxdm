@@ -233,6 +233,14 @@ pub enum Msg {
     DragEnd,
     /// Move the selected row: to the top, one step, or to the end.
     Move(MoveWhere),
+    CursorMoved(f32, f32),
+    OrderScrolled(iced::widget::scrollable::Viewport),
+    /// Pointer entered or left one of the table's scroll edges.
+    OrderEdge(Option<EdgeScroll>),
+    /// One step of the edge scroll, while the pointer stays there.
+    OrderEdgeTick,
+    /// Re-read the job list, for the percentages of whatever is running.
+    Tick,
     Daemon(DaemonSignal),
     Window(WindowControl),
     Select(QueueId),
@@ -283,6 +291,14 @@ pub enum App {
     Connecting,
     Failed(String),
     Ready(Box<State>),
+}
+
+/// Which way the order table scrolls itself while a row is carried to
+/// its edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeScroll {
+    Up,
+    Down,
 }
 
 /// Where a Move button sends the selected download.
@@ -348,6 +364,16 @@ pub struct State {
     sel_job: Option<JobId>,
     /// Row being dragged, if any.
     drag_job: Option<JobId>,
+    /// Pointer position in window space, for drawing the drag ghost
+    /// under it.
+    cursor: (f32, f32),
+    /// Where the order table is scrolled to, and how far it can go —
+    /// read back from the scrollable so a drag can move it.
+    order_scroll: (f32, f32),
+    /// Which edge of the order table the pointer is resting on while
+    /// dragging. Carrying a row to a position off-screen is otherwise
+    /// impossible: the list cannot be scrolled with the button held.
+    order_edge: Option<EdgeScroll>,
 
     confirm_delete: bool,
     shot: Option<Shot>,
@@ -355,11 +381,15 @@ pub struct State {
     dirty: usize,
 }
 
-/// Phases that are waiting rather than running: what the order table
-/// lists, and what the daemon's own refill picks from.
+/// Everything the order table lists: every download in the queue that
+/// is not finished with, running ones included.
+///
+/// A running download is still part of the order — it is what the queue
+/// is doing right now, and leaving it out made the table jump every
+/// time one started. Moving one changes nothing about the run in
+/// flight; it changes where that download sits if it comes back.
 fn is_pending(phase: crate::domain::Phase) -> bool {
-    use crate::domain::Phase;
-    matches!(phase, Phase::Queued | Phase::Paused | Phase::Failed)
+    phase != crate::domain::Phase::Completed
 }
 
 impl State {
@@ -662,6 +692,9 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 jobs,
                 sel_job: None,
                 drag_job: None,
+                cursor: (0.0, 0.0),
+                order_scroll: (0.0, 0.0),
+                order_edge: None,
                 confirm_delete: false,
                 shot: Shot::from_env(),
                 dirty: 0,
@@ -728,8 +761,73 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
             st.drag_job = Some(id);
             Task::none()
         }
+        Msg::CursorMoved(x, y) => {
+            st.cursor = (x, y);
+            Task::none()
+        }
+        Msg::OrderScrolled(vp) => {
+            let offset = vp.absolute_offset().y;
+            let max = (vp.content_bounds().height - vp.bounds().height).max(0.0);
+            st.order_scroll = (offset, max);
+            Task::none()
+        }
+        Msg::OrderEdge(edge) => {
+            st.order_edge = edge;
+            Task::none()
+        }
+        Msg::OrderEdgeTick => {
+            let (Some(edge), Some(dragged)) = (st.order_edge, st.drag_job) else {
+                return Task::none();
+            };
+            // The row travels with the scroll. Otherwise it sits where
+            // it was while the list slides past, and carrying it to the
+            // end of a long queue leaves it in the middle.
+            let pending = st.pending();
+            let Some(from) = pending.iter().position(|j| j.id == dragged) else {
+                return Task::none();
+            };
+            let last = pending.len().saturating_sub(1);
+            let to = if edge == EdgeScroll::Up {
+                from.saturating_sub(1)
+            } else {
+                (from + 1).min(last)
+            };
+            let (offset, max) = st.order_scroll;
+            let step = if edge == EdgeScroll::Up {
+                -ORDER_EDGE_STEP
+            } else {
+                ORDER_EDGE_STEP
+            };
+            let next = (offset + step).clamp(0.0, max);
+            let scrolled = (next - offset).abs() >= 0.5;
+            st.order_scroll.0 = next;
+            let move_task = reorder(st, from, to);
+            if !scrolled {
+                // Already at the end of the list: the row keeps moving
+                // until it reaches the end too.
+                return move_task;
+            }
+            Task::batch([
+                move_task,
+                iced::widget::operation::scroll_to(
+                    order_scroll_id(),
+                    iced::widget::scrollable::AbsoluteOffset {
+                        x: Some(0.0),
+                        y: Some(next),
+                    },
+                ),
+            ])
+        }
+        Msg::Tick => {
+            let client = st.client.clone();
+            Task::perform(async move { client.snapshot().await }, |r| match r {
+                Ok(s) => Msg::Jobs(s.jobs),
+                Err(_) => Msg::Noop,
+            })
+        }
         Msg::DragEnd => {
             st.drag_job = None;
+            st.order_edge = None;
             Task::none()
         }
         Msg::DragOver(over) => {
@@ -1044,6 +1142,28 @@ pub fn subscription(app: &App) -> Subscription<Msg> {
         }),
         crate::gui::ipc::all_events(crate::ipc_local::protocol::GuiKind::Queues).map(Msg::Daemon),
     ];
+    if st.drag_job.is_some() {
+        subs.push(iced::event::listen_with(
+            |event, _status, _id| match event {
+                iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                    Some(Msg::CursorMoved(position.x, position.y))
+                }
+                // A release anywhere ends the drag, including outside any row.
+                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                    iced::mouse::Button::Left,
+                )) => Some(Msg::DragEnd),
+                _ => None,
+            },
+        ));
+    }
+    if st.drag_job.is_some() && st.order_edge.is_some() {
+        subs.push(iced::time::every(ORDER_EDGE_EVERY).map(|_| Msg::OrderEdgeTick));
+    }
+    // A percentage that does not move is worse than no percentage: while
+    // this queue has something running, keep the table's numbers live.
+    if st.pending().iter().any(|j| j.status.phase.is_running()) {
+        subs.push(iced::time::every(Duration::from_millis(700)).map(|_| Msg::Tick));
+    }
     if st.shot.is_some() {
         subs.push(Shot::frames().map(|_| Msg::ShotTick));
     }
@@ -2021,7 +2141,9 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
     } else if st.cal_open {
         calendar_overlay(st, body)
     } else {
-        body
+        // Above the page, below the titlebar: the ghost follows the
+        // pointer over whatever it is dragged across.
+        order_drag_ghost(st, body)
     };
 
     let content = container(column![
@@ -2488,8 +2610,25 @@ const ORDER_HEAD_H: f32 = 22.0;
 const ORDER_GRIP_W: f32 = 18.0;
 const ORDER_IDX_W: f32 = 22.0;
 const ORDER_SIZE_W: f32 = 68.0;
-const ORDER_STATUS_W: f32 = 62.0;
+/// Wide enough for the longest status plus a percentage — "Downloading
+/// 100%" is the one that decides it, and a status that wraps to two
+/// lines breaks the row grid.
+const ORDER_STATUS_W: f32 = 104.0;
 const ORDER_FONT: f32 = 11.5;
+/// Auto-scroll while a dragged row rests on the table's edge: how tall
+/// the sensitive strip is, how far one step travels, and how often a
+/// step is taken. A row height every few frames reads as the list
+/// moving under the hand rather than jumping.
+const ORDER_EDGE_H: f32 = 20.0;
+const ORDER_EDGE_STEP: f32 = ORDER_ROW_H;
+const ORDER_EDGE_EVERY: Duration = Duration::from_millis(110);
+
+/// The order table's scrollable, so a drag at its edge can move it.
+fn order_scroll_id() -> iced::advanced::widget::Id {
+    static ID: std::sync::OnceLock<iced::advanced::widget::Id> = std::sync::OnceLock::new();
+    ID.get_or_init(|| iced::advanced::widget::Id::new("queue-order"))
+        .clone()
+}
 
 /// The queue's waiting downloads, in the order they will run, with the
 /// controls to change it.
@@ -2521,27 +2660,21 @@ fn pending_order(st: &State) -> Element<'_, Msg> {
     // How many of these start the moment the queue does — the same
     // number the concurrency section is set to.
     let starting = st.max_concurrent.min(count);
-    let help = if starting == 1 {
-        "Waiting downloads start from the top. The next one starts as soon as the queue does."
-            .to_owned()
-    } else {
-        format!(
-            "Waiting downloads start from the top. The first {starting} start as soon as the \
-             queue does."
-        )
-    };
+    let help = format!(
+        "Downloads start from the top, {} at a time. Reordering takes effect immediately and \
+         never interrupts one already running — it decides what goes next.",
+        starting
+    );
 
+    // Every header cell through one helper: the Name column read as a
+    // different kind of label when it had its own font and size.
     let head = container(
         row![
             iced::widget::Space::new().width(Length::Fixed(ORDER_GRIP_W)),
-            cell("#", ORDER_IDX_W, t.fg_3),
-            text("Name")
-                .font(theme::BODY_BOLD)
-                .size(10.0)
-                .color(t.fg_3)
-                .width(Length::Fill),
-            cell("Size", ORDER_SIZE_W, t.fg_3),
-            cell("Status", ORDER_STATUS_W, t.fg_3),
+            head_cell(t, "#", Length::Fixed(ORDER_IDX_W)),
+            head_cell(t, "Name", Length::Fill),
+            head_cell(t, "Size", Length::Fixed(ORDER_SIZE_W)),
+            head_cell(t, "Status", Length::Fixed(ORDER_STATUS_W)),
         ]
         .spacing(theme::space::S2)
         .align_y(Alignment::Center),
@@ -2554,8 +2687,43 @@ fn pending_order(st: &State) -> Element<'_, Msg> {
     for (i, job) in pending.iter().enumerate() {
         rows = rows.push(order_row(st, i, job, sel_idx));
     }
-    let body = crate::gui::widget::vscroll(rows)
-        .height(Length::Fixed(ORDER_ROW_H * ORDER_ROWS_VISIBLE as f32));
+    let view_h = ORDER_ROW_H * ORDER_ROWS_VISIBLE as f32;
+    let scroller = crate::gui::widget::vscroll(rows)
+        .id(order_scroll_id())
+        .on_scroll(Msg::OrderScrolled)
+        .height(Length::Fixed(view_h));
+    // Holding a dragged row near the table's top or bottom scrolls the
+    // list under it — the only way to reach a position that is off
+    // screen while the button is held.
+    //
+    // The strips exist only while something is being carried: laid over
+    // the table the rest of the time, they would eat the press that
+    // starts the drag. And while they are up they cover the row they
+    // sit on, which is why the tick moves the dragged row itself rather
+    // than waiting for a row underneath to be entered.
+    let body: Element<'_, Msg> = if st.drag_job.is_some() {
+        let edge = |dir: EdgeScroll| {
+            iced::widget::mouse_area(
+                container(iced::widget::Space::new())
+                    .width(Length::Fill)
+                    .height(Length::Fixed(ORDER_EDGE_H)),
+            )
+            .on_enter(Msg::OrderEdge(Some(dir)))
+            .on_exit(Msg::OrderEdge(None))
+        };
+        iced::widget::stack![
+            scroller,
+            column![
+                edge(EdgeScroll::Up),
+                iced::widget::Space::new().height(Length::Fill),
+                edge(EdgeScroll::Down),
+            ]
+            .height(Length::Fixed(view_h)),
+        ]
+        .into()
+    } else {
+        scroller.into()
+    };
 
     let t2 = *t;
     let table = container(column![head, hairline(t.border_subtle), body])
@@ -2601,6 +2769,54 @@ fn pending_order(st: &State) -> Element<'_, Msg> {
     )
 }
 
+/// The dragged row, drawn under the pointer.
+///
+/// Without it the only feedback is the list rearranging, which reads as
+/// the table twitching rather than as carrying something. Same
+/// treatment as a dragged column header in the main window, through the
+/// same helper.
+fn order_drag_ghost<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a, Msg> {
+    let t = &st.tokens;
+    let t2 = *t;
+    let Some(id) = st.drag_job else {
+        return base;
+    };
+    let pending = st.pending();
+    let Some(job) = pending.iter().find(|j| j.id == id) else {
+        return base;
+    };
+    let name = job.filename.clone().unwrap_or_else(|| job.url.to_string());
+    let ghost = container(
+        text(name)
+            .font(theme::BODY)
+            .size(ORDER_FONT)
+            .color(color::with_alpha(t.fg_1, crate::gui::widget::GHOST_ALPHA))
+            .wrapping(iced::widget::text::Wrapping::None),
+    )
+    .height(Length::Fixed(ORDER_ROW_H))
+    .padding([0.0, theme::space::S2])
+    .align_y(Alignment::Center)
+    .style(move |_| container::Style {
+        background: Some(color::with_alpha(t2.bg_raised, crate::gui::widget::GHOST_ALPHA).into()),
+        border: iced::Border {
+            color: color::with_alpha(t2.border_default, crate::gui::widget::GHOST_ALPHA),
+            width: 1.0,
+            radius: theme::radius::XS.into(),
+        },
+        ..Default::default()
+    });
+    crate::gui::widget::drag_ghost(
+        base,
+        ghost.into(),
+        (
+            st.cursor.0 + theme::space::S2,
+            // Window space minus the painted chrome, centred on the
+            // pointer like the header ghost.
+            st.cursor.1 - chrome::titlebar::chrome_h() - ORDER_ROW_H / 2.0,
+        ),
+    )
+}
+
 /// One draggable row. Press picks it up and selects it; dragging over
 /// another row swaps them as the pointer passes, which is what makes
 /// the list follow the hand instead of jumping on release.
@@ -2617,11 +2833,16 @@ fn order_row<'a>(
     // The ones a running queue is about to pick up, marked so the
     // dividing line between "now" and "later" is visible.
     let next_up = i < st.max_concurrent;
-    let (status, status_color) = match job.status.phase {
-        crate::domain::Phase::Paused => ("Paused", t.fg_2),
-        crate::domain::Phase::Failed => ("Failed", t.status_danger),
-        _ => ("Queued", t.fg_3),
-    };
+    // The same colours and words the main list uses for a phase, plus
+    // how far along a running one is — the number is the difference
+    // between "it is doing something" and "it is nearly done".
+    let (status_color, mut status) = theme::phase_style(t, job.status.phase);
+    if job.status.phase.is_running()
+        && let Some(total) = job.status.total.filter(|t| *t > 0)
+    {
+        let pct = (job.status.downloaded as f64 / total as f64 * 100.0).min(100.0);
+        status = format!("{status} {pct:.0}%");
+    }
     let name = job.filename.clone().unwrap_or_else(|| job.url.to_string());
 
     let body = row![
@@ -2641,7 +2862,7 @@ fn order_row<'a>(
             ORDER_SIZE_W,
             t.fg_3
         ),
-        cell(status, ORDER_STATUS_W, status_color),
+        cell(&status, ORDER_STATUS_W, status_color),
     ]
     .spacing(theme::space::S2)
     .align_y(Alignment::Center);
@@ -2678,6 +2899,16 @@ fn order_row<'a>(
         .into()
 }
 
+/// A column heading.
+fn head_cell<'a>(t: &Tokens, label: &str, width: Length) -> Element<'a, Msg> {
+    text(label.to_owned())
+        .font(theme::BODY_BOLD)
+        .size(ORDER_FONT)
+        .color(t.fg_3)
+        .width(width)
+        .into()
+}
+
 /// Fixed-width table cell.
 fn cell<'a>(s: &str, width: f32, color: iced::Color) -> Element<'a, Msg> {
     text(s.to_owned())
@@ -2685,6 +2916,7 @@ fn cell<'a>(s: &str, width: f32, color: iced::Color) -> Element<'a, Msg> {
         .size(ORDER_FONT)
         .color(color)
         .width(Length::Fixed(width))
+        .wrapping(iced::widget::text::Wrapping::None)
         .into()
 }
 

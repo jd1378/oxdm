@@ -2554,17 +2554,16 @@ fn header_ghost<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg> {
         ..Default::default()
     });
 
-    iced::widget::stack![
+    // The layer starts below the titlebar, so window-space y has to
+    // lose that; centre the ghost on the pointer.
+    crate::gui::widget::drag_ghost(
         base,
-        container(iced::widget::opaque(ghost)).padding(iced::Padding {
-            left: (m.cursor.0 - grab).max(0.0),
-            // The layer starts below the titlebar, so window-space y has
-            // to lose that; centre the ghost on the pointer.
-            top: (m.cursor.1 - titlebar::chrome_h() - HEADER_H / 2.0).max(0.0),
-            ..Default::default()
-        }),
-    ]
-    .into()
+        ghost.into(),
+        (
+            m.cursor.0 - grab,
+            m.cursor.1 - titlebar::chrome_h() - HEADER_H / 2.0,
+        ),
+    )
 }
 
 /// Resize grips, overlaid on the header row and centered on each column
@@ -2662,8 +2661,7 @@ const COL_BY_INDEX: [SortColumn; crate::gui::ui_prefs::COLS] = [
 const COL_MOVE_SLOP: f32 = 5.0;
 /// Pointer travel needed before a reorder drag changes direction.
 const DRAG_DIR_DEADBAND: f32 = 3.0;
-/// Opacity of the dragged-header ghost.
-const GHOST_ALPHA: f32 = 0.5;
+use crate::gui::widget::GHOST_ALPHA;
 
 /// Slot the dragged column where the pointer is: it lands before the
 /// first remaining column whose midpoint the pointer has not yet passed.
@@ -3149,20 +3147,7 @@ fn phase_mark(phase: Phase) -> crate::gui::widget::Mark {
 }
 
 fn phase_style(t: &Tokens, phase: Phase) -> (iced::Color, String) {
-    let color = match phase {
-        Phase::Evaluating
-        | Phase::ResolvingConflicts
-        | Phase::Downloading
-        | Phase::Assembling
-        | Phase::Flushing
-        | Phase::Verifying
-        | Phase::Reconnecting => t.action_primary,
-        Phase::Queued => t.status_info,
-        Phase::Paused | Phase::Cancelled => t.fg_3,
-        Phase::Completed => t.status_success,
-        Phase::Failed => t.status_danger,
-    };
-    (color, phase.label().to_owned())
+    theme::phase_style(t, phase)
 }
 
 fn format_short_date(dt: &chrono::DateTime<chrono::Utc>) -> String {

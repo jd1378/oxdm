@@ -62,6 +62,30 @@ pub fn section_card<'a, M: 'a>(
     )
 }
 
+/// Opacity a dragged thing is drawn at while it follows the pointer.
+pub const GHOST_ALPHA: f32 = 0.5;
+
+/// Float `ghost` over `base` at window coordinates `at`.
+///
+/// What makes a drag readable is that the thing being moved is under
+/// the pointer while the list rearranges beneath it. Shared so a
+/// dragged column header and a dragged queue row behave the same way.
+pub fn drag_ghost<'a, M: 'a>(
+    base: Element<'a, M>,
+    ghost: Element<'a, M>,
+    at: (f32, f32),
+) -> Element<'a, M> {
+    iced::widget::stack![
+        base,
+        container(iced::widget::opaque(ghost)).padding(iced::Padding {
+            left: at.0.max(0.0),
+            top: at.1.max(0.0),
+            ..Default::default()
+        }),
+    ]
+    .into()
+}
+
 /// `section_card` with a count beside the title.
 ///
 /// The number belongs in the header rather than the body: it says how

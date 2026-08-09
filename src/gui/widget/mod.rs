@@ -13,8 +13,8 @@ pub mod striped;
 
 pub use button::{Btn, BtnSize};
 pub use cards::{
-    SCROLL_GUTTER, TabBtn, card, collapsible_card, hairline, section_card, section_card_count,
-    sibling, surface, vdivider, vscroll,
+    GHOST_ALPHA, SCROLL_GUTTER, TabBtn, card, collapsible_card, drag_ghost, hairline, section_card,
+    section_card_count, sibling, surface, vdivider, vscroll,
 };
 pub use controls::{
     checkbox, col_header, col_header_sortable, combo, number_stepper, segmented, toggle,

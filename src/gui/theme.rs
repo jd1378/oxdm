@@ -604,6 +604,7 @@ pub mod size {
     pub const ICON_LG: f32 = 16.0;
     pub const ICON_XL: f32 = 20.0;
     pub const TITLEBAR_H: f32 = 32.0;
+
     pub const TOOLBAR_H: f32 = 44.0;
     pub const STATUSBAR_H: f32 = 28.0;
     pub const TAB_H: f32 = 36.0;
@@ -836,3 +837,27 @@ pub mod ts {
 /// Default body text: 13px Jakarta Regular (matches egui
 /// `TextStyle::Body`).
 pub const BODY_SIZE: f32 = 13.0;
+
+/// The colour and words a phase is shown with, everywhere it is shown.
+///
+/// One source so the queue window's order table and the main list agree
+/// about what "Paused" looks like — two places inventing their own
+/// palette is how a status ends up meaning something different one
+/// window over.
+pub fn phase_style(t: &Tokens, phase: crate::domain::Phase) -> (iced::Color, String) {
+    use crate::domain::Phase;
+    let color = match phase {
+        Phase::Evaluating
+        | Phase::ResolvingConflicts
+        | Phase::Downloading
+        | Phase::Assembling
+        | Phase::Flushing
+        | Phase::Verifying
+        | Phase::Reconnecting => t.action_primary,
+        Phase::Queued => t.status_info,
+        Phase::Paused | Phase::Cancelled => t.fg_3,
+        Phase::Completed => t.status_success,
+        Phase::Failed => t.status_danger,
+    };
+    (color, phase.label().to_owned())
+}
