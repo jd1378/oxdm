@@ -52,7 +52,7 @@ impl Section {
     /// (design `.s-pane-head`).
     fn desc(self) -> &'static str {
         match self {
-            Section::General => "Startup, appearance, and removal confirmations.",
+            Section::General => "Startup, appearance, and what leaves the list.",
             Section::Downloads => {
                 "Cache location, retry behavior, and when to hold downloads back."
             }
@@ -146,6 +146,7 @@ pub enum Msg {
     ConfirmIncomplete(bool),
     ConfirmCompleted(bool),
     ConfirmClean(bool),
+    ForgetMovedFiles(bool),
     PauseOnMetered(bool),
     PauseOnLowBattery(bool),
     // Categories
@@ -363,6 +364,7 @@ fn copy_section(dst: &mut Settings, src: &Settings, section: Section) {
             dst.remove_confirm_incomplete = src.remove_confirm_incomplete;
             dst.remove_confirm_completed = src.remove_confirm_completed;
             dst.remove_confirm_clean = src.remove_confirm_clean;
+            dst.forget_moved_files = src.forget_moved_files;
         }
         Section::Downloads => {
             dst.work_dir = src.work_dir.clone();
@@ -709,6 +711,10 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
         }
         Msg::ConfirmClean(v) => {
             st.s.remove_confirm_clean = v;
+            Task::none()
+        }
+        Msg::ForgetMovedFiles(v) => {
+            st.s.forget_moved_files = v;
             Task::none()
         }
         Msg::PauseOnMetered(v) => {
@@ -1611,6 +1617,21 @@ fn general_section(st: &State) -> Element<'_, Msg> {
                         Msg::ConfirmClean
                     ),
                 ]
+            ),
+            set_section(
+                t,
+                "File tracking",
+                vec![toggle_row(
+                    t,
+                    "Forget downloads whose file moved",
+                    Some(
+                        "Watch saved files and clear an entry as soon as its file \
+                         is no longer where oxdm saved it. Nothing on disk is \
+                         deleted, and an entry on a drive that is unplugged is kept."
+                    ),
+                    st.s.forget_moved_files,
+                    Msg::ForgetMovedFiles
+                )]
             ),
         ]
         .spacing(SECTION_GAP)

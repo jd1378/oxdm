@@ -87,6 +87,7 @@ fn spawn_workers(
     completion_actions::spawn(state.clone());
     crate::data::spawn_hook_executor(state.clone());
     crate::data::spawn_queue_scheduler(state.clone());
+    crate::data::spawn_file_watch(state.clone());
     tray::install(rt.handle().clone(), state.clone());
 
     // Graceful Ctrl-C / SIGTERM: route through the same Quit path the

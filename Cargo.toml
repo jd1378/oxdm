@@ -59,6 +59,7 @@ iced = { version = "0.14", default-features = false, features = ["tiny-skia", "w
 # `iced_widget`, which are already in-tree via `iced`). Re-audit before
 # bumping. Transitive versions are pinned by Cargo.lock.
 iced_anim = { version = "=0.3.1", default-features = false, features = ["widgets"] }
+notify = { version = "8.2.0", default-features = false, features = ["macos_fsevent"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"

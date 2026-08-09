@@ -80,6 +80,15 @@ pub struct Settings {
     /// they never saw listed.
     #[serde(default = "yes_default")]
     pub remove_confirm_clean: bool,
+    /// Watch each completed download's saved file, and drop the entry
+    /// from the list once the file is no longer there.
+    ///
+    /// Off by default: the list is also a history, and a user who files
+    /// their downloads away by hand has not asked to forget them. The
+    /// check cannot tell a move from a delete or a rename — all it knows
+    /// is that nothing is at the recorded path any more.
+    #[serde(default)]
+    pub forget_moved_files: bool,
     /// Pause running downloads while the connection is metered (cellular
     /// or a phone hotspot), and resume them when it is not.
     #[serde(default = "yes_default")]
@@ -411,6 +420,7 @@ impl Default for Settings {
             remove_confirm_incomplete: true,
             remove_confirm_completed: true,
             remove_confirm_clean: true,
+            forget_moved_files: false,
             pause_on_metered: true,
             pause_on_low_battery: false,
             start_at_login: false,

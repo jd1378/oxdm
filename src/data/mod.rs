@@ -9,6 +9,7 @@
 pub mod conditions;
 pub mod crypto;
 mod events;
+mod file_watch;
 mod hooks;
 pub mod keyring;
 mod mapping;
@@ -23,6 +24,7 @@ mod update_channel;
 
 pub use conditions::available_conditions;
 pub use events::{ConflictKind, DomainEvent};
+pub use file_watch::spawn as spawn_file_watch;
 pub use hooks::spawn as spawn_hook_executor;
 pub use pause::{CancelResumeStrategy, PauseStrategy};
 pub use queue_scheduler::spawn as spawn_queue_scheduler;
