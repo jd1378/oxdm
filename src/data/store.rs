@@ -532,7 +532,7 @@ impl Store {
                             started_at, finished_at, retries, interruptions, \
                             verify_pending, response_headers_json, \
                             error_json \
-                     FROM jobs ORDER BY created_at ASC",
+                     FROM jobs ORDER BY queue_position ASC, created_at ASC",
                 )?;
                 let iter = stmt.query_map([], |row| {
                     Ok(JobRow {
@@ -575,6 +575,27 @@ impl Store {
             .map_err(StoreError::Sql)?;
 
         rows.into_iter().map(JobRow::into_job).collect()
+    }
+
+    /// Send a job to the back of the list.
+    ///
+    /// `queue_position` is otherwise left at its default of 0, so every
+    /// job that has never been moved keeps its place in creation order
+    /// and only the moved ones sort after them — which is exactly what
+    /// "moved to the end" means.
+    pub async fn move_job_to_end(&self, id: JobId) -> Result<(), StoreError> {
+        let id = id.0.to_string();
+        self.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE jobs SET queue_position = \
+                   (SELECT COALESCE(MAX(queue_position), 0) + 1 FROM jobs) \
+                 WHERE id = ?1",
+                rusqlite::params![id],
+            )
+        })
+        .await
+        .map_err(StoreError::Sql)?;
+        Ok(())
     }
 
     pub async fn upsert_job(&self, job: &Job) -> Result<(), StoreError> {

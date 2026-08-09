@@ -805,6 +805,12 @@ impl AppState {
     fn fill_queue_slots(
         self: &Arc<Self>,
         queue_id: QueueId,
+        // The job whose ending freed the slot. It is skipped for this
+        // pass: a user pausing the only running download in a queue
+        // would otherwise watch the queue start it again a moment
+        // later. The queue comes back to it on the next pass, which is
+        // what "paused, not failed" is supposed to mean.
+        just_ended: Option<JobId>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
         let state = Arc::clone(self);
         Box::pin(async move {
@@ -827,7 +833,7 @@ impl AppState {
             // A job that refuses to start — out of disk, secrets locked
             // — stays queued, so without this the loop would keep
             // picking the same one.
-            let mut tried: std::collections::HashSet<JobId> = std::collections::HashSet::new();
+            let mut tried: std::collections::HashSet<JobId> = just_ended.into_iter().collect();
             loop {
                 let next = {
                     let jobs = state.jobs.read().await;
@@ -839,10 +845,15 @@ impl AppState {
                     if running_global >= global_cap || running_here >= queue_cap {
                         return;
                     }
+                    // Queued and paused, never failed. A pause is "not
+                    // now" and the queue comes back to it; a failure has
+                    // a reason that is still true, and retrying it on
+                    // every pass would spin the queue on the same broken
+                    // download forever. Failures are retried by hand.
                     jobs.values()
                         .find(|e| {
                             e.job.queue_id == queue_id
-                                && e.phase() == Phase::Queued
+                                && matches!(e.phase(), Phase::Queued | Phase::Paused)
                                 && !e.job.integrity_failed()
                                 && !tried.contains(&e.job.id)
                         })
@@ -1344,6 +1355,29 @@ impl AppState {
         *self.dialog_visible_for.write().await = id;
     }
 
+    /// Send a job to the back of its queue.
+    ///
+    /// A download that stops — the user paused it, or it failed — is no
+    /// longer the one the queue is working on, and leaving it at the
+    /// front means everything behind it waits for a decision nobody is
+    /// making. At the back it is still there, still resumable, and the
+    /// queue carries on with what it can do.
+    ///
+    /// Both halves matter: the in-memory order is what every window
+    /// lists, and the stored `queue_position` is what survives a
+    /// restart.
+    async fn move_to_queue_end(&self, id: JobId) {
+        {
+            let mut jobs = self.jobs.write().await;
+            if let Some(entry) = jobs.shift_remove(&id) {
+                jobs.insert(id, entry);
+            }
+        }
+        if let Err(e) = self.store.move_job_to_end(id).await {
+            tracing::warn!(id = %id, error = %e, "could not record the new queue position");
+        }
+    }
+
     /// Park a job at the end of the queue, mark it `Failed` with a
     /// `ConflictPending` payload, and send a notification. Used by the
     /// runner when `conflict_while_hidden = NotifyAndPark` and the
@@ -1352,12 +1386,7 @@ impl AppState {
     /// "No auto-retry" is implicit: oxdm never auto-retries after a
     /// terminal phase. The user explicitly Resumes from the queue row.
     pub async fn park_with_conflict(self: &Arc<Self>, id: JobId, msg: String) {
-        // Re-insert at the tail of the IndexMap.
-        let mut jobs = self.jobs.write().await;
-        if let Some(entry) = jobs.shift_remove(&id) {
-            jobs.insert(id, entry);
-        }
-        drop(jobs);
+        self.move_to_queue_end(id).await;
         let err = JobError::ConflictPending(msg);
         if let Some(entry) = self.jobs.read().await.get(&id) {
             entry.set_phase(Phase::Failed);
@@ -2602,7 +2631,7 @@ impl AppState {
                     // waiting in this queue before asking whether the
                     // queue is done, or a queue with ten downloads and
                     // room for three would run three and stop.
-                    finish_state.fill_queue_slots(queue_id).await;
+                    finish_state.fill_queue_slots(queue_id, Some(id)).await;
                     finish_state.maybe_finish_queue(queue_id).await;
                 });
             }
@@ -2665,6 +2694,12 @@ impl AppState {
                 Err(err) => {
                     entry.set_phase(Phase::Failed);
                     entry.reset_live_speed();
+                    // Same as a pause: it stops being the download the
+                    // queue is working on. Unlike a pause, the queue
+                    // does not pick it up again when it comes round —
+                    // whatever went wrong is still wrong, and a queue
+                    // that retries a failure every pass is a loop.
+                    state.move_to_queue_end(id).await;
                     // A failed integrity check is a failure *after* the
                     // last byte arrived — the file is whole, it is just
                     // not the file that was promised. So the run has an
@@ -2799,6 +2834,10 @@ impl AppState {
         // the speed/ETA cells switch the moment the user clicks Pause.
         entry.set_phase(Phase::Paused);
         entry.reset_live_speed();
+        // Whoever else is waiting in this queue should not be waiting on
+        // a download the user has just stopped. It keeps its place in
+        // line — at the back of it.
+        self.move_to_queue_end(id).await;
         self.persist_job(id).await;
         let _ = self.events.send(DomainEvent::JobUpdated {
             id,
