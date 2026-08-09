@@ -20,7 +20,10 @@ use crate::ipc_local::Client;
 use crate::ipc_local::protocol::{Event, GuiKind};
 
 const WIN_W: f32 = 468.0;
-const WIN_H: f32 = 556.0;
+/// Sized to the content: identity header, the four body cards with the
+/// page's own padding under the last of them, and the footer band. The
+/// painted titlebar is added on top where the user opted into it.
+const WIN_H: f32 = 512.0;
 
 /// Facts cargo does not expose to the crate itself; `build.rs` resolves
 /// them (each degrades to "unknown", never to a build failure).
@@ -649,18 +652,28 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
         )],
     );
 
-    let body = container(
-        column![
-            set_rows(t, vec![updates(st)]),
-            set_rows(t, vec![facts]),
-            repository,
-            donate,
-        ]
-        .spacing(GAP),
+    // Scrolls because the window is sized to the content it normally
+    // has: a release note long enough to wrap several times grows the
+    // update card, and growing past the window should not cut it off.
+    let body = crate::gui::widget::vscroll(
+        container(
+            column![
+                set_rows(t, vec![updates(st)]),
+                set_rows(t, vec![facts]),
+                repository,
+                donate,
+            ]
+            .spacing(GAP),
+        )
+        .width(Length::Fill)
+        .padding(iced::Padding {
+            top: BODY_PAD,
+            bottom: BODY_PAD,
+            left: BODY_PAD,
+            right: BODY_PAD - crate::gui::widget::SCROLL_GUTTER,
+        }),
     )
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .padding(BODY_PAD);
+    .height(Length::Fill);
 
     let footer = container(
         row![
@@ -721,8 +734,8 @@ pub fn launch_about() {
         .default_font(theme::BODY)
         .antialiasing(true)
         .window(chrome::window_settings(
-            iced::Size::new(WIN_W, WIN_H),
-            iced::Size::new(WIN_W, WIN_H),
+            iced::Size::new(WIN_W, WIN_H + titlebar::chrome_h()),
+            iced::Size::new(WIN_W, WIN_H + titlebar::chrome_h()),
         ));
     for f in theme::fonts::ALL {
         app = app.font(*f);

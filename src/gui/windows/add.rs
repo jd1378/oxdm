@@ -45,6 +45,9 @@ const PROBED_H: f32 = 344.0;
 /// rather than for the one showing, so switching tabs does not resize
 /// the window under the user's hands.
 const ADVANCED_H: f32 = 530.0;
+/// The "cannot be resumed" line and the gap above it: one 12px line of
+/// bold text plus the body column's spacing.
+const NOT_RESUMABLE_H: f32 = 28.0;
 /// Dash length of the empty card's outline. Short: at this size the
 /// outline is a hint that something goes here, not a fence around it.
 const DASH_LEN: f32 = 3.0;
@@ -277,11 +280,21 @@ impl AddState {
 /// page is the plain form, the form under a detected-file card, or the
 /// form under an error block, which is the tallest of the three.
 fn wanted_height(st: &AddState) -> f32 {
-    if st.advanced_open {
-        ADVANCED_H
+    // A server that won't resume adds a line above the form, which the
+    // fixed heights below don't account for: without this the Advanced
+    // row falls under the footer and the page scrolls.
+    let warning = match st.detected() {
+        Some(p) if !p.is_resumable => NOT_RESUMABLE_H,
+        _ => 0.0,
+    };
+    // The painted titlebar is part of the page when the user opts into
+    // custom chrome, and space the heights below never counted: every
+    // one of them was measured on an OS-decorated window.
+    let content = if st.advanced_open {
+        ADVANCED_H + warning
     } else {
         match &st.probed {
-            Some(Ok(_)) => PROBED_H,
+            Some(Ok(_)) => PROBED_H + warning,
             // The error block is as tall as the error is wordy, and the
             // same estimate the download window sizes itself with.
             Some(Err(e)) => {
@@ -291,7 +304,8 @@ fn wanted_height(st: &AddState) -> f32 {
             }
             None => IDLE_H,
         }
-    }
+    };
+    content + titlebar::chrome_h()
 }
 
 /// Resize to fit, and move the floor with it.
@@ -395,7 +409,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 queue_dirty: false,
                 category_dirty: false,
                 advanced_open: false,
-                min_h: IDLE_H,
+                min_h: IDLE_H + titlebar::chrome_h(),
                 adv_tab: AdvTab::Proxy,
                 proxy_kind: ProxyKind::None,
                 proxy_host: String::new(),
@@ -1475,8 +1489,8 @@ pub fn launch_add(_edit_id: Option<JobId>, _prefill: Option<String>) {
         .default_font(theme::BODY)
         .antialiasing(true)
         .window(chrome::window_settings(
-            iced::Size::new(DIALOG_W, IDLE_H),
-            iced::Size::new(DIALOG_W, IDLE_H),
+            iced::Size::new(DIALOG_W, IDLE_H + titlebar::chrome_h()),
+            iced::Size::new(DIALOG_W, IDLE_H + titlebar::chrome_h()),
         ));
     for f in theme::fonts::ALL {
         app = app.font(*f);
