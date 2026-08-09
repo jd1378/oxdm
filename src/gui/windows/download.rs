@@ -401,6 +401,22 @@ pub struct State {
     /// Live window width, so a height correction can leave it alone.
     win_w: f32,
     win_h: f32,
+    /// The height the window has when the Info tab is showing — the one
+    /// the user (or the launcher) chose. A settings tab borrows height
+    /// from it and gives it back.
+    info_h: f32,
+    /// A height this window asked the window manager for and has not
+    /// seen come back yet. The resize event it produces is ours, not
+    /// the user's — without this, every automatic fit would be read as
+    /// the user sizing the window by hand.
+    awaiting_h: Option<f32>,
+    /// The user has dragged this window's edge since it opened. From
+    /// then on its size is theirs: no tab fits it, nothing gives the
+    /// height back.
+    user_resized: bool,
+    /// A window reports its size once as it opens. That first event is
+    /// the size it was given, not a size anyone chose.
+    opened: bool,
     /// The minimum height currently in force. Tracks what was handed to
     /// the window manager: the transfer view's floor, or a shorter
     /// completion page's own height. Clamping against the static floor
@@ -664,6 +680,10 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 path_field: String::new(),
                 win_w: WIN_W,
                 win_h: WIN_MIN_H,
+                info_h: WIN_MIN_H,
+                awaiting_h: None,
+                user_resized: false,
+                opened: false,
                 min_h: LAUNCH_H.get().copied().unwrap_or(WIN_MIN_H).min(WIN_MIN_H),
                 imposed_h: LAUNCH_H.get().copied(),
                 rate_open: false,
@@ -789,6 +809,8 @@ fn fit_window(st: &mut State) -> Task<Msg> {
     }
     st.imposed_h = Some(h);
     st.min_h = WIN_MIN_H.min(h);
+    // Ours, so the resize it produces must not read as the user's.
+    st.awaiting_h = Some(h);
     resize_to(st.win_w, h)
 }
 
@@ -813,20 +835,32 @@ fn tab_height(st: &State) -> Option<f32> {
     Some(content + chrome::overhead_h())
 }
 
-/// Give a settings tab the height its contents need, without ever
-/// taking height away.
+/// Size the window to the tab being shown, and back again on the way
+/// out.
 ///
-/// Growth only, and the floor is left alone: the window the user sized
-/// is theirs, and a minimum raised to fit a tab would follow them back
-/// to the transfer view and refuse to shrink.
-fn grow_for_tab(st: &mut State) -> Task<Msg> {
-    let Some(wanted) = tab_height(st) else {
+/// A settings tab borrows the height it needs and returns it when the
+/// user leaves for Info, so a look at the speed limit does not leave
+/// the transfer view permanently taller.
+///
+/// Nothing is imposed on a window the user has resized: from the moment
+/// they drag an edge, the size is theirs for as long as the window
+/// lives. The floor is never touched either — a minimum raised to fit a
+/// tab would follow them back to Info and refuse to shrink.
+fn fit_for_tab(st: &mut State) -> Task<Msg> {
+    if st.user_resized {
         return Task::none();
+    }
+    // Info gets back whatever it had; the settings tabs ask for what
+    // their rows measure, and never for less than Info was using.
+    let wanted = match tab_height(st) {
+        Some(h) => h.max(st.info_h),
+        None => st.info_h,
     };
-    if st.win_h >= wanted {
+    if (st.win_h - wanted).abs() < 1.0 {
         return Task::none();
     }
     st.win_h = wanted;
+    st.awaiting_h = Some(wanted);
     let size = iced::Size::new(st.win_w, wanted);
     iced::window::latest().and_then(move |id| iced::window::resize(id, size))
 }
@@ -925,7 +959,7 @@ fn update_state(st: &mut State, msg: Msg) -> Task<Msg> {
         },
         Msg::SetTab(tab) => {
             st.tab = tab;
-            grow_for_tab(st)
+            fit_for_tab(st)
         }
         Msg::ToggleRate => {
             st.rate_open = !st.rate_open;
@@ -1016,14 +1050,14 @@ fn update_state(st: &mut State, msg: Msg) -> Task<Msg> {
         }
         Msg::ExitDone(v) => {
             st.on_completion.exit_app = v;
-            Task::batch([apply_completion(st), grow_for_tab(st)])
+            Task::batch([apply_completion(st), fit_for_tab(st)])
         }
         Msg::PowerEnabled(v) => {
             // The switch is the only thing that arms the action; it
             // commits whatever the picker is showing.
             st.on_completion.shutdown = v.then_some(st.power_choice);
             st.on_completion.force_shutdown = v && st.power_force;
-            Task::batch([apply_completion(st), grow_for_tab(st)])
+            Task::batch([apply_completion(st), fit_for_tab(st)])
         }
         Msg::PowerAction(s) => {
             let (action, force) = parse_power_label(&s);
@@ -1034,13 +1068,13 @@ fn update_state(st: &mut State, msg: Msg) -> Task<Msg> {
             if st.on_completion.shutdown.is_some() {
                 st.on_completion.shutdown = Some(action);
                 st.on_completion.force_shutdown = force;
-                return Task::batch([apply_completion(st), grow_for_tab(st)]);
+                return Task::batch([apply_completion(st), fit_for_tab(st)]);
             }
             Task::none()
         }
         Msg::Disconnect(v) => {
             st.on_completion.disconnect = v;
-            Task::batch([apply_completion(st), grow_for_tab(st)])
+            Task::batch([apply_completion(st), fit_for_tab(st)])
         }
         Msg::PauseResume => {
             let client = st.client.clone();
@@ -1165,6 +1199,17 @@ fn update_state(st: &mut State, msg: Msg) -> Task<Msg> {
         Msg::WinResized(w, h) => {
             st.win_w = w;
             st.win_h = h;
+            match st.awaiting_h {
+                // The size we just asked for, arriving back: ours.
+                Some(want) if (want - h).abs() < 2.0 => st.awaiting_h = None,
+                // Anything else is a hand on the window's edge — once
+                // the window is up and its opening size is in.
+                _ if st.opened => st.user_resized = true,
+                _ => st.opened = true,
+            }
+            if st.tab == Tab::Info {
+                st.info_h = h;
+            }
             chrome::enforce_min_size(iced::Size::new(w, h), iced::Size::new(WIN_MIN_W, st.min_h))
         }
         Msg::ShotTick => {
