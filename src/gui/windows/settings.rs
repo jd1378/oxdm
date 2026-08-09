@@ -52,8 +52,10 @@ impl Section {
     /// (design `.s-pane-head`).
     fn desc(self) -> &'static str {
         match self {
-            Section::General => "Startup, appearance, and when to hold downloads back.",
-            Section::Downloads => "Cache location, retry behavior, and removal confirmations.",
+            Section::General => "Startup, appearance, and removal confirmations.",
+            Section::Downloads => {
+                "Cache location, retry behavior, and when to hold downloads back."
+            }
             Section::Categories => {
                 "Categories auto-sort downloads by file extension. Each one owns \
                  the folder its files land in."
@@ -353,22 +355,23 @@ fn pending_settings(st: &State) -> Settings {
 fn copy_section(dst: &mut Settings, src: &Settings, section: Section) {
     match section {
         Section::General => {
-            dst.pause_on_metered = src.pause_on_metered;
-            dst.pause_on_low_battery = src.pause_on_low_battery;
             dst.theme = src.theme;
             dst.reduce_motion = src.reduce_motion;
-            dst.work_dir = src.work_dir.clone();
+            dst.custom_window_chrome = src.custom_window_chrome;
             dst.start_at_login = src.start_at_login;
             dst.start_to_tray = src.start_to_tray;
-        }
-        Section::Downloads => {
-            dst.max_retries = src.max_retries;
-            dst.n_fixed_retries = src.n_fixed_retries;
-            dst.wait_between_retries = src.wait_between_retries;
-            dst.use_server_time = src.use_server_time;
             dst.remove_confirm_incomplete = src.remove_confirm_incomplete;
             dst.remove_confirm_completed = src.remove_confirm_completed;
             dst.remove_confirm_clean = src.remove_confirm_clean;
+        }
+        Section::Downloads => {
+            dst.work_dir = src.work_dir.clone();
+            dst.use_server_time = src.use_server_time;
+            dst.max_retries = src.max_retries;
+            dst.n_fixed_retries = src.n_fixed_retries;
+            dst.wait_between_retries = src.wait_between_retries;
+            dst.pause_on_metered = src.pause_on_metered;
+            dst.pause_on_low_battery = src.pause_on_low_battery;
         }
         Section::Categories => {
             dst.category_extensions = src.category_extensions.clone();
@@ -1584,21 +1587,28 @@ fn general_section(st: &State) -> Element<'_, Msg> {
             ),
             set_section(
                 t,
-                "Schedule-aware",
+                "Remove behavior",
                 vec![
                     toggle_row(
                         t,
-                        "Pause on metered networks",
-                        Some("Stop downloads on cellular or a phone hotspot, and resume after."),
-                        st.s.pause_on_metered,
-                        Msg::PauseOnMetered
+                        "Confirm removing incomplete downloads",
+                        Some("Ask before discarding a job that has not finished."),
+                        st.s.remove_confirm_incomplete,
+                        Msg::ConfirmIncomplete
                     ),
                     toggle_row(
                         t,
-                        "Pause when battery is low",
-                        Some("Below 20% and not plugged in."),
-                        st.s.pause_on_low_battery,
-                        Msg::PauseOnLowBattery
+                        "Confirm removing completed downloads",
+                        Some("Ask before clearing a finished job from the list."),
+                        st.s.remove_confirm_completed,
+                        Msg::ConfirmCompleted
+                    ),
+                    toggle_row(
+                        t,
+                        "Confirm cleaning finished downloads",
+                        Some("Ask before the toolbar's Clean clears every finished job at once."),
+                        st.s.remove_confirm_clean,
+                        Msg::ConfirmClean
                     ),
                 ]
             ),
@@ -1678,28 +1688,21 @@ fn downloads_section(st: &State) -> Element<'_, Msg> {
             ),
             set_section(
                 t,
-                "Remove behavior",
+                "Schedule-aware",
                 vec![
                     toggle_row(
                         t,
-                        "Confirm removing incomplete downloads",
-                        Some("Ask before discarding a job that has not finished."),
-                        st.s.remove_confirm_incomplete,
-                        Msg::ConfirmIncomplete
+                        "Pause on metered networks",
+                        Some("Stop downloads on cellular or a phone hotspot, and resume after."),
+                        st.s.pause_on_metered,
+                        Msg::PauseOnMetered
                     ),
                     toggle_row(
                         t,
-                        "Confirm removing completed downloads",
-                        Some("Ask before clearing a finished job from the list."),
-                        st.s.remove_confirm_completed,
-                        Msg::ConfirmCompleted
-                    ),
-                    toggle_row(
-                        t,
-                        "Confirm cleaning finished downloads",
-                        Some("Ask before the toolbar's Clean clears every finished job at once."),
-                        st.s.remove_confirm_clean,
-                        Msg::ConfirmClean
+                        "Pause when battery is low",
+                        Some("Below 20% and not plugged in."),
+                        st.s.pause_on_low_battery,
+                        Msg::PauseOnLowBattery
                     ),
                 ]
             ),
