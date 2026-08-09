@@ -23,8 +23,8 @@ use crate::gui::widget::error_panel::{error_block, mid_truncate};
 use crate::gui::widget::striped::striped_progress_hatched;
 use crate::gui::widget::{
     Btn, BtnSize, RateChart, TRACKING_EM, TabBtn, TextInput, collapsible_card, combo, hairline,
-    number_stepper, pill_progress, rate_chart, segmented, set_row_flat, set_row_panel, set_rows,
-    set_rows_flat, sibling, status_dot, surface, toggle, tracked_caps, vdivider,
+    number_stepper, pill_progress, rate_chart, segmented, set_row_flat, set_row_groups,
+    set_row_panel, set_rows, sibling, status_dot, surface, toggle, tracked_caps, vdivider,
 };
 use crate::gui::windows::add::footer;
 use crate::ipc_local::Client;
@@ -2143,23 +2143,28 @@ fn speed_tab(st: &State) -> Element<'_, Msg> {
             .view(t),
     );
 
-    set_rows_flat(
+    // The limit, the value it takes and the presets that set it are one
+    // decision in three rows: they are spaced apart, not ruled off from
+    // each other.
+    set_row_groups(
         t,
         vec![
-            set_row_flat(
+            vec![set_row_flat(
                 t,
                 "Max parallel connections",
                 Some("Auto lets oxdm choose; applying reconnects active segments."),
                 conn_controls.into(),
-            ),
-            set_row_flat(
-                t,
-                "Speed limit",
-                Some("Cap this job's throughput. Takes effect as you change it."),
-                toggle(t, limited, true, Msg::UseLimiter),
-            ),
-            set_row_flat(t, "Limit to", None, value_row.into()),
-            set_row_flat(t, "Quick set", None, presets.into()),
+            )],
+            vec![
+                set_row_flat(
+                    t,
+                    "Speed limit",
+                    Some("Cap this job's throughput. Takes effect as you change it."),
+                    toggle(t, limited, true, Msg::UseLimiter),
+                ),
+                set_row_flat(t, "Limit to", None, value_row.into()),
+                set_row_flat(t, "Quick set", None, presets.into()),
+            ],
         ],
     )
 }
@@ -2231,47 +2236,51 @@ fn completion_tab(st: &State) -> Element<'_, Msg> {
     .spacing(theme::space::S3)
     .align_y(Alignment::Center);
 
-    let mut rows = vec![
-        set_row_flat(
+    let mut groups = vec![
+        vec![set_row_flat(
             t,
             "Show completion dialog when done",
             None,
             toggle(t, oc.show_dialog, true, Msg::NotifyDone),
-        ),
-        set_row_flat(
+        )],
+        vec![set_row_flat(
             t,
             "Exit oxdm when done",
             None,
             toggle(t, oc.exit_app, true, Msg::ExitDone),
-        ),
-        set_row_flat(
+        )],
+        // The warning joins the row that armed it: it is that row's
+        // consequence, not a fourth thing to decide.
+        vec![set_row_flat(
             t,
             "Power action",
             Some("Runs after a 60-second cancellable countdown."),
             power_controls.into(),
-        ),
+        )],
     ];
-    // The warning sits directly under the power row, inside the group:
-    // it is the consequence of what was just armed, so it reads as part
-    // of that control rather than as a banner over the whole pane.
-    if let Some(warn) = completion_warn(st) {
-        // The warning keeps the row grid but not the inset: on a flat
-        // pane there is no card edge for it to sit inside of.
-        rows.push(
-            container(warn)
-                .width(Length::Fill)
-                .padding(iced::Padding::from([theme::space::S3, 0.0]))
-                .into(),
-        );
-    }
-    rows.push(set_row_flat(
+    groups.push(vec![set_row_flat(
         t,
         "Disconnect from network when done",
         Some("Superseded by a power action when one is set."),
         toggle(t, oc.disconnect, !power_on, Msg::Disconnect),
-    ));
+    )]);
+    // Last, under every row that can raise it: three of these settings
+    // can, and it speaks for all of them at once. Sitting between them
+    // it would also shove the rows below it down as it appeared, moving
+    // a control out from under the hand that just armed it.
+    //
+    // It keeps the row grid but not the inset — on a flat pane there is
+    // no card edge for it to sit inside of.
+    if let Some(warn) = completion_warn(st) {
+        groups.push(vec![
+            container(warn)
+                .width(Length::Fill)
+                .padding(iced::Padding::from([theme::space::S3, 0.0]))
+                .into(),
+        ]);
+    }
 
-    set_rows_flat(t, rows)
+    set_row_groups(t, groups)
 }
 
 /// Destructive-action warning panel (design `.pane-warn`, rust). Lists

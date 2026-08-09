@@ -177,12 +177,28 @@ pub fn set_rows<'a, M: 'a>(t: &Tokens, rows: Vec<Element<'a, M>>) -> Element<'a,
 /// A dashed divider says "these are separate" without the solid line's
 /// claim to be the edge of something.
 pub fn set_rows_flat<'a, M: 'a>(t: &Tokens, rows: Vec<Element<'a, M>>) -> Element<'a, M> {
+    set_row_groups(t, rows.into_iter().map(|r| vec![r]).collect())
+}
+
+/// Flat rows in groups: a dashed rule between the groups, nothing but
+/// the rows' own spacing inside one.
+///
+/// For settings that are one another's detail — a limit and the presets
+/// that set it, an action and the warning about what it will do. A rule
+/// between those says they are separate things to decide, when the
+/// second only exists because of the first.
+pub fn set_row_groups<'a, M: 'a>(t: &Tokens, groups: Vec<Vec<Element<'a, M>>>) -> Element<'a, M> {
     let mut body = column![].width(Length::Fill);
-    for (i, r) in rows.into_iter().enumerate() {
+    for (i, group) in groups.into_iter().enumerate() {
+        if group.is_empty() {
+            continue;
+        }
         if i > 0 {
             body = body.push(crate::gui::widget::dashed_rule(t.border_default));
         }
-        body = body.push(r);
+        for row in group {
+            body = body.push(row);
+        }
     }
     body.width(Length::Fill).into()
 }
