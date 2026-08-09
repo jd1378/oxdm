@@ -465,7 +465,10 @@ fn identity(t: &Tokens) -> Element<'_, Msg> {
     )
     .width(Length::Fill)
     .padding(iced::Padding {
-        top: 22.0,
+        // A tenth off the top: the mark and the wordmark sat lower in
+        // the band than the copy below them, which reads as the header
+        // drifting away from the page rather than heading it.
+        top: 19.8,
         right: 22.0,
         bottom: 20.0,
         left: 22.0,
