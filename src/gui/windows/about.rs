@@ -23,7 +23,11 @@ const WIN_W: f32 = 468.0;
 /// Sized to the content: identity header, the four body cards with the
 /// page's own padding under the last of them, and the footer band. The
 /// painted titlebar is added on top where the user opted into it.
-const WIN_H: f32 = 512.0;
+///
+/// The last card ends in padding that paints nothing, so a height read
+/// off a screenshot lands a few pixels short and the page scrolls by
+/// exactly that much; the 5 is that shortfall.
+const WIN_H: f32 = 517.0;
 
 /// Facts cargo does not expose to the crate itself; `build.rs` resolves
 /// them (each degrades to "unknown", never to a build failure).
