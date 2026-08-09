@@ -93,6 +93,38 @@ pub fn links_in_file(path: &std::path::Path) -> Vec<url::Url> {
     extract_http_urls(&text)
 }
 
+/// Every link the clipboard can be read as offering.
+///
+/// The clipboard is not one string: an owner advertises several
+/// targets, and which one answers first decides what the user appears
+/// to have copied. `read_text` wants a single URL and takes the first
+/// line of the best target — right for a capture, wrong for a paste,
+/// where a list of ten links would arrive as one. This reads every
+/// textual target in full and keeps whichever yields the most links.
+pub fn clipboard_links() -> Vec<url::Url> {
+    let mut best: Vec<url::Url> = Vec::new();
+    for text in read_texts() {
+        let links = extract_http_urls(&text);
+        if links.len() > best.len() {
+            best = links;
+        }
+    }
+    best
+}
+
+/// Every textual payload the clipboard will hand over, in full.
+fn read_texts() -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(mut cb) = arboard::Clipboard::new()
+        && let Ok(t) = cb.get_text()
+    {
+        out.push(t);
+    }
+    #[cfg(target_os = "linux")]
+    out.extend(read_linux_texts());
+    out
+}
+
 pub fn read_text() -> Option<String> {
     if let Ok(mut cb) = arboard::Clipboard::new()
         && let Ok(t) = cb.get_text()
@@ -115,12 +147,27 @@ pub fn read_text() -> Option<String> {
 /// then pick the first one whose payload looks textual.
 #[cfg(target_os = "linux")]
 fn read_linux_fallback() -> Option<String> {
+    read_linux_texts()
+        .iter()
+        .find_map(|payload| first_url_line(payload))
+}
+
+/// Every textual target the clipboard owner advertises, in full and in
+/// preference order.
+///
+/// X11 and Wayland have no "give me any text" call — the consumer must
+/// name a target — so we ask what is on offer and read each textual one.
+/// Whole payloads, not first lines: a `text/uri-list` *is* the list.
+#[cfg(target_os = "linux")]
+fn read_linux_texts() -> Vec<String> {
     let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
-    let targets = if wayland {
+    let Some(targets) = (if wayland {
         run_capture("wl-paste", &["--list-types"])
     } else {
         run_capture("xclip", &["-selection", "clipboard", "-o", "-t", "TARGETS"])
-    }?;
+    }) else {
+        return Vec::new();
+    };
 
     // Score targets: prefer URL-shaped over generic text so a browser
     // that advertises both gets the canonical URL line, but anything
@@ -139,19 +186,16 @@ fn read_linux_fallback() -> Option<String> {
         .collect();
     ordered.sort_by_key(|&(_, p)| p);
 
-    for (t, _) in ordered {
-        let out = if wayland {
-            run_capture("wl-paste", &["--no-newline", "-t", t])
-        } else {
-            run_capture("xclip", &["-selection", "clipboard", "-o", "-t", t])
-        };
-        if let Some(o) = out
-            && let Some(line) = first_url_line(&o)
-        {
-            return Some(line);
-        }
-    }
-    None
+    ordered
+        .into_iter()
+        .filter_map(|(t, _)| {
+            if wayland {
+                run_capture("wl-paste", &["--no-newline", "-t", t])
+            } else {
+                run_capture("xclip", &["-selection", "clipboard", "-o", "-t", t])
+            }
+        })
+        .collect()
 }
 
 #[cfg(target_os = "linux")]

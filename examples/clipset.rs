@@ -15,8 +15,13 @@ fn main() {
     // when a paste appears to do nothing.
     if arg == "--get" {
         match oxdm::gui::clipboard::read_text() {
-            Some(t) => println!("[{t}]"),
-            None => println!("<nothing>"),
+            Some(t) => println!("read_text: [{t}]"),
+            None => println!("read_text: <nothing>"),
+        }
+        let links = oxdm::gui::clipboard::clipboard_links();
+        println!("links: {}", links.len());
+        for l in links {
+            println!("  {l}");
         }
         return;
     }

@@ -634,6 +634,15 @@ fn clipped(name: &str) -> String {
     }
 }
 
+/// Turn an IPC result into a message: nothing to say on success, a
+/// toast naming the reason on failure.
+fn paste_failure(result: Result<(), String>, what: &str) -> Msg {
+    match result {
+        Ok(()) => Msg::Noop,
+        Err(e) => Msg::Toast(ToastSeverity::Error, format!("{what}: {e}")),
+    }
+}
+
 fn act<F>(fut: F) -> Task<Msg>
 where
     F: std::future::Future<Output = Result<(), String>> + Send + 'static,
@@ -1105,11 +1114,25 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                 // One link is a download the user is about to describe;
                 // several are a list to triage, which is what the batch
                 // window is for.
+                //
+                // Failures are said out loud rather than logged: the
+                // usual cause is a daemon older than this window, which
+                // does not know the request and answers with an error
+                // no one would otherwise see.
                 1 => {
                     let one = urls[0].to_string();
-                    act(async move { client.open_add_window(None, Some(one)).await })
+                    Task::perform(
+                        async move { client.open_add_window(None, Some(one)).await },
+                        |r| paste_failure(r, "Couldn't open the Add window"),
+                    )
                 }
-                _ => act(async move { client.open_batch_window(urls).await }),
+                n => {
+                    let what = format!("Couldn't open the list of {n} links");
+                    Task::perform(
+                        async move { client.open_batch_window(urls).await },
+                        move |r| paste_failure(r, &what),
+                    )
+                }
             }
         }
         Msg::Toast(severity, message) => spawn_toast(m, severity, message),
@@ -1445,13 +1468,9 @@ fn handle_key(
         // clipboard is blocking on X11, so it goes off the UI thread.
         Key::Character("v") if mods.command() => Task::perform(
             async {
-                tokio::task::spawn_blocking(|| {
-                    crate::gui::clipboard::read_text()
-                        .map(|t| crate::gui::clipboard::extract_http_urls(&t))
-                        .unwrap_or_default()
-                })
-                .await
-                .unwrap_or_default()
+                tokio::task::spawn_blocking(crate::gui::clipboard::clipboard_links)
+                    .await
+                    .unwrap_or_default()
             },
             Msg::LinksPasted,
         ),
