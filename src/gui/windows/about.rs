@@ -734,8 +734,8 @@ pub fn launch_about() {
         .default_font(theme::BODY)
         .antialiasing(true)
         .window(chrome::window_settings(
-            iced::Size::new(WIN_W, WIN_H + titlebar::chrome_h()),
-            iced::Size::new(WIN_W, WIN_H + titlebar::chrome_h()),
+            iced::Size::new(WIN_W, WIN_H + chrome::overhead_h()),
+            iced::Size::new(WIN_W, WIN_H + chrome::overhead_h()),
         ));
     for f in theme::fonts::ALL {
         app = app.font(*f);

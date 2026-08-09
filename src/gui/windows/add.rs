@@ -40,14 +40,14 @@ const FORCED_SINGLE_SEGMENT: &str = "1 connection (forced)";
 /// Nothing probed yet: URL field and the placeholder card.
 const IDLE_H: f32 = 204.0;
 /// The detected-file card above the destination form.
-const PROBED_H: f32 = 344.0;
+const PROBED_H: f32 = 348.0;
 /// With the Advanced pane open. Sized for its tallest tab — Proxy —
 /// rather than for the one showing, so switching tabs does not resize
 /// the window under the user's hands.
-const ADVANCED_H: f32 = 530.0;
+const ADVANCED_H: f32 = 531.0;
 /// The "cannot be resumed" line and the gap above it: one 12px line of
 /// bold text plus the body column's spacing.
-const NOT_RESUMABLE_H: f32 = 28.0;
+const NOT_RESUMABLE_H: f32 = 27.0;
 /// Dash length of the empty card's outline. Short: at this size the
 /// outline is a hint that something goes here, not a fence around it.
 const DASH_LEN: f32 = 3.0;
@@ -305,7 +305,7 @@ fn wanted_height(st: &AddState) -> f32 {
             None => IDLE_H,
         }
     };
-    content + titlebar::chrome_h()
+    content + chrome::overhead_h()
 }
 
 /// Resize to fit, and move the floor with it.
@@ -409,7 +409,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 queue_dirty: false,
                 category_dirty: false,
                 advanced_open: false,
-                min_h: IDLE_H + titlebar::chrome_h(),
+                min_h: IDLE_H + chrome::overhead_h(),
                 adv_tab: AdvTab::Proxy,
                 proxy_kind: ProxyKind::None,
                 proxy_host: String::new(),
@@ -1489,8 +1489,8 @@ pub fn launch_add(_edit_id: Option<JobId>, _prefill: Option<String>) {
         .default_font(theme::BODY)
         .antialiasing(true)
         .window(chrome::window_settings(
-            iced::Size::new(DIALOG_W, IDLE_H + titlebar::chrome_h()),
-            iced::Size::new(DIALOG_W, IDLE_H + titlebar::chrome_h()),
+            iced::Size::new(DIALOG_W, IDLE_H + chrome::overhead_h()),
+            iced::Size::new(DIALOG_W, IDLE_H + chrome::overhead_h()),
         ));
     for f in theme::fonts::ALL {
         app = app.font(*f);

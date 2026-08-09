@@ -35,8 +35,25 @@ pub fn window_task<M: Send + 'static>(control: WindowControl) -> Task<M> {
 /// otherwise blend into whatever is behind them). Padding insets the
 /// content by the border width so the child's background cannot paint
 /// over the ring.
+const BORDER_W: f32 = 1.0;
+
+/// Vertical space the painted chrome takes out of a window before the
+/// page starts: the ring's top and bottom border, the titlebar, and the
+/// hairline under it. Zero where the OS decorates the window.
+///
+/// Windows whose height is a measurement of their contents add this to
+/// it. The measurements were all taken on OS-decorated windows, so
+/// without it the last row of content falls under the footer and the
+/// page scrolls by exactly this much.
+pub fn overhead_h() -> f32 {
+    if titlebar::use_custom() {
+        titlebar::chrome_h() + 2.0 * BORDER_W
+    } else {
+        0.0
+    }
+}
+
 pub fn framed<'a, M: 'a>(content: impl Into<iced::Element<'a, M>>) -> iced::Element<'a, M> {
-    const BORDER_W: f32 = 1.0;
     // A decorated window already has an OS frame; the ring would be a
     // black line inside it.
     if !titlebar::use_custom() {
