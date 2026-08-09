@@ -1623,11 +1623,12 @@ fn general_section(st: &State) -> Element<'_, Msg> {
                 "File tracking",
                 vec![toggle_row(
                     t,
-                    "Forget downloads whose file moved",
+                    "Forget downloads whose files are gone",
                     Some(
-                        "Watch saved files and clear an entry as soon as its file \
-                         is no longer where oxdm saved it. Nothing on disk is \
-                         deleted, and an entry on a drive that is unplugged is kept."
+                        "Watch what each download has on disk — the saved file, or \
+                         the cached parts of an unfinished one — and clear its entry \
+                         as soon as that is no longer there. Nothing is deleted, and \
+                         an entry on a drive that is unplugged is kept."
                     ),
                     st.s.forget_moved_files,
                     Msg::ForgetMovedFiles

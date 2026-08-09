@@ -1,5 +1,11 @@
-//! Drop completed entries whose saved file is no longer where oxdm put
-//! it (`Settings::forget_moved_files`).
+//! Drop entries whose data is no longer there
+//! (`Settings::forget_moved_files`).
+//!
+//! Two ways for that to happen. A finished download's file is moved,
+//! renamed or deleted, and the row points at nothing. Or an unfinished
+//! one's work folder — its `metadata.pb` and every `.part` — is deleted
+//! out from under it, and the row is a progress bar over bytes that no
+//! longer exist.
 //!
 //! The OS reports the move: one watch per folder that holds a completed
 //! download, and a file leaving it wakes this task within milliseconds.
@@ -120,11 +126,17 @@ async fn resync(
     let Some(watcher) = watcher else {
         return;
     };
-    let wanted: HashSet<PathBuf> = completed_files(state)
+    // Every folder holding something a job depends on: the folders its
+    // finished files are in, and the cache root whose children are the
+    // work folders. One watch on the root covers every job in it.
+    let mut wanted: HashSet<PathBuf> = completed_files(state)
         .await
         .into_iter()
         .filter_map(|(_, p)| p.parent().map(Path::to_path_buf))
         .collect();
+    if !partial_work_dirs(state).await.is_empty() {
+        wanted.insert(state.settings().await.work_dir);
+    }
 
     for dir in watched.difference(&wanted).cloned().collect::<Vec<_>>() {
         let _ = watcher.unwatch(&dir);
@@ -165,6 +177,29 @@ async fn completed_files(state: &Arc<AppState>) -> Vec<(crate::domain::JobId, Pa
         .collect()
 }
 
+/// Work folders that hold something worth losing, and the job they
+/// belong to.
+///
+/// Only downloads that are stopped part-way. A running one is writing
+/// into its folder as we look; a finished one has everything in the
+/// saved file and does not care what is left in the cache; and one that
+/// has never fetched a byte loses nothing to a folder that was never
+/// created.
+async fn partial_work_dirs(state: &Arc<AppState>) -> Vec<(crate::domain::JobId, PathBuf)> {
+    let work_root = state.settings().await.work_dir;
+    state
+        .list_jobs()
+        .await
+        .into_iter()
+        .filter(|j| {
+            !j.status.phase.is_running()
+                && j.status.phase != Phase::Completed
+                && j.status.downloaded > 0
+        })
+        .map(|j| (j.id, crate::data::state::per_job_dir(&work_root, j.id)))
+        .collect()
+}
+
 async fn sweep(state: &Arc<AppState>) {
     let mut gone = Vec::new();
     for (id, path) in completed_files(state).await {
@@ -172,10 +207,15 @@ async fn sweep(state: &Arc<AppState>) {
             gone.push((id, path));
         }
     }
+    for (id, dir) in partial_work_dirs(state).await {
+        if is_gone(&dir).await {
+            gone.push((id, dir));
+        }
+    }
 
     for (id, path) in gone {
         tracing::info!(id = %id, path = %path.display(),
-            "file is no longer at its saved path — forgetting the download");
+            "what this download had is no longer there — forgetting it");
         // The partial state goes with it: keeping a work dir for a job
         // that is no longer listed leaves bytes nobody can reach. The
         // file itself is never touched — it is not there to touch.

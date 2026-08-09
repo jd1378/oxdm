@@ -80,8 +80,9 @@ pub struct Settings {
     /// they never saw listed.
     #[serde(default = "yes_default")]
     pub remove_confirm_clean: bool,
-    /// Watch each completed download's saved file, and drop the entry
-    /// from the list once the file is no longer there.
+    /// Watch what each download has on disk — a finished one's saved
+    /// file, an unfinished one's cached parts — and drop the entry from
+    /// the list once that is no longer there.
     ///
     /// Off by default: the list is also a history, and a user who files
     /// their downloads away by hand has not asked to forget them. The
