@@ -540,7 +540,10 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
                 fit
             }
         }
-        Msg::Paste => Task::perform(async { crate::gui::clipboard::read_text() }, Msg::Pasted),
+        Msg::Paste => Task::perform(
+            async { crate::gui::clipboard::clipboard_first_link() },
+            Msg::Pasted,
+        ),
         Msg::Pasted(Some(s)) => update_ready(st, Msg::UrlChanged(s.trim().to_owned())),
         Msg::Pasted(None) => Task::none(),
         Msg::DebounceFired(generation) => {

@@ -1388,12 +1388,11 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                 // the press without taking the decision away, since the
                 // field is still theirs to edit.
                 ToolbarAction::AddUrl => act(async move {
-                    let prefill = tokio::task::spawn_blocking(|| {
-                        crate::gui::clipboard::read_url_from_clipboard().map(|u| u.to_string())
-                    })
-                    .await
-                    .ok()
-                    .flatten();
+                    let prefill =
+                        tokio::task::spawn_blocking(crate::gui::clipboard::clipboard_first_link)
+                            .await
+                            .ok()
+                            .flatten();
                     client.open_add_window(None, prefill).await
                 }),
                 ToolbarAction::ToggleRun => match m.filter {

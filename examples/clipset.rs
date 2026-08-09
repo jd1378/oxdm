@@ -18,6 +18,10 @@ fn main() {
             Some(t) => println!("read_text: [{t}]"),
             None => println!("read_text: <nothing>"),
         }
+        match oxdm::gui::clipboard::clipboard_first_link() {
+            Some(t) => println!("first_link: [{t}]"),
+            None => println!("first_link: <nothing>"),
+        }
         let links = oxdm::gui::clipboard::clipboard_links();
         println!("links: {}", links.len());
         for l in links {

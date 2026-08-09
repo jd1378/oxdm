@@ -1,7 +1,19 @@
 //! One-shot clipboard URL detection.
 
-pub fn read_url_from_clipboard() -> Option<url::Url> {
-    extract_http_url(&read_text()?)
+/// The single link the Add window starts with, as text.
+///
+/// A clipboard holding a list is a batch elsewhere; here it is one
+/// download, so the field takes the first link on offer. With no link
+/// at all, the first non-empty line — a paste that is not a URL is
+/// still what the user meant to put there, and the field is theirs to
+/// correct.
+pub fn clipboard_first_link() -> Option<String> {
+    if let Some(u) = clipboard_links().into_iter().next() {
+        return Some(u.to_string());
+    }
+    let text = read_text()?;
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
+    Some(line.to_owned())
 }
 
 /// Find the first http/https URL embedded in `text`. Tolerates leading
@@ -10,7 +22,11 @@ pub fn read_url_from_clipboard() -> Option<url::Url> {
 /// parse so a clean URL with unusual chars still goes through.
 fn extract_http_url(text: &str) -> Option<url::Url> {
     let trimmed = text.trim();
-    if let Ok(u) = url::Url::parse(trimmed)
+    // Whole-string parse only when the string *is* one URL. `Url::parse`
+    // strips tabs and newlines per spec, so a two-line list parses as
+    // one nonsense URL with the second link glued to the first.
+    if !trimmed.contains(char::is_whitespace)
+        && let Ok(u) = url::Url::parse(trimmed)
         && matches!(u.scheme(), "http" | "https")
     {
         return Some(u);
@@ -305,6 +321,27 @@ mod tests {
         assert!(links_in_file(&binary).is_empty());
 
         assert!(links_in_file(&dir.path().join("missing.txt")).is_empty());
+    }
+
+    /// A clipboard full of links prefills the Add window with one of
+    /// them, not with all of them run together. `Url::parse` deletes
+    /// newlines rather than rejecting them, so the whole-string parse
+    /// used to return `https://a.example/1.binhttps://b.example/2.bin`.
+    #[test]
+    fn a_list_of_links_reads_as_its_first_link() {
+        let text = "https://a.example/1.bin\nhttps://b.example/2.bin\n";
+        assert_eq!(
+            extract_http_url(text).unwrap().as_str(),
+            "https://a.example/1.bin"
+        );
+        // A lone URL still goes through the whole-string parse, which
+        // is what tolerates characters the scanner would cut on.
+        assert_eq!(
+            extract_http_url("  https://a.example/f.bin  ")
+                .unwrap()
+                .as_str(),
+            "https://a.example/f.bin"
+        );
     }
 
     /// Trailing punctuation belongs to the sentence, not the URL.
