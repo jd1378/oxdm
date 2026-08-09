@@ -18,6 +18,7 @@ mod power;
 mod queue_scheduler;
 mod resolvers;
 mod runner;
+pub mod space;
 pub mod state;
 pub mod store;
 mod update_channel;

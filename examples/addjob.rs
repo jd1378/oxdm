@@ -30,6 +30,13 @@ async fn main() {
     // is the only way to reach the run's own name-resolution path
     // without racing a probe that answers first.
     let user = rest.iter().any(|a| a == "--auth").then(|| "u".to_owned());
+    // A size the caller claims to have probed, for exercising decisions
+    // that turn on how big the file is.
+    let size: Option<u64> = rest
+        .iter()
+        .position(|a| a == "--size")
+        .and_then(|i| rest.get(i + 1))
+        .and_then(|v| v.parse().ok());
 
     let client = oxdm::ipc_local::Client::connect_retry(std::time::Duration::from_secs(5))
         .await
@@ -49,7 +56,7 @@ async fn main() {
             proxy_password: None,
             cookies: None,
             category: None,
-            size: None,
+            size,
             checksums: Vec::new(),
         })
         .await

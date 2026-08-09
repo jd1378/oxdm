@@ -97,6 +97,12 @@ pub fn error_meta(err: &JobError) -> (&'static str, &'static str, &'static str, 
             "DISK_FULL",
             "The destination drive ran out of room. Your progress is safe.",
         ),
+        JobError::InsufficientSpace { .. } => (
+            "hard-drive",
+            "Not enough disk space",
+            "NO_ROOM",
+            "Nothing was started: the drive cannot hold this download.",
+        ),
         JobError::PermissionDenied(_) => (
             "hard-drive",
             "Can't write to this folder",
@@ -287,6 +293,16 @@ pub fn error_detail(err: &JobError) -> String {
              far is kept."
                 .into()
         }
+        JobError::InsufficientSpace {
+            path,
+            needed,
+            available,
+        } => format!(
+            "{path} has {} free, and this needs {}. Nothing was started, so nothing was \
+             half-written.",
+            crate::gui::format::format_bytes(*available),
+            crate::gui::format::format_bytes(*needed),
+        ),
         JobError::PermissionDenied(_) => {
             "The destination folder refused to be written to. Permissions may have changed \
              since the download started."
@@ -413,6 +429,16 @@ fn recovery_copy(err: &JobError) -> Option<(Tone, &'static str, &'static [&'stat
                 "Check that the drive isn't being unmounted or going to sleep.",
                 "Or point this download at a roomier folder under Properties → General, \
                  then retry. Your progress carries over.",
+            ],
+        ),
+        JobError::InsufficientSpace { .. } => (
+            Tone::Danger,
+            TRY,
+            &[
+                "Free up space on that drive, then start the download again.",
+                "Or point it at a folder on another drive under Properties → General.",
+                "The file is assembled from its parts, so both the cache folder and the \
+                 save folder need room for it while it finishes.",
             ],
         ),
         JobError::PermissionDenied(_) => (

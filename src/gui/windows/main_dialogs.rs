@@ -851,3 +851,44 @@ pub fn secrets_locked<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Ms
     .spacing(theme::space::S3);
     modal(t, base, card.into(), 480.0, None)
 }
+
+/// "This did not start, and here is why." The daemon refuses before it
+/// touches anything — no partial file, no half-started queue — so this
+/// reports a decision rather than a failure.
+pub fn refused<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg> {
+    let t = &m.tokens;
+    let reason = m.refusal.clone().unwrap_or_default();
+
+    let card = column![
+        row![
+            icons::icon("triangle-alert", 20.0, t.status_warning),
+            title_row(t, "Nothing was started"),
+        ]
+        .spacing(theme::space::S2)
+        .align_y(Alignment::Center),
+        text(reason)
+            .font(theme::BODY)
+            .size(12.0)
+            .color(t.fg_2)
+            .wrapping(text::Wrapping::WordOrGlyph),
+        text(
+            "Free up room, or send this download to a folder on another drive from \
+             Properties → General. A file is assembled from its parts, so the cache \
+             folder and the save folder both need room for it while it finishes."
+        )
+        .font(theme::BODY)
+        .size(11.5)
+        .color(t.fg_3)
+        .wrapping(text::Wrapping::WordOrGlyph),
+        row![
+            iced::widget::Space::new().width(Length::Fill),
+            Btn::new("Close")
+                .primary()
+                .on_press(Msg::CloseOverlay)
+                .view(t),
+        ]
+        .align_y(Alignment::Center),
+    ]
+    .spacing(theme::space::S3);
+    modal(t, base, card.into(), 460.0, Some(Msg::CloseOverlay))
+}

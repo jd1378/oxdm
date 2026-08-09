@@ -308,6 +308,9 @@ pub enum Msg {
     /// fetch from byte 0. The only way forward when the server refuses
     /// to resume or the remote file changed.
     RestartFromZero,
+    /// The daemon declined to start this download, in its own words.
+    Refused(String),
+    RefusalAck,
     /// Failure recovery for a write fault: pick a new destination, then
     /// retry. The bytes already downloaded carry over.
     Open,
@@ -359,6 +362,9 @@ pub struct State {
     confirm_delete: bool,
     /// The "start this download over?" confirmation is up.
     confirm_restart: bool,
+    /// Why the daemon would not start this download. Set by the button
+    /// that asked; cleared by acknowledging it.
+    refusal: Option<String>,
     /// Hash line under the pointer, and the one that was just copied —
     /// the design highlights on hover and flips the copy mark to a
     /// check for a moment (`HASH_COPIED_MS`).
@@ -630,6 +636,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 tab: Tab::Info,
                 confirm_delete: false,
                 confirm_restart: false,
+                refusal: None,
                 hash_hover: None,
                 hash_copied: None,
                 retries: std::collections::HashMap::new(),
@@ -988,8 +995,22 @@ fn update_state(st: &mut State, msg: Msg) -> Task<Msg> {
                         client.resume(id).await
                     }
                 },
-                |_| Msg::Noop,
+                |r| match r {
+                    Ok(()) => Msg::Noop,
+                    // Resuming is the one action the daemon declines on
+                    // the user's behalf; a button that silently does
+                    // nothing reads as broken.
+                    Err(e) => Msg::Refused(e),
+                },
             )
+        }
+        Msg::Refused(reason) => {
+            st.refusal = Some(reason);
+            Task::none()
+        }
+        Msg::RefusalAck => {
+            st.refusal = None;
+            Task::none()
         }
         Msg::Cancel => {
             let client = st.client.clone();
@@ -1038,6 +1059,7 @@ fn update_state(st: &mut State, msg: Msg) -> Task<Msg> {
         Msg::Escape => {
             st.confirm_delete = false;
             st.confirm_restart = false;
+            st.refusal = None;
             Task::none()
         }
         Msg::RestartAsk => {
@@ -1204,7 +1226,7 @@ pub fn view(app: &App) -> Element<'_, Msg> {
             // under a different parent, and the scrollable loses its
             // state with it — the page would jump back to the top the
             // moment the confirmation opened.
-            restart_overlay(st, delete_overlay(st, page))
+            refusal_overlay(st, restart_overlay(st, delete_overlay(st, page)))
         }
     })
 }
@@ -2498,6 +2520,31 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
         ]
         .into(),
     )
+}
+
+/// "This did not start, and here is why." Nothing was touched — the
+/// daemon refuses before it claims the job — so this reports a decision
+/// rather than a failure, and the only thing to do about it is read it.
+fn refusal_overlay<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a, Msg> {
+    let Some(reason) = st.refusal.clone() else {
+        return stack![base].into();
+    };
+    let t = &st.tokens;
+    let card = confirm_card(
+        t,
+        ("triangle-alert", t.status_warning, "Nothing was started"),
+        format!(
+            "{reason}. A file is assembled from its parts, so the cache folder and the \
+             save folder both need room for it while it finishes."
+        ),
+        Btn::new("Close").ghost().on_press(Msg::RefusalAck).view(t),
+        Btn::new("Open Containing Folder")
+            .toolbar()
+            .icon("folder")
+            .on_press(Msg::OpenFolder)
+            .view(t),
+    );
+    modal_over(t, base, card)
 }
 
 /// "Start this download over?" confirmation. Says what it costs — the

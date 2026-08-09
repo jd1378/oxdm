@@ -125,6 +125,8 @@ pub enum Msg {
     Toolbar(ToolbarAction),
     Tool(ToolAction),
     CloseOverlay,
+    /// The daemon declined an action. Carries its own words for it.
+    Refused(String),
     Context(ContextAction),
     KeyPressed(iced::keyboard::Key, iced::keyboard::Modifiers),
     Modifiers(iced::keyboard::Modifiers),
@@ -293,6 +295,9 @@ pub enum Overlay {
     /// "Start these downloads over?" — asked before, because it throws
     /// away every byte already fetched.
     RestartConfirm,
+    /// The daemon refused to start something and said why. Nothing has
+    /// happened yet — this is the reason it did not.
+    Refused,
 }
 
 pub enum App {
@@ -327,6 +332,8 @@ pub struct Main {
     pub remove: Option<RemoveState>,
     /// Files a removal was asked to delete and could not, one line each.
     pub remove_problems: Vec<String>,
+    /// Why the daemon would not start what was asked for, in its words.
+    pub refusal: Option<String>,
     /// Downloads a confirmed restart will start over from zero.
     pub restart_ids: Vec<JobId>,
     pub db_error: Option<String>,
@@ -418,6 +425,7 @@ impl Main {
             overlay: Overlay::None,
             remove: None,
             remove_problems: Vec::new(),
+            refusal: None,
             restart_ids: Vec::new(),
             db_error: None,
             modifiers: iced::keyboard::Modifiers::default(),
@@ -657,6 +665,21 @@ where
     )
 }
 
+/// Like [`act`], for the actions a refusal has to be shown for.
+///
+/// Starting is the one thing the daemon says no to on the user's
+/// behalf — out of room, mid-shutdown — and a silent no reads as a
+/// button that does not work.
+fn act_reporting<F>(fut: F) -> Task<Msg>
+where
+    F: std::future::Future<Output = Result<(), String>> + Send + 'static,
+{
+    Task::perform(fut, |r| match r {
+        Ok(()) => Msg::Noop,
+        Err(e) => Msg::Refused(e),
+    })
+}
+
 fn refresh(client: Arc<Client>) -> Task<Msg> {
     Task::perform(async move { client.snapshot().await }, |r| match r {
         Ok(snap) => Msg::Snapshot(snap),
@@ -879,6 +902,11 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             m.menu_anchor = m.cursor;
             Task::none()
         }
+        Msg::Refused(reason) => {
+            m.refusal = Some(reason);
+            m.overlay = Overlay::Refused;
+            Task::none()
+        }
         Msg::CloseOverlay => {
             m.context_menu = None;
             m.columns_menu = false;
@@ -889,6 +917,9 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             }
             if m.overlay == Overlay::RemoveWarning {
                 m.remove_problems.clear();
+            }
+            if m.overlay == Overlay::Refused {
+                m.refusal = None;
             }
             if m.overlay == Overlay::RestartConfirm {
                 m.restart_ids.clear();
@@ -1402,7 +1433,7 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                         if m.snap.active_queues.contains(&q) {
                             act(async move { client.stop_queue(q).await })
                         } else {
-                            act(async move { client.start_queue(q).await })
+                            act_reporting(async move { client.start_queue(q).await })
                         }
                     }
                     // Other scopes: pause/resume everything, keyed on
@@ -1411,7 +1442,7 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                         if m.any_running() {
                             act(async move { client.pause_all().await })
                         } else {
-                            act(async move { client.resume_all().await })
+                            act_reporting(async move { client.resume_all().await })
                         }
                     }
                 },
@@ -1616,7 +1647,7 @@ fn context_action(m: &mut Main, action: ContextAction) -> Task<Msg> {
             }
             Task::none()
         }
-        ContextAction::Resume => act(async move {
+        ContextAction::Resume => act_reporting(async move {
             for id in ids {
                 client.resume(id).await?;
             }
@@ -1840,6 +1871,7 @@ fn main_view(m: &Main) -> Element<'_, Msg> {
             Overlay::SecretsLocked => main_dialogs::secrets_locked(m, base),
             Overlay::RemoveWarning => main_dialogs::remove_warning(m, base),
             Overlay::RestartConfirm => main_dialogs::restart_confirm(m, base),
+            Overlay::Refused => main_dialogs::refused(m, base),
             _ => base,
         }
     };

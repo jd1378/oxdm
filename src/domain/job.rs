@@ -122,6 +122,24 @@ impl Phase {
     }
 }
 
+/// Sizes inside an error message. The GUI has its own formatter, but
+/// an error carries its explanation wherever it goes — a log line, a
+/// copied report, a CLI — and "needs 2147483648 bytes" is not one.
+fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = n as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{n} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JobError {
     #[error("network error: {0}")]
@@ -168,6 +186,20 @@ pub enum JobError {
     /// the partial download survives either way.
     #[error("out of disk space: {0}")]
     DiskFull(String),
+    /// Refused before starting: the volume cannot hold what this
+    /// download (or this queue) is about to put on it. Structured so
+    /// every window can say which folder and by how much, and distinct
+    /// from `DiskFull`, which is a run that has already died.
+    #[error(
+        "{path} has {} free, and this needs {}",
+        human_bytes(*available),
+        human_bytes(*needed)
+    )]
+    InsufficientSpace {
+        path: String,
+        needed: u64,
+        available: u64,
+    },
     /// The destination folder rejected the write.
     #[error("can't write to the destination: {0}")]
     PermissionDenied(String),

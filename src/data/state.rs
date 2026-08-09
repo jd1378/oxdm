@@ -694,6 +694,25 @@ impl AppState {
             .map(|e| (e.job.id, e.phase()))
             .collect();
         let running_now = snapshot.iter().filter(|(_, p)| p.is_running()).count();
+
+        // A queue is asked about as a whole: its downloads land on the
+        // same disks one after another, and starting the first two of
+        // ten only to run out on the third helps nobody. Jobs whose
+        // size nobody knows sit this out — see `data::space`.
+        let work_dir = self.settings.read().await.work_dir.clone();
+        let needs: Vec<crate::data::space::Need> = {
+            let jobs = self.jobs.read().await;
+            snapshot
+                .iter()
+                .filter(|(_, p)| p.is_startable())
+                .filter_map(|(jid, _)| jobs.get(jid))
+                .map(|e| self.space_need(e, &work_dir))
+                .collect()
+        };
+        self.refuse_if_short_on_space(needs)
+            .await
+            .map_err(|e| e.to_string())?;
+
         let mut budget = cap.saturating_sub(running_now);
         let mut started_any = false;
         for (jid, phase) in snapshot {
@@ -1590,6 +1609,54 @@ impl AppState {
         Ok(())
     }
 
+    /// What one job will want from the disks, if anyone knows its size.
+    fn space_need(&self, entry: &JobEntry, work_dir: &std::path::Path) -> crate::data::space::Need {
+        crate::data::space::Need {
+            // The configured cache folder, not this job's subfolder
+            // inside it: they are the same volume, and only one of them
+            // is a folder the user has ever seen.
+            work_dir: work_dir.to_path_buf(),
+            save_dir: entry.job.save_dir.clone(),
+            // The live counter first: a job part-way through a run knows
+            // more than the row last written to the database.
+            total: entry.counters.total().or(entry.job.status.total),
+            downloaded: entry.counters.downloaded().max(entry.job.status.downloaded),
+        }
+    }
+
+    /// Refuse before starting anything that plainly cannot fit.
+    ///
+    /// The error names one volume, what it needs and what it has; the
+    /// windows show it verbatim, because the numbers *are* the
+    /// explanation.
+    async fn refuse_if_short_on_space(
+        &self,
+        needs: Vec<crate::data::space::Need>,
+    ) -> Result<(), JobError> {
+        use crate::data::space;
+        if needs.is_empty() {
+            return Ok(());
+        }
+        // Every syscall here — statvfs per volume, plus the metadata
+        // walk that finds it — is blocking, and there may be one per
+        // job in a queue.
+        let short = tokio::task::spawn_blocking(move || {
+            let required = space::required_by_volume(&needs, space::volume_key);
+            space::shortfall(required, space::free_space)
+        })
+        .await
+        .ok()
+        .flatten();
+        match short {
+            None => Ok(()),
+            Some(s) => Err(JobError::InsufficientSpace {
+                path: s.path.display().to_string(),
+                needed: s.needed,
+                available: s.available,
+            }),
+        }
+    }
+
     /// Snapshot every user-visible job. Hidden jobs (e.g. self-update
     /// artifact downloads) are filtered out here so every callsite —
     /// queue UI, tray menu, clear-completed — gets the same view.
@@ -2238,6 +2305,12 @@ impl AppState {
             .job_entry(id)
             .await
             .ok_or_else(|| JobError::Other("job not found".into()))?;
+        // Asked before the job is claimed, so a refusal leaves it
+        // exactly as it was: still queued, still startable once there
+        // is room.
+        let work_dir = self.settings.read().await.work_dir.clone();
+        self.refuse_if_short_on_space(vec![self.space_need(&entry, &work_dir)])
+            .await?;
         if entry.running.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
