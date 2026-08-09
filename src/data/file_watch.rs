@@ -7,12 +7,16 @@
 //! went, because an event says a folder changed, not which row is now
 //! wrong.
 //!
-//! Watches cannot be the whole story, so the sweep also runs:
+//! The sweep also runs at startup, which is what catches everything
+//! moved while oxdm was not running.
 //!
-//! * at startup, for everything moved while oxdm was not running;
-//! * on a slow tick, because network shares and some FUSE mounts never
-//!   deliver events at all, and a watch on an unplugged drive dies with
-//!   it.
+//! Nothing is on a timer: an idle oxdm with a watch on a folder nobody
+//! touches costs nothing, and a periodic stat of every completed
+//! download would spin up disks and wake network shares for an answer
+//! that is almost always "still there". The cost is that a folder whose
+//! OS reports nothing — network shares, some FUSE mounts, a drive
+//! unplugged and plugged back in — is only reconciled at the next
+//! startup or the next event elsewhere.
 //!
 //! The check cannot distinguish a move from a rename or a delete. All
 //! three mean the same thing to the list: the row points at nothing.
@@ -28,8 +32,6 @@ use crate::data::RemoveOpts;
 use crate::data::state::AppState;
 use crate::domain::Phase;
 
-/// Safety net for folders whose OS never reports anything.
-const SWEEP_EVERY: Duration = Duration::from_secs(300);
 /// A move is a delete plus a create, and a file manager working in the
 /// folder emits a burst. Settling first turns a burst into one sweep,
 /// and gives a rename-in-place time to land before we call it gone.
@@ -52,14 +54,15 @@ pub fn spawn(state: Arc<AppState>) {
             Err(e) => {
                 // Every backend can fail to start — inotify watch
                 // limits, a sandbox with no FS notification at all.
-                // The slow sweep still does the job.
-                tracing::warn!(error = %e, "no filesystem watcher; falling back to periodic checks");
+                // Without it the startup sweep is all there is, so this
+                // is worth saying out loud rather than degrading
+                // quietly into a setting that looks on and does nothing.
+                tracing::warn!(error = %e, "no filesystem watcher: moved files will only be noticed at startup");
                 None
             }
         };
         let mut watched: HashSet<PathBuf> = HashSet::new();
         let mut events = state.subscribe();
-        let mut slow = tokio::time::interval(SWEEP_EVERY);
 
         loop {
             if state.is_exiting() {
@@ -75,7 +78,6 @@ pub fn spawn(state: Arc<AppState>) {
             }
 
             tokio::select! {
-                _ = slow.tick() => {}
                 _ = fs_rx.recv() => {
                     // Drain the rest of the burst, then let it settle.
                     while fs_rx.try_recv().is_ok() {}
@@ -136,9 +138,9 @@ async fn resync(
             Ok(()) => {
                 watched.insert(dir);
             }
-            // A folder that cannot be watched is not worth a warning
-            // every tick — it is usually a mount that went away, and
-            // the sweep covers it.
+            // A folder that cannot be watched is usually a mount that
+            // went away, which is the case this deliberately does not
+            // act on — debug, not a warning.
             Err(e) => tracing::debug!(dir = %dir.display(), error = %e, "cannot watch folder"),
         }
     }
