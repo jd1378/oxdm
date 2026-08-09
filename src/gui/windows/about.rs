@@ -315,6 +315,8 @@ const MARK_TILE: f32 = 26.0;
 /// Gap between every stacked block, and the body's inset. One value so
 /// the sections read as an even rhythm rather than a set of cards.
 const GAP: f32 = theme::space::S3;
+/// How far the mark sits below the top of the header band.
+const LOGO_DROP: f32 = 8.0;
 const BODY_PAD: f32 = theme::space::S5;
 
 /// One cell of the build-facts row: label left, mono value right.
@@ -428,24 +430,32 @@ fn identity(t: &Tokens) -> Element<'_, Msg> {
         row![
             // The app PNG already draws its own rounded plate, so it
             // sits bare; only the lettermark fallback needs a tile.
-            container(glyph)
-                .width(Length::Fixed(64.0))
-                .height(Length::Fixed(64.0))
-                .align_x(Alignment::Center)
-                .align_y(Alignment::Center)
-                .style(move |_| container::Style {
-                    background: (!has_glyph).then_some(tile_bg.into()),
-                    border: iced::Border {
-                        color: if has_glyph {
-                            iced::Color::TRANSPARENT
-                        } else {
-                            t2.border_default
+            // Dropped against the wordmark rather than aligned to its
+            // cap height: "oxdm" is set large enough that a top-aligned
+            // mark reads as sitting above the name it belongs to. A
+            // spacer, not padding — padding would take the drop out of
+            // the tile's own 64px and shrink the mark inside it.
+            column![
+                iced::widget::Space::new().height(Length::Fixed(LOGO_DROP)),
+                container(glyph)
+                    .width(Length::Fixed(64.0))
+                    .height(Length::Fixed(64.0))
+                    .align_x(Alignment::Center)
+                    .align_y(Alignment::Center)
+                    .style(move |_| container::Style {
+                        background: (!has_glyph).then_some(tile_bg.into()),
+                        border: iced::Border {
+                            color: if has_glyph {
+                                iced::Color::TRANSPARENT
+                            } else {
+                                t2.border_default
+                            },
+                            width: if has_glyph { 0.0 } else { 1.0 },
+                            radius: theme::radius::LG.into(),
                         },
-                        width: if has_glyph { 0.0 } else { 1.0 },
-                        radius: theme::radius::LG.into(),
-                    },
-                    ..Default::default()
-                }),
+                        ..Default::default()
+                    }),
+            ],
             column![
                 text("oxdm").font(theme::DISPLAY).size(32.0).color(t.fg_1),
                 text("An open-source download manager for every desktop.")
@@ -465,10 +475,7 @@ fn identity(t: &Tokens) -> Element<'_, Msg> {
     )
     .width(Length::Fill)
     .padding(iced::Padding {
-        // A tenth off the top: the mark and the wordmark sat lower in
-        // the band than the copy below them, which reads as the header
-        // drifting away from the page rather than heading it.
-        top: 19.8,
+        top: 22.0,
         right: 22.0,
         bottom: 20.0,
         left: 22.0,
