@@ -3,6 +3,7 @@
 pub mod button;
 pub mod cards;
 pub mod controls;
+mod dashed;
 pub mod ellipsis;
 pub mod error_panel;
 pub mod inputs;
@@ -18,6 +19,7 @@ pub use cards::{
 pub use controls::{
     checkbox, col_header, col_header_sortable, combo, number_stepper, segmented, toggle,
 };
+pub use dashed::dashed_frame;
 pub use ellipsis::ellipsized;
 pub use inputs::{FileInput, PasswordInput, TextInput, search_field};
 pub use pills::{

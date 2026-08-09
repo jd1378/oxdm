@@ -32,7 +32,26 @@ const FORCED_SINGLE_SEGMENT: &str = "1 connection (forced)";
 /// Window height while the probe-error block is shown (titlebar 28 +
 /// body padding 2×16 + url row ≈60 + gap 14 + error block ≈300 +
 /// footer ≈46; design §3.2 `.error-block` replaces the detected card).
-const ERROR_H: f32 = 484.0;
+/// Heights measured off the rendered dialog: the point where the last
+/// row of content ends, plus the page's bottom padding and the footer
+/// band. The window is sized to its contents rather than to a number
+/// that once fit them.
+///
+/// Nothing probed yet: URL field and the placeholder card.
+const IDLE_H: f32 = 204.0;
+/// The detected-file card above the destination form.
+const PROBED_H: f32 = 344.0;
+/// With the Advanced pane open. Sized for its tallest tab — Proxy —
+/// rather than for the one showing, so switching tabs does not resize
+/// the window under the user's hands.
+const ADVANCED_H: f32 = 530.0;
+/// Dash length of the empty card's outline. Short: at this size the
+/// outline is a hint that something goes here, not a fence around it.
+const DASH_LEN: f32 = 3.0;
+/// Above the probe result: the URL label, its field, and the gap.
+const ABOVE_RESULT: f32 = 74.0;
+/// The page's bottom padding plus the footer band.
+const BELOW_CONTENT: f32 = 61.0;
 /// Static "a few things to check" bullets for the probe-error panel
 /// (design §3.2, `add-dialog.jsx` `.eb-checklist` copy).
 const PROBE_CHECKLIST: &[&str] = &[
@@ -154,6 +173,9 @@ pub struct AddState {
     category_dirty: bool,
 
     advanced_open: bool,
+    /// The floor currently in force, tracked so it can come back down
+    /// when the dialog gets shorter.
+    min_h: f32,
     adv_tab: AdvTab,
     proxy_kind: ProxyKind,
     proxy_host: String,
@@ -249,6 +271,48 @@ impl AddState {
     }
 }
 
+/// The height this dialog's current contents want.
+///
+/// The Advanced pane is taller than anything above it; otherwise the
+/// page is the plain form, the form under a detected-file card, or the
+/// form under an error block, which is the tallest of the three.
+fn wanted_height(st: &AddState) -> f32 {
+    if st.advanced_open {
+        ADVANCED_H
+    } else {
+        match &st.probed {
+            Some(Ok(_)) => PROBED_H,
+            // The error block is as tall as the error is wordy, and the
+            // same estimate the download window sizes itself with.
+            Some(Err(e)) => {
+                ABOVE_RESULT
+                    + crate::gui::widget::error_panel::checklist_block_height(e, PROBE_CHECKLIST)
+                    + BELOW_CONTENT
+            }
+            None => IDLE_H,
+        }
+    }
+}
+
+/// Resize to fit, and move the floor with it.
+///
+/// The minimum has to travel with the height in both directions: left
+/// at the idle height the user could shrink a probed dialog until its
+/// own contents were cut off, and left at the probed height a dialog
+/// that goes back to idle keeps a band of empty surface it can never
+/// lose.
+fn fit_window(st: &mut AddState) -> Task<Msg> {
+    let h = wanted_height(st);
+    st.min_h = h;
+    let size = iced::Size::new(DIALOG_W, h);
+    iced::window::latest().and_then(move |id| {
+        Task::batch([
+            iced::window::set_min_size(id, Some(size)),
+            iced::window::resize(id, size),
+        ])
+    })
+}
+
 fn parse_args() -> (Option<JobId>, Option<String>) {
     let mut args = std::env::args().skip(3);
     let mut edit_id = None;
@@ -331,6 +395,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 queue_dirty: false,
                 category_dirty: false,
                 advanced_open: false,
+                min_h: IDLE_H,
                 adv_tab: AdvTab::Proxy,
                 proxy_kind: ProxyKind::None,
                 proxy_host: String::new(),
@@ -464,11 +529,15 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
                 .parse::<url::Url>()
                 .map(|u| matches!(u.scheme(), "http" | "https"))
                 .unwrap_or(false);
+            // The card or the error block just went away with the old
+            // URL; the window follows the content back down rather than
+            // leaving a band of empty surface above the buttons.
+            let fit = fit_window(st);
             if valid {
-                debounce(st.probe_gen)
+                Task::batch([fit, debounce(st.probe_gen)])
             } else {
                 st.probing = false;
-                Task::none()
+                fit
             }
         }
         Msg::Paste => Task::perform(async { crate::gui::clipboard::read_text() }, Msg::Pasted),
@@ -507,7 +576,6 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
                     classified = true;
                 }
             }
-            let ok = res.is_ok();
             st.probed = Some(res);
             if classified {
                 // Freshly classified → apply per-category routing (F5).
@@ -515,9 +583,7 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
             }
             // Grow the window for the detected card, or for the error
             // block (design §3.2: `.error-block` replaces the card).
-            let h = if ok { 417.0 } else { ERROR_H };
-            iced::window::latest()
-                .and_then(move |id| iced::window::resize(id, iced::Size::new(DIALOG_W, h)))
+            fit_window(st)
         }
         Msg::SavePathChanged(p) => {
             st.save_path = p;
@@ -575,15 +641,7 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
         }
         Msg::ToggleAdvanced => {
             st.advanced_open = !st.advanced_open;
-            let h = if st.advanced_open {
-                620.0
-            } else if st.detected().is_some() {
-                417.0
-            } else {
-                268.0
-            };
-            iced::window::latest()
-                .and_then(move |id| iced::window::resize(id, iced::Size::new(DIALOG_W, h)))
+            fit_window(st)
         }
         Msg::SetAdvTab(tab) => {
             st.adv_tab = tab;
@@ -648,7 +706,7 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
             st.error = None;
             st.probe_gen += 1;
             st.probing = true;
-            start_probe(st)
+            Task::batch([fit_window(st), start_probe(st)])
         }
         Msg::CopyText(s) => iced::clipboard::write(s),
         Msg::Submit { start_now } => {
@@ -722,7 +780,7 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
             Task::none()
         }
         Msg::WinResized(w, h) => {
-            chrome::enforce_min_size(iced::Size::new(w, h), iced::Size::new(DIALOG_W, 268.0))
+            chrome::enforce_min_size(iced::Size::new(w, h), iced::Size::new(DIALOG_W, st.min_h))
         }
         Msg::ShotTick => {
             if let Some(shot) = &mut st.shot
@@ -1106,19 +1164,23 @@ fn detect_card(st: &AddState) -> Element<'_, Msg> {
         .into(),
     };
 
-    let size_col = column![
-        text("SIZE").font(theme::BODY_BOLD).size(9.0).color(t.fg_3),
-        text(
-            detected
-                .map(|p| p.size.map(format_bytes).unwrap_or_else(|| "—".into()))
-                .unwrap_or_else(|| "—".into())
-        )
-        .font(theme::MONO)
-        .size(13.0)
-        .color(t.fg_1),
-    ]
-    .spacing(2.0)
-    .align_x(Alignment::End);
+    // Only once something has said how big the file is. Before that
+    // the column was a label over an em dash — a fact-shaped hole where
+    // there is no fact yet, on the very card that explains it will find
+    // one.
+    let size_col: Element<'_, Msg> = match detected.and_then(|p| p.size) {
+        Some(bytes) => column![
+            text("SIZE").font(theme::BODY_BOLD).size(9.0).color(t.fg_3),
+            text(format_bytes(bytes))
+                .font(theme::MONO)
+                .size(13.0)
+                .color(t.fg_1),
+        ]
+        .spacing(2.0)
+        .align_x(Alignment::End)
+        .into(),
+        None => iced::widget::Space::new().width(Length::Shrink).into(),
+    };
 
     let (fill, border) = if non_resumable {
         (t.status_warning_bg, t.status_warning)
@@ -1128,7 +1190,13 @@ fn detect_card(st: &AddState) -> Element<'_, Msg> {
         (t.bg_surface, t.border_default)
     };
 
-    container(
+    // Nothing asked for yet: the card is an invitation, not a record,
+    // so it wears the dashed outline that says something goes here.
+    // Drawn on a canvas behind the content — `iced::Border` strokes
+    // solid. Once a probe is under way the card is reporting on a real
+    // URL, and the outline goes solid with it.
+    let waiting = detected.is_none() && !st.probing;
+    let card = container(
         row![
             tile,
             text_col,
@@ -1143,13 +1211,25 @@ fn detect_card(st: &AddState) -> Element<'_, Msg> {
     .style(move |_| container::Style {
         background: Some(fill.into()),
         border: iced::Border {
-            color: border,
+            color: if waiting {
+                iced::Color::TRANSPARENT
+            } else {
+                border
+            },
             width: 1.0,
             radius: theme::surface::RADIUS.into(),
         },
         ..Default::default()
-    })
-    .into()
+    });
+    if waiting {
+        iced::widget::stack![
+            card,
+            crate::gui::widget::dashed_frame(border, theme::surface::RADIUS, DASH_LEN)
+        ]
+        .into()
+    } else {
+        card.into()
+    }
 }
 
 fn advanced_section(st: &AddState) -> Element<'_, Msg> {
@@ -1392,8 +1472,8 @@ pub fn launch_add(_edit_id: Option<JobId>, _prefill: Option<String>) {
         .default_font(theme::BODY)
         .antialiasing(true)
         .window(chrome::window_settings(
-            iced::Size::new(DIALOG_W, 268.0),
-            iced::Size::new(DIALOG_W, 268.0),
+            iced::Size::new(DIALOG_W, IDLE_H),
+            iced::Size::new(DIALOG_W, IDLE_H),
         ));
     for f in theme::fonts::ALL {
         app = app.font(*f);

@@ -161,6 +161,34 @@ pub fn error_meta(err: &JobError) -> (&'static str, &'static str, &'static str, 
 /// Derived from the copy the card actually renders rather than measured
 /// per variant: editing the wording, or adding a step to a list, moves
 /// the height with it.
+/// Height of the *checklist* panel — the one the Add dialog shows in
+/// place of the detected-file card.
+///
+/// A separate estimate from `error_block_height`: that panel is the
+/// download window's, at its width and with its chrome. Calibrated
+/// against the rendered card — 122px of fixed furniture (icon tile,
+/// title row, eyebrow, code footer, paddings), a 17px line, and two
+/// column widths, since the detail sits in a narrower column beside
+/// the icon and the retry button while the bullets run the full width.
+pub fn checklist_block_height(err: &JobError, items: &[&str]) -> f32 {
+    const CARD_CHROME: f32 = 122.0;
+    const LINE: f32 = 17.0;
+    const BULLET_GAP: f32 = 4.0;
+    /// The detail sits in a narrow column between the icon tile and the
+    /// retry button; the bullets run the full width of the card.
+    const DETAIL_CHARS: usize = 60;
+    const BULLET_CHARS: usize = 100;
+
+    fn lines(s: &str, per_line: usize) -> f32 {
+        (s.chars().count().div_ceil(per_line)).max(1) as f32
+    }
+
+    let detail = lines(&error_detail(err), DETAIL_CHARS);
+    let bullets: f32 = items.iter().map(|i| lines(i, BULLET_CHARS)).sum();
+    let gaps = BULLET_GAP * (items.len().saturating_sub(1)) as f32;
+    CARD_CHROME + LINE * (detail + bullets) + gaps
+}
+
 pub fn error_block_height(err: &JobError) -> f32 {
     /// Everything in the card that does not scale with the text: 12px
     /// padding top and bottom, the 36px icon tile, the hairline, the
