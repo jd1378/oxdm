@@ -157,6 +157,18 @@ async fn serve(mut stream: TcpStream, default_rate: u64) -> io::Result<()> {
         return Ok(());
     };
 
+    // One line per request: the point of this server is to be able to
+    // say what a client actually asked for — how many probes a paste
+    // turned into, whether a resume sent the Range it claimed.
+    println!(
+        "{} {}{}",
+        req.method,
+        req.target(),
+        req.header("range")
+            .map(|r| format!(" [{r}]"))
+            .unwrap_or_default()
+    );
+
     if !matches!(req.method.as_str(), "GET" | "HEAD") {
         http::write_text(&mut stream, "405 Method Not Allowed", "text/plain", "").await;
         return Ok(());

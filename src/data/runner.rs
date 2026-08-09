@@ -151,8 +151,16 @@ pub trait LiveBridge: Send + Sync + 'static {
     /// the name odl derived from `Content-Disposition` or the URL.
     /// Awaited: every window reads `Job::filename`, and the name has to
     /// be there before the download it belongs to starts.
-    async fn on_filename_resolved(&self, id: JobId, filename: String) {
+    /// Returns a folder to save into when classifying the resolved
+    /// name moved the job — the destination is still a decision at this
+    /// point, since the file is assembled from the work dir at the end.
+    async fn on_filename_resolved(
+        &self,
+        id: JobId,
+        filename: String,
+    ) -> Option<std::path::PathBuf> {
         let _ = (id, filename);
+        None
     }
     /// Called after `evaluate` with the checksums the server advertised
     /// in its headers, for the daemon to record on the job. Awaited —
@@ -282,9 +290,21 @@ impl JobRunner {
             // on the job before the first byte lands — a row that
             // renames itself halfway through a download reads as a
             // different download.
-            self.bridge
+            if let Some(dir) = self
+                .bridge
                 .on_filename_resolved(self.job_id, instruction.filename().to_owned())
-                .await;
+                .await
+            {
+                // Only into a name nothing else holds. odl resolved
+                // conflicts against the folder it was given, and a
+                // retarget it never saw could land on top of a file
+                // already there — the folder change is the improvement,
+                // overwriting is not.
+                let target = dir.join(instruction.filename());
+                if !tokio::fs::try_exists(&target).await.unwrap_or(true) {
+                    instruction.set_save_dir(dir);
+                }
+            }
         }
 
         // Per-job working directory inside the configured download_dir.

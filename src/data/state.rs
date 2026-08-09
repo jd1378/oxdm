@@ -327,7 +327,31 @@ pub struct AppState {
     /// Single-slot grace timer for destructive power actions (queue
     /// hooks + per-job completion actions both go through it).
     power: Arc<crate::data::power::PowerGuard>,
+    /// Probes in flight and recently finished, keyed by URL.
+    ///
+    /// The Add dialog probes through the daemon, and the same URL is
+    /// usually asked about twice within a second or two — once for the
+    /// dialog, once for the job it turns into. One request answers
+    /// both.
+    probes: tokio::sync::Mutex<std::collections::HashMap<String, ProbeSlot>>,
 }
+
+/// A probe's state: running (with everyone waiting on it) or finished
+/// (with what it found, until it goes stale).
+enum ProbeSlot {
+    /// Subscribers get the result the moment the leader has it.
+    Running(broadcast::Sender<Arc<Result<ProbeResult, JobError>>>),
+    Done {
+        at: std::time::Instant,
+        result: Arc<Result<ProbeResult, JobError>>,
+    },
+}
+
+/// How long a finished probe answers for the next caller. Long enough
+/// to cover "paste, look at it, press Add", short enough that a link
+/// re-added later in the session is asked about again — sizes and
+/// signed URLs both go stale.
+const PROBE_FRESH_FOR: std::time::Duration = std::time::Duration::from_secs(120);
 
 impl AppState {
     /// Boot oxdm: open the DB, load settings, hydrate the queue, build
@@ -442,6 +466,7 @@ impl AppState {
             master_key: RwLock::new(master_key),
             db_error: RwLock::new(db_error),
             power,
+            probes: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -1077,6 +1102,28 @@ impl AppState {
         let _ = self.events.send(DomainEvent::JobUpdated { id, phase });
     }
 
+    /// Where a job should be saved once its category is known, or
+    /// `None` to leave it where it is.
+    ///
+    /// Only a folder the app chose is moved. A job sitting in some
+    /// category's default folder was routed there by a guess at its
+    /// name; a job sitting anywhere else is sitting where the user put
+    /// it, and no classification outranks that.
+    fn retarget_dir(
+        settings: &Settings,
+        current: &std::path::Path,
+        category: Category,
+    ) -> Option<std::path::PathBuf> {
+        let wanted = settings.category_folder(category);
+        if wanted == current {
+            return None;
+        }
+        let app_chose_it = Category::ALL_ASSIGNABLE
+            .iter()
+            .any(|c| settings.category_folder(*c) == current);
+        app_chose_it.then_some(wanted)
+    }
+
     /// Record the name a run resolved for a job that was added without
     /// one, and classify it now that there is something to classify.
     ///
@@ -1087,23 +1134,35 @@ impl AppState {
     /// are already being written to the folder chosen when the job was
     /// added, and a category is what a file *is* — moving a file behind
     /// the user's back to make the two agree is the worse answer.
-    pub async fn apply_resolved_filename(&self, id: JobId, filename: String) {
+    pub async fn apply_resolved_filename(
+        &self,
+        id: JobId,
+        filename: String,
+    ) -> Option<std::path::PathBuf> {
         let name = filename.trim();
         if name.is_empty() {
-            return;
+            return None;
         }
-        let overrides = self.settings.read().await.category_extensions.clone();
+        let settings = self.settings.read().await.clone();
         let mut jobs = self.jobs.write().await;
-        let Some(old) = jobs.get(&id).cloned() else {
-            return;
-        };
+        let old = jobs.get(&id).cloned()?;
         if old.job.filename.as_deref().is_some_and(|n| !n.is_empty()) {
-            return;
+            return None;
         }
         let mut new_job = old.job.clone();
         new_job.filename = Some(name.to_owned());
+        let mut moved_to = None;
         if new_job.category == Category::Other {
-            new_job.category = classify(name, &overrides);
+            new_job.category = classify(name, &settings.category_extensions);
+            // The folder follows the category while it still can. The
+            // parts live in the per-job work dir and the file is
+            // assembled at the end, so this run's destination is still
+            // a decision rather than a fact — and the caller applies it
+            // to the instruction before the download starts.
+            if let Some(dir) = Self::retarget_dir(&settings, &new_job.save_dir, new_job.category) {
+                new_job.save_dir = dir.clone();
+                moved_to = Some(dir);
+            }
         }
         let phase = old.phase();
         let new_entry = clone_entry_with_job(&old, new_job.clone()).await;
@@ -1117,6 +1176,7 @@ impl AppState {
             filename: name.to_owned(),
         });
         let _ = self.events.send(DomainEvent::JobUpdated { id, phase });
+        moved_to
     }
 
     /// Replace only the source URL + destination (save_dir + filename) of
@@ -1735,6 +1795,11 @@ impl AppState {
         probe: ProbeFacts,
     ) -> Result<JobId, JobError> {
         let id = JobId::new();
+        // Whether this job arrives knowing anything about the file. A
+        // caller that probed says so by passing what it found; one that
+        // did not gets the answer filled in behind it.
+        let named = filename.as_deref().is_some_and(|n| !n.trim().is_empty());
+        let probe_was_empty = probe.size.is_none() && probe.checksums.is_empty();
         // Detect the category once at creation when the caller did not
         // supply an explicit choice. `classify` falls back to
         // `Category::Other` when nothing matches.
@@ -1797,11 +1862,24 @@ impl AppState {
             .await
             .map_err(|e| JobError::Io(e.to_string()))?;
         let completion = seeded_completion(&self.settings().await);
+        let url = job.url.clone();
+        // A job with credentials is not one a bare probe can describe:
+        // the server answers a sign-in page, and recording its name and
+        // size on the job would be worse than knowing nothing. Those
+        // jobs learn from their own run, which carries the secrets.
+        let probe_worth_it = !named
+            && probe_was_empty
+            && job.auth_user.is_none()
+            && job.enc_auth_password.is_none()
+            && job.enc_cookies.is_none();
         self.jobs
             .write()
             .await
             .insert(id, Arc::new(JobEntry::with_completion(job, completion)));
         let _ = self.events.send(DomainEvent::JobAdded { id });
+        if probe_worth_it {
+            self.probe_in_background(id, url);
+        }
         Ok(id)
     }
 
@@ -1879,6 +1957,156 @@ impl AppState {
     /// Internally goes through `DownloadManager::evaluate` with a
     /// `ProbeResolver` that aborts on every conflict, so the call
     /// either returns metadata or a clean error — never side-effects.
+    /// Probe `url`, sharing one request between everyone who asks.
+    ///
+    /// The Add dialog asks, and a moment later the job it created asks
+    /// again; a second request would ask the same server the same
+    /// question for the same answer. Callers that arrive while a probe
+    /// is running wait for it, and one that arrives just after gets
+    /// what it found (see [`PROBE_FRESH_FOR`]).
+    ///
+    /// Failures are shared too, and deliberately not cached: a server
+    /// that was unreachable a second ago is worth asking again.
+    pub async fn probe_shared(&self, url: url::Url) -> Result<ProbeResult, JobError> {
+        let key = url.as_str().to_owned();
+        let mut rx = {
+            let mut slots = self.probes.lock().await;
+            match slots.get(&key) {
+                Some(ProbeSlot::Done { at, result }) if at.elapsed() < PROBE_FRESH_FOR => {
+                    return (**result).clone();
+                }
+                Some(ProbeSlot::Running(tx)) => Some(tx.subscribe()),
+                _ => {
+                    let (tx, _) = broadcast::channel(1);
+                    slots.insert(key.clone(), ProbeSlot::Running(tx));
+                    None
+                }
+            }
+        };
+        if let Some(rx) = rx.as_mut() {
+            // The leader dropping its sender without a value would only
+            // happen if its task was cancelled mid-probe; asking again
+            // is better than reporting an error nobody caused.
+            return match rx.recv().await {
+                Ok(result) => (*result).clone(),
+                Err(_) => self.probe(url).await,
+            };
+        }
+
+        let result = Arc::new(self.probe(url).await);
+        {
+            let mut slots = self.probes.lock().await;
+            let waiters = match slots.remove(&key) {
+                Some(ProbeSlot::Running(tx)) => Some(tx),
+                _ => None,
+            };
+            if result.is_ok() {
+                slots.insert(
+                    key,
+                    ProbeSlot::Done {
+                        at: std::time::Instant::now(),
+                        result: result.clone(),
+                    },
+                );
+            }
+            // Sent with the map unlocked in mind: `send` only fails when
+            // nobody is waiting, which is the common case.
+            if let Some(tx) = waiters {
+                let _ = tx.send(result.clone());
+            }
+        }
+        (*result).clone()
+    }
+
+    /// Probe a job's URL in the background and record what comes back.
+    ///
+    /// For a job added before its probe finished — the user pasted a
+    /// link and pressed Add. The answer is worth having even though
+    /// nobody is waiting for it: the row can show its real name and
+    /// size while it sits in the queue, rather than a URL and a dash
+    /// until someone starts it.
+    ///
+    /// Failure is silent by design. Nothing the user asked for has
+    /// failed yet; if the link really is dead they find out when they
+    /// start the download, with the error panel that flow already has.
+    fn probe_in_background(self: &Arc<Self>, id: JobId, url: url::Url) {
+        let state = self.clone();
+        tokio::spawn(async move {
+            match state.probe_shared(url).await {
+                Ok(probe) => state.apply_probe_result(id, probe).await,
+                Err(e) => {
+                    tracing::debug!(id = %id, error = %e, "background probe found nothing")
+                }
+            }
+        });
+    }
+
+    /// Fill in what a job does not know yet from a probe that landed
+    /// after it was added.
+    ///
+    /// Only ever fills blanks. By the time this runs the job may have
+    /// been started, renamed or finished, and a probe is the *older*
+    /// piece of information in every one of those races — the run
+    /// talked to the same server later and for real.
+    pub async fn apply_probe_result(self: &Arc<Self>, id: JobId, probe: ProbeResult) {
+        let settings = self.settings.read().await.clone();
+        let mut jobs = self.jobs.write().await;
+        let Some(old) = jobs.get(&id).cloned() else {
+            return;
+        };
+        // A run of its own outranks anything a probe can say.
+        if old.running.load(Ordering::Acquire) || old.phase() != Phase::Queued {
+            return;
+        }
+        let mut new_job = old.job.clone();
+        let mut changed = false;
+        let named = new_job.filename.as_deref().is_some_and(|n| !n.is_empty());
+        if !named && !probe.filename.trim().is_empty() {
+            new_job.filename = Some(probe.filename.clone());
+            if new_job.category == Category::Other {
+                new_job.category = classify(&probe.filename, &settings.category_extensions);
+                // Nothing has run yet, so the destination is still
+                // nobody's decision but the app's own guess — which
+                // this just improved on.
+                if let Some(dir) =
+                    Self::retarget_dir(&settings, &new_job.save_dir, new_job.category)
+                {
+                    new_job.save_dir = dir;
+                }
+            }
+            changed = true;
+        }
+        if new_job.status.total.is_none() && probe.size.is_some() {
+            new_job.status.total = probe.size;
+            changed = true;
+        }
+        if crate::data::mapping::merge_checksums(&mut new_job.checksums, probe.checksums.clone()) {
+            changed = true;
+        }
+        if !changed {
+            return;
+        }
+        let phase = old.phase();
+        let new_entry = clone_entry_with_job(&old, new_job.clone()).await;
+        new_entry
+            .is_resumable
+            .store(if probe.is_resumable { 1 } else { -1 }, Ordering::Release);
+        // The counters are what the list reads for its size column, so
+        // a total that only reached the stored job would not show.
+        new_entry.counters.set_total(probe.size);
+        jobs.insert(id, new_entry);
+        drop(jobs);
+        if let Err(e) = self.store.upsert_job(&new_job).await {
+            tracing::warn!(id = %id, error = %e, "could not store what the probe found");
+        }
+        if let Some(name) = new_job.filename.clone() {
+            let _ = self
+                .events
+                .send(DomainEvent::JobFilenameResolved { id, filename: name });
+        }
+        let _ = self.events.send(DomainEvent::JobUpdated { id, phase });
+    }
+
     pub async fn probe(&self, url: url::Url) -> Result<ProbeResult, JobError> {
         let manager = self.manager.read().await.clone();
         let settings = self.settings.read().await.clone();
@@ -3224,11 +3452,13 @@ impl LiveBridge for StateLiveBridge {
         state.merge_server_checksums(id, checksums).await;
     }
 
-    async fn on_filename_resolved(&self, id: JobId, filename: String) {
-        let Some(state) = self.state.upgrade() else {
-            return;
-        };
-        state.apply_resolved_filename(id, filename).await;
+    async fn on_filename_resolved(
+        &self,
+        id: JobId,
+        filename: String,
+    ) -> Option<std::path::PathBuf> {
+        let state = self.state.upgrade()?;
+        state.apply_resolved_filename(id, filename).await
     }
 
     fn on_event(&self, id: JobId, event: &OdlProgressEvent) {

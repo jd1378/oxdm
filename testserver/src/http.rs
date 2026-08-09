@@ -20,6 +20,11 @@ pub struct Request {
 }
 
 impl Request {
+    /// The request target verbatim, query string and all.
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+
     /// Path with the query string stripped.
     pub fn path(&self) -> &str {
         match self.target.split_once('?') {

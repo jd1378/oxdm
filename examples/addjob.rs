@@ -15,7 +15,12 @@ async fn main() {
         eprintln!("usage: addjob <url> <save-dir> [--start]");
         std::process::exit(2);
     };
-    let start = args.any(|a| a == "--start");
+    let rest: Vec<String> = args.collect();
+    let start = rest.iter().any(|a| a == "--start");
+    // A job with credentials is never probed in the background, which
+    // is the only way to reach the run's own name-resolution path
+    // without racing a probe that answers first.
+    let user = rest.iter().any(|a| a == "--auth").then(|| "u".to_owned());
 
     let client = oxdm::ipc_local::Client::connect_retry(std::time::Duration::from_secs(5))
         .await
@@ -30,7 +35,7 @@ async fn main() {
             headers: Default::default(),
             max_connections: None,
             proxy: None,
-            auth_user: None,
+            auth_user: user,
             auth_password: None,
             proxy_password: None,
             cookies: None,
