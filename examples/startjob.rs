@@ -15,6 +15,13 @@ async fn main() {
     let client = oxdm::ipc_local::Client::connect_retry(std::time::Duration::from_secs(5))
         .await
         .expect("no daemon");
+    if std::env::args().any(|a| a == "--pause") {
+        match client.pause(id).await {
+            Ok(()) => println!("paused"),
+            Err(e) => println!("refused: {e}"),
+        }
+        return;
+    }
     match client.start_job(id).await {
         Ok(()) => println!("started"),
         Err(e) => println!("refused: {e}"),

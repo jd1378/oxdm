@@ -426,6 +426,13 @@ impl AppState {
         let mut jobs = IndexMap::new();
         let completion = seeded_completion(&settings);
         for j in stored_jobs {
+            // A job left mid-run by a crash arrives here already
+            // demoted to Paused — `Store::list_jobs` does it, since no
+            // runner survives a restart. That is what keeps a phantom
+            // Downloading out of the queue's concurrency count, and
+            // what lets the user resume it: the parts and `metadata.pb`
+            // are still on disk, so a job caught during assembly
+            // assembles and verifies rather than fetching again.
             jobs.insert(
                 j.id,
                 Arc::new(JobEntry::with_completion(j, completion.clone())),
@@ -727,7 +734,11 @@ impl AppState {
         }
 
         let mut active = self.active_queues.write().await;
-        if started_any && active.insert(id, QueueRunTally::default()).is_none() {
+        let tally = QueueRunTally {
+            queue_run: true,
+            ..QueueRunTally::default()
+        };
+        if started_any && active.insert(id, tally).is_none() {
             let _ = self.events.send(DomainEvent::QueueStarted { id });
         }
         Ok(())
@@ -774,6 +785,79 @@ impl AppState {
             });
         }
         Ok(())
+    }
+
+    /// Start queued jobs in `queue_id` until its slots are full.
+    ///
+    /// Two caps apply and both are real: the queue's own
+    /// `max_concurrent`, and the global `max_concurrent_downloads`
+    /// across every queue — a per-queue limit that let three queues run
+    /// three each would be a setting that means nothing.
+    ///
+    /// Only for a queue that is actually running. A queue nobody
+    /// started has no slots to fill, and a job finishing in it (started
+    /// by hand) must not quietly start its neighbours.
+    ///
+    /// Boxed because this is a cycle: filling a slot starts a job, and
+    /// that job finishing fills the next. An `async fn` calling itself
+    /// through that loop has a future whose type contains itself, which
+    /// the compiler cannot size — or prove `Send`.
+    fn fill_queue_slots(
+        self: &Arc<Self>,
+        queue_id: QueueId,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        let state = Arc::clone(self);
+        Box::pin(async move {
+            let queue_run = state
+                .active_queues
+                .read()
+                .await
+                .get(&queue_id)
+                .is_some_and(|t| t.queue_run);
+            if state.is_exiting() || !queue_run {
+                return;
+            }
+            let global_cap = state.settings().await.max_concurrent_downloads.max(1);
+            let queue_cap = state
+                .queue(queue_id)
+                .await
+                .and_then(|q| q.max_concurrent)
+                .unwrap_or(global_cap)
+                .max(1);
+            // A job that refuses to start — out of disk, secrets locked
+            // — stays queued, so without this the loop would keep
+            // picking the same one.
+            let mut tried: std::collections::HashSet<JobId> = std::collections::HashSet::new();
+            loop {
+                let next = {
+                    let jobs = state.jobs.read().await;
+                    let running_global = jobs.values().filter(|e| e.phase().is_running()).count();
+                    let running_here = jobs
+                        .values()
+                        .filter(|e| e.job.queue_id == queue_id && e.phase().is_running())
+                        .count();
+                    if running_global >= global_cap || running_here >= queue_cap {
+                        return;
+                    }
+                    jobs.values()
+                        .find(|e| {
+                            e.job.queue_id == queue_id
+                                && e.phase() == Phase::Queued
+                                && !e.job.integrity_failed()
+                                && !tried.contains(&e.job.id)
+                        })
+                        .map(|e| e.job.id)
+                };
+                let Some(id) = next else {
+                    return;
+                };
+                tried.insert(id);
+                state.mark_run_intent(id, false).await;
+                if let Err(e) = state.start_job(id).await {
+                    tracing::info!(id = %id, error = %e, "queue could not start the next download");
+                }
+            }
+        })
     }
 
     /// Watcher: after a job leaves running state, if its queue has no
@@ -2514,6 +2598,11 @@ impl AppState {
             {
                 let finish_state = state.clone();
                 tokio::spawn(async move {
+                    // A slot just came free: give it to the next job
+                    // waiting in this queue before asking whether the
+                    // queue is done, or a queue with ten downloads and
+                    // room for three would run three and stop.
+                    finish_state.fill_queue_slots(queue_id).await;
                     finish_state.maybe_finish_queue(queue_id).await;
                 });
             }
@@ -3065,7 +3154,12 @@ impl AppState {
     /// stopped, and an on-finish hook that fires when the user presses
     /// Stop all is a shutdown nobody asked for.
     pub async fn stop_all(self: &Arc<Self>) {
-        self.pause_all().await;
+        // Queues first, and not for tidiness: while a queue is still
+        // marked as running it is something that starts downloads, so
+        // pausing first leaves a window in which the queue machinery
+        // can put back what was just stopped. Ending the runs first
+        // means everything still transferring afterwards is a download
+        // somebody started by hand.
         let stopped: Vec<QueueId> = {
             let mut active = self.active_queues.write().await;
             let ids = active.keys().copied().collect();
@@ -3078,6 +3172,7 @@ impl AppState {
             // keyed on whether the queue is active.
             let _ = self.events.send(DomainEvent::QueueStopped { id });
         }
+        self.pause_all().await;
     }
 
     /// Resume every job that is not already running or done — failed
@@ -3474,6 +3569,11 @@ fn build_manager(settings: &Settings, proxy_password: Option<&str>) -> DownloadM
 struct QueueRunTally {
     completed: u32,
     failed: u32,
+    /// The whole queue was started, rather than one job in it. Only a
+    /// queue run feeds itself: someone who started a single download by
+    /// hand asked for that download, and answering by starting the
+    /// other forty behind it would be oxdm deciding for them.
+    queue_run: bool,
 }
 
 /// A finished job's contribution to its queue's tally. Cancelled (the
