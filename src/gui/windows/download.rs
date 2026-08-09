@@ -2261,8 +2261,8 @@ fn completion_tab(st: &State) -> Element<'_, Msg> {
     groups.push(vec![set_row_flat(
         t,
         "Disconnect from network when done",
-        Some("Superseded by a power action when one is set."),
-        toggle(t, oc.disconnect, !power_on, Msg::Disconnect),
+        Some("Runs before a power action, when one is set."),
+        toggle(t, oc.disconnect, true, Msg::Disconnect),
     )]);
     // Last, under every row that can raise it: three of these settings
     // can, and it speaks for all of them at once. Sitting between them
@@ -2293,23 +2293,24 @@ fn completion_tab(st: &State) -> Element<'_, Msg> {
 /// many of these there are.
 fn completion_warn_items(oc: &crate::domain::OnCompletion) -> Vec<&'static str> {
     let mut items: Vec<&'static str> = Vec::new();
+    // In the order they happen: the link goes down first, then the
+    // machine. A list that promises them the other way round is a list
+    // the user has to reorder in their head.
+    if oc.disconnect {
+        items
+            .push("Your network connection will be turned off. Other running transfers will fail.");
+    }
     match oc.shutdown {
         Some(ShutdownAction::ShutDown) => items.push("Your computer will shut down."),
         Some(ShutdownAction::Restart) => items.push("Your computer will restart."),
         Some(ShutdownAction::Sleep) => items.push("Your computer will go to sleep."),
         None => {}
     }
-    if oc.exit_app {
-        items.push("oxdm will quit.");
-    }
     if oc.force_shutdown && oc.shutdown.is_some() {
         items.push("Open apps will be closed without saving.");
     }
-    // Mirrors the daemon's precedence: a power action supersedes the
-    // disconnect, so don't promise something that won't run.
-    if oc.disconnect && oc.shutdown.is_none() {
-        items
-            .push("Your network connection will be turned off. Other running transfers will fail.");
+    if oc.exit_app {
+        items.push("oxdm will quit.");
     }
     items
 }
@@ -3521,5 +3522,30 @@ mod tests {
         // A zero-length assembly cannot divide; the caller filters it,
         // and the fallback is what the download reported.
         assert_eq!(bar_frac(Some((0, 0)), 0.75), 0.75);
+    }
+
+    /// Disconnecting and powering off are not rivals: the link goes
+    /// down, then the machine does. The warning has to promise both,
+    /// or the one it leaves out happens unannounced.
+    #[test]
+    fn the_warning_names_every_action_that_will_run() {
+        use crate::domain::{OnCompletion, ShutdownAction};
+        let both = OnCompletion {
+            shutdown: Some(ShutdownAction::Sleep),
+            disconnect: true,
+            ..OnCompletion::default()
+        };
+        let items = completion_warn_items(&both);
+        assert_eq!(items.len(), 2, "{items:?}");
+        // In the order they run.
+        assert!(items[0].contains("network"));
+        assert!(items[1].contains("sleep"));
+
+        let alone = OnCompletion {
+            disconnect: true,
+            ..OnCompletion::default()
+        };
+        assert_eq!(completion_warn_items(&alone).len(), 1);
+        assert!(completion_warn_items(&OnCompletion::default()).is_empty());
     }
 }

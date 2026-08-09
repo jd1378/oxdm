@@ -401,8 +401,8 @@ pub struct OnCompletion {
     pub force_shutdown: bool,
     /// Turn the machine's network off once the download finishes (IDM's
     /// "disconnect when done"). Runs through the same cancellable grace
-    /// timer as the power actions; suppressed when a power action is
-    /// already armed, since that takes the link down anyway.
+    /// timer as the power actions, and combines with one: the link goes
+    /// down first, then the machine does.
     #[serde(default)]
     pub disconnect: bool,
 }

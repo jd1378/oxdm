@@ -68,15 +68,26 @@ pub fn spawn(state: Arc<AppState>) {
                 let mut power_armed = false;
                 if let Some(action) = prefs.shutdown {
                     let force = prefs.force_shutdown;
+                    // Both, in the order they make sense in: the link
+                    // goes down first, then the machine. They ride one
+                    // armed action rather than two, so there is still
+                    // one countdown and one thing to cancel — as two
+                    // they would race for the guard's single slot and
+                    // the loser would be dropped.
+                    let disconnect_first = prefs.disconnect;
                     power_armed = state.arm_power_action(action.into(), move || {
+                        if disconnect_first && let Err(e) = run_disconnect() {
+                            // The machine still goes down: the user
+                            // asked for that, and a link that would not
+                            // drop is not a reason to keep it running.
+                            tracing::warn!(error = %e, "disconnect before power action failed");
+                        }
                         run_shutdown(action, force).map_err(|e| e.to_string())
                     });
                 }
-                // A power action already takes the link down; arming
-                // disconnect too would only lose the race for the
-                // one-slot guard and drop the shutdown countdown.
-                if prefs.disconnect {
-                    if power_armed || state.pending_shutdown().is_some() {
+                // On its own, the disconnect is the armed action.
+                if prefs.disconnect && !power_armed {
+                    if state.pending_shutdown().is_some() {
                         tracing::info!(
                             "skipping disconnect completion action: a power action is pending"
                         );
