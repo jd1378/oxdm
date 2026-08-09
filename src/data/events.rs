@@ -61,6 +61,12 @@ pub enum DomainEvent {
         id: JobId,
         message: String,
     },
+    /// A queue's run was ended by the user rather than by running out
+    /// of work. Carries no tally because there is nothing to report:
+    /// on-finish hooks belong to a queue that finished.
+    QueueStopped {
+        id: QueueId,
+    },
     SettingsChanged,
     /// User must answer a server-side conflict (etag changed, not resumable, …).
     /// Carries a token the UI uses when calling `state.resolve_*`.

@@ -1446,7 +1446,7 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                         }
                     }
                 },
-                ToolbarAction::StopAll => act(async move { client.pause_all().await }),
+                ToolbarAction::StopAll => act(async move { client.stop_all().await }),
                 ToolbarAction::Clean => request_clean(m),
                 ToolbarAction::Schedule => act(async move { client.open_queues_window().await }),
             }

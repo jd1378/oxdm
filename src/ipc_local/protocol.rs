@@ -134,6 +134,9 @@ pub enum Request {
     StartQueue(QueueId),
     StopQueue(QueueId),
     PauseAll,
+    /// Pause everything *and* end every queue run — the toolbar's Stop
+    /// all, as opposed to the tray's Pause all.
+    StopAll,
     ResumeAll,
     UpsertQueue(Queue),
     DeleteQueue(QueueId),

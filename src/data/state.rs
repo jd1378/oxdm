@@ -3053,6 +3053,33 @@ impl AppState {
         }
     }
 
+    /// Stop everything: pause every running download, and hand the
+    /// queues back to the user.
+    ///
+    /// `pause_all` on its own leaves every queue marked as running,
+    /// which is not a cosmetic detail — the toolbar goes on offering
+    /// "Stop queue" for a queue with nothing in flight, and the run
+    /// stays open forever because nothing will ever drain it.
+    ///
+    /// No `QueueFinished`: the queues did not finish, they were
+    /// stopped, and an on-finish hook that fires when the user presses
+    /// Stop all is a shutdown nobody asked for.
+    pub async fn stop_all(self: &Arc<Self>) {
+        self.pause_all().await;
+        let stopped: Vec<QueueId> = {
+            let mut active = self.active_queues.write().await;
+            let ids = active.keys().copied().collect();
+            active.clear();
+            ids
+        };
+        for id in stopped {
+            tracing::info!(queue = %id, "queue run ended by Stop all");
+            // The list still has to repaint: its Start/Stop button is
+            // keyed on whether the queue is active.
+            let _ = self.events.send(DomainEvent::QueueStopped { id });
+        }
+    }
+
     /// Resume every job that is not already running or done — failed
     /// ones included, same rule as `start_queue`: "resume everything"
     /// that silently skips the failures is not what it says.

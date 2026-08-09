@@ -270,6 +270,9 @@ impl Client {
     pub async fn pause_all(&self) -> Result<(), String> {
         self.expect_ok(Request::PauseAll).await
     }
+    pub async fn stop_all(&self) -> Result<(), String> {
+        self.expect_ok(Request::StopAll).await
+    }
     pub async fn resume_all(&self) -> Result<(), String> {
         self.expect_ok(Request::ResumeAll).await
     }

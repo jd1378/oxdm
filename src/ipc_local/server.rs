@@ -413,9 +413,9 @@ fn map_domain_event(filter: SubFilter, ev: DomainEvent) -> Option<Event> {
         DomainEvent::ConflictRequested { .. } => Some(Event::ConflictChanged),
         DomainEvent::OpenDownloadDialog { id } => Some(Event::OpenDownloadDialog(id)),
         DomainEvent::ShowMainWindow => Some(Event::ShowMainWindow),
-        DomainEvent::QueueStarted { .. } | DomainEvent::QueueFinished { .. } => {
-            Some(Event::ActiveQueuesChanged)
-        }
+        DomainEvent::QueueStarted { .. }
+        | DomainEvent::QueueFinished { .. }
+        | DomainEvent::QueueStopped { .. } => Some(Event::ActiveQueuesChanged),
         DomainEvent::QueuesChanged => Some(Event::QueuesChanged),
         DomainEvent::ShutdownPending {
             action,
@@ -656,6 +656,10 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
         },
         Request::PauseAll => {
             state.pause_all().await;
+            Reply::Ok
+        }
+        Request::StopAll => {
+            state.stop_all().await;
             Reply::Ok
         }
         Request::ResumeAll => {
