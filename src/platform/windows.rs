@@ -71,7 +71,11 @@ pub fn install_resize_subclass(handle: &impl HasWindowHandle) {
     // would mean failure, but distinguishing that from a window with
     // no prior proc is unreliable, so we simply guard the chain at
     // call time by checking for a non-null pointer.
-    let new_proc = subclass_proc as usize as isize;
+    // Through a typed fn pointer, not straight to an integer: casting
+    // the function *item* is a lint now, and the pointer is what the
+    // ABI actually wants.
+    let new_proc: unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT = subclass_proc;
+    let new_proc = new_proc as usize as isize;
     let prev = unsafe { SetWindowLongPtrW(hwnd, GWLP_WNDPROC, new_proc) };
     if prev == 0 {
         tracing::warn!(

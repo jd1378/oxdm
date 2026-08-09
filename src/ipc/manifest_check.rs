@@ -105,6 +105,9 @@ fn canonical_host_binary() -> Result<PathBuf, String> {
 }
 
 fn candidate_manifest_dirs() -> Vec<PathBuf> {
+    // `mut` only on the platforms whose branches push to it; Windows
+    // returns the bare list.
+    #[allow(unused_mut)]
     let mut out = Vec::new();
     let Some(home) = dirs::home_dir() else {
         return out;
