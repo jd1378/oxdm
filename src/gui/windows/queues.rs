@@ -370,6 +370,10 @@ pub struct State {
     /// Where the order table is scrolled to, and how far it can go —
     /// read back from the scrollable so a drag can move it.
     order_scroll: (f32, f32),
+    /// The order the table is showing while a drag is in flight. Only a
+    /// preview: nothing is sent to the daemon, and nothing else in the
+    /// app is rewritten, until the row is let go.
+    order_preview: Option<Vec<JobId>>,
     /// Which edge of the order table the pointer is resting on while
     /// dragging. Carrying a row to a position off-screen is otherwise
     /// impossible: the list cannot be scrolled with the button held.
@@ -398,11 +402,40 @@ impl State {
         let Some(q) = self.selected else {
             return Vec::new();
         };
-        self.jobs
+        let rows: Vec<&crate::domain::Job> = self
+            .jobs
             .iter()
             .filter(|j| j.queue_id == q && is_pending(j.status.phase))
-            .collect()
+            .collect();
+        // While a row is being carried, the table shows where it would
+        // land rather than where it is. Anything that appeared since
+        // the drag started keeps its own place at the end.
+        let Some(order) = &self.order_preview else {
+            return rows;
+        };
+        let mut out: Vec<&crate::domain::Job> = order
+            .iter()
+            .filter_map(|id| rows.iter().copied().find(|j| j.id == *id))
+            .collect();
+        out.extend(rows.iter().copied().filter(|j| !order.contains(&j.id)));
+        out
     }
+}
+
+/// Move a row within the preview only.
+///
+/// A drag crosses a dozen rows on its way; committing each crossing
+/// would mean a dozen round trips and a dozen rewrites of the job list
+/// for one gesture whose only meaningful state is where the row is let
+/// go.
+fn preview_move(st: &mut State, from: usize, to: usize) {
+    let mut ids: Vec<JobId> = st.pending().iter().map(|j| j.id).collect();
+    if from >= ids.len() || to >= ids.len() || from == to {
+        return;
+    }
+    let moved = ids.remove(from);
+    ids.insert(to, moved);
+    st.order_preview = Some(ids);
 }
 
 /// Move one row and tell the daemon the whole new order.
@@ -420,6 +453,11 @@ fn reorder(st: &mut State, from: usize, to: usize) -> Task<Msg> {
     }
     let moved = ids.remove(from);
     ids.insert(to, moved);
+    commit_order(st, ids)
+}
+
+/// Put `ids` in force: locally first, then on the daemon.
+fn commit_order(st: &mut State, ids: Vec<JobId>) -> Task<Msg> {
     // Mirror the new order locally by rebuilding the job list with the
     // pending rows in their new sequence, leaving everything else where
     // it is — the same slots-only rewrite the daemon does.
@@ -694,6 +732,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 drag_job: None,
                 cursor: (0.0, 0.0),
                 order_scroll: (0.0, 0.0),
+                order_preview: None,
                 order_edge: None,
                 confirm_delete: false,
                 shot: Shot::from_env(),
@@ -801,22 +840,19 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
             let next = (offset + step).clamp(0.0, max);
             let scrolled = (next - offset).abs() >= 0.5;
             st.order_scroll.0 = next;
-            let move_task = reorder(st, from, to);
+            preview_move(st, from, to);
             if !scrolled {
                 // Already at the end of the list: the row keeps moving
                 // until it reaches the end too.
-                return move_task;
+                return Task::none();
             }
-            Task::batch([
-                move_task,
-                iced::widget::operation::scroll_to(
-                    order_scroll_id(),
-                    iced::widget::scrollable::AbsoluteOffset {
-                        x: Some(0.0),
-                        y: Some(next),
-                    },
-                ),
-            ])
+            iced::widget::operation::scroll_to(
+                order_scroll_id(),
+                iced::widget::scrollable::AbsoluteOffset {
+                    x: Some(0.0),
+                    y: Some(next),
+                },
+            )
         }
         Msg::Tick => {
             let client = st.client.clone();
@@ -828,7 +864,16 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
         Msg::DragEnd => {
             st.drag_job = None;
             st.order_edge = None;
-            Task::none()
+            // One commit for the whole gesture, and only if it changed
+            // anything.
+            let Some(order) = st.order_preview.take() else {
+                return Task::none();
+            };
+            let now: Vec<JobId> = st.pending().iter().map(|j| j.id).collect();
+            if now == order {
+                return Task::none();
+            }
+            commit_order(st, order)
         }
         Msg::DragOver(over) => {
             let Some(dragged) = st.drag_job.filter(|d| *d != over) else {
@@ -841,7 +886,8 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
             ) else {
                 return Task::none();
             };
-            reorder(st, from, to)
+            preview_move(st, from, to);
+            Task::none()
         }
         Msg::Move(whence) => {
             let pending = st.pending();
@@ -2620,6 +2666,9 @@ const ORDER_FONT: f32 = 11.5;
 /// step is taken. A row height every few frames reads as the list
 /// moving under the hand rather than jumping.
 const ORDER_EDGE_H: f32 = 20.0;
+/// Rows built above and below the viewport, so a flick has something to
+/// show before the next scroll event lands.
+const ORDER_OVERSCAN: usize = 4;
 const ORDER_EDGE_STEP: f32 = ORDER_ROW_H;
 const ORDER_EDGE_EVERY: Duration = Duration::from_millis(110);
 
@@ -2683,9 +2732,25 @@ fn pending_order(st: &State) -> Element<'_, Msg> {
     .padding([0.0, theme::space::S2])
     .align_y(Alignment::Center);
 
+    // Only the rows near the viewport are built, the rest are two
+    // spacers — the same virtual list the main window's table uses, and
+    // for the same reason: a queue with a few thousand downloads in it
+    // would otherwise lay out a few thousand rows on every frame.
+    let first = ((st.order_scroll.0 / ORDER_ROW_H).floor() as usize).saturating_sub(ORDER_OVERSCAN);
+    let visible = ORDER_ROWS_VISIBLE + ORDER_OVERSCAN * 2 + 1;
+    let last = (first + visible).min(count);
     let mut rows = column![].width(Length::Fill);
-    for (i, job) in pending.iter().enumerate() {
+    if first > 0 {
+        rows =
+            rows.push(iced::widget::Space::new().height(Length::Fixed(first as f32 * ORDER_ROW_H)));
+    }
+    for (i, job) in pending.iter().enumerate().take(last).skip(first) {
         rows = rows.push(order_row(st, i, job, sel_idx));
+    }
+    if last < count {
+        rows = rows.push(
+            iced::widget::Space::new().height(Length::Fixed((count - last) as f32 * ORDER_ROW_H)),
+        );
     }
     let view_h = ORDER_ROW_H * ORDER_ROWS_VISIBLE as f32;
     let scroller = crate::gui::widget::vscroll(rows)

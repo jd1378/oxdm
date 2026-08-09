@@ -105,13 +105,15 @@ pub fn section_card_count<'a, M: 'a>(
             .size(10.5)
             .color(t.fg_2),
     )
-    .padding([1.0, 6.0])
+    .padding([3.0, 9.0])
     .style(move |_| container::Style {
         background: Some(t2.bg_sunken.into()),
         border: iced::Border {
             color: t2.border_subtle,
             width: 1.0,
-            radius: 999.0.into(),
+            // A rounded square, not a pill: it is a count of rows in a
+            // table, and the table's own corners are this radius.
+            radius: theme::radius::XS.into(),
         },
         ..Default::default()
     });
@@ -121,6 +123,9 @@ pub fn section_card_count<'a, M: 'a>(
             .font(theme::BODY_BOLD)
             .size(13.0)
             .color(t.fg_1),
+        // The count belongs at the far edge, where the eye finds it
+        // without reading past the title.
+        iced::widget::Space::new().width(Length::Fill),
         badge,
     ]
     .spacing(theme::space::S2)
