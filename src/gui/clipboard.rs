@@ -38,18 +38,41 @@ fn trim_trailing_punctuation(s: &str) -> &str {
 
 /// Every http(s) link in `text`, in order, without repeats.
 ///
+/// Scans for the schemes rather than splitting the text into tokens: a
+/// pasted list separates its links with whatever it likes — newlines,
+/// commas, quotes, `<a href="...">` — and tokenising on whitespace
+/// found only the ones that happened to stand alone.
+///
 /// Lines that are not links are skipped rather than rejected: a pasted
 /// page of prose with three URLs in it is three downloads, and a list
 /// copied out of a chat window is mostly not links.
 pub fn extract_http_urls(text: &str) -> Vec<url::Url> {
+    let lower = text.to_ascii_lowercase();
     let mut out: Vec<url::Url> = Vec::new();
-    for token in text.split_whitespace() {
-        let Some(url) = extract_http_url(trim_trailing_punctuation(token)) else {
-            continue;
+    let mut at = 0usize;
+    while at < lower.len() {
+        let Some(rel) = lower[at..].find("http") else {
+            break;
         };
-        if !out.iter().any(|u| u == &url) {
+        let start = at + rel;
+        // The candidate ends where the next link begins, or at the
+        // first character no URL can carry.
+        let rest = &text[start..];
+        let end = rest
+            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | '|' | '\\'))
+            .unwrap_or(rest.len());
+        let next = lower[start + 4..]
+            .find("http")
+            .map(|i| start + 4 + i)
+            .unwrap_or(usize::MAX);
+        let cut = end.min(next.saturating_sub(start));
+        let candidate = trim_trailing_punctuation(&rest[..cut]);
+        if let Some(url) = extract_http_url(candidate)
+            && !out.iter().any(|u| u == &url)
+        {
             out.push(url);
         }
+        at = start + 4;
     }
     out
 }
@@ -185,6 +208,31 @@ mod tests {
     fn text_without_links_yields_none() {
         assert!(extract_http_urls("no links here").is_empty());
         assert!(extract_http_urls("ftp://x.example/f.bin magnet:?xt=z").is_empty());
+    }
+
+    /// Two links, however they were separated. A paste does not
+    /// promise one per line: comma-separated lists, quoted URLs and
+    /// markup all arrive this way, and each of them used to yield a
+    /// single link — which then opened the Add dialog for the first
+    /// one and lost the rest.
+    #[test]
+    fn links_are_found_whatever_separates_them() {
+        let cases = [
+            "https://a.example/1.bin https://b.example/2.bin",
+            "https://a.example/1.bin\nhttps://b.example/2.bin",
+            "https://a.example/1.bin,https://b.example/2.bin",
+            "https://a.example/1.bin; https://b.example/2.bin",
+            "<a href=\"https://a.example/1.bin\">one</a><a href=\"https://b.example/2.bin\">two</a>",
+            "\"https://a.example/1.bin\" \"https://b.example/2.bin\"",
+        ];
+        for text in cases {
+            let urls = extract_http_urls(text);
+            assert_eq!(
+                urls.iter().map(|u| u.as_str()).collect::<Vec<_>>(),
+                ["https://a.example/1.bin", "https://b.example/2.bin"],
+                "{text:?}"
+            );
+        }
     }
 
     /// A dropped file is only a link list if it is text with links in
