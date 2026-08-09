@@ -1,6 +1,6 @@
 //! Batch-capture triage window (`oxdm gui batch <staged-json-path>`):
 //! row per captured link with probe status, queue selector, select
-//! all, Start-now toggle, "Add N" footer.
+//! all, Start-now toggle, "Add N URLs" footer.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -365,9 +365,10 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
     let header = row![
         // Not "send to oxdm": whoever the links came from, they are in
         // oxdm now and this window is oxdm asking which of them to
-        // keep.
+        // keep. "URLs" rather than "links" to match the toolbar button
+        // that opens its single-item sibling.
         text(format!(
-            "Add {n_sel} of {n_total} link{}",
+            "Add {n_sel} of {n_total} URL{}",
             if n_total == 1 { "" } else { "s" }
         ))
         .font(theme::BODY_BOLD)
@@ -460,16 +461,19 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
         .spacing(theme::space::S3)
         .align_y(Alignment::Center)
         .into(),
-        Btn::new(format!("Add {n_sel}"))
-            .primary()
-            .icon("download")
-            .enabled(n_sel > 0)
-            .on_press(Msg::Send)
-            .view(t),
+        Btn::new(format!(
+            "Add {n_sel} URL{}",
+            if n_sel == 1 { "" } else { "s" }
+        ))
+        .primary()
+        .icon("download")
+        .enabled(n_sel > 0)
+        .on_press(Msg::Send)
+        .view(t),
     );
 
     let page = column![
-        titlebar::titlebar(t, "Add links", false, Msg::Window),
+        titlebar::titlebar(t, "Add URLs", false, Msg::Window),
         container(
             column![
                 sibling(header.into()),
@@ -501,7 +505,7 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
 
 pub fn launch_batch(_path: PathBuf) {
     let mut app = iced::application(boot, update, view)
-        .title(|_: &App| "oxdm — Add links".to_owned())
+        .title(|_: &App| "oxdm — Add URLs".to_owned())
         .theme(|app: &App| match app {
             App::Ready(st) => st.tokens.iced_theme(),
             _ => Tokens::dark().iced_theme(),
