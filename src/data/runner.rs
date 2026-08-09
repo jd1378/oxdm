@@ -147,6 +147,13 @@ pub trait LiveBridge: Send + Sync + 'static {
     fn on_final_path(&self, id: JobId, path: std::path::PathBuf) {
         let _ = (id, path);
     }
+    /// Called after `evaluate` for a job that was added without one —
+    /// the name odl derived from `Content-Disposition` or the URL.
+    /// Awaited: every window reads `Job::filename`, and the name has to
+    /// be there before the download it belongs to starts.
+    async fn on_filename_resolved(&self, id: JobId, filename: String) {
+        let _ = (id, filename);
+    }
     /// Called after `evaluate` with the checksums the server advertised
     /// in its headers, for the daemon to record on the job. Awaited —
     /// the digests must be on the job (and in the DB) before the
@@ -268,6 +275,16 @@ impl JobRunner {
         // this the bytes land under a different name entirely.
         if let Some(name) = job.filename.as_deref().filter(|n| !n.trim().is_empty()) {
             instruction.set_filename(name.to_owned());
+        } else {
+            // Added without a probe: the job has been sitting in the
+            // list under its URL, and this is the first moment anything
+            // knows what it is actually called. Awaited so the name is
+            // on the job before the first byte lands — a row that
+            // renames itself halfway through a download reads as a
+            // different download.
+            self.bridge
+                .on_filename_resolved(self.job_id, instruction.filename().to_owned())
+                .await;
         }
 
         // Per-job working directory inside the configured download_dir.

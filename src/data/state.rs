@@ -1077,6 +1077,48 @@ impl AppState {
         let _ = self.events.send(DomainEvent::JobUpdated { id, phase });
     }
 
+    /// Record the name a run resolved for a job that was added without
+    /// one, and classify it now that there is something to classify.
+    ///
+    /// Only fills a blank: a name the user typed is theirs, and a
+    /// second run of a renamed job must not undo the rename.
+    ///
+    /// The category follows the name but the folder does not. The bytes
+    /// are already being written to the folder chosen when the job was
+    /// added, and a category is what a file *is* — moving a file behind
+    /// the user's back to make the two agree is the worse answer.
+    pub async fn apply_resolved_filename(&self, id: JobId, filename: String) {
+        let name = filename.trim();
+        if name.is_empty() {
+            return;
+        }
+        let overrides = self.settings.read().await.category_extensions.clone();
+        let mut jobs = self.jobs.write().await;
+        let Some(old) = jobs.get(&id).cloned() else {
+            return;
+        };
+        if old.job.filename.as_deref().is_some_and(|n| !n.is_empty()) {
+            return;
+        }
+        let mut new_job = old.job.clone();
+        new_job.filename = Some(name.to_owned());
+        if new_job.category == Category::Other {
+            new_job.category = classify(name, &overrides);
+        }
+        let phase = old.phase();
+        let new_entry = clone_entry_with_job(&old, new_job.clone()).await;
+        jobs.insert(id, new_entry);
+        drop(jobs);
+        if let Err(e) = self.store.upsert_job(&new_job).await {
+            tracing::warn!(id = %id, error = %e, "could not store the resolved filename");
+        }
+        let _ = self.events.send(DomainEvent::JobFilenameResolved {
+            id,
+            filename: name.to_owned(),
+        });
+        let _ = self.events.send(DomainEvent::JobUpdated { id, phase });
+    }
+
     /// Replace only the source URL + destination (save_dir + filename) of
     /// a job. Refused while the job is running — the Properties UI only
     /// offers these fields in paused/queued/cancelled/failed states, and
@@ -3180,6 +3222,13 @@ impl LiveBridge for StateLiveBridge {
             return;
         };
         state.merge_server_checksums(id, checksums).await;
+    }
+
+    async fn on_filename_resolved(&self, id: JobId, filename: String) {
+        let Some(state) = self.state.upgrade() else {
+            return;
+        };
+        state.apply_resolved_filename(id, filename).await;
     }
 
     fn on_event(&self, id: JobId, event: &OdlProgressEvent) {

@@ -202,6 +202,17 @@ impl AddState {
         }
     }
 
+    /// Whether the URL field holds something oxdm can fetch. The only
+    /// gate on adding: everything else the dialog shows is detail the
+    /// run fills in.
+    fn valid_url(&self) -> bool {
+        self.url
+            .trim()
+            .parse::<url::Url>()
+            .map(|u| matches!(u.scheme(), "http" | "https"))
+            .unwrap_or(false)
+    }
+
     fn build_req(&self) -> Option<AddJobReq> {
         let url: url::Url = self.url.trim().parse().ok()?;
         let p = PathBuf::from(self.save_path.trim());
@@ -497,6 +508,29 @@ fn start_probe(st: &AddState) -> Task<Msg> {
 /// already touched (`save_dirty` / `queue_dirty`). Client-side only;
 /// the daemon applies the same routing solely on the non-interactive
 /// capture path.
+/// The last path segment of a URL, which is what a file is usually
+/// called before anyone asks the server. Only ever a guess — a media
+/// link names a page, not the video — so it routes the job and never
+/// becomes its name; `Content-Disposition` decides that at run time.
+fn name_from_url(url: &str) -> String {
+    let Ok(u) = url.parse::<url::Url>() else {
+        return String::new();
+    };
+    u.path_segments()
+        .and_then(|mut s| s.next_back())
+        .map(percent_decode)
+        .unwrap_or_default()
+}
+
+/// `%20` in a URL is a space in the name it suggests. Undecoded, an
+/// extension behind an encoded character never matches a category.
+fn percent_decode(s: &str) -> String {
+    percent_encoding::percent_decode_str(s)
+        .decode_utf8()
+        .map(|c| c.into_owned())
+        .unwrap_or_else(|_| s.to_owned())
+}
+
 fn apply_category_prefill(st: &mut AddState) {
     let Some(cat) = st.category else {
         return;
@@ -537,12 +571,21 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
             if !st.category_dirty {
                 st.category = None;
             }
-            let valid = st
-                .url
-                .trim()
-                .parse::<url::Url>()
-                .map(|u| matches!(u.scheme(), "http" | "https"))
-                .unwrap_or(false);
+            let valid = st.valid_url();
+            // Route on the URL's own guess at a name until the probe
+            // says otherwise. Adding without waiting must not mean
+            // everything lands in Other: a link ending in `.mkv` is a
+            // video whether or not anyone asked the server.
+            if valid && !st.category_dirty {
+                let guess = name_from_url(st.url.trim());
+                if !guess.is_empty() {
+                    st.category = Some(crate::domain::classify(
+                        &guess,
+                        &st.settings.category_extensions,
+                    ));
+                    apply_category_prefill(st);
+                }
+            }
             // The card or the error block just went away with the old
             // URL; the window follows the content back down rather than
             // leaving a band of empty surface above the buttons.
@@ -933,7 +976,11 @@ fn ready_view(st: &AddState) -> Element<'_, Msg> {
         );
     }
 
-    let detected = st.detected().is_some();
+    // A probe is a convenience, not a precondition: the daemon learns
+    // the name, the size and the resumability when the download starts,
+    // and someone pasting a link wants it in the list now. The buttons
+    // follow the URL, so the wait is only for what the *dialog* shows.
+    let submittable = st.valid_url();
     let queue_name = st
         .queues
         .iter()
@@ -955,13 +1002,13 @@ fn ready_view(st: &AddState) -> Element<'_, Msg> {
             })
             .secondary()
             .icon("clock")
-            .enabled(detected)
+            .enabled(submittable)
             .on_press(Msg::Submit { start_now: false })
             .view(t),
             Btn::new("Download now")
                 .primary()
                 .icon("download")
-                .enabled(detected)
+                .enabled(submittable)
                 .on_press(Msg::Submit { start_now: true })
                 .view(t),
         ]
@@ -1498,5 +1545,23 @@ pub fn launch_add(_edit_id: Option<JobId>, _prefill: Option<String>) {
     if let Err(e) = app.run() {
         eprintln!("gui error: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::name_from_url;
+
+    /// The guess only has to be good enough to classify by extension.
+    #[test]
+    fn a_url_suggests_the_name_at_the_end_of_its_path() {
+        assert_eq!(name_from_url("https://a.example/dir/clip.mkv"), "clip.mkv");
+        assert_eq!(
+            name_from_url("https://a.example/d/my%20file.zip?token=1"),
+            "my file.zip"
+        );
+        // Nothing to go on: the run will name it.
+        assert_eq!(name_from_url("https://a.example/"), "");
+        assert_eq!(name_from_url("not a url"), "");
     }
 }
