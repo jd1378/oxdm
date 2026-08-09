@@ -101,3 +101,34 @@ mod tests {
         assert_eq!(format_int_grouped(2_516_582_400), "2,516,582,400");
     }
 }
+
+/// The label on a file's extension tile.
+///
+/// Takes the job's own name rather than whatever is on screen: a job
+/// added before anything knew its name shows its URL there, and
+/// `zeros-1g.bin?w=10354` has an "extension" of `bin?w=10354`. A link
+/// is what it is until the download names it.
+pub fn ext_label(filename: Option<&str>) -> String {
+    let name = filename.map(str::trim).filter(|n| !n.is_empty());
+    let Some(name) = name else {
+        return "LINK".into();
+    };
+    std::path::Path::new(name)
+        .extension()
+        .map(|e| e.to_string_lossy().to_uppercase())
+        .unwrap_or_else(|| "FILE".into())
+}
+
+#[cfg(test)]
+mod ext_tests {
+    use super::ext_label;
+
+    #[test]
+    fn a_query_string_is_not_an_extension() {
+        assert_eq!(ext_label(Some("clip.mkv")), "MKV");
+        assert_eq!(ext_label(Some("README")), "FILE");
+        // Nothing has named it yet — the header is showing the URL.
+        assert_eq!(ext_label(None), "LINK");
+        assert_eq!(ext_label(Some("  ")), "LINK");
+    }
+}

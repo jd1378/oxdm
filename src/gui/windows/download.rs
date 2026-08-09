@@ -312,6 +312,11 @@ pub enum Msg {
     /// retry. The bytes already downloaded carry over.
     Open,
     OpenFolder,
+    /// Same two actions from the completed view, which has nothing left
+    /// to say once the file is handed over: the window is in the way of
+    /// what the user just asked to look at.
+    OpenAndClose,
+    OpenFolderAndClose,
     HashHover(Option<HashLine>),
     HashCopy(HashLine, String),
     HashCopied(HashLine),
@@ -1003,6 +1008,14 @@ fn update_state(st: &mut State, msg: Msg) -> Task<Msg> {
             crate::platform::open_path(&path);
             Task::none()
         }
+        Msg::OpenAndClose => {
+            crate::platform::open_path(&final_path(&st.entry));
+            iced::exit()
+        }
+        Msg::OpenFolderAndClose => {
+            crate::platform::open_path(&st.entry.job.save_dir);
+            iced::exit()
+        }
         Msg::DeleteAsk => {
             st.confirm_delete = true;
             Task::none()
@@ -1250,10 +1263,7 @@ fn header_card(st: &State) -> Element<'_, Msg> {
         .filename
         .clone()
         .unwrap_or_else(|| st.entry.job.url.to_string());
-    let ext = PathBuf::from(&name)
-        .extension()
-        .map(|e| e.to_string_lossy().to_uppercase())
-        .unwrap_or_else(|| "FILE".into());
+    let ext = crate::gui::format::ext_label(st.entry.job.filename.as_deref());
     let host = st.entry.job.url.host_str().unwrap_or("").to_owned();
     let cat_color = match st.entry.job.category {
         crate::domain::Category::Compressed => t.cat_compressed,
@@ -2230,10 +2240,7 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
     let path = final_path(&st.entry).display().to_string();
     let address = st.entry.job.url.to_string();
 
-    let ext = PathBuf::from(&name)
-        .extension()
-        .map(|e| e.to_string_lossy().to_uppercase())
-        .unwrap_or_else(|| "FILE".into());
+    let ext = crate::gui::format::ext_label(st.entry.job.filename.as_deref());
     // Tampered = saved or computed checksum mismatch → escalate the
     // whole completed view (rust accent, "don't open" warning) per
     // design §3.3 tampered variant.
@@ -2447,12 +2454,12 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
                 Btn::new("Open")
                     .primary()
                     .icon("play")
-                    .on_press(Msg::Open)
+                    .on_press(Msg::OpenAndClose)
                     .view(t),
                 Btn::new("Open Containing Folder")
                     .toolbar()
                     .icon("folder")
-                    .on_press(Msg::OpenFolder)
+                    .on_press(Msg::OpenFolderAndClose)
                     .view(t),
             ]
             .spacing(theme::space::S2)

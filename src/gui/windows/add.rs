@@ -1140,10 +1140,7 @@ fn detect_card(st: &AddState) -> Element<'_, Msg> {
     };
     let tile: Element<'_, Msg> = match detected {
         Some(p) => {
-            let ext = PathBuf::from(&p.filename)
-                .extension()
-                .map(|e| e.to_string_lossy().to_uppercase())
-                .unwrap_or_else(|| "FILE".into());
+            let ext = crate::gui::format::ext_label(Some(&p.filename));
             container(text(ext).font(theme::MONO_BOLD).size(12.0).color(tile_fg))
                 .width(Length::Fixed(EXT_TILE))
                 .height(Length::Fixed(EXT_TILE))

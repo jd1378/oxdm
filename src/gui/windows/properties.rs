@@ -1291,10 +1291,7 @@ fn general_tab(st: &State) -> Element<'_, Msg> {
     let t2 = *t;
     let job = &st.entry.job;
     let name = job.filename.clone().unwrap_or_default();
-    let ext = PathBuf::from(&name)
-        .extension()
-        .map(|e| e.to_string_lossy().to_uppercase())
-        .unwrap_or_else(|| "FILE".into());
+    let ext = crate::gui::format::ext_label(job.filename.as_deref());
     let total = st.entry.counters.total;
     let phase = st.entry.counters.phase;
     let (phase_color, phase_label) = match phase {

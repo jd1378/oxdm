@@ -17,6 +17,15 @@ async fn main() {
     };
     let rest: Vec<String> = args.collect();
     let start = rest.iter().any(|a| a == "--start");
+    // Milliseconds between adding and starting, for reaching the window
+    // where a background probe is still in flight when the user hits
+    // Resume.
+    let start_after: u64 = rest
+        .iter()
+        .position(|a| a == "--start-after")
+        .and_then(|i| rest.get(i + 1))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
     // A job with credentials is never probed in the background, which
     // is the only way to reach the run's own name-resolution path
     // without racing a probe that answers first.
@@ -46,7 +55,8 @@ async fn main() {
         .await
         .expect("add");
     println!("{id}");
-    if start {
+    if start || start_after > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(start_after)).await;
         client.start_job(id).await.expect("start");
     }
 }
