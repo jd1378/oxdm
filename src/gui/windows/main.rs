@@ -56,11 +56,20 @@ const STATUSBAR_H: f32 = 28.0;
 const TOAST_PAD_Y: f32 = 10.0;
 const TOAST_PAD_X: f32 = 14.0;
 
+/// Row context menu: 7 items, 3 separators, and the card's own padding.
+/// Its height decides which way the menu opens, so it is counted rather
+/// than eyeballed.
+const MENU_ITEM_H: f32 = 28.0;
+const MENU_SEP_H: f32 = 1.0 + theme::space::S0 * 2.0;
+const MENU_ITEMS: f32 = 7.0;
+const MENU_SEPS: f32 = 3.0;
+const MENU_PAD: f32 = theme::space::S1;
+
 // Pulse clock (design `pulse` keyframe). Drives the live-dot's alpha;
 // the whole subscription is gated on `!reduce_motion` (W6).
 const PULSE_TICK_MS: u64 = 60;
-const PULSE_SPEED: f32 = 3.2; // radians/sec of the sine pulse
-const PULSE_MIN_ALPHA: f32 = 0.35;
+/// Seconds per pulse (design `16_animations` §2.2: 1.4s).
+const PULSE_PERIOD_S: f32 = 1.4;
 
 // Drag-to-add overlay (design `.drag-overlay`): full-window clay wash
 // (`rgba(201,112,63,.88)` ≈ clay-400 @ .88) with a centered glyph tile.
@@ -1755,14 +1764,17 @@ pub fn subscription(app: &App) -> Subscription<Msg> {
     Subscription::batch(subs)
 }
 
-/// Pulsing alpha for the live-dot (design `pulse` keyframe). Static at
-/// full opacity when motion is reduced.
-fn pulse_alpha(m: &Main) -> f32 {
+/// How far through the pulse the live dot's ring is, 0..1.
+///
+/// A ramp, not a sine: the ring travels outwards and fades, then starts
+/// again from the dot — a wave that eased back inwards would read as
+/// breathing rather than as a signal going out. Frozen at 0 when motion
+/// is reduced, which leaves the dot alone.
+fn pulse_phase(m: &Main) -> f32 {
     if m.snap.settings.reduce_motion {
-        return 1.0;
+        return 0.0;
     }
-    let s = (m.anim_t * PULSE_SPEED).sin() * 0.5 + 0.5; // 0..1
-    PULSE_MIN_ALPHA + (1.0 - PULSE_MIN_ALPHA) * s
+    (m.anim_t / PULSE_PERIOD_S).fract()
 }
 
 pub fn theme_of(app: &App) -> iced::Theme {
@@ -1872,7 +1884,14 @@ fn main_view(m: &Main) -> Element<'_, Msg> {
             Overlay::RemoveWarning => main_dialogs::remove_warning(m, base),
             Overlay::RestartConfirm => main_dialogs::restart_confirm(m, base),
             Overlay::Refused => main_dialogs::refused(m, base),
-            _ => base,
+            // Nothing open, and still three layers deep. Every overlay
+            // above is a `stack` of base + scrim + panel, and a
+            // scrollable keeps its offset by where it sits in the widget
+            // tree — so a tree that gains two layers when a menu opens
+            // hands the table a fresh state, and the list jumps back to
+            // the top on open and again on close.
+            _ => iced::widget::stack![base, iced::widget::Space::new(), iced::widget::Space::new()]
+                .into(),
         }
     };
 
@@ -2029,6 +2048,10 @@ fn sidebar_row<'a>(
     t: &Tokens,
     leader: Element<'a, Msg>,
     label: &str,
+    // Sits at the right-hand end of the row, before the count: a state
+    // the row is *in*, as opposed to the swatch on the left, which says
+    // what the row is.
+    trailing: Option<Element<'a, Msg>>,
     count: Option<u64>,
     active: bool,
     height: f32,
@@ -2048,13 +2071,17 @@ fn sidebar_row<'a>(
     ]
     .spacing(theme::space::S2)
     .align_y(Alignment::Center);
+    r = r.push(iced::widget::Space::new().width(Length::Fill));
+    if let Some(badge) = trailing {
+        r = r.push(badge);
+    }
     if let Some(n) = count {
         let count_fg = if active {
             color::with_alpha(iced::Color::WHITE, 0.85)
         } else {
             t.fg_3
         };
-        r = r.push(iced::widget::Space::new().width(Length::Fill)).push(
+        r = r.push(
             text(n.to_string())
                 .font(theme::MONO)
                 .size(11.0)
@@ -2188,7 +2215,7 @@ fn sidebar(m: &Main) -> Element<'_, Msg> {
     let t = &m.tokens;
     let rh = SIDEBAR_ROW_H;
     let live = m.live_queues();
-    let pa = pulse_alpha(m);
+    let pulse = pulse_phase(m);
     let mut col = column![]
         .spacing(2.0)
         .padding(iced::Padding::new(theme::space::S1));
@@ -2209,6 +2236,7 @@ fn sidebar(m: &Main) -> Element<'_, Msg> {
             t,
             icons::icon("layers", 17.0, leader_fg(t, all_active)),
             "All downloads",
+            None,
             Some(m.cat_count(None)),
             all_active,
             rh,
@@ -2228,6 +2256,7 @@ fn sidebar(m: &Main) -> Element<'_, Msg> {
                 t,
                 icons::icon(icon, 17.0, leader_fg(t, active)),
                 label,
+                None,
                 Some(m.cat_count(Some(cat))),
                 active,
                 rh,
@@ -2252,26 +2281,19 @@ fn sidebar(m: &Main) -> Element<'_, Msg> {
             let active = m.filter == SidebarFilter::Queue(q.id);
             let count = m.snap.jobs.iter().filter(|j| j.queue_id == q.id).count() as u64;
             let chip = swatch(8.0, 2.0, t.queue_color(q));
-            // Live-dot (design `.q-live-dot`): pulsing moss dot when the
-            // queue has ≥1 running job (N2). Pulse gated on !reduce_motion.
-            let leader: Element<'_, Msg> = if live.contains(&q.id) {
-                row![
-                    chip,
-                    crate::gui::widget::dot(
-                        LIVE_DOT_SIZE,
-                        color::with_alpha(color::moss::M400, pa),
-                    ),
-                ]
-                .spacing(5.0)
-                .align_y(Alignment::Center)
-                .into()
-            } else {
-                chip
-            };
+            // Live dot (design `.q-live-dot`): a moss dot with a ring
+            // pulsing out of it while the queue has something running.
+            // It rides at the right, beside the count — it says what the
+            // queue is *doing*, where the swatch on the left says which
+            // queue it is.
+            let live_dot: Option<Element<'_, Msg>> = live
+                .contains(&q.id)
+                .then(|| crate::gui::widget::pulse_dot(LIVE_DOT_SIZE, color::moss::M400, pulse));
             col = col.push(sidebar_row(
                 t,
-                leader,
+                chip,
                 &q.name,
+                live_dot,
                 Some(count),
                 active,
                 rh,
@@ -2302,6 +2324,7 @@ fn sidebar(m: &Main) -> Element<'_, Msg> {
                 t,
                 icons::icon(icon, 17.0, t.fg_2),
                 label,
+                None,
                 None,
                 false,
                 rh,
@@ -3590,14 +3613,22 @@ fn context_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>, id: JobId) -> E
     // point); clamp so the menu stays inside the window.
     let (cx, cy) = m.menu_anchor;
     let cy = cy - titlebar::chrome_h(); // overlay stack starts below the bar
-    let (mw, mh) = (268.0, 290.0);
+    // Counted, not guessed: a menu measured short opens with its tail
+    // off the bottom of the window, and the clamp that was supposed to
+    // stop that has nothing to clamp against.
+    let mh = MENU_PAD * 2.0 + MENU_ITEM_H * MENU_ITEMS + MENU_SEP_H * MENU_SEPS;
+    let mw = 268.0;
     let (ww, wh) = if m.win_size.0 > 0.0 {
         (m.win_size.0, m.win_size.1 - titlebar::chrome_h())
     } else {
         (1240.0, 760.0)
     };
-    let left = cx.min(ww - mw).max(0.0);
-    let top = cy.min(wh - mh).max(0.0);
+    // Not enough room below the pointer: open upwards instead of
+    // sliding back up over it. Same for the right edge. Clamping is
+    // still the last word — a menu taller than the window has to start
+    // at the top whichever way it opens.
+    let left = if cx + mw > ww { cx - mw } else { cx }.clamp(0.0, (ww - mw).max(0.0));
+    let top = if cy + mh > wh { cy - mh } else { cy }.clamp(0.0, (wh - mh).max(0.0));
     iced::widget::stack![
         base,
         scrim,

@@ -200,6 +200,78 @@ impl<M> canvas::Program<M> for Ring {
     }
 }
 
+/// A live dot with a ring pulsing out of it.
+///
+/// `phase` runs 0..1 over the pulse period. The dot itself holds still
+/// — what moves is a ring expanding out of it and fading as it goes,
+/// which reads as "this is alive" without the dot itself throbbing in
+/// and out of legibility.
+///
+/// Callers freeze `phase` when motion is reduced; the dot alone is the
+/// static form.
+pub fn pulse_dot<'a, M: 'a>(size: f32, color: Color, phase: f32) -> Element<'a, M> {
+    // The ring travels half the dot's width again beyond its edge.
+    let reach = size * PULSE_REACH;
+    canvas(Pulse { color, phase, size })
+        .width(Length::Fixed(size + reach * 2.0))
+        .height(Length::Fixed(size + reach * 2.0))
+        .into()
+}
+
+/// How far past the dot's edge the ring travels, as a fraction of the
+/// dot's diameter.
+const PULSE_REACH: f32 = 0.9;
+
+struct Pulse {
+    color: Color,
+    /// 0..1 through the pulse.
+    phase: f32,
+    size: f32,
+}
+
+impl<M> canvas::Program<M> for Pulse {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &iced::Renderer,
+        _theme: &iced::Theme,
+        bounds: Rectangle,
+        _cursor: iced::mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let center = Point::new(bounds.width / 2.0, bounds.height / 2.0);
+        let r = self.size / 2.0;
+        let reach = self.size * PULSE_REACH;
+        // The ring grows from the dot's edge outwards and fades to
+        // nothing as it goes, so the loop has no visible seam.
+        let t = self.phase.clamp(0.0, 1.0);
+        if t > 0.0 {
+            // Stroked, not filled: a ring leaving the dot reads as a
+            // signal going out, where a soft disc under it just looks
+            // like a glow that never moves.
+            let ring_r = r + reach * t;
+            let mut ring = self.color;
+            ring.a *= (1.0 - t) * PULSE_RING_ALPHA;
+            frame.stroke(
+                &canvas::Path::circle(center, ring_r),
+                canvas::Stroke::default()
+                    .with_width(PULSE_RING_W)
+                    .with_color(ring),
+            );
+        }
+        frame.fill(&canvas::Path::circle(center, r), self.color);
+        vec![frame.into_geometry()]
+    }
+}
+
+/// Opacity the ring starts at, before it fades out on its way.
+const PULSE_RING_ALPHA: f32 = 0.85;
+/// Ring thickness. Thin enough to read as a wave, thick enough to
+/// survive being drawn at 7px across.
+const PULSE_RING_W: f32 = 1.5;
+
 /// Plain filled circle of `size` px.
 pub fn dot<'a, M: 'a>(size: f32, color: Color) -> Element<'a, M> {
     container(iced::widget::Space::new())
