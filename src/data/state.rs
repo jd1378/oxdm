@@ -109,6 +109,12 @@ pub struct JobEntry {
     /// Per-job completion actions (IDM-style "Options on completion").
     /// Defaults to showing the system notification only.
     pub on_completion: std::sync::RwLock<crate::domain::OnCompletion>,
+    /// Digests already computed for the saved file, and which file they
+    /// were computed from. Hashing a finished download is minutes of
+    /// disk for a large one, and Properties asks for it again every
+    /// time a row is added or removed — nearly always about the same
+    /// bytes as last time.
+    pub hashed: std::sync::Mutex<Option<HashedFile>>,
     /// Active resolver for the in-flight runner, if any. The UI calls
     /// into it via `AppState::resolve_*`.
     pub resolver: RwLock<Option<Arc<UiResolver>>>,
@@ -126,7 +132,71 @@ pub struct JobEntry {
     pub live_controls: odl::progress::LiveControls,
 }
 
+/// Digests computed from one particular file.
+///
+/// Tied to the file's length and modification time, not just its path:
+/// a file replaced on disk is a different file, and handing out a digest
+/// from the old one would let new bytes pass a check they never took.
+#[derive(Debug, Clone)]
+pub struct HashedFile {
+    pub len: u64,
+    pub mtime_ms: i64,
+    pub digests: std::collections::HashMap<crate::domain::Algo, String>,
+}
+
+/// Length + modification time of `path`, or `None` if it cannot be
+/// asked — in which case nothing is cached and nothing is reused.
+async fn file_identity(path: &std::path::Path) -> Option<(u64, i64)> {
+    let meta = tokio::fs::metadata(path).await.ok()?;
+    let mtime = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis() as i64;
+    Some((meta.len(), mtime))
+}
+
 impl JobEntry {
+    /// Digests already known for the file `ident` describes.
+    fn known_digests(
+        &self,
+        ident: Option<(u64, i64)>,
+    ) -> std::collections::HashMap<crate::domain::Algo, String> {
+        let Some((len, mtime_ms)) = ident else {
+            return Default::default();
+        };
+        self.hashed
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .filter(|h| h.len == len && h.mtime_ms == mtime_ms)
+            .map(|h| h.digests)
+            .unwrap_or_default()
+    }
+
+    /// Remember what this file hashed to, replacing any record of an
+    /// older version of it.
+    fn remember_digests(
+        &self,
+        ident: Option<(u64, i64)>,
+        digests: std::collections::HashMap<crate::domain::Algo, String>,
+    ) {
+        let Some((len, mtime_ms)) = ident else {
+            return;
+        };
+        if digests.is_empty() {
+            return;
+        }
+        if let Ok(mut g) = self.hashed.lock() {
+            *g = Some(HashedFile {
+                len,
+                mtime_ms,
+                digests,
+            });
+        }
+    }
+
     /// Where this job's assembled file is, live value first.
     ///
     /// The runner writes the path it actually produced into the atomic
@@ -188,6 +258,7 @@ impl JobEntry {
             captured_response: std::sync::RwLock::new(None),
             session_speed_override: std::sync::atomic::AtomicU64::new(0),
             on_completion: std::sync::RwLock::new(on_completion),
+            hashed: std::sync::Mutex::new(None),
             resolver: RwLock::new(None),
             final_path: std::sync::RwLock::new(job_final_path),
             live_controls: odl::progress::LiveControls::new(),
@@ -1202,13 +1273,18 @@ impl AppState {
         }
         let mut new_job = old.job.clone();
         new_job.checksums = checksums;
-        let new_entry = clone_entry_with_job(&old, new_job.clone()).await;
+        let new_entry = clone_entry_with_job(&old, new_job).await;
+        clear_settled_mismatch(&new_entry);
         jobs.insert(id, new_entry);
         drop(jobs);
-        self.store
-            .upsert_job(&new_job)
-            .await
-            .map_err(|e| JobError::Io(e.to_string()))?;
+        // Through `persist_job` rather than the job built above: the
+        // phase and the error were just edited on the entry, and the
+        // splice is what carries them to the store.
+        self.persist_job(id).await;
+        let phase = self.job_entry(id).await.map(|e| e.phase());
+        if let Some(phase) = phase {
+            let _ = self.events.send(DomainEvent::JobUpdated { id, phase });
+        }
         Ok(())
     }
 
@@ -1917,7 +1993,17 @@ impl AppState {
         let phase = entry.phase();
         tokio::spawn(async move {
             let _ = state.events.send(DomainEvent::JobUpdated { id, phase });
-            let results = hash_against_rows(&path, &entry.job.checksums).await;
+            // Adding or deleting a row does not change the file, so a
+            // digest this job already computed from these exact bytes
+            // answers the new row too — the common case, since the
+            // dialog asks for a check after every edit.
+            let ident = file_identity(&path).await;
+            let known = entry.known_digests(ident);
+            let results = hash_against_rows(&path, &entry.job.checksums, known).await;
+            if let Ok((_, computed)) = &results {
+                entry.remember_digests(ident, computed.clone());
+            }
+            let results = results.map(|(rows, _)| rows);
             if let Some(e) = state.job_entry(id).await {
                 e.verifying.store(false, Ordering::Release);
             }
@@ -2004,6 +2090,7 @@ impl AppState {
             c.expected = computed;
         }
         let fresh = clone_entry_with_job(&entry, job).await;
+        clear_settled_mismatch(&fresh);
         let phase = fresh.phase();
         self.jobs.write().await.insert(id, fresh);
         self.persist_job(id).await;
@@ -3361,19 +3448,30 @@ pub struct RemoveOpts {
 }
 
 /// Hash `path` once per algorithm the rows name, and judge each row
-/// against it. Returns `(row index, verdict, computed digest)`, the
-/// digest only where it disagrees — a matching row has nothing to show
-/// beside itself.
+/// against it. Returns the per-row verdicts — `(row index, verdict,
+/// computed digest)`, the digest only where it disagrees, since a
+/// matching row has nothing to show beside itself — and every digest
+/// computed along the way, so the caller can spare the next check.
+///
+/// `known` seeds that map: an algorithm already answered for this file
+/// is not read from disk again.
 ///
 /// Rows whose hash is malformed are left alone rather than failed:
 /// "this is not a hash" is not the same claim as "this file is wrong".
+#[allow(clippy::type_complexity)]
 async fn hash_against_rows(
     path: &std::path::Path,
     rows: &[crate::domain::Checksum],
-) -> Result<Vec<(usize, crate::domain::CsStatus, Option<String>)>, String> {
+    known: std::collections::HashMap<crate::domain::Algo, String>,
+) -> Result<
+    (
+        Vec<(usize, crate::domain::CsStatus, Option<String>)>,
+        std::collections::HashMap<crate::domain::Algo, String>,
+    ),
+    String,
+> {
     use crate::domain::CsStatus;
-    let mut computed: std::collections::HashMap<crate::domain::Algo, String> =
-        std::collections::HashMap::new();
+    let mut computed = known;
     let mut out = Vec::new();
     for (i, c) in rows.iter().enumerate() {
         if c.hash.trim().len() != c.algo.hex_len() {
@@ -3401,11 +3499,9 @@ async fn hash_against_rows(
             out.push((i, CsStatus::Mismatch, Some(digest)));
         }
     }
-    Ok(out)
+    Ok((out, computed))
 }
 
-/// Per-job working directory under the configured download dir. Holds
-/// `metadata.pb`, `odl.lock`, and every `<ulid>.part` for this job.
 /// Materialise a Job view that reflects live (in-memory) state on top
 /// of the load-time snapshot held by `JobEntry::job`. The `Job` struct
 /// is immutable in the registry, so progress and completion data live
@@ -3446,6 +3542,42 @@ pub(crate) fn splice_live(entry: &JobEntry) -> Job {
     j.retries = entry.retries.load(Ordering::Relaxed);
     j.interruptions = entry.interruptions.load(Ordering::Relaxed);
     j
+}
+
+/// Drop a recorded integrity failure once no row disagrees with the
+/// file any more.
+///
+/// The verdict is about a hash, and the hashes are the user's list:
+/// deleting the one that did not match, or replacing it with one that
+/// does, answers the question the failure was asking. Leaving it
+/// recorded would keep a file condemned by a line that is no longer
+/// there — and keep it unresumable, since `integrity_failed` reads the
+/// error as well as the rows.
+///
+/// Only the checksum failure is cleared. Every other one is about bytes
+/// that never arrived, and no edit to a hash list fetches them.
+fn clear_settled_mismatch(entry: &JobEntry) {
+    if entry
+        .job
+        .checksums
+        .iter()
+        .any(|c| c.status == crate::domain::CsStatus::Mismatch)
+    {
+        return;
+    }
+    let Ok(mut last) = entry.last_error.write() else {
+        return;
+    };
+    if !matches!(*last, Some(JobError::ChecksumMismatch { .. })) {
+        return;
+    }
+    *last = None;
+    // The transfer had reached its end — the file is whole and
+    // assembled, and the mismatch was the only reason the run counted
+    // as a failure at all.
+    if entry.phase() == Phase::Failed && entry.saved_file().is_some() {
+        entry.set_phase(Phase::Completed);
+    }
 }
 
 /// Current wall-clock as epoch milliseconds — matches the `0 = None`
@@ -3592,6 +3724,9 @@ async fn clone_entry_with_job(old: &Arc<JobEntry>, new_job: Job) -> Arc<JobEntry
             old.session_speed_override.load(Ordering::Acquire),
         ),
         on_completion: std::sync::RwLock::new(on_completion),
+        // Carried over: the bytes on disk did not change because a row
+        // was added to the list describing them.
+        hashed: std::sync::Mutex::new(old.hashed.lock().ok().and_then(|g| g.clone())),
         resolver: RwLock::new(resolver),
         final_path: std::sync::RwLock::new(final_path),
         live_controls: old.live_controls.clone(),
@@ -4090,7 +4225,10 @@ mod tests {
         };
         let rows = vec![row(GOOD), row(&GOOD.replace('b', "a")), row("not-a-hash")];
 
-        let out = hash_against_rows(&path, &rows).await.unwrap();
+        let (out, computed) = hash_against_rows(&path, &rows, Default::default())
+            .await
+            .unwrap();
+        assert_eq!(computed.get(&Algo::Sha256).map(String::as_str), Some(GOOD));
 
         assert_eq!(out.len(), 2, "the malformed row is skipped, not judged");
         assert_eq!(out[0], (0, CsStatus::Verified, None));
@@ -4100,6 +4238,54 @@ mod tests {
             out[1].2.as_deref(),
             Some(GOOD),
             "a mismatch carries what the file actually hashes to",
+        );
+    }
+
+    /// A digest already computed from these bytes answers the next row
+    /// too. Proven by asking about a file that is not there: reading it
+    /// would fail, so a verdict at all means nothing was read.
+    #[tokio::test]
+    async fn a_known_digest_is_not_computed_again() {
+        use crate::domain::{Algo, Checksum, CsSource, CsStatus};
+        const GOOD: &str = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
+        let rows = vec![Checksum {
+            algo: Algo::Sha256,
+            hash: GOOD.to_owned(),
+            source: CsSource::User,
+            status: CsStatus::Unverified,
+            expected: None,
+        }];
+        let known = std::collections::HashMap::from([(Algo::Sha256, GOOD.to_owned())]);
+
+        let (out, _) = hash_against_rows(std::path::Path::new("/nonexistent/f.bin"), &rows, known)
+            .await
+            .expect("no file is read");
+
+        assert_eq!(out, vec![(0, CsStatus::Verified, None)]);
+    }
+
+    /// A file replaced on disk is a different file: its length or its
+    /// modification time moves, and the digests taken from the old one
+    /// must not answer for the new bytes.
+    #[test]
+    fn a_changed_file_forgets_what_it_hashed_to() {
+        use crate::domain::Algo;
+        let entry = entry_in(Phase::Completed);
+        let digests = std::collections::HashMap::from([(Algo::Sha256, "abc".to_owned())]);
+        entry.remember_digests(Some((10, 1_000)), digests);
+
+        assert!(!entry.known_digests(Some((10, 1_000))).is_empty());
+        assert!(
+            entry.known_digests(Some((10, 2_000))).is_empty(),
+            "rewritten in place"
+        );
+        assert!(
+            entry.known_digests(Some((11, 1_000))).is_empty(),
+            "a different length"
+        );
+        assert!(
+            entry.known_digests(None).is_empty(),
+            "a file we cannot stat is not a file we know"
         );
     }
 

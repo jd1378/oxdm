@@ -1024,14 +1024,31 @@ fn splash<'a>(msg: String) -> Element<'a, Msg> {
 }
 
 fn tabbtn<'a>(t: &Tokens, label: &'a str, icon: &'a str, tab: Tab, cur: Tab) -> Element<'a, Msg> {
-    TabBtn::new(label)
+    tabbtn_counted(t, label, icon, tab, cur, None)
+}
+
+/// A tab that carries how much is behind it — the count belongs on the
+/// tab rather than in a row on another page saying "3 saved" and
+/// pointing here.
+fn tabbtn_counted<'a>(
+    t: &Tokens,
+    label: &'a str,
+    icon: &'a str,
+    tab: Tab,
+    cur: Tab,
+    count: Option<usize>,
+) -> Element<'a, Msg> {
+    let mut b = TabBtn::new(label)
         .icon(icon)
         .icon_size(13.0)
         .height(35.0)
         .font_size(12.0)
         .active(tab == cur)
-        .on_press(Msg::SetTab(tab))
-        .view(t)
+        .on_press(Msg::SetTab(tab));
+    if let Some(n) = count.filter(|n| *n > 0) {
+        b = b.count(n as u64);
+    }
+    b.view(t)
 }
 
 fn section<'a>(t: &Tokens, label: &str, body: Element<'a, Msg>) -> Element<'a, Msg> {
@@ -1083,7 +1100,14 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
     let tabs = container(
         row![
             tabbtn(t, "General", "info", Tab::General, st.tab),
-            tabbtn(t, "Checksums", "shield-check", Tab::Checksums, st.tab),
+            tabbtn_counted(
+                t,
+                "Checksums",
+                "shield-check",
+                Tab::Checksums,
+                st.tab,
+                Some(st.checksums.len()),
+            ),
             tabbtn(t, "Connection", "globe", Tab::Connection, st.tab),
             tabbtn(t, "Cookies", "cookie", Tab::Cookies, st.tab),
             tabbtn(t, "Headers", "list", Tab::Headers, st.tab),
@@ -1457,36 +1481,6 @@ fn general_tab(st: &State) -> Element<'_, Msg> {
         .into(),
     );
 
-    let cs_summary = if st.checksums.is_empty() {
-        "None. Open the Checksums tab to add one.".to_owned()
-    } else {
-        format!("{} saved", st.checksums.len())
-    };
-    let integrity = section(
-        t,
-        "integrity",
-        container(
-            row![
-                column![
-                    text("Checksums")
-                        .font(theme::BODY_MEDIUM)
-                        .size(12.0)
-                        .color(t.fg_1),
-                    text("Hashes saved for this file.")
-                        .font(theme::BODY)
-                        .size(11.0)
-                        .color(t.fg_3),
-                ]
-                .spacing(2.0),
-                iced::widget::Space::new().width(Length::Fill),
-                text(cs_summary).font(theme::BODY).size(12.0).color(t.fg_3),
-            ]
-            .align_y(Alignment::Center),
-        )
-        .padding([10.0, theme::space::S3])
-        .into(),
-    );
-
     // Run history: how rough the transfer was. One number, because the
     // question is "did this go cleanly", not which of retry, reconnect
     // or resume fired.
@@ -1523,7 +1517,7 @@ fn general_tab(st: &State) -> Element<'_, Msg> {
         .into(),
     );
 
-    column![hero, file_section, source_section, integrity, history]
+    column![hero, file_section, source_section, history]
         .spacing(theme::space::S3)
         .into()
 }
