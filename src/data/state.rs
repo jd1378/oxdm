@@ -816,18 +816,13 @@ impl AppState {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
         let state = Arc::clone(self);
         Box::pin(async move {
-            let queue_run = state
-                .active_queues
-                .read()
-                .await
-                .get(&queue_id)
-                .is_some_and(|t| t.queue_run);
-            tracing::warn!(
-                ?queue_id,
-                queue_run,
-                exiting = state.is_exiting(),
-                "DBG fill enter"
-            );
+            let (queue_run, failed_now) = {
+                let active = state.active_queues.read().await;
+                match active.get(&queue_id) {
+                    Some(t) => (t.queue_run, t.failed_now.clone()),
+                    None => (false, std::collections::HashSet::new()),
+                }
+            };
             if state.is_exiting() || !queue_run {
                 return;
             }
@@ -851,24 +846,27 @@ impl AppState {
                         .filter(|e| e.job.queue_id == queue_id && e.phase().is_running())
                         .count();
                     if running_global >= global_cap || running_here >= queue_cap {
-                        tracing::warn!(
-                            running_global,
-                            global_cap,
-                            running_here,
-                            queue_cap,
-                            "DBG fill: no room"
-                        );
                         return;
                     }
-                    // Queued and paused, never failed. A pause is "not
-                    // now" and the queue comes back to it; a failure has
-                    // a reason that is still true, and retrying it on
-                    // every pass would spin the queue on the same broken
-                    // download forever. Failures are retried by hand.
+                    // Queued and paused always; failed only if the
+                    // failure is older than this run. A pause is "not
+                    // now" and the queue comes back to it. A failure
+                    // from this run has a reason that is still true, and
+                    // retrying it every pass would spin the queue on one
+                    // broken download forever — but a queue full of
+                    // failures from *yesterday* is exactly what Start
+                    // queue was pressed for, and stopping after the
+                    // first of them helps nobody.
                     jobs.values()
                         .find(|e| {
+                            let phase = e.phase();
+                            let eligible = match phase {
+                                Phase::Queued | Phase::Paused => true,
+                                Phase::Failed => !failed_now.contains(&e.job.id),
+                                _ => false,
+                            };
                             e.job.queue_id == queue_id
-                                && matches!(e.phase(), Phase::Queued | Phase::Paused)
+                                && eligible
                                 && !e.job.integrity_failed()
                                 && !tried.contains(&e.job.id)
                         })
@@ -911,15 +909,23 @@ impl AppState {
     /// Record one job's terminal outcome against its queue's current
     /// run. Called before the finish watcher runs, so the job that
     /// drains the queue is counted in the event it triggers.
-    async fn tally_queue_outcome(&self, queue_id: QueueId, outcome: JobOutcome) {
+    async fn tally_queue_outcome(&self, queue_id: QueueId, id: JobId, outcome: JobOutcome) {
         let mut active = self.active_queues.write().await;
         let Some(tally) = active.get_mut(&queue_id) else {
             return; // job outside a queue run (single Start of a paused job)
         };
         match outcome {
-            JobOutcome::Completed => tally.completed += 1,
-            JobOutcome::Failed => tally.failed += 1,
-            JobOutcome::Cancelled => {}
+            JobOutcome::Completed => {
+                tally.completed += 1;
+                tally.failed_now.remove(&id);
+            }
+            JobOutcome::Failed => {
+                tally.failed += 1;
+                tally.failed_now.insert(id);
+            }
+            JobOutcome::Cancelled => {
+                tally.failed_now.remove(&id);
+            }
         }
     }
 
@@ -2682,6 +2688,7 @@ impl AppState {
             state
                 .tally_queue_outcome(
                     queue_id,
+                    id,
                     match &outcome {
                         Ok(_) => JobOutcome::Completed,
                         Err(JobError::Cancelled) => JobOutcome::Cancelled,
@@ -3675,10 +3682,18 @@ fn build_manager(settings: &Settings, proxy_password: Option<&str>) -> DownloadM
 /// active, because "how did this run go" is the only question the
 /// finish notification can answer honestly — the queue's job list still
 /// holds whatever earlier runs left behind.
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone)]
 struct QueueRunTally {
     completed: u32,
     failed: u32,
+    /// Jobs that failed *during this run*.
+    ///
+    /// A queue does not retry these when it comes back round — the
+    /// reason they failed is still true, and a queue that tries them
+    /// every pass spins forever. A job that was already failed when the
+    /// run started is not in here: starting a queue full of failures is
+    /// how the user asks for them to be tried again.
+    failed_now: std::collections::HashSet<JobId>,
     /// The whole queue was started, rather than one job in it. Only a
     /// queue run feeds itself: someone who started a single download by
     /// hand asked for that download, and answering by starting the
