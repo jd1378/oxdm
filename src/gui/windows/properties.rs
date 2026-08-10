@@ -1,5 +1,5 @@
 //! Per-job Properties window (`oxdm gui properties <id>`): General /
-//! Checksums / Connection / Cookies / Headers / Advanced tabs, hero
+//! Checksums / Connection / Cookies / Headers tabs, hero
 //! card, section cards with kv rows, footer with Open Containing
 //! Folder / Close / Apply.
 
@@ -69,7 +69,6 @@ pub enum Tab {
     Connection,
     Cookies,
     Headers,
-    Advanced,
 }
 
 #[derive(Clone)]
@@ -110,8 +109,6 @@ pub enum Msg {
     HeaderValue(usize, String),
     HeaderRemove(usize),
     HeaderAdd,
-    // Advanced
-    AdvAutoVerify(bool),
     // Checksums (#5)
     CsAddOpen,
     CsAddCancel,
@@ -684,11 +681,6 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             mark(st);
             Task::none()
         }
-        Msg::AdvAutoVerify(v) => {
-            st.adv.auto_verify = v;
-            mark(st);
-            Task::none()
-        }
         Msg::CsAddOpen => {
             st.cs_adding = true;
             st.checksum_hash = text_editor::Content::new();
@@ -892,7 +884,7 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             Task::none()
         }
         Msg::WinResized(w, h) => {
-            chrome::enforce_min_size(iced::Size::new(w, h), iced::Size::new(650.0, 718.0))
+            chrome::enforce_min_size(iced::Size::new(w, h), iced::Size::new(600.0, 718.0))
         }
         Msg::ShotTick => {
             if let Some(shot) = &mut st.shot
@@ -1095,7 +1087,6 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
             tabbtn(t, "Connection", "globe", Tab::Connection, st.tab),
             tabbtn(t, "Cookies", "cookie", Tab::Cookies, st.tab),
             tabbtn(t, "Headers", "list", Tab::Headers, st.tab),
-            tabbtn(t, "Advanced", "sliders-horizontal", Tab::Advanced, st.tab),
         ]
         .spacing(theme::space::S1),
     )
@@ -1111,7 +1102,6 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
         Tab::Connection => connection_tab(st),
         Tab::Cookies => cookies_tab(st),
         Tab::Headers => headers_tab(st),
-        Tab::Advanced => advanced_tab(st),
     };
     // Lock banner tops every editable pane while the download runs;
     // skipped on General (read-only display) and Checksums (its
@@ -2804,34 +2794,6 @@ fn headers_tab(st: &State) -> Element<'_, Msg> {
     .into()
 }
 
-/// Advanced pane. Dead-fields inventory (guardian amendment): every
-/// editable-but-dead `Advanced` field was REMOVED from the UI —
-/// `user_agent`, `referer`, `segments` (duplicates
-/// `Job.max_connections`), `speed_kbps`, `timeout`, `retries`,
-/// `run_command`, `open_when_done` — none is wired through
-/// `data/mapping.rs::job_overlay_options` to a real odl option, so
-/// showing an editor would fake behavior. Only `auto_verify` remains:
-/// the runner gates `add_checksums` on it (guardian F3).
-fn advanced_tab(st: &State) -> Element<'_, Msg> {
-    let t = &st.tokens;
-    let editable = !st.locked();
-
-    let transfer = section(
-        t,
-        "transfer",
-        toggle_row(
-            t,
-            "Auto-verify checksums",
-            "Compute & compare every saved hash when the download completes.",
-            st.adv.auto_verify,
-            editable,
-            Msg::AdvAutoVerify,
-        ),
-    );
-
-    column![transfer].spacing(theme::space::S3).into()
-}
-
 pub fn launch_properties(_id: JobId) {
     let mut app = iced::application(boot, update, view)
         .title(|app: &App| match app {
@@ -2846,8 +2808,8 @@ pub fn launch_properties(_id: JobId) {
         .default_font(theme::BODY)
         .antialiasing(true)
         .window(chrome::window_settings(
-            iced::Size::new(650.0, 720.0),
-            iced::Size::new(650.0, 718.0),
+            iced::Size::new(600.0, 720.0),
+            iced::Size::new(600.0, 718.0),
         ));
     for f in theme::fonts::ALL {
         app = app.font(*f);

@@ -1,6 +1,6 @@
 //! Per-job integrity checksums. The Properties dialog's Checksums tab
-//! mutates these; the runner verifies them at completion when
-//! `Advanced::auto_verify` is on.
+//! mutates these; the runner hands every well-formed `Server`/`User`
+//! row to odl and they are compared at completion.
 //!
 //! Lives in `domain` (and not under `ui::components::properties`) so
 //! the IPC protocol + `Job` can reference it without pulling in any

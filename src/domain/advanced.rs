@@ -118,7 +118,6 @@ pub struct Advanced {
     pub speed_unit_mb: bool,
     pub timeout: i64,
     pub retries: i64,
-    pub auto_verify: bool,
     pub open_when_done: bool,
     pub run_command: String,
     #[serde(default)]
@@ -142,7 +141,6 @@ impl Default for Advanced {
             speed_unit_mb: false,
             timeout: 30,
             retries: 5,
-            auto_verify: true,
             open_when_done: false,
             run_command: String::new(),
             headers: Vec::new(),

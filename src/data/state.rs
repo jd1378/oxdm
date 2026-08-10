@@ -1891,8 +1891,6 @@ impl AppState {
         let path = entry
             .saved_file()
             .ok_or_else(|| JobError::Other("this download has no saved file".into()))?;
-        // Asked for by hand, so `auto_verify` does not gate it: that
-        // preference says whether to check *without being asked*.
         if crate::data::mapping::checksum_digests(&entry.job).is_empty() {
             return Err(JobError::Other("nothing to check this file against".into()));
         }

@@ -236,34 +236,13 @@ fn bearer_header(job: &Job, auth_secret: Option<&str>) -> Option<String> {
     }
 }
 
-/// Expected-integrity digests for a job, ready for
-/// `Instruction::add_checksums`.
-///
-/// Empty unless the job's persisted `advanced.auto_verify` toggle is on
-/// (guardian F3 — never verify behind the user's back). Only `Server` /
-/// `User`-sourced entries qualify: a `Computed` record describes a
-/// previous run's bytes and would permanently fail a legitimate
-/// re-download of changed content. Entries with a wrong-length or
-/// non-hex digest are skipped; hex is lowercased to match odl's
-/// lowercase verification output.
-pub fn job_expected_digests(job: &Job) -> Vec<HashDigest> {
-    if !job.advanced.auto_verify {
-        return Vec::new();
-    }
-    checksum_digests(job)
-}
-
 /// Which of the job's checksum rows this run should check, by index.
 ///
-/// The same gate and the same sources as `job_expected_digests` — the
-/// `auto_verify` preference, and only `Server`/`User` rows, since a
-/// `Computed` one describes a previous run's bytes — but it keeps the
-/// row indices, so each row can be given its own verdict instead of
-/// one verdict being painted across all of them.
+/// The same rows as `checksum_digests` — `Server`/`User` sources only,
+/// since a `Computed` one describes a previous run's bytes — but it
+/// keeps the row indices, so each row can be given its own verdict
+/// instead of one verdict being painted across all of them.
 pub fn checksum_rows_to_verify(job: &Job) -> Vec<usize> {
-    if !job.advanced.auto_verify {
-        return Vec::new();
-    }
     job.checksums
         .iter()
         .enumerate()
@@ -273,9 +252,13 @@ pub fn checksum_rows_to_verify(job: &Job) -> Vec<usize> {
         .collect()
 }
 
-/// Every digest on the job that is well-formed enough to check against,
-/// regardless of the `auto_verify` preference — that one answers
-/// "check without being asked", not "may be checked".
+/// Every digest on the job that is well-formed enough to check against.
+///
+/// Only `Server`/`User`-sourced entries qualify: a `Computed` record
+/// describes a previous run's bytes and would permanently fail a
+/// legitimate re-download of changed content. Entries with a
+/// wrong-length or non-hex digest are skipped; hex is lowercased to
+/// match odl's lowercase verification output.
 pub fn checksum_digests(job: &Job) -> Vec<HashDigest> {
     job.checksums
         .iter()
@@ -548,19 +531,8 @@ mod tests {
     const SHA256_UPPER: &str = "B94D27B9934D3E08A52E52D7DA7DABFAC484EFE37A5380EE9088F7ACE2EFCDE9";
 
     #[test]
-    fn digests_gated_on_auto_verify() {
-        let mut job = sample_job();
-        job.checksums = vec![checksum(Algo::Sha256, SHA256_UPPER, CsSource::User)];
-        job.advanced.auto_verify = false;
-        assert!(job_expected_digests(&job).is_empty());
-        job.advanced.auto_verify = true;
-        assert_eq!(job_expected_digests(&job).len(), 1);
-    }
-
-    #[test]
     fn digests_exclude_computed_source() {
         let mut job = sample_job();
-        job.advanced.auto_verify = true;
         job.checksums = vec![
             checksum(Algo::Sha256, SHA256_UPPER, CsSource::Computed),
             checksum(
@@ -569,7 +541,7 @@ mod tests {
                 CsSource::Server,
             ),
         ];
-        let digests = job_expected_digests(&job);
+        let digests = checksum_digests(&job);
         assert_eq!(digests.len(), 1);
         assert!(matches!(&digests[0], HashDigest::MD5(h, HashEncoding::Hex)
             if h == "5eb63bbbe01eeed093cb22bb8f5acdc3"));
@@ -578,7 +550,6 @@ mod tests {
     #[test]
     fn digests_skip_invalid_hex_and_lowercase_valid() {
         let mut job = sample_job();
-        job.advanced.auto_verify = true;
         job.checksums = vec![
             // Wrong length for SHA-256.
             checksum(Algo::Sha256, "abcd", CsSource::User),
@@ -587,7 +558,7 @@ mod tests {
             // Valid uppercase — must be lowercased.
             checksum(Algo::Sha256, SHA256_UPPER, CsSource::User),
         ];
-        let digests = job_expected_digests(&job);
+        let digests = checksum_digests(&job);
         assert_eq!(digests.len(), 1);
         assert!(
             matches!(&digests[0], HashDigest::SHA256(h, HashEncoding::Hex)

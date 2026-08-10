@@ -269,9 +269,9 @@ impl JobRunner {
         // Feature #14: hand the job's expected checksums to odl so the
         // Verifying phase actually compares — a mismatch surfaces as
         // `JobError::ChecksumMismatch` through the existing error path.
-        // Gating (auto_verify) + source filtering (Server/User only)
-        // live in `mapping::job_expected_digests`.
-        let digests = crate::data::mapping::job_expected_digests(&job);
+        // Source filtering (Server/User only) lives in
+        // `mapping::checksum_digests`.
+        let digests = crate::data::mapping::checksum_digests(&job);
         if !digests.is_empty() {
             instruction.add_checksums(digests);
         }
@@ -851,7 +851,6 @@ mod tests {
             interruptions: 0,
             verify_pending: false,
             status: JobStatus::default(),
-            // `auto_verify` defaults to true — the gate under test.
             advanced: crate::domain::Advanced::default(),
             checksums: vec![Checksum {
                 algo: Algo::Sha256,
