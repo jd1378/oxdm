@@ -2786,34 +2786,35 @@ fn pending_order(st: &State) -> Element<'_, Msg> {
     // list under it — the only way to reach a position that is off
     // screen while the button is held.
     //
-    // The strips exist only while something is being carried: laid over
-    // the table the rest of the time, they would eat the press that
-    // starts the drag. And while they are up they cover the row they
-    // sit on, which is why the tick moves the dragged row itself rather
-    // than waiting for a row underneath to be entered.
-    let body: Element<'_, Msg> = if st.drag_job.is_some() {
-        let edge = |dir: EdgeScroll| {
-            iced::widget::mouse_area(
-                container(iced::widget::Space::new())
-                    .width(Length::Fill)
-                    .height(Length::Fixed(ORDER_EDGE_H)),
-            )
+    // The strips only listen while something is being carried: live the
+    // rest of the time, they would eat the press that starts a drag.
+    // What they must not do is come and go from the widget tree — the
+    // scrollable keeps its offset by its position in that tree, so
+    // wrapping it in a stack for the duration of a drag scrolled the
+    // list back to the top the moment the row was let go.
+    let dragging = st.drag_job.is_some();
+    let edge = |dir: EdgeScroll| -> Element<'_, Msg> {
+        let strip = container(iced::widget::Space::new())
+            .width(Length::Fill)
+            .height(Length::Fixed(ORDER_EDGE_H));
+        if !dragging {
+            return strip.into();
+        }
+        iced::widget::mouse_area(strip)
             .on_enter(Msg::OrderEdge(Some(dir)))
             .on_exit(Msg::OrderEdge(None))
-        };
-        iced::widget::stack![
-            scroller,
-            column![
-                edge(EdgeScroll::Up),
-                iced::widget::Space::new().height(Length::Fill),
-                edge(EdgeScroll::Down),
-            ]
-            .height(Length::Fixed(view_h)),
-        ]
-        .into()
-    } else {
-        scroller.into()
+            .into()
     };
+    let body: Element<'_, Msg> = iced::widget::stack![
+        scroller,
+        column![
+            edge(EdgeScroll::Up),
+            iced::widget::Space::new().height(Length::Fill),
+            edge(EdgeScroll::Down),
+        ]
+        .height(Length::Fixed(view_h)),
+    ]
+    .into();
 
     let t2 = *t;
     let table = container(column![head, hairline(t.border_subtle), body])

@@ -436,6 +436,15 @@ fn normalize_categories(s: &mut Settings) {
         .map(|c| (*c, s.category_folder(*c)))
         .collect();
     s.category_folders = resolved.into_iter().collect();
+    // Same key order as the form will rebuild it in. These maps keep
+    // insertion order, and the diff compares them as written — so a map
+    // holding exactly the same routing, stored in the order the daemon
+    // happened to write it, read as an edit on every keystroke.
+    let queues: Vec<_> = Category::ALL_ASSIGNABLE
+        .iter()
+        .filter_map(|c| s.category_queues.get(c).map(|q| (*c, *q)))
+        .collect();
+    s.category_queues = queues.into_iter().collect();
 }
 
 fn mirror(st: &mut State) {
