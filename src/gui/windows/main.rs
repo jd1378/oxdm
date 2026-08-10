@@ -56,14 +56,28 @@ const STATUSBAR_H: f32 = 28.0;
 const TOAST_PAD_Y: f32 = 10.0;
 const TOAST_PAD_X: f32 = 14.0;
 
-/// Row context menu: 7 items, 3 separators, and the card's own padding.
+/// Row context menu: 9 items, 3 separators, and the card's own padding.
 /// Its height decides which way the menu opens, so it is counted rather
 /// than eyeballed.
 const MENU_ITEM_H: f32 = 28.0;
 const MENU_SEP_H: f32 = 1.0 + theme::space::S0 * 2.0;
-const MENU_ITEMS: f32 = 7.0;
+const MENU_ITEMS: f32 = 9.0;
 const MENU_SEPS: f32 = 3.0;
 const MENU_PAD: f32 = theme::space::S1;
+const MENU_W: f32 = 260.0;
+/// Card width including its border — what the layout has to fit.
+const MENU_BOX_W: f32 = MENU_W + MENU_PAD * 2.0 + 2.0;
+
+/// Submenu: how many destinations are on screen at once, and the strips
+/// that reach the rest. A menu long enough to run off the window is a
+/// menu whose last entries cannot be clicked at all.
+const SUBMENU_VISIBLE: usize = 7;
+const SUBMENU_W: f32 = 200.0;
+const SUBMENU_BOX_W: f32 = SUBMENU_W + MENU_PAD * 2.0 + 2.0;
+/// Scroll strip at each end of an overlong submenu.
+const SUBMENU_EDGE_H: f32 = 14.0;
+/// One row per tick while the pointer rests on a strip.
+const SUBMENU_EDGE_MS: u64 = 110;
 
 // Pulse clock (design `pulse` keyframe). Drives the live-dot's alpha;
 // the whole subscription is gated on `!reduce_motion` (W6).
@@ -137,6 +151,16 @@ pub enum Msg {
     /// The daemon declined an action. Carries its own words for it.
     Refused(String),
     Context(ContextAction),
+    /// Open one of the context menu's "Move to…" lists, or close
+    /// whichever is open (the pointer moved to a plain entry).
+    SubmenuOpen(Option<SubMenu>),
+    /// Pointer entered (`-1` / `1`) or left (`0`) a scroll strip.
+    SubmenuEdge(i8),
+    SubmenuTick,
+    /// Wheel over an open submenu. Positive is away from the user.
+    SubmenuWheel(f32),
+    MoveToCategory(Category),
+    MoveToQueue(crate::domain::QueueId),
     KeyPressed(iced::keyboard::Key, iced::keyboard::Modifiers),
     Modifiers(iced::keyboard::Modifiers),
     CursorMoved(f32, f32),
@@ -231,6 +255,13 @@ pub enum ToolAction {
     Settings,
     BrowserExtension,
     About,
+}
+
+/// The two destinations a download can be moved to from its row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubMenu {
+    Category,
+    Queue,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -329,6 +360,12 @@ pub struct Main {
     pub collapsed_sections: HashSet<u8>,
     pub maximized: bool,
     pub context_menu: Option<JobId>,
+    /// Which "Move to…" list the context menu has open, how far it is
+    /// scrolled, and which scroll strip the pointer is resting on
+    /// (`-1` up, `1` down, `0` neither).
+    pub submenu: Option<SubMenu>,
+    pub submenu_first: usize,
+    pub submenu_edge: i8,
     /// Sidebar section head under the pointer. The design only reveals
     /// the section's "+" on hover (`.sec-head:hover .add { opacity: 1 }`),
     /// and a view cannot read hover status, so track it.
@@ -429,6 +466,9 @@ impl Main {
             collapsed_sections: HashSet::new(),
             maximized: false,
             context_menu: None,
+            submenu: None,
+            submenu_first: 0,
+            submenu_edge: 0,
             hovered_section: None,
             hovered_row: None,
             overlay: Overlay::None,
@@ -844,7 +884,7 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             Task::none()
         }
         Msg::RowClick(id, ctrl, shift) => {
-            m.context_menu = None;
+            close_context_menu(m);
             if ctrl {
                 if !m.selection.remove(&id) {
                     m.selection.insert(id);
@@ -917,7 +957,7 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             Task::none()
         }
         Msg::CloseOverlay => {
-            m.context_menu = None;
+            close_context_menu(m);
             m.columns_menu = false;
             // Escape/backdrop on the welcome overlay is a dismissal
             // too — it must persist `first_run_seen` like the buttons.
@@ -1112,7 +1152,7 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                 .map(move |maximized| Msg::WindowSizeSettled(w, h, maximized))
         }
         Msg::RemoveAs(kind) => {
-            m.context_menu = None;
+            close_context_menu(m);
             request_remove(m, kind)
         }
         Msg::DragHover(on) => {
@@ -1416,8 +1456,63 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             }
         },
         Msg::Context(action) => {
-            m.context_menu = None;
+            close_context_menu(m);
             context_action(m, action)
+        }
+        Msg::SubmenuOpen(which) => {
+            if m.submenu != which {
+                m.submenu = which;
+                m.submenu_first = 0;
+                m.submenu_edge = 0;
+            }
+            Task::none()
+        }
+        Msg::SubmenuEdge(dir) => {
+            m.submenu_edge = dir;
+            // One row on entering the strip, so a single flick of the
+            // pointer already moves the list; the timer takes over from
+            // there for as long as the pointer stays.
+            if dir != 0 {
+                scroll_submenu(m, dir);
+            }
+            Task::none()
+        }
+        Msg::SubmenuWheel(dy) => {
+            // Only while a list is open — otherwise this would fight
+            // the table for the wheel.
+            if m.submenu.is_some() && dy != 0.0 {
+                scroll_submenu(m, if dy > 0.0 { -1 } else { 1 });
+            }
+            Task::none()
+        }
+        Msg::SubmenuTick => {
+            let dir = m.submenu_edge;
+            if dir != 0 {
+                scroll_submenu(m, dir);
+            }
+            Task::none()
+        }
+        Msg::MoveToCategory(cat) => {
+            let ids: Vec<JobId> = m.selection.iter().copied().collect();
+            let client = m.client.clone();
+            close_context_menu(m);
+            act_reporting(async move {
+                for id in ids {
+                    client.set_job_category(id, cat).await?;
+                }
+                Ok(())
+            })
+        }
+        Msg::MoveToQueue(qid) => {
+            let ids: Vec<JobId> = m.selection.iter().copied().collect();
+            let client = m.client.clone();
+            close_context_menu(m);
+            act_reporting(async move {
+                for id in ids {
+                    client.set_job_queue(id, qid).await?;
+                }
+                Ok(())
+            })
         }
         Msg::Toolbar(action) => {
             let client = m.client.clone();
@@ -1519,7 +1614,7 @@ fn handle_key(
         // the rows on screen. A focused text field consumes Ctrl+A for
         // its own select-all before this listener sees it.
         Key::Character("a") if mods.command() && m.overlay == Overlay::None => {
-            m.context_menu = None;
+            close_context_menu(m);
             let order: Vec<JobId> = m.visible_jobs().iter().map(|j| j.id).collect();
             // The anchor is what a following Shift+click extends from;
             // the top row is where the selection reads as starting.
@@ -1652,6 +1747,31 @@ fn request_remove(m: &mut Main, kind: RemoveKind) -> Task<Msg> {
     }
 }
 
+/// Shut the row menu and everything hanging off it. A submenu left
+/// open would reopen with the next menu, scrolled to wherever the last
+/// one was left.
+fn close_context_menu(m: &mut Main) {
+    m.context_menu = None;
+    m.submenu = None;
+    m.submenu_first = 0;
+    m.submenu_edge = 0;
+}
+
+/// Move the open submenu's window over its list, stopping at both ends.
+fn scroll_submenu(m: &mut Main, dir: i8) {
+    let len = match m.submenu {
+        Some(SubMenu::Category) => Category::ALL_ASSIGNABLE.len(),
+        Some(SubMenu::Queue) => m.snap.queues.len(),
+        None => return,
+    };
+    let last = len.saturating_sub(SUBMENU_VISIBLE);
+    m.submenu_first = if dir < 0 {
+        m.submenu_first.saturating_sub(1)
+    } else {
+        (m.submenu_first + 1).min(last)
+    };
+}
+
 fn context_action(m: &mut Main, action: ContextAction) -> Task<Msg> {
     let ids: Vec<JobId> = m.selection.iter().copied().collect();
     let client = m.client.clone();
@@ -1740,6 +1860,15 @@ pub fn subscription(app: &App) -> Subscription<Msg> {
             iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => {
                 Some(Msg::MouseReleased)
             }
+            // Reaching for a strip at the edge is the fallback; the
+            // wheel is what a hand already on the mouse does.
+            iced::Event::Mouse(iced::mouse::Event::WheelScrolled { delta }) => {
+                let dy = match delta {
+                    iced::mouse::ScrollDelta::Lines { y, .. } => y,
+                    iced::mouse::ScrollDelta::Pixels { y, .. } => y,
+                };
+                Some(Msg::SubmenuWheel(dy))
+            }
             // A drag can end without a release ever reaching us —
             // the pointer leaves the window, or the compositor takes
             // focus away mid-gesture. Without this the header keeps
@@ -1772,6 +1901,15 @@ pub fn subscription(app: &App) -> Subscription<Msg> {
             subs.push(
                 iced::time::every(std::time::Duration::from_millis(PULSE_TICK_MS))
                     .map(|_| Msg::AnimTick),
+            );
+        }
+        // Only while the pointer is resting on a submenu's scroll
+        // strip: a clock that ticks the rest of the time is a window
+        // that never idles.
+        if m.submenu_edge != 0 {
+            subs.push(
+                iced::time::every(std::time::Duration::from_millis(SUBMENU_EDGE_MS))
+                    .map(|_| Msg::SubmenuTick),
             );
         }
     }
@@ -2264,6 +2402,7 @@ fn sidebar(m: &Main) -> Element<'_, Msg> {
             (Category::Music, "music", "Music"),
             (Category::Pictures, "image", "Pictures"),
             (Category::Documents, "file-text", "Documents"),
+            (Category::Other, "file", "Other"),
         ] {
             let active = m.filter == SidebarFilter::Category(cat);
             col = col.push(sidebar_row(
@@ -3441,6 +3580,49 @@ fn context_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>, id: JobId) -> E
             .padding([theme::space::S0, 0.0])
             .width(Length::Fill)
     };
+    // Moving onto a plain entry shuts whatever list was open, the way
+    // every other menu behaves — otherwise a submenu opened by a graze
+    // stays over the entries below it.
+    let plain = |e: Element<'a, Msg>| Element::from(mouse_area(e).on_enter(Msg::SubmenuOpen(None)));
+    // A row that opens a list beside it: opens on hover like a menu,
+    // and on click for anyone who does not wait.
+    let opens = |icon: &'a str, label: &'a str, which: SubMenu| {
+        let fg = t2.fg_1;
+        let r = row![
+            icons::icon(icon, 15.0, fg),
+            text(label).font(theme::BODY).size(13.0).color(fg),
+            iced::widget::Space::new().width(Length::Fill),
+            icons::icon("chevron-right", 13.0, t2.fg_3),
+        ]
+        .spacing(theme::space::S2)
+        .align_y(Alignment::Center);
+        let open = m.submenu == Some(which);
+        let inner = container(r)
+            .width(Length::Fill)
+            .height(Length::Fixed(MENU_ITEM_H))
+            .align_y(Alignment::Center)
+            .padding([0.0, theme::space::S2]);
+        let btn = iced::widget::button(inner)
+            .padding(0)
+            .width(Length::Fill)
+            .style(move |_th, status| iced::widget::button::Style {
+                background: (open
+                    || matches!(
+                        status,
+                        iced::widget::button::Status::Hovered
+                            | iced::widget::button::Status::Pressed
+                    ))
+                .then(|| t2.bg_sunken.into()),
+                text_color: fg,
+                border: iced::Border {
+                    radius: theme::radius::XS.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .on_press(Msg::SubmenuOpen(Some(which)));
+        Element::from(mouse_area(btn).on_enter(Msg::SubmenuOpen(Some(which))))
+    };
 
     // One entry, not two: pause and resume are the same switch, and the
     // download window's footer has always shown it that way. Queued
@@ -3538,7 +3720,7 @@ fn context_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>, id: JobId) -> E
     let menu = container(
         column![
             // The action most often wanted sits under the cursor.
-            item(
+            plain(item(
                 if running { "pause" } else { "play" },
                 if running { "Pause" } else { "Resume" },
                 None,
@@ -3548,14 +3730,14 @@ fn context_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>, id: JobId) -> E
                 } else {
                     ContextAction::Resume
                 })
-            ),
+            )),
             separator(),
             // Design puts "Show progress…" first among the rest and
             // offers it in every state — the same window carries the
             // completion view, so a finished download can be reopened
             // after its dialog was dismissed. The label follows what
             // the window will show.
-            item(
+            plain(item(
                 "activity",
                 if done {
                     "Show Completion Dialog"
@@ -3565,49 +3747,51 @@ fn context_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>, id: JobId) -> E
                 None,
                 true,
                 Msg::Context(ContextAction::ShowProgress)
-            ),
-            item(
+            )),
+            plain(item(
                 "file",
                 "Open",
                 None,
                 done,
                 Msg::Context(ContextAction::Open)
-            ),
-            item(
+            )),
+            plain(item(
                 "folder",
                 "Open Containing Folder",
                 None,
                 true,
                 Msg::Context(ContextAction::OpenFolder)
-            ),
+            )),
+            opens("layers", "Move to Category", SubMenu::Category),
+            opens("inbox", "Move to Queue", SubMenu::Queue),
             separator(),
-            destruct,
-            item(
+            plain(destruct),
+            plain(item(
                 "rotate-cw",
                 "Restart Download",
                 None,
                 true,
                 Msg::Context(ContextAction::Restart)
-            ),
-            item(
+            )),
+            plain(item(
                 "copy",
                 "Copy URL",
                 None,
                 true,
                 Msg::Context(ContextAction::CopyUrl)
-            ),
+            )),
             separator(),
-            item(
+            plain(item(
                 "info",
                 "Show Properties",
                 None,
                 true,
                 Msg::Context(ContextAction::Properties)
-            ),
+            )),
         ]
-        .width(Length::Fixed(260.0)),
+        .width(Length::Fixed(MENU_W)),
     )
-    .padding(theme::space::S1)
+    .padding(MENU_PAD)
     .style(move |_| container::Style {
         background: Some(t2.bg_raised.into()),
         border: iced::Border {
@@ -3639,7 +3823,7 @@ fn context_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>, id: JobId) -> E
     // off the bottom of the window, and the clamp that was supposed to
     // stop that has nothing to clamp against.
     let mh = MENU_PAD * 2.0 + MENU_ITEM_H * MENU_ITEMS + MENU_SEP_H * MENU_SEPS;
-    let mw = 268.0;
+    let mw = MENU_BOX_W;
     let (ww, wh) = if m.win_size.0 > 0.0 {
         (m.win_size.0, m.win_size.1 - titlebar::chrome_h())
     } else {
@@ -3651,6 +3835,41 @@ fn context_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>, id: JobId) -> E
     // at the top whichever way it opens.
     let left = if cx + mw > ww { cx - mw } else { cx }.clamp(0.0, (ww - mw).max(0.0));
     let top = if cy + mh > wh { cy - mh } else { cy }.clamp(0.0, (wh - mh).max(0.0));
+
+    // A permanent fourth layer, empty when no list is open: adding and
+    // removing a layer re-keys the widgets underneath, and the table
+    // below would lose its scroll position every time a submenu opened.
+    let sub: Element<'a, Msg> = match m.submenu {
+        Some(which) => {
+            let (rows_before, seps_before) = match which {
+                SubMenu::Category => (4.0, 1.0),
+                SubMenu::Queue => (5.0, 1.0),
+            };
+            let anchor_y = top + MENU_PAD + rows_before * MENU_ITEM_H + seps_before * MENU_SEP_H;
+            let (panel, sub_h) = submenu_panel(m, which, id);
+            // Beside the parent row, flipping to the other side of the
+            // menu when there is no room — the same rule the menu
+            // itself follows against the window edge.
+            let sub_left = if left + mw + SUBMENU_BOX_W > ww {
+                (left - SUBMENU_BOX_W).max(0.0)
+            } else {
+                left + mw
+            };
+            // Lifted to sit level with its row, then held inside the
+            // window: a list that starts beside its row and ends past
+            // the bottom edge is a list whose tail cannot be clicked.
+            let sub_top = (anchor_y - MENU_PAD).clamp(0.0, (wh - sub_h).max(0.0));
+            container(iced::widget::opaque(panel))
+                .padding(iced::Padding {
+                    left: sub_left,
+                    top: sub_top,
+                    ..Default::default()
+                })
+                .into()
+        }
+        None => iced::widget::Space::new().into(),
+    };
+
     iced::widget::stack![
         base,
         scrim,
@@ -3659,8 +3878,166 @@ fn context_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>, id: JobId) -> E
             top,
             ..Default::default()
         }),
+        sub,
     ]
     .into()
+}
+
+/// The list of destinations hanging off a "Move to…" row, and the
+/// height it occupies — the caller needs the number to keep the panel
+/// inside the window.
+///
+/// Only `SUBMENU_VISIBLE` rows are on screen; a longer list is reached
+/// through the strips at either end, which scroll while the pointer
+/// rests on them. Without them a machine with a dozen queues has
+/// entries it is impossible to click.
+fn submenu_panel<'a>(m: &'a Main, which: SubMenu, id: JobId) -> (Element<'a, Msg>, f32) {
+    let t2 = m.tokens;
+    let job = m.snap.jobs.iter().find(|j| j.id == id);
+
+    // (leader, label, whether the job is already there, what to do)
+    let entries: Vec<(Element<'a, Msg>, String, bool, Msg)> = match which {
+        SubMenu::Category => Category::ALL_ASSIGNABLE
+            .iter()
+            .map(|c| {
+                (
+                    icons::icon(category_icon(*c), 15.0, t2.fg_2),
+                    c.label().to_owned(),
+                    job.is_some_and(|j| j.category == *c),
+                    Msg::MoveToCategory(*c),
+                )
+            })
+            .collect(),
+        SubMenu::Queue => m
+            .snap
+            .queues
+            .iter()
+            .map(|q| {
+                (
+                    swatch(8.0, 2.0, m.tokens.queue_color(q)),
+                    q.name.clone(),
+                    job.is_some_and(|j| j.queue_id == q.id),
+                    Msg::MoveToQueue(q.id),
+                )
+            })
+            .collect(),
+    };
+
+    let total = entries.len();
+    let first = m.submenu_first.min(total.saturating_sub(SUBMENU_VISIBLE));
+    let scrollable = total > SUBMENU_VISIBLE;
+    let shown = total.min(SUBMENU_VISIBLE);
+
+    // A strip is a hover target, not a button: resting on it scrolls,
+    // and it dims when that end of the list has been reached.
+    let strip = |dir: i8, live: bool| {
+        let fg = if live { t2.fg_2 } else { t2.fg_4 };
+        let inner = container(icons::icon(
+            if dir < 0 {
+                "chevron-up"
+            } else {
+                "chevron-down"
+            },
+            13.0,
+            fg,
+        ))
+        .width(Length::Fill)
+        .height(Length::Fixed(SUBMENU_EDGE_H))
+        .align_x(Alignment::Center)
+        .align_y(Alignment::Center);
+        let mut area = mouse_area(inner).on_exit(Msg::SubmenuEdge(0));
+        if live {
+            area = area
+                .on_enter(Msg::SubmenuEdge(dir))
+                .on_press(Msg::SubmenuEdge(dir));
+        }
+        Element::from(area)
+    };
+
+    let mut col = column![].width(Length::Fixed(SUBMENU_W));
+    if scrollable {
+        col = col.push(strip(-1, first > 0));
+    }
+    for (leader, label, current, msg) in entries.into_iter().skip(first).take(shown) {
+        let mut r = row![
+            leader,
+            text(label).font(theme::BODY).size(13.0).color(t2.fg_1),
+        ]
+        .spacing(theme::space::S2)
+        .align_y(Alignment::Center);
+        if current {
+            r = r
+                .push(iced::widget::Space::new().width(Length::Fill))
+                .push(icons::icon("check", 13.0, t2.fg_3));
+        }
+        let inner = container(r)
+            .width(Length::Fill)
+            .height(Length::Fixed(MENU_ITEM_H))
+            .align_y(Alignment::Center)
+            .padding([0.0, theme::space::S2]);
+        col = col.push(
+            iced::widget::button(inner)
+                .padding(0)
+                .width(Length::Fill)
+                .style(move |_th, status| iced::widget::button::Style {
+                    background: matches!(
+                        status,
+                        iced::widget::button::Status::Hovered
+                            | iced::widget::button::Status::Pressed
+                    )
+                    .then(|| t2.bg_sunken.into()),
+                    text_color: t2.fg_1,
+                    border: iced::Border {
+                        radius: theme::radius::XS.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .on_press(msg),
+        );
+    }
+    if scrollable {
+        col = col.push(strip(1, first + SUBMENU_VISIBLE < total));
+    }
+
+    let h = MENU_PAD * 2.0
+        + MENU_ITEM_H * shown as f32
+        + if scrollable {
+            SUBMENU_EDGE_H * 2.0
+        } else {
+            0.0
+        };
+    let panel = container(col)
+        .padding(MENU_PAD)
+        .style(move |_| container::Style {
+            background: Some(t2.bg_raised.into()),
+            border: iced::Border {
+                color: t2.border_default,
+                width: 1.0,
+                radius: theme::radius::SM.into(),
+            },
+            shadow: iced::Shadow {
+                color: color::with_alpha(iced::Color::BLACK, 80.0 / 255.0),
+                offset: iced::Vector::new(0.0, 4.0),
+                blur_radius: 16.0,
+            },
+            ..Default::default()
+        })
+        .into();
+    (panel, h)
+}
+
+/// The sidebar's icon for a category, reused wherever one is named.
+fn category_icon(c: Category) -> &'static str {
+    match c {
+        Category::Compressed => "archive",
+        Category::Programs => "package",
+        Category::Videos => "film",
+        Category::Music => "music",
+        Category::Pictures => "image",
+        Category::Documents => "file-text",
+        Category::Other => "file",
+    }
 }
 
 fn columns_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg> {
