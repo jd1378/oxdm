@@ -38,8 +38,8 @@ pub enum Section {
 impl Section {
     const ALL: [(Section, &'static str, &'static str); 7] = [
         (Section::General, "sliders-horizontal", "General"),
-        (Section::Downloads, "download", "Downloads"),
         (Section::Categories, "folder", "Categories"),
+        (Section::Downloads, "download", "Downloads"),
         (Section::Network, "globe", "Network"),
         (Section::Browser, "puzzle", "Browser"),
         (Section::Notifications, "bell", "Notifications"),
@@ -1691,21 +1691,6 @@ fn downloads_section(st: &State) -> Element<'_, Msg> {
             ),
             set_section(
                 t,
-                "Connections",
-                vec![toggle_row(
-                    t,
-                    "Split parts while downloading",
-                    Some(
-                        "Let oxdm break up a slow part when other connections finish \
-                         early, instead of leaving one connection to finish alone. \
-                         Turn off for servers that object to reconnects."
-                    ),
-                    st.s.dynamic_split,
-                    Msg::DynamicSplit
-                )]
-            ),
-            set_section(
-                t,
                 "Retries",
                 vec![
                     set_row(
@@ -2009,6 +1994,17 @@ fn network_section(st: &State) -> Element<'_, Msg> {
                              the file size."
                         ),
                         connections_picker(t, st.s.max_connections)
+                    ),
+                    toggle_row(
+                        t,
+                        "Split parts while downloading",
+                        Some(
+                            "Let oxdm break up a slow part when other connections finish \
+                             early, instead of leaving one connection to finish alone. \
+                             Turn off for servers that object to reconnects."
+                        ),
+                        st.s.dynamic_split,
+                        Msg::DynamicSplit
                     ),
                     set_row(
                         t,
