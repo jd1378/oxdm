@@ -1513,6 +1513,20 @@ fn handle_key(
             },
             Msg::LinksPasted,
         ),
+        // Select all of what the list currently shows — the filter,
+        // tab and search narrow it, and the virtual list only renders a
+        // window of it, so this walks the full filtered set rather than
+        // the rows on screen. A focused text field consumes Ctrl+A for
+        // its own select-all before this listener sees it.
+        Key::Character("a") if mods.command() && m.overlay == Overlay::None => {
+            m.context_menu = None;
+            let order: Vec<JobId> = m.visible_jobs().iter().map(|j| j.id).collect();
+            // The anchor is what a following Shift+click extends from;
+            // the top row is where the selection reads as starting.
+            m.select_anchor = order.first().copied();
+            m.selection = order.into_iter().collect();
+            Task::none()
+        }
         Key::Character("q") if mods.command() => {
             let client = m.client.clone();
             Task::perform(async move { client.daemon_quit().await }, |_| Msg::Noop)
