@@ -603,9 +603,11 @@ pub fn remove_warning<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Ms
 
 // Each vendor's extension store landing page (design §3.8). We do NOT
 // fake an "Installed ✓" state — there is no reliable detection — so the
-// button always reads "Open store page". Brave/Arc reuse the Chrome
-// Web Store; Safari ships via the Mac App Store.
-const BROWSER_STORES: [(&str, &str, &str); 7] = [
+// button always reads "Open store page". Only the two stores the
+// extension is actually published to: a row per Chromium repackaging
+// pointed six of them at the same Chrome Web Store page, which is a
+// longer list saying the same thing twice.
+const BROWSER_STORES: [(&str, &str, &str); 2] = [
     (
         "Chrome",
         "Chrome Web Store",
@@ -616,27 +618,6 @@ const BROWSER_STORES: [(&str, &str, &str); 7] = [
         "Firefox Add-ons",
         "https://addons.mozilla.org/firefox/",
     ),
-    (
-        "Edge",
-        "Edge Add-ons",
-        "https://microsoftedge.microsoft.com/addons/",
-    ),
-    (
-        "Brave",
-        "Chrome Web Store",
-        "https://chromewebstore.google.com/",
-    ),
-    (
-        "Opera",
-        "Opera Add-ons",
-        "https://addons.opera.com/extensions/",
-    ),
-    (
-        "Arc",
-        "Chrome Web Store",
-        "https://chromewebstore.google.com/",
-    ),
-    ("Safari", "Mac App Store", "https://apps.apple.com/"),
 ];
 
 /// Browser-extensions dialog, "manage" mode (opened from Tools).
@@ -807,7 +788,10 @@ fn extensions_dialog<'a>(
     }
     let card = card
         .push(hero)
-        .push(vscroll(list).height(Length::Fixed(264.0)))
+        // Two rows fit as they are; the scroller was sized for a list
+        // that no longer exists, and left a hand's width of empty
+        // panel under them.
+        .push(list)
         .push(privacy)
         .push(footer);
 
