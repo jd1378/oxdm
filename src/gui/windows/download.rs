@@ -245,14 +245,6 @@ const STAT_VALUE_SIZE: f32 = 13.0;
 /// so `vdivider` has a height to draw against.
 const STAT_CELL_H: f32 = STAT_CELL_PAD_Y * 2.0 + 13.0 + 18.0;
 
-/// Burst/pulse oscillation rate (rad/s feel applied to `anim_t`).
-const PULSE_RATE: f32 = 3.2;
-
-// --- Reconnect banner (design §3.3 `.reconnect-banner`, ochre) -------
-/// Banner background alpha floor/ceiling for the gentle ochre pulse.
-const RECONNECT_PULSE_MIN: f32 = 0.55;
-const RECONNECT_PULSE_MAX: f32 = 1.0;
-
 /// A retry odl has scheduled. `until_ms` is a wall-clock deadline
 /// rather than a remaining duration, so the countdown survives a window
 /// that repaints at its own pace — and a deadline in the past simply
@@ -1591,12 +1583,11 @@ fn running_view(st: &State) -> Element<'_, Msg> {
         footer_right,
     );
 
-    // Reconnect banner sits above the progress bar (design §3.3),
-    // ochre, only while the whole transfer is mid-retry.
+    // No reconnect banner here. The window's own title says
+    // "Reconnecting", and the segment rows say which parts are retrying
+    // and when they go again — a third copy of the same news, pulsing,
+    // over the progress bar is noise.
     let mut hero = column![sibling(header_card(st))].spacing(theme::space::S3);
-    if phase == Phase::Reconnecting {
-        hero = hero.push(reconnect_banner(st));
-    }
     if let Some(b) = nonresume_banner(st) {
         hero = hero.push(b);
     }
@@ -3279,51 +3270,6 @@ fn nonresume_banner(st: &State) -> Option<Element<'_, Msg>> {
                 .to_owned(),
         )
     })
-}
-
-/// Ochre "Reconnecting…" banner shown above the progress bar while the
-/// whole transfer is mid-retry (`Phase::Reconnecting`). Appends the
-/// live attempt count from `job.retries` when known, and gently pulses
-/// its tint unless `reduce_motion` (W6).
-fn reconnect_banner(st: &State) -> Element<'_, Msg> {
-    let t = &st.tokens;
-    let fg = t.status_warning;
-    // Map a sine of the running anim clock to the configured alpha band.
-    let pulse = if st.reduce_motion {
-        RECONNECT_PULSE_MAX
-    } else {
-        let s = (st.anim_t * PULSE_RATE).sin() * 0.5 + 0.5;
-        RECONNECT_PULSE_MIN + (RECONNECT_PULSE_MAX - RECONNECT_PULSE_MIN) * s
-    };
-    let bg = color::with_alpha(t.status_warning_bg, pulse);
-
-    let retries = st.entry.job.retries;
-    let label = if retries > 0 {
-        format!("Reconnecting… · attempt {retries}")
-    } else {
-        "Reconnecting…".to_owned()
-    };
-
-    container(
-        row![
-            icons::icon("rotate-cw", 17.0, fg),
-            text(label).font(theme::BODY_MEDIUM).size(12.0).color(fg),
-        ]
-        .spacing(theme::space::S2)
-        .align_y(Alignment::Center),
-    )
-    .width(Length::Fill)
-    .padding(theme::space::S3)
-    .style(move |_| container::Style {
-        background: Some(bg.into()),
-        border: iced::Border {
-            color: fg,
-            width: 1.0,
-            radius: theme::radius::XS.into(),
-        },
-        ..Default::default()
-    })
-    .into()
 }
 
 /// Whether this completed download is *tampered*: a saved checksum
