@@ -2792,29 +2792,34 @@ fn pending_order(st: &State) -> Element<'_, Msg> {
     // scrollable keeps its offset by its position in that tree, so
     // wrapping it in a stack for the duration of a drag scrolled the
     // list back to the top the moment the row was let go.
-    let dragging = st.drag_job.is_some();
-    let edge = |dir: EdgeScroll| -> Element<'_, Msg> {
-        let strip = container(iced::widget::Space::new())
-            .width(Length::Fill)
-            .height(Length::Fixed(ORDER_EDGE_H));
-        if !dragging {
-            return strip.into();
-        }
-        iced::widget::mouse_area(strip)
-            .on_enter(Msg::OrderEdge(Some(dir)))
-            .on_exit(Msg::OrderEdge(None))
-            .into()
+    let edge = |dir: EdgeScroll| {
+        iced::widget::mouse_area(
+            container(iced::widget::Space::new())
+                .width(Length::Fill)
+                .height(Length::Fixed(ORDER_EDGE_H)),
+        )
+        .on_enter(Msg::OrderEdge(Some(dir)))
+        .on_exit(Msg::OrderEdge(None))
     };
-    let body: Element<'_, Msg> = iced::widget::stack![
-        scroller,
+    // The strips are laid over the table only while something is being
+    // carried. A layer over a `stack` takes the pointer whether or not
+    // it has any handlers, so leaving them up the rest of the time ate
+    // the press that starts a drag. Off-duty the layer is an empty
+    // `Space`, which occupies no area — but the stack itself stays, so
+    // the scrollable underneath keeps its place in the tree, and with
+    // it its scroll position.
+    let overlay: Element<'_, Msg> = if st.drag_job.is_some() {
         column![
             edge(EdgeScroll::Up),
             iced::widget::Space::new().height(Length::Fill),
             edge(EdgeScroll::Down),
         ]
-        .height(Length::Fixed(view_h)),
-    ]
-    .into();
+        .height(Length::Fixed(view_h))
+        .into()
+    } else {
+        iced::widget::Space::new().into()
+    };
+    let body: Element<'_, Msg> = iced::widget::stack![scroller, overlay].into();
 
     let t2 = *t;
     let table = container(column![head, hairline(t.border_subtle), body])
@@ -2869,12 +2874,16 @@ fn pending_order(st: &State) -> Element<'_, Msg> {
 fn order_drag_ghost<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a, Msg> {
     let t = &st.tokens;
     let t2 = *t;
-    let Some(id) = st.drag_job else {
-        return base;
-    };
-    let pending = st.pending();
-    let Some(job) = pending.iter().find(|j| j.id == id) else {
-        return base;
+    // Always the same shape, ghost or no ghost. A layer that appears
+    // for the duration of a drag moves everything below it one step
+    // deeper in the widget tree, and a scrollable identified by its
+    // place in that tree comes back with a fresh state — the order
+    // table jumped to the top on both the press and the release.
+    let carried = st
+        .drag_job
+        .and_then(|id| st.pending().iter().find(|j| j.id == id).copied());
+    let Some(job) = carried else {
+        return crate::gui::widget::drag_ghost(base, iced::widget::Space::new().into(), (0.0, 0.0));
     };
     let name = job.filename.clone().unwrap_or_else(|| job.url.to_string());
     let ghost = container(
