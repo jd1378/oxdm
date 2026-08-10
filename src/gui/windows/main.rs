@@ -3040,13 +3040,21 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
         )
     } else {
         let (color, label) = phase_style(t, phase);
-        let label = if integrity_failed {
-            "Integrity check failed".to_owned()
+        // The phase can still be `Completed` — every byte arrived, and
+        // a hash added afterwards is what condemned the file. Taking
+        // the colour and the mark from the phase would put a green
+        // tick next to the words "Integrity check failed".
+        let (mark, color, label) = if integrity_failed {
+            (
+                crate::gui::widget::Mark::Cross,
+                t.status_danger,
+                "Integrity check failed".to_owned(),
+            )
         } else {
-            label
+            (phase_mark(phase), color, label)
         };
         cell(
-            status_mark(phase_mark(phase), color, label, 12.0),
+            status_mark(mark, color, label, 12.0),
             Length::Fixed(m.columns.width(SortColumn::Status as usize)),
             Alignment::Start,
         )
