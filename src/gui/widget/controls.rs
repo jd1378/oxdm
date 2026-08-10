@@ -197,6 +197,9 @@ pub fn checkbox<'a, M: Clone + 'a>(
     cb.into()
 }
 
+/// Rows an open dropdown shows before it starts scrolling.
+const MENU_MAX_ROWS: usize = 8;
+
 /// Dropdown styled like the design's Combo: H_MD, bg_raised,
 /// border_subtle, chevron handle.
 pub fn combo<'a, M, T>(
@@ -223,7 +226,18 @@ where
             width,
         );
     }
+    // Rows in the open menu, at most. Left to itself the menu takes
+    // whatever space is above or below the field, which is rarely a
+    // whole number of rows — so the list ended on a row sliced through
+    // the middle, spilling over the menu's own border and onto the
+    // field. A height counted in whole rows cannot end mid-row.
+    //
+    // Each row is exactly `control::H_MD` tall: the menu inherits the
+    // field's padding, and `line height + padding.y()` is how the menu
+    // measures one.
+    let rows = options.len().min(MENU_MAX_ROWS) as f32;
     let list = pick_list(options, selected, on_select)
+        .menu_height(Length::Fixed(rows * theme::control::H_MD))
         .width(Length::Fill)
         .text_size(13.0)
         .font(theme::BODY)
