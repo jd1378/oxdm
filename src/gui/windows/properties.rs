@@ -71,19 +71,18 @@ pub enum Tab {
     Headers,
 }
 
+/// What one connected Properties window starts from.
+#[derive(Clone)]
+pub struct Session {
+    client: Arc<Client>,
+    entry: JobEntryView,
+    settings: crate::domain::Settings,
+    queues: Vec<(crate::domain::QueueId, String)>,
+}
+
 #[derive(Clone)]
 pub enum Msg {
-    Connected(
-        Result<
-            Box<(
-                Arc<Client>,
-                JobEntryView,
-                crate::domain::Settings,
-                Vec<(crate::domain::QueueId, String)>,
-            )>,
-            String,
-        >,
-    ),
+    Connected(Result<Box<Session>, String>),
     Entry(Box<JobEntryView>),
     Daemon(DaemonSignal),
     Window(WindowControl),
@@ -292,7 +291,12 @@ pub fn boot() -> (App, Task<Msg>) {
                     .iter()
                     .map(|q| (q.id, q.name.clone()))
                     .collect::<Vec<_>>();
-                Ok(Box::new((client, entry, snap.settings, queues)))
+                Ok(Box::new(Session {
+                    client,
+                    entry,
+                    settings: snap.settings,
+                    queues,
+                }))
             },
             Msg::Connected,
         ),
@@ -432,7 +436,12 @@ fn hydrate(st: &mut State) {
 pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
     match msg {
         Msg::Connected(Ok(boxed)) => {
-            let (client, entry, settings, queues) = *boxed;
+            let Session {
+                client,
+                entry,
+                settings,
+                queues,
+            } = *boxed;
             let mut st = State {
                 tokens: Tokens::from_settings(&settings),
                 id: entry.job.id,
