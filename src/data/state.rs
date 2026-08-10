@@ -767,9 +767,11 @@ impl AppState {
             .await
             .values()
             .filter(|e| {
-                e.job.queue_id == id
-                    && e.running.load(Ordering::Acquire)
-                    && e.phase() != Phase::Assembling
+                // By phase, not by the `running` flag: a job that is
+                // evaluating or reconnecting is a download this queue
+                // is doing, and the flag lags the phase by a moment at
+                // both ends of a run.
+                e.job.queue_id == id && e.phase().is_running() && e.phase() != Phase::Assembling
             })
             .map(|e| e.job.id)
             .collect();
@@ -820,6 +822,12 @@ impl AppState {
                 .await
                 .get(&queue_id)
                 .is_some_and(|t| t.queue_run);
+            tracing::warn!(
+                ?queue_id,
+                queue_run,
+                exiting = state.is_exiting(),
+                "DBG fill enter"
+            );
             if state.is_exiting() || !queue_run {
                 return;
             }
@@ -843,6 +851,13 @@ impl AppState {
                         .filter(|e| e.job.queue_id == queue_id && e.phase().is_running())
                         .count();
                     if running_global >= global_cap || running_here >= queue_cap {
+                        tracing::warn!(
+                            running_global,
+                            global_cap,
+                            running_here,
+                            queue_cap,
+                            "DBG fill: no room"
+                        );
                         return;
                     }
                     // Queued and paused, never failed. A pause is "not
@@ -2633,14 +2648,20 @@ impl AppState {
         // First started job in a queue also fires QueueStarted, so a
         // manual single-job Start surfaces on_start hooks the same as a
         // schedule-driven start_queue.
-        if self
-            .active_queues
-            .write()
-            .await
-            .insert(queue_id, QueueRunTally::default())
-            .is_none()
         {
-            let _ = self.events.send(DomainEvent::QueueStarted { id: queue_id });
+            // Join the queue's run, never replace it. `insert` here
+            // overwrote the tally on every start — which threw away the
+            // completed/failed counts the finish notification reports,
+            // and cleared the flag that says this is a queue run, so
+            // the queue stopped feeding itself after the first job it
+            // started this way.
+            let mut active = self.active_queues.write().await;
+            let fresh = !active.contains_key(&queue_id);
+            active.entry(queue_id).or_default();
+            drop(active);
+            if fresh {
+                let _ = self.events.send(DomainEvent::QueueStarted { id: queue_id });
+            }
         }
         tokio::spawn(async move {
             let outcome = runner.run(job_clone).await;
@@ -2668,21 +2689,6 @@ impl AppState {
                     },
                 )
                 .await;
-            // After every terminal outcome, ask the watcher whether this
-            // job's queue has now drained completely; if so it emits
-            // QueueFinished. Doing it here avoids a second subscriber
-            // task with a different view of "still running".
-            {
-                let finish_state = state.clone();
-                tokio::spawn(async move {
-                    // A slot just came free: give it to the next job
-                    // waiting in this queue before asking whether the
-                    // queue is done, or a queue with ten downloads and
-                    // room for three would run three and stop.
-                    finish_state.fill_queue_slots(queue_id, Some(id)).await;
-                    finish_state.maybe_finish_queue(queue_id).await;
-                });
-            }
             match outcome {
                 Ok(o) => {
                     // Row verdicts came from the run itself, which
@@ -2791,6 +2797,23 @@ impl AppState {
                         let _ = state.events.send(DomainEvent::JobFailed { id, error: err });
                     }
                 }
+            }
+            // Only now — with the phase written — does the queue get
+            // asked what to do next. Run before it, this raced the
+            // outcome: the job whose run had just ended still counted
+            // as running, so a queue with one slot saw no room, started
+            // nothing, and stopped for good the moment the phase
+            // flipped underneath it.
+            {
+                let finish_state = state.clone();
+                tokio::spawn(async move {
+                    // A slot just came free: give it to the next job
+                    // waiting in this queue before asking whether the
+                    // queue is done, or a queue with ten downloads and
+                    // room for three would run three and stop.
+                    finish_state.fill_queue_slots(queue_id, Some(id)).await;
+                    finish_state.maybe_finish_queue(queue_id).await;
+                });
             }
             let _ = token; // keep alive for the run
             // Last thing the task does: whoever is waiting for runs to
@@ -3672,6 +3695,9 @@ enum JobOutcome {
     Cancelled,
 }
 
+/// Stand-in key for a retry that belongs to no single part.
+const WHOLE_JOB_RETRY: &str = "\u{0}whole-job";
+
 /// AAD identity for secrets that belong to the app rather than to a
 /// job. The nil UUID is never a real `JobId`, so a global ciphertext
 /// cannot be replayed as a job's and vice versa.
@@ -3865,6 +3891,25 @@ impl LiveBridge for StateLiveBridge {
                     {
                         entry.set_phase(Phase::Downloading);
                     }
+                }
+            }
+            // The wait before the next attempt. odl announces it when
+            // the wait *starts*, and `PartRetrying` only when the retry
+            // fires — so without this the row said "Downloading" for
+            // the whole wait and flickered through Reconnecting for an
+            // instant afterwards. A download waiting to try again is
+            // the state the user wants named.
+            OdlProgressEvent::RetryScheduled { ulid, .. } => {
+                if let Ok(jobs) = state.jobs.try_read()
+                    && let Some(entry) = jobs.get(&id)
+                {
+                    if let Ok(mut retrying) = entry.retrying_parts.lock() {
+                        // A whole-download retry (the initial probe) has
+                        // no part to key on; it clears when the next
+                        // phase change lands.
+                        retrying.insert(ulid.clone().unwrap_or_else(|| WHOLE_JOB_RETRY.to_owned()));
+                    }
+                    entry.set_phase(Phase::Reconnecting);
                 }
             }
             OdlProgressEvent::PartRetrying { ulid, .. } => {

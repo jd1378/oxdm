@@ -13,6 +13,13 @@ async fn main() {
         eprintln!("no queue named {want}");
         std::process::exit(2);
     };
+    if std::env::args().any(|a| a == "--stop") {
+        match client.stop_queue(q.id).await {
+            Ok(()) => println!("stopped {}", q.name),
+            Err(e) => println!("refused: {e}"),
+        }
+        return;
+    }
     match client.start_queue(q.id).await {
         Ok(()) => println!("started {}", q.name),
         Err(e) => println!("refused: {e}"),
