@@ -19,7 +19,7 @@ use crate::gui::shot::Shot;
 use crate::gui::theme::{self, Tokens};
 use crate::gui::widget::error_panel::hash_mismatch;
 use crate::gui::widget::{
-    Btn, BtnSize, TabBtn, TextInput, checkbox, eyebrow, hairline, pill_progress, status_dot, toggle,
+    Btn, BtnSize, TabBtn, TextInput, checkbox, combo, eyebrow, hairline, pill_progress, toggle,
 };
 use crate::gui::windows::add::footer;
 use crate::gui::{color, icons};
@@ -73,7 +73,17 @@ pub enum Tab {
 
 #[derive(Clone)]
 pub enum Msg {
-    Connected(Result<Box<(Arc<Client>, JobEntryView, crate::domain::Settings)>, String>),
+    Connected(
+        Result<
+            Box<(
+                Arc<Client>,
+                JobEntryView,
+                crate::domain::Settings,
+                Vec<(crate::domain::QueueId, String)>,
+            )>,
+            String,
+        >,
+    ),
     Entry(Box<JobEntryView>),
     Daemon(DaemonSignal),
     Window(WindowControl),
@@ -109,6 +119,8 @@ pub enum Msg {
     HeaderValue(usize, String),
     HeaderRemove(usize),
     HeaderAdd,
+    SetCategory(String),
+    SetQueue(String),
     // Checksums (#5)
     CsAddOpen,
     CsAddCancel,
@@ -181,6 +193,12 @@ pub struct State {
     /// Same rule as `proxy_pass_edited`, for the cookie editor.
     cookies_edited: bool,
     headers: Vec<(String, String)>,
+    /// Where the download files itself, and which queue runs it. Both
+    /// are staged like every other field on this tab and go out on
+    /// Apply.
+    category: crate::domain::Category,
+    queue: crate::domain::QueueId,
+    queues: Vec<(crate::domain::QueueId, String)>,
     adv: crate::domain::Advanced,
     checksums: Vec<Checksum>,
     // Checksums add-form (#5, design §3.4 AddChecksumForm)
@@ -269,7 +287,12 @@ pub fn boot() -> (App, Task<Msg>) {
                     .await?;
                 let entry = client.job_entry(id).await?.ok_or("job not found")?;
                 let snap = client.snapshot().await?;
-                Ok(Box::new((client, entry, snap.settings)))
+                let queues = snap
+                    .queues
+                    .iter()
+                    .map(|q| (q.id, q.name.clone()))
+                    .collect::<Vec<_>>();
+                Ok(Box::new((client, entry, snap.settings, queues)))
             },
             Msg::Connected,
         ),
@@ -342,6 +365,12 @@ fn count_changes(st: &State) -> usize {
     if st.checksums != job.checksums {
         n += 1;
     }
+    if st.category != job.category {
+        n += 1;
+    }
+    if st.queue != job.queue_id {
+        n += 1;
+    }
     n
 }
 
@@ -396,12 +425,14 @@ fn hydrate(st: &mut State) {
     st.has_stored_cookies = job.enc_cookies.is_some();
     st.cookies_edited = false;
     st.checksums = job.checksums.clone();
+    st.category = job.category;
+    st.queue = job.queue_id;
 }
 
 pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
     match msg {
         Msg::Connected(Ok(boxed)) => {
-            let (client, entry, settings) = *boxed;
+            let (client, entry, settings, queues) = *boxed;
             let mut st = State {
                 tokens: Tokens::from_settings(&settings),
                 id: entry.job.id,
@@ -426,6 +457,9 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 has_stored_cookies: false,
                 cookies_edited: false,
                 headers: Vec::new(),
+                category: entry.job.category,
+                queue: entry.job.queue_id,
+                queues,
                 adv: Default::default(),
                 checksums: Vec::new(),
                 cs_adding: false,
@@ -681,6 +715,23 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             mark(st);
             Task::none()
         }
+        Msg::SetCategory(label) => {
+            if let Some(c) = crate::domain::Category::ALL_ASSIGNABLE
+                .iter()
+                .find(|c| c.label() == label)
+            {
+                st.category = *c;
+                mark(st);
+            }
+            Task::none()
+        }
+        Msg::SetQueue(name) => {
+            if let Some((id, _)) = st.queues.iter().find(|(_, n)| *n == name) {
+                st.queue = *id;
+                mark(st);
+            }
+            Task::none()
+        }
         Msg::CsAddOpen => {
             st.cs_adding = true;
             st.checksum_hash = text_editor::Content::new();
@@ -852,6 +903,8 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                 }
             });
             let source_dirty = st.dirty_source;
+            let category = (st.category != st.entry.job.category).then_some(st.category);
+            let queue = (st.queue != st.entry.job.queue_id).then_some(st.queue);
             // Optimistic: `dirty` re-arms on Applied(Err); the
             // sub-flags only clear once the daemon confirmed.
             st.dirty = false;
@@ -861,6 +914,12 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                         client.update_job_location(id, edit).await?;
                     } else if source_dirty {
                         client.set_job_source(id, url, save_dir, filename).await?;
+                    }
+                    if let Some(category) = category {
+                        client.set_job_category(id, category).await?;
+                    }
+                    if let Some(queue) = queue {
+                        client.set_job_queue(id, queue).await?;
                     }
                     client.set_job_advanced(id, adv).await
                 },
@@ -1074,6 +1133,25 @@ fn section<'a>(t: &Tokens, label: &str, body: Element<'a, Msg>) -> Element<'a, M
     .into()
 }
 
+/// Width of the General tab's dropdowns — enough for the longest queue
+/// name without the control swallowing the row.
+const PICKER_W: f32 = 220.0;
+
+/// A labelled row whose value is a control rather than text.
+fn picker_row<'a>(t: &Tokens, label: &'a str, control: Element<'a, Msg>) -> Element<'a, Msg> {
+    row![
+        text(label)
+            .font(theme::BODY_MEDIUM)
+            .size(12.0)
+            .color(t.fg_1),
+        iced::widget::Space::new().width(Length::Fill),
+        control,
+    ]
+    .align_y(Alignment::Center)
+    .padding([6.0, theme::space::S3])
+    .into()
+}
+
 fn kv_row<'a>(t: &Tokens, label: &'a str, value: String, mono: bool) -> Element<'a, Msg> {
     row![
         text(label)
@@ -1149,8 +1227,9 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
         {
             let mut right = row![].spacing(theme::space::S2).align_y(Alignment::Center);
             if st.dirty {
-                // clay "● unsaved" dirty-dot — staged edits await Apply.
-                right = right.push(status_dot(t.action_primary, "unsaved", 11.0));
+                // No "● unsaved" dot: the Discard button beside it
+                // appears for the same reason and already counts what
+                // is staged. Settings and Queues say it once too.
                 right = right.push(
                     Btn::new(format!(
                         "Discard {} change{}",
@@ -1399,7 +1478,35 @@ fn general_tab(st: &State) -> Element<'_, Msg> {
         column![
             kv_row(t, "Name", name, true),
             row_sep(t),
-            kv_row(t, "Category", job.category.label().to_owned(), false),
+            picker_row(
+                t,
+                "Category",
+                combo(
+                    t,
+                    crate::domain::Category::ALL_ASSIGNABLE
+                        .iter()
+                        .map(|c| c.label().to_owned())
+                        .collect(),
+                    Some(st.category.label().to_owned()),
+                    Msg::SetCategory,
+                    Length::Fixed(PICKER_W),
+                ),
+            ),
+            row_sep(t),
+            picker_row(
+                t,
+                "Queue",
+                combo(
+                    t,
+                    st.queues.iter().map(|(_, n)| n.clone()).collect(),
+                    st.queues
+                        .iter()
+                        .find(|(id, _)| *id == st.queue)
+                        .map(|(_, n)| n.clone()),
+                    Msg::SetQueue,
+                    Length::Fixed(PICKER_W),
+                ),
+            ),
             row_sep(t),
             kv_row(t, "Size", size_str, true),
             row_sep(t),
