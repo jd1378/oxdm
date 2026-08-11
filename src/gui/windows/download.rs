@@ -685,16 +685,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 imposed_h: LAUNCH_H.get().copied(),
                 rate_open: false,
                 segments_open: false,
-                // A window opening on a download that is not running
-                // starts with a full window of zeros, so the chart
-                // reads as a flat line at rest rather than as an empty
-                // plot waiting for something. A running one starts
-                // empty and draws itself in from the left.
-                samples: if entry.counters.phase.is_running() {
-                    Vec::new()
-                } else {
-                    vec![0.0; CHART_SAMPLES]
-                },
+                samples: fresh_samples(entry.counters.phase.is_running()),
                 peak: 0.0,
                 anim_t: 0.0,
                 use_limiter: limit.is_some() || entry.session_speed_override > 0,
@@ -976,7 +967,7 @@ fn update_state(st: &mut State, msg: Msg) -> Task<Msg> {
             Task::none()
         }
         Msg::ResetChart => {
-            st.samples.clear();
+            st.samples = fresh_samples(st.phase().is_running());
             st.peak = 0.0;
             Task::none()
         }
@@ -1301,6 +1292,21 @@ fn final_path(entry: &JobEntryView) -> PathBuf {
             .save_dir
             .join(entry.job.filename.as_deref().unwrap_or(""))
     })
+}
+
+/// What the chart holds with no history behind it: the state a window
+/// opens in, and the state Reset puts it back to.
+///
+/// A download that is not running starts as a flat line at rest rather
+/// than an empty plot waiting for something. A running one starts empty
+/// and draws itself in from the left, so what is on screen is only ever
+/// speed that was actually measured.
+fn fresh_samples(running: bool) -> Vec<f32> {
+    if running {
+        Vec::new()
+    } else {
+        vec![0.0; CHART_SAMPLES]
+    }
 }
 
 /// Whether the rate chart still has anything to record.
