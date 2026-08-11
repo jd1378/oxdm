@@ -182,6 +182,8 @@ pub enum Msg {
     IpcPort(String),
     CopyPairing,
     Regenerate,
+    /// The daemon minted a new pairing code (or refused to).
+    Regenerated(Result<String, String>),
     ConflictHidden(String),
     // Notifications
     ShowCompleteDialog(bool),
@@ -447,6 +449,13 @@ fn normalize_categories(s: &mut Settings) {
     s.category_queues = queues.into_iter().collect();
 }
 
+/// Take a pairing code the daemon owns into both the form and the
+/// baseline it is diffed against.
+fn adopt_ext_token(st: &mut State, token: String) {
+    st.s.ext_token = token.clone();
+    st.original.ext_token = token;
+}
+
 fn mirror(st: &mut State) {
     // Whatever moved `st.s` wholesale — Reset, Discard, a reload — the
     // preview follows it, the same way picking a theme repaints on the
@@ -640,11 +649,21 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
         // `st.s` is the user's unsaved edit buffer and must not be
         // overwritten from under them.
         Msg::Daemon(DaemonSignal::Event(Event::SettingsChanged)) => {
-            crate::gui::theme::refresh_tokens(
-                st.client.clone(),
-                |t| Msg::Themed(Box::new(t)),
-                Msg::Noop,
-            )
+            let client = st.client.clone();
+            Task::batch([
+                crate::gui::theme::refresh_tokens(
+                    st.client.clone(),
+                    |t| Msg::Themed(Box::new(t)),
+                    Msg::Noop,
+                ),
+                // Same reason the regenerate reply is adopted: whoever
+                // rotated the code, this window must not hold the old
+                // one and write it back on Apply.
+                Task::perform(
+                    async move { client.snapshot().await.map(|s| s.settings.ext_token) },
+                    Msg::Regenerated,
+                ),
+            ])
         }
         Msg::Daemon(_) => Task::none(),
         Msg::Themed(t) => {
@@ -881,9 +900,22 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
         Msg::CopyPairing => iced::clipboard::write(st.s.ext_token.clone()),
         Msg::Regenerate => {
             let client = st.client.clone();
-            Task::perform(async move { client.regenerate_ext_token().await }, |_| {
-                Msg::Noop
-            })
+            Task::perform(
+                async move { client.regenerate_ext_token().await },
+                Msg::Regenerated,
+            )
+        }
+        Msg::Regenerated(Ok(token)) => {
+            // The code is the daemon's, not a field being edited here:
+            // it lands on the baseline as well as the form, so it does
+            // not read as an unsaved change — and so a later Apply
+            // sends the new code rather than putting the old one back.
+            adopt_ext_token(st, token);
+            Task::none()
+        }
+        Msg::Regenerated(Err(e)) => {
+            tracing::warn!(error = %e, "could not regenerate the pairing code");
+            Task::none()
         }
         Msg::ConflictHidden(v) => {
             use crate::domain::ConflictWhileHidden;

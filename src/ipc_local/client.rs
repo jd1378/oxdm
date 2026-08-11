@@ -289,8 +289,16 @@ impl Client {
     pub async fn update_settings(&self, s: Settings) -> Result<(), String> {
         self.expect_ok(Request::UpdateSettings(Box::new(s))).await
     }
-    pub async fn regenerate_ext_token(&self) -> Result<(), String> {
-        self.expect_ok(Request::RegenerateExtToken).await
+    pub async fn regenerate_ext_token(&self) -> Result<String, String> {
+        match self
+            .request(Request::RegenerateExtToken)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            Reply::ExtToken(t) => Ok(t),
+            Reply::Err(e) => Err(e),
+            other => Err(format!("unexpected reply: {other:?}")),
+        }
     }
     pub async fn secrets_status(&self) -> Result<bool, String> {
         match self

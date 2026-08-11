@@ -393,6 +393,8 @@ pub enum Reply {
         cookies: Option<String>,
     },
     DbStatus(Option<String>),
+    /// The pairing code the extension needs, freshly minted.
+    ExtToken(String),
 }
 
 /// Daemon → client async events.

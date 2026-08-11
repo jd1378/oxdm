@@ -683,7 +683,10 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
             Err(e) => Reply::Err(e),
         },
         Request::RegenerateExtToken => match state.regenerate_ext_token().await {
-            Ok(_) => Reply::Ok,
+            // Handed back rather than dropped: the window that asked
+            // is showing the old code and has no other way to learn
+            // the new one.
+            Ok(token) => Reply::ExtToken(token),
             Err(e) => Reply::Err(e),
         },
         Request::SecretsStatus => Reply::SecretsStatus {
