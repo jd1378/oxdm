@@ -371,12 +371,44 @@ fn switches_page(t: &theme::Tokens) -> Element<'static, Msg> {
     .into()
 }
 
+/// The download window's hero progress bar at the fractions where its
+/// rounded ends decide the picture: just started, halfway, and full.
+fn bars_page(t: &theme::Tokens) -> Element<'static, Msg> {
+    let mut col = column![].spacing(24.0).width(Length::Fill);
+    for frac in [0.04_f32, 0.17, 0.5, 1.0] {
+        col = col.push(
+            column![
+                text(format!("{}%", (frac * 100.0).round() as u32))
+                    .font(theme::BODY)
+                    .size(12.0)
+                    .color(t.fg_2),
+                widget::striped_progress(
+                    frac,
+                    Length::Fill,
+                    10.0,
+                    t.bg_sunken,
+                    t.action_primary,
+                    Some((
+                        t.action_primary,
+                        color::mix(t.action_primary, Color::WHITE, 0.35),
+                    )),
+                    true,
+                    1.7,
+                ),
+            ]
+            .spacing(6.0),
+        );
+    }
+    container(col).padding(24.0).width(Length::Fill).into()
+}
+
 fn view(state: &Probe) -> Element<'_, Msg> {
     let t = state.tokens;
     match state.page.as_str() {
         "buttons" => return page_bg(&t, buttons_page(&t)),
         "inputs" => return page_bg(&t, inputs_page(&t)),
         "switches" => return page_bg(&t, switches_page(&t)),
+        "bars" => return page_bg(&t, bars_page(&t)),
         "canvas" => {
             return iced::widget::canvas(DebugCanvas)
                 .width(Length::Fill)

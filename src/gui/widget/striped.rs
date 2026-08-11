@@ -116,10 +116,22 @@ impl<M> canvas::Program<M> for Striped {
                     // Rectangular slices, then both end caps are
                     // re-fixed with single-color rounded slices.
                     let radius = size.height / 2.0;
+                    // Where the square slices have to stop. On the left
+                    // that is the cap; on the right it is the cap only
+                    // once the fill has reached it, since a fill that
+                    // ends mid-track ends square by design. Running a
+                    // slice under the cap leaves its corners outside the
+                    // pill: the cap paints its own rounded shape and
+                    // cannot erase what is drawn beyond it.
+                    let right_limit = if fw >= size.width - radius {
+                        size.width - radius
+                    } else {
+                        fw
+                    };
                     for i in 0..n {
                         let t = i as f32 / (n - 1) as f32;
                         let x = i as f32 * slice_w;
-                        let (x0, x1) = (x.max(radius), (x + slice_w + 0.5).min(fw - 0.0));
+                        let (x0, x1) = (x.max(radius), (x + slice_w + 0.5).min(right_limit));
                         if x1 <= x0 {
                             continue;
                         }
@@ -159,8 +171,11 @@ impl<M> canvas::Program<M> for Striped {
             }
         }
 
-        // Animated stripes: 45° bands intersected with the fill rect
-        // (manual clip — see note above).
+        // Animated stripes: 45° bands intersected with the filled part
+        // of the bar *and* with the bar's own pill outline, so a band
+        // stops at the rounded end instead of squaring it off (manual
+        // clip — see note above).
+        let outline = pill_polygon(size, radius);
         if self.animate {
             let angle = 45.0_f32.to_radians();
             let perp_period = 14.0;
@@ -179,7 +194,7 @@ impl<M> canvas::Program<M> for Striped {
                     Point::new(x + band_w + h, 0.0),
                     Point::new(x + h, 0.0),
                 ];
-                if let Some(path) = clip_poly_x(&poly, 0.0, fw) {
+                if let Some(path) = band_path(&poly, 0.0, fw, &outline) {
                     frame.fill(&path, stripe);
                 }
                 x += h_period;
@@ -200,6 +215,7 @@ impl<M> canvas::Program<M> for Striped {
 /// Design `.bp-strike`: 1px bands every 11px at -45°, drawn over the
 /// full width of the bar.
 fn hatch_bands(frame: &mut canvas::Frame, size: Size, color: Color) {
+    let outline = pill_polygon(size, size.height / 2.0);
     const PERIOD: f32 = 11.0;
     const BAND: f32 = 1.5;
     let h = size.height;
@@ -216,39 +232,92 @@ fn hatch_bands(frame: &mut canvas::Frame, size: Size, color: Color) {
             Point::new(x + band_w - h, 0.0),
             Point::new(x - h, 0.0),
         ];
-        if let Some(path) = clip_poly_x(&poly, 0.0, size.width) {
+        if let Some(path) = band_path(&poly, 0.0, size.width, &outline) {
             frame.fill(&path, color);
         }
         x += h_period;
     }
 }
 
-/// Sutherland-Hodgman clip of a convex polygon against
-/// `x0 <= x <= x1`. Returns `None` when fully outside.
-fn clip_poly_x(poly: &[Point], x0: f32, x1: f32) -> Option<canvas::Path> {
-    let clip_half = |pts: &[Point], keep_left_of: f32, sign: f32| -> Vec<Point> {
-        let inside = |p: &Point| (p.x - keep_left_of) * sign <= 0.0;
+/// The bar's own outline, as a convex polygon fine enough to clip
+/// against.
+///
+/// The stripes are diagonal bands over a pill, and tiny-skia's geometry
+/// backend ignores `with_clip`, so the only way a band stops at the
+/// rounded end is for its *shape* to stop there. Eight segments per cap
+/// put the approximation within `r * 0.02` of the true arc, which at a
+/// 4px radius is under a tenth of a pixel.
+fn pill_polygon(size: Size, radius: f32) -> Vec<Point> {
+    const SEG: usize = 8;
+    let r = radius.min(size.width / 2.0).max(0.0);
+    let mut pts = Vec::with_capacity(2 * (SEG + 1));
+    let arc = |c: Point, from: f32, to: f32, out: &mut Vec<Point>| {
+        for i in 0..=SEG {
+            let a = from + (to - from) * (i as f32 / SEG as f32);
+            out.push(Point::new(c.x + r * a.cos(), c.y + r * a.sin()));
+        }
+    };
+    let (top, bottom) = (r, size.height - r);
+    // Right cap, then left: one closed ring, in one direction.
+    arc(
+        Point::new(size.width - r, top),
+        -std::f32::consts::FRAC_PI_2,
+        std::f32::consts::FRAC_PI_2,
+        &mut pts,
+    );
+    if bottom > top {
+        pts.push(Point::new(size.width - r, bottom));
+    }
+    arc(
+        Point::new(r, bottom),
+        std::f32::consts::FRAC_PI_2,
+        std::f32::consts::PI * 1.5,
+        &mut pts,
+    );
+    pts
+}
+
+/// Sutherland-Hodgman clip of `poly` against the convex `clip`
+/// polygon. Both must be convex; the bands and the pill are.
+fn clip_poly_convex(poly: &[Point], clip: &[Point]) -> Vec<Point> {
+    // Which side of an edge counts as inside depends on which way the
+    // clip polygon is wound, so ask its own area rather than assuming.
+    let area: f32 = (0..clip.len())
+        .map(|i| {
+            let (a, b) = (clip[i], clip[(i + 1) % clip.len()]);
+            a.x * b.y - b.x * a.y
+        })
+        .sum();
+    let orient = if area >= 0.0 { 1.0 } else { -1.0 };
+    let mut pts = poly.to_vec();
+    for i in 0..clip.len() {
+        if pts.len() < 3 {
+            return Vec::new();
+        }
+        let (a, b) = (clip[i], clip[(i + 1) % clip.len()]);
+        let side = |p: &Point| orient * ((b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x));
         let mut out = Vec::with_capacity(pts.len() + 2);
-        for i in 0..pts.len() {
-            let cur = pts[i];
-            let next = pts[(i + 1) % pts.len()];
-            let cur_in = inside(&cur);
-            let next_in = inside(&next);
-            if cur_in {
+        for j in 0..pts.len() {
+            let cur = pts[j];
+            let next = pts[(j + 1) % pts.len()];
+            let (dc, dn) = (side(&cur), side(&next));
+            if dc >= 0.0 {
                 out.push(cur);
             }
-            if cur_in != next_in {
-                let t = (keep_left_of - cur.x) / (next.x - cur.x);
-                out.push(Point::new(keep_left_of, cur.y + t * (next.y - cur.y)));
+            if (dc >= 0.0) != (dn >= 0.0) {
+                let t = dc / (dc - dn);
+                out.push(Point::new(
+                    cur.x + t * (next.x - cur.x),
+                    cur.y + t * (next.y - cur.y),
+                ));
             }
         }
-        out
-    };
-    let pts = clip_half(poly, x1, 1.0);
-    if pts.is_empty() {
-        return None;
+        pts = out;
     }
-    let pts = clip_half(&pts, x0, -1.0);
+    pts
+}
+
+fn poly_path(pts: &[Point]) -> Option<canvas::Path> {
     if pts.len() < 3 {
         return None;
     }
@@ -259,6 +328,42 @@ fn clip_poly_x(poly: &[Point], x0: f32, x1: f32) -> Option<canvas::Path> {
     }
     b.close();
     Some(b.build())
+}
+
+/// A band clipped to `x0..x1` *and* to the bar's rounded outline.
+fn band_path(poly: &[Point], x0: f32, x1: f32, outline: &[Point]) -> Option<canvas::Path> {
+    let pts = clip_poly_x_pts(poly, x0, x1);
+    if pts.len() < 3 {
+        return None;
+    }
+    poly_path(&clip_poly_convex(&pts, outline))
+}
+
+/// The same x-range clip, handing back the points so a second clip can
+/// run on them.
+fn clip_poly_x_pts(poly: &[Point], x0: f32, x1: f32) -> Vec<Point> {
+    let clip_half = |pts: &[Point], edge: f32, sign: f32| -> Vec<Point> {
+        let inside = |p: &Point| (p.x - edge) * sign <= 0.0;
+        let mut out = Vec::with_capacity(pts.len() + 2);
+        for i in 0..pts.len() {
+            let cur = pts[i];
+            let next = pts[(i + 1) % pts.len()];
+            let (cur_in, next_in) = (inside(&cur), inside(&next));
+            if cur_in {
+                out.push(cur);
+            }
+            if cur_in != next_in {
+                let t = (edge - cur.x) / (next.x - cur.x);
+                out.push(Point::new(edge, cur.y + t * (next.y - cur.y)));
+            }
+        }
+        out
+    };
+    let pts = clip_half(poly, x1, 1.0);
+    if pts.is_empty() {
+        return Vec::new();
+    }
+    clip_half(&pts, x0, -1.0)
 }
 
 /// Transfer-rate chart: dotted gridlines, avg dashed line, polyline +
@@ -371,5 +476,52 @@ impl<M> canvas::Program<M> for RateChart {
         }
 
         vec![frame.into_geometry()]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every point of a clipped band has to be inside the pill, or the
+    /// band is what draws the square corner the pill was hiding.
+    #[test]
+    fn a_band_never_reaches_outside_the_pill() {
+        let size = Size::new(200.0, 8.0);
+        let r = size.height / 2.0;
+        let outline = pill_polygon(size, r);
+        // A band lying right across the left cap, the case that leaked.
+        let poly = [
+            Point::new(-4.0, size.height),
+            Point::new(2.0, size.height),
+            Point::new(10.0, 0.0),
+            Point::new(4.0, 0.0),
+        ];
+        let pts = clip_poly_convex(&clip_poly_x_pts(&poly, 0.0, 100.0), &outline);
+        assert!(pts.len() >= 3, "the band survives the clip");
+        for p in &pts {
+            // Distance to the pill's spine, which is `r` at most
+            // anywhere inside it. A hair of slack for the polygon
+            // approximation of the arc.
+            let cx = p.x.clamp(r, size.width - r);
+            let d = ((p.x - cx).powi(2) + (p.y - r).powi(2)).sqrt();
+            assert!(d <= r + 0.05, "{p:?} sits {d} from the spine, r = {r}");
+        }
+    }
+
+    /// Clipping must not eat the middle of the bar, where there is no
+    /// curve to respect.
+    #[test]
+    fn a_band_in_the_straight_middle_is_left_alone() {
+        let size = Size::new(200.0, 8.0);
+        let outline = pill_polygon(size, size.height / 2.0);
+        let poly = [
+            Point::new(100.0, size.height),
+            Point::new(106.0, size.height),
+            Point::new(114.0, 0.0),
+            Point::new(108.0, 0.0),
+        ];
+        let pts = clip_poly_convex(&poly, &outline);
+        assert_eq!(pts.len(), 4, "an untouched band keeps its four corners");
     }
 }
