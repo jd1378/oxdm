@@ -30,16 +30,16 @@ use crate::gui::windows::add::footer;
 use crate::ipc_local::Client;
 use crate::ipc_local::protocol::{Event, JobEntryView};
 
-/// A minute of history, one sample a second, which is what the plot's
-/// width is scaled to.
+/// Half a minute of history at two samples a second, which is what the
+/// plot's width is scaled to.
 ///
-/// The egui build sampled twice a second and kept 120 points. Over a
-/// plot this wide that is under four pixels per sample: the line spent
-/// its detail on jitter nobody can read, and the window woke twice a
-/// second to draw it. A speed reading per second is what the number
-/// above the chart changes at anyway.
+/// The egui build sampled at the same rate but kept 120 points, which
+/// over a plot this wide is under four pixels apart: the line spent its
+/// detail on jitter nobody can read. Sixty keeps the cadence and halves
+/// the window, so what is on screen is the last thirty seconds at the
+/// resolution the speed actually moves at.
 const CHART_SAMPLES: usize = 60;
-const CHART_INTERVAL: Duration = Duration::from_secs(1);
+const CHART_INTERVAL: Duration = Duration::from_millis(500);
 
 // --- Window geometry -------------------------------------------------
 /// The window opens at its floor height: the tab bodies scroll, so extra
