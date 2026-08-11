@@ -944,10 +944,11 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
         }
         Msg::ConflictHidden(v) => {
             use crate::domain::ConflictWhileHidden;
-            st.s.conflict_while_hidden = match v.as_str() {
-                "notify_and_park" => ConflictWhileHidden::NotifyAndPark,
-                _ => ConflictWhileHidden::AutoPopup,
-            };
+            st.s.conflict_while_hidden = CONFLICT_CHOICES
+                .iter()
+                .find(|(_, label)| *label == v)
+                .map(|(value, _)| *value)
+                .unwrap_or(ConflictWhileHidden::AutoPopup);
             Task::none()
         }
         Msg::ShowCompleteDialog(v) => {
@@ -1100,6 +1101,41 @@ fn splash<'a>(msg: String) -> Element<'a, Msg> {
 }
 
 /// Design `.settings-nav .s-item`: 500 12.5px, 600 when selected.
+/// What the conflict picker offers, in the order it offers it.
+const CONFLICT_CHOICES: [(crate::domain::ConflictWhileHidden, &str); 2] = [
+    (
+        crate::domain::ConflictWhileHidden::AutoPopup,
+        "Open the download's window and ask",
+    ),
+    (
+        crate::domain::ConflictWhileHidden::NotifyAndPark,
+        "Notify me and leave it waiting",
+    ),
+];
+
+fn conflict_label(v: crate::domain::ConflictWhileHidden) -> &'static str {
+    CONFLICT_CHOICES
+        .iter()
+        .find(|(value, _)| *value == v)
+        .map(|(_, label)| *label)
+        .unwrap_or("")
+}
+
+/// One sentence on what the chosen setting actually does — including
+/// the part that costs something, since both options do.
+fn conflict_hint(v: crate::domain::ConflictWhileHidden) -> &'static str {
+    match v {
+        crate::domain::ConflictWhileHidden::AutoPopup => {
+            "The window comes to the front with the question, over whatever you \
+             were doing. The download waits for your answer rather than guessing."
+        }
+        crate::domain::ConflictWhileHidden::NotifyAndPark => {
+            "Nothing opens. The download stops, moves to the end of its queue and \
+             sends a notification; it stays stopped until you resume it."
+        }
+    }
+}
+
 const NAV_FONT: f32 = 12.5;
 /// The label's line box reserves descender room below the baseline that
 /// a word like "General" never uses, so centring the *boxes* leaves the
@@ -2183,10 +2219,10 @@ fn header_rows(st: &State) -> Vec<Element<'_, Msg>> {
 fn browser_section(st: &State) -> Element<'_, Msg> {
     let t = &st.tokens;
     let t2 = *t;
-    let conflict = match st.s.conflict_while_hidden {
-        crate::domain::ConflictWhileHidden::AutoPopup => "auto_popup",
-        crate::domain::ConflictWhileHidden::NotifyAndPark => "notify_and_park",
-    };
+    // The stored value is a key; what the user picks from is a
+    // sentence. A dropdown reading "auto_popup" made them guess what
+    // pops up, and when.
+    let conflict = conflict_label(st.s.conflict_while_hidden);
     pane(
         t,
         Section::Browser,
@@ -2246,15 +2282,34 @@ fn browser_section(st: &State) -> Element<'_, Msg> {
                 ),
                 set_row_stack(
                     t,
-                    "Conflict while the dialog is hidden",
-                    Some("What happens when a capture arrives with no visible window."),
-                    combo(
-                        t,
-                        vec!["auto_popup".to_owned(), "notify_and_park".to_owned()],
-                        Some(conflict.to_owned()),
-                        Msg::ConflictHidden,
-                        Length::Fill,
+                    "When a download needs an answer and its window is closed",
+                    Some(
+                        "Some downloads stop to ask: the file changed on the server, \
+                         the name is taken, the hash did not match.",
                     ),
+                    column![
+                        combo(
+                            t,
+                            CONFLICT_CHOICES
+                                .iter()
+                                .map(|(_, l)| (*l).to_owned())
+                                .collect(),
+                            Some(conflict.to_owned()),
+                            Msg::ConflictHidden,
+                            Length::Fill,
+                        ),
+                        // Under the picker rather than beside both
+                        // options: the choice is binary, and the one
+                        // sentence that matters is what the current
+                        // setting will do.
+                        text(conflict_hint(st.s.conflict_while_hidden))
+                            .font(theme::BODY)
+                            .size(11.0)
+                            .color(t.fg_3)
+                            .line_height(iced::widget::text::LineHeight::Relative(1.4)),
+                    ]
+                    .spacing(theme::space::S1)
+                    .into(),
                 ),
             ],
         ),

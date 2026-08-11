@@ -1543,9 +1543,6 @@ impl AppState {
         let _ = self.events.send(DomainEvent::JobFailed { id, error: err });
     }
 
-    /// Replace the extension token with a freshly generated one and
-    /// persist. Existing extension WebSocket sessions stay open until
-    /// they reconnect; new sessions must use the new value.
     /// A fresh pairing code, minted and handed back — *not* stored.
     ///
     /// Saving it here would unpair the extension the instant the button
