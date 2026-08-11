@@ -314,6 +314,7 @@ pub(crate) fn encode_phase(p: Phase) -> u8 {
         Phase::Failed => 9,
         Phase::Cancelled => 10,
         Phase::Reconnecting => 11,
+        Phase::Conflict => 12,
     }
 }
 
@@ -330,6 +331,7 @@ pub(crate) fn decode_phase(v: u8) -> Phase {
         9 => Phase::Failed,
         10 => Phase::Cancelled,
         11 => Phase::Reconnecting,
+        12 => Phase::Conflict,
         _ => Phase::Queued,
     }
 }
@@ -1534,12 +1536,16 @@ impl AppState {
         self.move_to_queue_end(id).await;
         let err = JobError::ConflictPending(msg);
         if let Some(entry) = self.jobs.read().await.get(&id) {
-            entry.set_phase(Phase::Failed);
+            entry.set_phase(Phase::Conflict);
             entry.reset_live_speed();
             if let Ok(mut g) = entry.last_error.write() {
                 *g = Some(err.clone());
             }
         }
+        // Written down: the caller persisted the job as `Failed` a
+        // moment ago, and a restart in between would lose the fact that
+        // this one is waiting on a person rather than broken.
+        self.persist_job(id).await;
         let _ = self.events.send(DomainEvent::JobFailed { id, error: err });
     }
 
@@ -2873,18 +2879,22 @@ impl AppState {
                         *g = Some(err.clone());
                     }
                     state.persist_job(id).await;
-                    // NotifyAndPark path: surface the conflict failure
-                    // as a parked job (end of queue, no auto-retry)
-                    // plus a desktop notification, instead of leaving
-                    // the user staring at a `Failed` row with no clue
-                    // what happened.
+                    // Questions, not failures: each of these stops the
+                    // download on something a person can settle, and
+                    // answering it lets the same run continue.
+                    //
+                    // A checksum mismatch is deliberately not among
+                    // them. Nothing about it is answerable — the file
+                    // on disk is not the promised one, `resume` refuses
+                    // it outright, and the only way forward is starting
+                    // over. Calling that "needs your answer" would
+                    // offer a decision that does not exist.
                     let is_conflict = matches!(
                         &err,
                         JobError::ServerConflict(_)
                             | JobError::NotResumable(_)
                             | JobError::FileChanged(_)
                             | JobError::SaveConflict(_)
-                            | JobError::ChecksumMismatch { .. }
                     );
                     if park_on_conflict && is_conflict {
                         state.park_with_conflict(id, err.to_string()).await;

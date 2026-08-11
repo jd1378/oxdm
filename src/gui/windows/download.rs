@@ -1699,6 +1699,18 @@ fn error_footer<'a>(t: &Tokens, err: &JobError) -> Element<'a, Msg> {
                 .view(t),
             cancel,
         ],
+        // A parked conflict: the bytes are fine and the question is
+        // still open, so the way forward is to run it again with this
+        // window in front — which is what Continue does, and why it is
+        // not called Retry: nothing failed.
+        JobError::ConflictPending(_) => row![
+            Btn::new("Continue")
+                .primary()
+                .icon("play")
+                .on_press(Msg::PauseResume)
+                .view(t),
+            cancel,
+        ],
         // Transient network/DNS + everything else: retry then cancel.
         _ => row![retry(), cancel],
     };
@@ -3052,6 +3064,9 @@ fn bar_look(
             None,
         ),
         Phase::Failed => (t.status_danger_bg, t.status_danger, None),
+        // Frozen like a failure, but ochre: the bytes are still good
+        // and the bar picks up where it left off once answered.
+        Phase::Conflict => (t.status_warning_bg, t.status_warning, None),
         // Reconnecting reads ochre (design `is-reconnecting`), pairing
         // with the banner above; still striped (it's a running phase).
         Phase::Reconnecting => (

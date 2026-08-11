@@ -147,9 +147,10 @@ pub fn error_meta(err: &JobError) -> (&'static str, &'static str, &'static str, 
         ),
         JobError::ConflictPending(_) => (
             "triangle-alert",
-            "Paused: needs your attention",
+            "Needs your answer",
             "CONFLICT_PENDING",
-            "A conflict came up while running in the background. Resume to retry the download.",
+            "Continue the download and oxdm asks the question again with this window \
+             in front, where you can answer it.",
         ),
         JobError::Other(_) => (
             "circle-alert",
@@ -310,8 +311,8 @@ pub fn error_detail(err: &JobError) -> String {
         }
         JobError::Io(_) => "The download stopped while reading or writing the file on disk.".into(),
         JobError::ConflictPending(_) => {
-            "This download hit a conflict while running in the background and is waiting for \
-             you to decide."
+            "This download stopped on something only you can settle and is waiting. \
+             The bytes it already has are kept."
                 .into()
         }
         JobError::Other(_) => {

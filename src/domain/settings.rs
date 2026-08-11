@@ -132,6 +132,19 @@ pub struct Settings {
     /// the other notifications.
     #[serde(default)]
     pub notify_failed: bool,
+    /// If true, a download stopped on a conflict surfaces its window on
+    /// the question. Its own pair of toggles rather than the failure
+    /// ones: a conflict is not a failure — the bytes are fine and the
+    /// download continues the moment it is answered — and it is the one
+    /// stopped state where doing nothing means it never finishes.
+    #[serde(default = "yes_default")]
+    pub show_conflict_dialog: bool,
+    /// System notification when a download stops on a conflict. On by
+    /// default, unlike the others: nothing else is coming, and a
+    /// download that quietly waits forever is worse than a
+    /// notification nobody needed.
+    #[serde(default = "yes_default")]
+    pub notify_conflict: bool,
     /// Update-available surfaces. Both are inert for now: the updater
     /// only checks on demand from the About dialog, so nothing raises
     /// these events and the settings rows stay disabled.
@@ -421,6 +434,8 @@ impl Default for Settings {
             notify_complete: false,
             show_failed_dialog: true,
             notify_failed: false,
+            show_conflict_dialog: true,
+            notify_conflict: true,
             show_update_dialog: false,
             notify_update: false,
             update_feed_url: String::new(),

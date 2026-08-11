@@ -858,6 +858,10 @@ pub fn phase_style(t: &Tokens, phase: crate::domain::Phase) -> (iced::Color, Str
         Phase::Paused | Phase::Cancelled => t.fg_3,
         Phase::Completed => t.status_success,
         Phase::Failed => t.status_danger,
+        // Ochre, not rust: nothing broke, and the difference between
+        // "this is over" and "this is waiting on you" is the whole
+        // point of the state.
+        Phase::Conflict => t.status_warning,
     };
     (color, phase.label().to_owned())
 }

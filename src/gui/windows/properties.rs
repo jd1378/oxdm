@@ -1508,6 +1508,7 @@ fn general_tab(st: &State) -> Element<'_, Msg> {
     let (phase_color, phase_label) = match phase {
         Phase::Completed => (t.status_success, "COMPLETE"),
         Phase::Failed => (t.status_danger, "FAILED"),
+        Phase::Conflict => (t.status_warning, "NEEDS YOUR ANSWER"),
         Phase::Paused => (t.fg_3, "PAUSED"),
         Phase::Queued => (t.status_info, "QUEUED"),
         Phase::Cancelled => (t.fg_3, "CANCELLED"),

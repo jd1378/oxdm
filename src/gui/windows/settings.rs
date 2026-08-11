@@ -194,6 +194,8 @@ pub enum Msg {
     NotifyComplete(bool),
     ShowFailedDialog(bool),
     NotifyFailed(bool),
+    ShowConflictDialog(bool),
+    NotifyConflict(bool),
     // Advanced
     ResetDbAsk,
     ResetDbCancel,
@@ -410,6 +412,8 @@ fn copy_section(dst: &mut Settings, src: &Settings, section: Section) {
             dst.notify_complete = src.notify_complete;
             dst.show_failed_dialog = src.show_failed_dialog;
             dst.notify_failed = src.notify_failed;
+            dst.show_conflict_dialog = src.show_conflict_dialog;
+            dst.notify_conflict = src.notify_conflict;
             dst.show_update_dialog = src.show_update_dialog;
             dst.notify_update = src.notify_update;
         }
@@ -954,6 +958,14 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
         }
         Msg::NotifyFailed(v) => {
             st.s.notify_failed = v;
+            Task::none()
+        }
+        Msg::ShowConflictDialog(v) => {
+            st.s.show_conflict_dialog = v;
+            Task::none()
+        }
+        Msg::NotifyConflict(v) => {
+            st.s.notify_conflict = v;
             Task::none()
         }
         Msg::ResetDbAsk => {
@@ -2268,23 +2280,42 @@ fn notifications_section(st: &State) -> Element<'_, Msg> {
                     toggle_row(
                         t,
                         "Show dialog",
-                        Some(
-                            "Opens the job's window on the error, where you can retry. \
-                             Covers a download stopped by a conflict too — it is waiting \
-                             for an answer, and this is where you give it.",
-                        ),
+                        Some("Opens the job's window on the error, where you can retry."),
                         st.s.show_failed_dialog,
                         Msg::ShowFailedDialog,
                     ),
                     toggle_row(
                         t,
                         "System notification",
-                        Some(
-                            "Reports the failure — or a download stopped by a conflict — \
-                             without taking focus.",
-                        ),
+                        Some("Reports the failure without taking focus."),
                         st.s.notify_failed,
                         Msg::NotifyFailed,
+                    ),
+                ],
+            ),
+            set_section(
+                t,
+                "Download needs an answer",
+                vec![
+                    toggle_row(
+                        t,
+                        "Show dialog",
+                        Some(
+                            "Opens the job's window on the question — a file that changed \
+                             on the server, a name already taken — where you answer it.",
+                        ),
+                        st.s.show_conflict_dialog,
+                        Msg::ShowConflictDialog,
+                    ),
+                    toggle_row(
+                        t,
+                        "System notification",
+                        Some(
+                            "Says the download stopped and is waiting, without taking focus. \
+                             It stays stopped until you answer.",
+                        ),
+                        st.s.notify_conflict,
+                        Msg::NotifyConflict,
                     ),
                 ],
             ),

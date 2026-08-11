@@ -50,6 +50,12 @@ pub enum Phase {
     Flushing,
     Verifying,
     Paused,
+    /// Stopped on a question only the user can answer: the file changed
+    /// on the server, the name is taken, a hash did not match. Distinct
+    /// from `Failed` — nothing went wrong that a retry would fix, and
+    /// distinct from `Paused` — the user did not ask for this and the
+    /// download will not move until they answer.
+    Conflict,
     /// oxdm-synth: at least one part is mid-retry (odl emits
     /// `PartRetrying`). The transfer is still live — the runner has not
     /// failed — so this counts as a running phase. Restored to
@@ -81,16 +87,25 @@ impl Phase {
             Self::Cancelled => "Cancelled",
             Self::Completed => "Complete",
             Self::Failed => "Failed",
+            Self::Conflict => "Needs your answer",
         }
     }
 
+    /// The run is over. A conflict counts: the download is not coming
+    /// back on its own, and a queue waiting for it to finish would wait
+    /// for as long as the user is away.
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::Failed)
+        matches!(self, Self::Completed | Self::Failed | Self::Conflict)
     }
 
     /// Can a queue run pick this job up? Everything that is not
     /// already running and not already done — a failed job is a
     /// retry, not a reason to refuse to start the queue.
+    ///
+    /// A conflict is not startable: the question that stopped it is
+    /// still unanswered, so a queue starting it again would hit the
+    /// same one and park it again. The user resumes it by hand, which
+    /// is the answer.
     pub fn is_startable(self) -> bool {
         matches!(
             self,
@@ -766,6 +781,18 @@ mod tests {
         assert!(!Phase::Reconnecting.is_post_transfer());
         assert!(!Phase::Completed.is_post_transfer());
         assert!(!Phase::Paused.is_post_transfer());
+    }
+
+    /// A queue that picked a conflict back up would hit the same
+    /// unanswered question and park it again — a loop with a
+    /// notification per lap. The run is over as far as the queue is
+    /// concerned; the user's answer is what starts it.
+    #[test]
+    fn a_conflict_waits_for_a_person_not_for_the_queue() {
+        assert!(!Phase::Conflict.is_startable());
+        assert!(Phase::Conflict.is_terminal());
+        assert!(!Phase::Conflict.is_running());
+        assert_eq!(Phase::Conflict.label(), "Needs your answer");
     }
 
     #[test]

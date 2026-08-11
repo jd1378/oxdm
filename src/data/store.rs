@@ -946,6 +946,10 @@ impl JobRow {
             phase: match phase {
                 Phase::Completed
                 | Phase::Failed
+                // Survives a restart on purpose: the question that
+                // stopped it is still unanswered, and demoting it to
+                // Paused would say the user stopped it themselves.
+                | Phase::Conflict
                 | Phase::Cancelled
                 | Phase::Queued
                 | Phase::Paused => phase,
@@ -1032,6 +1036,7 @@ fn phase_to_str(p: Phase) -> &'static str {
         Phase::Paused => "paused",
         Phase::Completed => "completed",
         Phase::Failed => "failed",
+        Phase::Conflict => "conflict",
         Phase::Cancelled => "cancelled",
     }
 }
@@ -1049,6 +1054,7 @@ fn phase_from_str(s: &str) -> Option<Phase> {
         "paused" => Phase::Paused,
         "completed" => Phase::Completed,
         "failed" => Phase::Failed,
+        "conflict" => Phase::Conflict,
         "cancelled" => Phase::Cancelled,
         _ => return None,
     })
