@@ -18,38 +18,17 @@
 //! unidentified and hosts that reject unknown clients rejected them
 //! without a name to complain about.
 
-use std::sync::LazyLock;
-
-/// Platform token, in the shape UA comments have used since Netscape:
-/// what the binary runs on, not what it pretends to be.
-#[cfg(target_os = "linux")]
-const OS_TOKEN: &str = "Linux";
-#[cfg(target_os = "macos")]
-const OS_TOKEN: &str = "Macintosh";
-#[cfg(target_os = "windows")]
-const OS_TOKEN: &str = "Windows NT";
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-const OS_TOKEN: &str = std::env::consts::OS;
-
-/// The names people recognise, rather than the target-triple ones.
-const ARCH_TOKEN: &str = match () {
-    _ if cfg!(target_arch = "aarch64") => "arm64",
-    _ if cfg!(target_arch = "x86_64") => "x86_64",
-    _ => std::env::consts::ARCH,
-};
-
-/// `oxdm/<version> (<platform>; <arch>)` — a product token and a
-/// comment, per RFC 9110 §10.1.5. No browser tokens: claiming to be
-/// Chrome is what the per-download override is for, and a default that
-/// lies makes every server log wrong.
-pub fn default_user_agent() -> &'static str {
-    static UA: LazyLock<String> = LazyLock::new(|| {
-        format!(
-            "oxdm/{} ({OS_TOKEN}; {ARCH_TOKEN})",
-            env!("CARGO_PKG_VERSION")
-        )
-    });
-    &UA
+/// `oxdm/<version>` — a bare product token, the shape curl uses.
+///
+/// No platform comment: the operating system and architecture describe
+/// the user's machine, and they change nothing about what a server
+/// sends back for a URL the user picked. What identifies this client
+/// is the name and version, which cannot be dropped without lying
+/// about who is calling. No browser tokens either — claiming to be
+/// Chrome is what the per-download override and the randomizer are
+/// for, and a default that lies makes every server log wrong.
+pub const fn default_user_agent() -> &'static str {
+    concat!("oxdm/", env!("CARGO_PKG_VERSION"))
 }
 
 /// The UA the global layer contributes: an explicit override if the
@@ -90,12 +69,12 @@ mod tests {
     use super::*;
     use crate::domain::Settings;
 
+    /// Name and version, and nothing about the machine underneath.
     #[test]
-    fn the_default_names_the_app_its_version_and_its_platform() {
+    fn the_default_names_the_app_and_its_version_only() {
         let ua = default_user_agent();
-        assert!(ua.starts_with(&format!("oxdm/{}", env!("CARGO_PKG_VERSION"))));
-        assert!(ua.contains(OS_TOKEN), "{ua}");
-        assert!(ua.contains(ARCH_TOKEN), "{ua}");
+        assert_eq!(ua, format!("oxdm/{}", env!("CARGO_PKG_VERSION")));
+        assert!(!ua.contains('('), "no platform comment: {ua}");
     }
 
     #[test]
