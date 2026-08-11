@@ -861,6 +861,12 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
             Task::none()
         }
         Msg::Submit { start_now } => {
+            // The buttons are already disabled on a clash; this is the
+            // guard for every other way a message can arrive.
+            if name_clash(st) {
+                st.error = Some("Another download already has that name.".to_owned());
+                return Task::none();
+            }
             let Some(req) = st.build_req() else {
                 st.error = Some("Enter a valid http(s) URL.".to_owned());
                 return Task::none();
@@ -1065,7 +1071,12 @@ fn ready_view(st: &AddState) -> Element<'_, Msg> {
     // the name, the size and the resumability when the download starts,
     // and someone pasting a link wants it in the list now. The buttons
     // follow the URL, so the wait is only for what the *dialog* shows.
-    let submittable = st.valid_url();
+    //
+    // A name another download holds is the one thing that does stop
+    // them. The dialog opens on a free name, so reaching this takes
+    // typing a taken one, and answering that by renaming what was just
+    // typed would be deciding it for them.
+    let submittable = st.valid_url() && !name_clash(st);
     let queue_name = st
         .queues
         .iter()
@@ -1164,6 +1175,14 @@ fn raw_name(st: &AddState) -> Option<String> {
         .filter(|n| !n.trim().is_empty())
 }
 
+/// Would this land on a name another download already holds?
+fn name_clash(st: &AddState) -> bool {
+    st.destination()
+        .filename
+        .as_deref()
+        .is_some_and(|n| st.name_taken(n))
+}
+
 fn save_note(st: &AddState) -> Option<crate::gui::save_path::Note> {
     let dest = st.destination();
     // The dialog numbered the name for the user. Nothing is wrong, but
@@ -1184,10 +1203,7 @@ fn save_note(st: &AddState) -> Option<crate::gui::save_path::Note> {
     // the daemon number it after the window has closed.
     if let Some(name) = dest.filename.as_deref().filter(|n| st.name_taken(n)) {
         return Some(crate::gui::save_path::Note {
-            text: format!(
-                "{name} is already in the list. Saving as {}",
-                st.free_name(name)
-            ),
+            text: format!("{name} is already in the list"),
             warning: true,
         });
     }
