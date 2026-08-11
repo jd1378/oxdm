@@ -101,6 +101,12 @@ pub struct JobEntry {
     /// failed job. Set by [`AppState::mark_run_intent`] at every entry
     /// point that starts a job, so it always describes the current run.
     pub manual_run: AtomicBool,
+    /// The concurrency cap sent this one back to Queued rather than
+    /// starting it. Set by [`AppState::start_job`] when it refuses an
+    /// automatic start, cleared when the job actually starts. It is
+    /// what tells [`AppState::fill_deferred_slots`] which queued jobs
+    /// are waiting on a slot as opposed to waiting on a person.
+    pub deferred_by_cap: AtomicBool,
     /// `0` = unknown, `1` = yes, `-1` = no. Set by the runner after
     /// evaluate succeeds. UI exposes the value as
     /// "Resume support: Yes / No / Unknown".
@@ -266,6 +272,7 @@ impl JobEntry {
             running: AtomicBool::new(false),
             last_error: std::sync::RwLock::new(last_error),
             manual_run: AtomicBool::new(false),
+            deferred_by_cap: AtomicBool::new(false),
             is_resumable: std::sync::atomic::AtomicI8::new(0),
             captured_response: std::sync::RwLock::new(None),
             session_speed_override: std::sync::atomic::AtomicU64::new(0),
@@ -402,6 +409,9 @@ pub struct AppState {
     /// waits on this instead of polling: a run finishes when it
     /// finishes, and only the run knows when that is.
     run_finished: tokio::sync::Notify,
+    /// Held across "count what is running, then claim a slot" so two
+    /// starts landing together cannot both see the last free slot.
+    admission: tokio::sync::Mutex<()>,
     /// Set once the daemon has been asked to quit and never cleared:
     /// the process is on its way out, waiting only for whatever cannot
     /// be interrupted. Everything that would start new work checks it,
@@ -626,6 +636,7 @@ impl AppState {
             dialog_visible_for: RwLock::new(None),
             hidden_jobs: RwLock::new(std::collections::HashSet::new()),
             run_finished: tokio::sync::Notify::new(),
+            admission: tokio::sync::Mutex::new(()),
             exiting: AtomicBool::new(false),
             main_queue_id,
             queues: RwLock::new(queues),
@@ -883,6 +894,40 @@ impl AppState {
             .await
             .map_err(|e| e.to_string())?;
 
+        // The run is declared before the first job starts, not after the
+        // loop: a job that reaches its epilogue while the loop is still
+        // going asks whether its queue is running, and a "no" there
+        // stopped the queue feeding itself for good. Rolled back below
+        // if nothing could be started at all.
+        //
+        // A fresh run gets a fresh tally, so what the finish
+        // notification reports is this run — but only when the queue was
+        // not already running, or restarting a running queue would
+        // discard the counts it has accumulated.
+        let was_running = {
+            let mut active = self.active_queues.write().await;
+            match active.get_mut(&id) {
+                Some(tally) if tally.queue_run => true,
+                // A hand-started download in this queue may have opened
+                // a tally already; this run takes it over rather than
+                // dropping the outcome it is holding.
+                Some(tally) => {
+                    tally.queue_run = true;
+                    false
+                }
+                None => {
+                    active.insert(
+                        id,
+                        QueueRunTally {
+                            queue_run: true,
+                            ..QueueRunTally::default()
+                        },
+                    );
+                    false
+                }
+            }
+        };
+
         let mut budget = cap.saturating_sub(running_now);
         let mut started_any = false;
         for (jid, phase) in snapshot {
@@ -897,29 +942,26 @@ impl AppState {
                 continue;
             }
             self.mark_run_intent(jid, false).await;
-            if self.start_job(jid).await.is_ok() {
-                started_any = true;
-                budget -= 1;
+            match self.start_job(jid).await {
+                Ok(()) => {
+                    started_any = true;
+                    budget -= 1;
+                }
+                // Every slot is busy. The job is queued and starts when
+                // one frees, so the queue run is real either way.
+                Err(JobError::Deferred) => started_any = true,
+                Err(_) => {}
             }
         }
 
         if !started_any {
+            // Nothing to run: undo the declaration rather than leaving a
+            // queue that shows Stop with nothing to stop.
+            if !was_running {
+                self.active_queues.write().await.remove(&id);
+            }
             return Ok(());
         }
-        // A fresh run, so a fresh tally — what the finish notification
-        // reports is this run, not what a hand-started download left in
-        // the entry beforehand.
-        let was_running = {
-            let mut active = self.active_queues.write().await;
-            let old = active.insert(
-                id,
-                QueueRunTally {
-                    queue_run: true,
-                    ..QueueRunTally::default()
-                },
-            );
-            old.is_some_and(|t| t.queue_run)
-        };
         if !was_running {
             let _ = self.events.send(DomainEvent::QueueStarted { id });
         }
@@ -2770,6 +2812,76 @@ impl AppState {
         }
     }
 
+    /// Wait out a run that has been told to stop but has not finished
+    /// writing its outcome yet, and hand back the entry to start from.
+    ///
+    /// Bounded: a job whose phase still says it is running is genuinely
+    /// running and returns immediately, and the wait gives up rather
+    /// than blocking a request forever if an epilogue never lands.
+    async fn settle_previous_run(&self, id: JobId, entry: Arc<JobEntry>) -> Arc<JobEntry> {
+        const GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+        let deadline = std::time::Instant::now() + GRACE;
+        let mut entry = entry;
+        while entry.running.load(Ordering::Acquire) && !entry.phase().is_running() {
+            if std::time::Instant::now() >= deadline {
+                tracing::warn!(id = %id, "previous run has not released the job; starting anyway");
+                break;
+            }
+            let finished = self.run_finished.notified();
+            tokio::select! {
+                _ = finished => {}
+                _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+            }
+            match self.job_entry(id).await {
+                Some(e) => entry = e,
+                None => break,
+            }
+        }
+        entry
+    }
+
+    /// Is every slot the user allowed already in use?
+    async fn at_concurrency_cap(&self) -> bool {
+        let cap = self.settings().await.max_concurrent_downloads;
+        at_cap(&*self.jobs.read().await, cap)
+    }
+
+    /// Start whatever the cap sent back to Queued, oldest first, until
+    /// the slots are full again.
+    ///
+    /// The queue filler only runs for a queue the user actually
+    /// started, so without this a job deferred by the global cap during
+    /// Resume all would sit Queued with nothing ever coming back for it.
+    /// Boxed for the same reason as [`Self::fill_queue_slots`]: filling
+    /// a slot starts a job, and that job's ending fills the next, so the
+    /// future's type would contain itself.
+    pub fn fill_deferred_slots(
+        self: &Arc<Self>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        let state = Arc::clone(self);
+        Box::pin(async move { state.fill_deferred_slots_inner().await })
+    }
+
+    async fn fill_deferred_slots_inner(self: &Arc<Self>) {
+        loop {
+            if self.is_exiting() || self.at_concurrency_cap().await {
+                return;
+            }
+            let next = next_deferred(&*self.jobs.read().await);
+            let Some(id) = next else { return };
+            // Cleared up front: a start that refuses for its own reasons
+            // (out of disk, secrets locked) must not be retried on every
+            // pass forever.
+            if let Some(entry) = self.job_entry(id).await {
+                entry.deferred_by_cap.store(false, Ordering::Release);
+            }
+            self.mark_run_intent(id, false).await;
+            if let Err(e) = self.start_job(id).await {
+                tracing::info!(id = %id, error = %e, "a deferred download could not start");
+            }
+        }
+    }
+
     pub async fn start_job(self: &Arc<Self>, id: JobId) -> Result<(), JobError> {
         // The daemon is winding down; starting a transfer now would
         // either be paused a moment later or hold the exit open.
@@ -2786,9 +2898,34 @@ impl AppState {
         let work_dir = self.settings.read().await.work_dir.clone();
         self.refuse_if_short_on_space(vec![self.space_need(&entry, &work_dir)])
             .await?;
+        // A run that was cancelled a moment ago still holds `running`
+        // until its task has written the outcome. Starting into that gap
+        // returned Ok having spawned nothing, so Pause → Resume in quick
+        // succession reported success and left the download stopped.
+        let entry = self.settle_previous_run(id, entry).await;
+        // Admission: the global cap governs automatic starts (a queue,
+        // Resume all, the scheduler, a capture). A start the user aimed
+        // at this one download runs regardless — being told "no" by a
+        // number they set for background work is not what pressing play
+        // means.
+        let manual = entry.manual_run.load(Ordering::Acquire);
+        let _admission = self.admission.lock().await;
+        if !manual && self.at_concurrency_cap().await {
+            entry.deferred_by_cap.store(true, Ordering::Release);
+            if entry.phase() != Phase::Queued {
+                entry.set_phase(Phase::Queued);
+                let _ = self.events.send(DomainEvent::JobUpdated {
+                    id,
+                    phase: Phase::Queued,
+                });
+            }
+            return Err(JobError::Deferred);
+        }
         if entry.running.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
+        entry.deferred_by_cap.store(false, Ordering::Release);
+        drop(_admission);
         // Fresh cancel token per run. The previous run's token may be
         // already cancelled (pause trips it); installing a new one lets
         // resume actually run instead of returning Cancelled instantly.
@@ -2976,7 +3113,6 @@ impl AppState {
             // job stuck on its last live phase, with the failure
             // recorded nowhere the UI reads.
             let entry = state.job_entry(id).await.unwrap_or(entry);
-            entry.running.store(false, Ordering::Release);
             // The run is over; a conflict answer arriving now belongs
             // to nothing. Dropped so the next run publishes its own.
             *entry.resolver.write().await = None;
@@ -3107,6 +3243,14 @@ impl AppState {
                     }
                 }
             }
+            // Released only now, with the outcome written. Cleared
+            // first, this was a lie in the gap: `start_job`'s admission
+            // check saw a free job whose phase still said Downloading,
+            // and `pause` → `resume` inside that gap returned Ok having
+            // started nothing — the UI reported success and the
+            // download stayed stopped. It is also the flag `remove`
+            // refuses on, so it must outlive the phase write.
+            entry.running.store(false, Ordering::Release);
             // Only now — with the phase written — does the queue get
             // asked what to do next. Run before it, this raced the
             // outcome: the job whose run had just ended still counted
@@ -3121,6 +3265,10 @@ impl AppState {
                     // queue is done, or a queue with ten downloads and
                     // room for three would run three and stop.
                     finish_state.fill_queue_slots(queue_id, Some(id)).await;
+                    // Then to anything the cap itself deferred, whatever
+                    // queue it belongs to — the queue filler only serves
+                    // a queue the user started.
+                    finish_state.fill_deferred_slots().await;
                     finish_state.maybe_finish_queue(queue_id).await;
                 });
             }
@@ -3208,6 +3356,11 @@ impl AppState {
             cancel: entry.cancel.lock().expect("cancel mutex poisoned").clone(),
         };
         let res = self.pause_strategy.pause(&handle).await;
+        // Whatever this download was waiting for, it is not waiting any
+        // more. Left set, a job the cap had deferred would be started
+        // again by the slot filler moments after the user paused it —
+        // and Pause all would end with a download running.
+        entry.deferred_by_cap.store(false, Ordering::Release);
         // The runner outcome handler also sets phase + zeros counters on
         // Cancelled, but the runner may take a tick to wind down. Flip
         // the visible state immediately so the dialog footer button and
@@ -3544,7 +3697,19 @@ impl AppState {
             .collect()
     }
 
+    /// Forget every "waiting for a free slot" mark.
+    ///
+    /// Pause all and Stop all mean *stop*: a queued download that was
+    /// only waiting on the cap must not be started by the slot filler a
+    /// moment later. It stays queued for the user to start again.
+    async fn clear_deferrals(&self) {
+        for entry in self.jobs.read().await.values() {
+            entry.deferred_by_cap.store(false, Ordering::Release);
+        }
+    }
+
     pub async fn pause_all(self: &Arc<Self>) {
+        self.clear_deferrals().await;
         // A job writing its final file is left alone: `pause` refuses
         // it anyway, and asking is how a shutdown ends up logging an
         // error for doing the right thing.
@@ -3918,6 +4083,27 @@ fn name_is_taken(jobs: &IndexMap<JobId, Arc<JobEntry>>, name: &str, except: Opti
 /// The downloads "Stop queue" pauses: the ones the queue is running of
 /// its own accord.
 ///
+/// Are all the slots the user allows in use?
+///
+/// Counted by phase rather than by the `running` flag: the phase is
+/// what every other surface calls "running", and the flag lags it at
+/// both ends of a run.
+fn at_cap(jobs: &IndexMap<JobId, Arc<JobEntry>>, cap: usize) -> bool {
+    let running = jobs.values().filter(|e| e.phase().is_running()).count();
+    running >= cap.max(1)
+}
+
+/// The next download the cap sent back to the queue, in list order.
+fn next_deferred(jobs: &IndexMap<JobId, Arc<JobEntry>>) -> Option<JobId> {
+    jobs.values()
+        .find(|e| {
+            e.deferred_by_cap.load(Ordering::Acquire)
+                && e.phase() == Phase::Queued
+                && !e.running.load(Ordering::Acquire)
+        })
+        .map(|e| e.job.id)
+}
+
 /// Membership is by phase, not by the `running` flag: a job that is
 /// evaluating or reconnecting is a download this queue is doing, and
 /// the flag lags the phase by a moment at both ends of a run.
@@ -3992,6 +4178,7 @@ async fn clone_entry_with_job(old: &Arc<JobEntry>, new_job: Job) -> Arc<JobEntry
         running: AtomicBool::new(old.running.load(Ordering::Acquire)),
         last_error: std::sync::RwLock::new(old.last_error.read().ok().and_then(|g| g.clone())),
         manual_run: AtomicBool::new(old.manual_run.load(Ordering::Acquire)),
+        deferred_by_cap: AtomicBool::new(old.deferred_by_cap.load(Ordering::Acquire)),
         is_resumable: std::sync::atomic::AtomicI8::new(old.is_resumable.load(Ordering::Acquire)),
         captured_response: std::sync::RwLock::new(captured_response),
         session_speed_override: std::sync::atomic::AtomicU64::new(
@@ -4512,6 +4699,52 @@ mod tests {
         assert!(!targets.contains(&by_hand), "the user asked for this one");
         assert!(!targets.contains(&assembling), "not a transfer to stop");
         assert!(!targets.contains(&paused), "nothing to stop");
+    }
+
+    #[test]
+    fn the_cap_counts_what_is_running_not_what_is_waiting() {
+        let mut jobs: IndexMap<JobId, Arc<JobEntry>> = IndexMap::new();
+        let mut add = |phase: Phase| {
+            let entry = entry_in(phase);
+            jobs.insert(entry.job.id, Arc::new(entry));
+        };
+        add(Phase::Downloading);
+        add(Phase::Evaluating);
+        add(Phase::Queued);
+        add(Phase::Paused);
+        add(Phase::Completed);
+
+        assert!(at_cap(&jobs, 2), "two running against a cap of two");
+        assert!(!at_cap(&jobs, 3), "a third slot is free");
+        // A cap of zero would mean nothing may ever run.
+        assert!(at_cap(&jobs, 0));
+        assert!(!at_cap(&IndexMap::new(), 1));
+    }
+
+    #[test]
+    fn a_deferred_download_is_picked_up_in_list_order() {
+        let mut jobs: IndexMap<JobId, Arc<JobEntry>> = IndexMap::new();
+        let mut add = |phase: Phase, deferred: bool| -> JobId {
+            let entry = entry_in(phase);
+            entry.deferred_by_cap.store(deferred, Ordering::Release);
+            let id = entry.job.id;
+            jobs.insert(id, Arc::new(entry));
+            id
+        };
+        // Queued because a person left it there, not because of the cap.
+        add(Phase::Queued, false);
+        let first = add(Phase::Queued, true);
+        add(Phase::Queued, true);
+        // Deferred once, but running now.
+        add(Phase::Downloading, true);
+
+        assert_eq!(next_deferred(&jobs), Some(first));
+    }
+
+    #[test]
+    fn nothing_is_waiting_on_a_slot_when_nothing_was_deferred() {
+        let jobs = table(&[Some("a.zip"), Some("b.zip")]);
+        assert_eq!(next_deferred(&jobs), None);
     }
 
     #[test]

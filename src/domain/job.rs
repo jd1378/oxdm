@@ -202,6 +202,13 @@ pub enum JobError {
     ChecksumMismatch { expected: String, actual: String },
     #[error("cancelled")]
     Cancelled,
+    /// Not started because every concurrent-download slot is in use.
+    /// The job is back in the queue and starts on its own when one
+    /// frees. Only automatic starts (a queue, Resume all, the
+    /// scheduler, a capture) can see this — a start the user aimed at
+    /// one download ignores the cap.
+    #[error("waiting for a free download slot")]
+    Deferred,
     #[error("io error: {0}")]
     Io(String),
     /// The destination drive ran out of space. Split from `Io` because

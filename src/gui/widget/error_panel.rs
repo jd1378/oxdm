@@ -145,6 +145,13 @@ pub fn error_meta(err: &JobError) -> (&'static str, &'static str, &'static str, 
             "CANCELLED",
             "This download was cancelled. Start it again to retry.",
         ),
+        JobError::Deferred => (
+            "clock",
+            "Waiting for a free slot",
+            "WAITING",
+            "Every download slot is in use. This one starts on its own when one frees, or \
+             start it by hand to run it now.",
+        ),
         JobError::Io(_) => (
             "hard-drive",
             "Disk write error",
@@ -299,6 +306,9 @@ pub fn error_detail(err: &JobError) -> String {
                 .into()
         }
         JobError::Cancelled => "This download was stopped before it finished.".into(),
+        JobError::Deferred => {
+            "It is queued behind the number of downloads you allow at once.".into()
+        }
         JobError::DiskFull(_) => {
             "The drive this download saves to has no room left. What has been downloaded so \
              far is kept."
