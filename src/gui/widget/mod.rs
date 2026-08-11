@@ -3,10 +3,12 @@
 pub mod button;
 pub mod cards;
 pub mod controls;
+pub mod copy;
 mod dashed;
 pub mod ellipsis;
 pub mod error_panel;
 pub mod inputs;
+pub mod integrity;
 pub mod pills;
 pub mod settings;
 pub mod striped;

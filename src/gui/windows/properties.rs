@@ -17,7 +17,6 @@ use crate::gui::format::{format_bytes_2, format_int_grouped};
 use crate::gui::ipc::DaemonSignal;
 use crate::gui::shot::Shot;
 use crate::gui::theme::{self, Tokens};
-use crate::gui::widget::error_panel::hash_mismatch;
 use crate::gui::widget::{
     Btn, BtnSize, TabBtn, TextInput, checkbox, combo, eyebrow, hairline, pill_progress, toggle,
 };
@@ -80,6 +79,16 @@ pub struct Session {
     queues: Vec<(crate::domain::QueueId, String)>,
 }
 
+/// Which copy button was pressed. Row indices, so a list that changes
+/// under the confirmation simply drops it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyTarget {
+    Url,
+    Hash(usize),
+    Expected(usize),
+    Got(usize),
+}
+
 #[derive(Clone)]
 pub enum Msg {
     Connected(Result<Box<Session>, String>),
@@ -118,6 +127,8 @@ pub enum Msg {
     HeaderValue(usize, String),
     HeaderRemove(usize),
     HeaderAdd,
+    /// A copy button's confirmation has run its course.
+    CopyExpired,
     SetCategory(String),
     SetQueue(String),
     // Checksums (#5)
@@ -132,7 +143,7 @@ pub enum Msg {
     /// Verify finished for the row identified by (algo, saved hash) —
     /// identity, not index, so a concurrent remove can't misfile it.
     CsVerifyFailed(String),
-    CsCopy(String),
+    CsCopy(CopyTarget, String),
     // Settings refresh (theme + will-send headers stay current)
     SettingsRefreshed(Box<crate::domain::Settings>),
     // Footer
@@ -200,6 +211,9 @@ pub struct State {
     queues: Vec<(crate::domain::QueueId, String)>,
     adv: crate::domain::Advanced,
     checksums: Vec<Checksum>,
+    /// Which copy button is showing its confirmation, if any. Keyed so
+    /// two buttons in the same window answer independently.
+    copied: Option<CopyTarget>,
     // Checksums add-form (#5, design §3.4 AddChecksumForm)
     cs_adding: bool,
     cs_algo: Algo,
@@ -471,6 +485,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 queues,
                 adv: Default::default(),
                 checksums: Vec::new(),
+                copied: None,
                 cs_adding: false,
                 cs_algo: Algo::Sha256,
                 cs_auto: true,
@@ -595,7 +610,7 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             Task::none()
         }
         Msg::BrowsedSave(None) => Task::none(),
-        Msg::CopyUrl => iced::clipboard::write(st.url.clone()),
+        Msg::CopyUrl => confirm_copy(st, CopyTarget::Url, st.url.clone()),
         Msg::ProxyModeSel(i) => {
             if let Some(mode) = PROXY_MODE_VALUES.get(i) {
                 st.proxy_mode = *mode;
@@ -840,7 +855,11 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             st.cs_verify_error = Some(e);
             Task::none()
         }
-        Msg::CsCopy(s) => iced::clipboard::write(s),
+        Msg::CsCopy(what, s) => confirm_copy(st, what, s),
+        Msg::CopyExpired => {
+            st.copied = None;
+            Task::none()
+        }
         Msg::OpenFolder => {
             crate::platform::open_path(&st.entry.job.save_dir);
             Task::none()
@@ -1139,6 +1158,96 @@ fn section<'a>(t: &Tokens, label: &str, body: Element<'a, Msg>) -> Element<'a, M
             }),
     ]
     .spacing(theme::space::S1 + 2.0)
+    .into()
+}
+
+/// Put `text` on the clipboard and let the button that asked say so.
+fn confirm_copy(st: &mut State, what: CopyTarget, text: String) -> Task<Msg> {
+    st.copied = Some(what);
+    Task::batch([
+        iced::clipboard::write(text),
+        Task::perform(crate::gui::widget::copy::expire(), |()| Msg::CopyExpired),
+    ])
+}
+
+/// A failed row, laid out the way the download window's file-integrity
+/// table lays it out: the algorithm, a mismatch chip, and the
+/// expected/got pair with the computed digest struck through — plus the
+/// source and per-row actions this tab carries.
+#[allow(clippy::too_many_arguments)]
+fn mismatch_row<'a>(
+    t: &Tokens,
+    cs: &'a Checksum,
+    i: usize,
+    got: &str,
+    source_label: &'a str,
+    actions: Element<'a, Msg>,
+    copied: Option<CopyTarget>,
+) -> Element<'a, Msg> {
+    use crate::gui::widget::integrity;
+    let t2 = *t;
+    let (chip_bg, chip_fg, label, icon) = integrity::Verdict::Mismatch.chip(t);
+    let values = column![
+        integrity::hash_line(
+            t,
+            "expected",
+            &cs.hash,
+            false,
+            copied == Some(CopyTarget::Expected(i)),
+            Msg::CsCopy(CopyTarget::Expected(i), cs.hash.clone()),
+        ),
+        integrity::hash_line(
+            t,
+            "got",
+            got,
+            true,
+            copied == Some(CopyTarget::Got(i)),
+            Msg::CsCopy(CopyTarget::Got(i), got.to_owned()),
+        ),
+    ]
+    .spacing(theme::space::S1);
+    container(
+        row![
+            container(
+                text(cs.algo.label().to_owned())
+                    .font(theme::MONO_BOLD)
+                    .size(integrity::ALGO_SIZE)
+                    .color(t.fg_1)
+            )
+            .width(Length::Fixed(integrity::ALGO_W))
+            .height(Length::Fixed(integrity::LINE_H))
+            .align_y(Alignment::Center),
+            container(integrity::chip(icon, label, chip_bg, chip_fg))
+                .width(Length::Fixed(integrity::STATUS_W))
+                .height(Length::Fixed(integrity::LINE_H))
+                .align_y(Alignment::Center),
+            container(values).width(Length::Fill),
+            container(
+                text(source_label)
+                    .font(theme::MONO)
+                    .size(10.0)
+                    .color(t.fg_3)
+            )
+            .height(Length::Fixed(integrity::LINE_H))
+            .align_y(Alignment::Center),
+            container(actions)
+                .height(Length::Fixed(integrity::LINE_H))
+                .align_y(Alignment::Center),
+        ]
+        .spacing(theme::space::S2)
+        .align_y(Alignment::Start),
+    )
+    .width(Length::Fill)
+    .padding([integrity::PAD_Y, integrity::PAD_X])
+    .style(move |_| container::Style {
+        background: Some(t2.status_danger_bg.into()),
+        border: iced::Border {
+            color: integrity::DANGER_EDGE,
+            width: 1.0,
+            radius: theme::radius::XS.into(),
+        },
+        ..Default::default()
+    })
     .into()
 }
 
@@ -1564,11 +1673,13 @@ fn general_tab(st: &State) -> Element<'_, Msg> {
                             .enabled(editable)
                             .on_input(Msg::Url)
                             .view(t),
-                        Btn::new("")
-                            .secondary()
-                            .icon_only("copy")
-                            .on_press(Msg::CopyUrl)
-                            .view(t),
+                        crate::gui::widget::copy::copy_btn(
+                            "",
+                            st.copied == Some(CopyTarget::Url),
+                            Msg::CopyUrl,
+                        )
+                        .secondary()
+                        .view(t),
                     ]
                     .spacing(6.0)
                     .align_y(Alignment::Center),
@@ -1703,10 +1814,12 @@ fn checksums_tab(st: &State) -> Element<'_, Msg> {
         let can_verify = st.entry.job.status.final_path.is_some();
         let mut list = column![];
         for (i, cs) in st.checksums.iter().enumerate() {
-            // The daemon hashes the file once for every row it can
-            // check, so "verifying" is a property of the job, not of a
-            // row — and it stays true across a window that closes.
-            let verifying = st.entry.verifying;
+            // A check is running for the job, not for a row — but only
+            // the rows still waiting on a verdict are waiting on it.
+            // Painting "Verifying…" over rows that already have one
+            // took their answer away and gave nothing back.
+            let job_verifying = st.entry.verifying;
+            let verifying = job_verifying && cs.status == CsStatus::Unverified;
             let (status_color, status_label) = if verifying {
                 // Indeterminate: hashing reports no progress, and the
                 // daemon owns the run (honesty decision #5).
@@ -1731,40 +1844,57 @@ fn checksums_tab(st: &State) -> Element<'_, Msg> {
             // Server-verified hashes can never be removed; everything
             // is removable only while not running (design §3.5).
             let protected = cs.source == CsSource::Server && cs.status == CsStatus::Verified;
-            let removable = !st.locked() && !verifying && !protected;
+            let removable = !st.locked() && !job_verifying && !protected;
             let mut actions = row![].spacing(theme::space::S1).align_y(Alignment::Center);
-            if cs.status != CsStatus::Verified {
+            // Only a row with no verdict is worth checking. A verdict
+            // already answers the question, and nothing can change it
+            // without changing the hash or the file — either of which
+            // clears the verdict and brings the button back.
+            if cs.status == CsStatus::Unverified {
                 actions = actions.push(
                     Btn::new("Verify")
                         .toolbar()
                         .icon("shield-check")
                         .size(BtnSize::Sm)
                         .font_size(10.0)
-                        .enabled(can_verify && !verifying)
+                        .enabled(can_verify && !job_verifying)
                         .on_press(Msg::CsVerify(i))
                         .view(t),
                 );
             }
-            actions = actions
-                .push(
-                    Btn::new("")
-                        .toolbar()
-                        .icon_only("copy")
-                        .size(BtnSize::Sm)
-                        .on_press(Msg::CsCopy(cs.hash.clone()))
-                        .view(t),
-                )
-                .push(
-                    Btn::new("")
-                        .toolbar()
-                        .icon_only("trash-2")
-                        .size(BtnSize::Sm)
-                        .enabled(removable)
-                        .on_press(Msg::ChecksumRemove(i))
-                        .view(t),
+            // A failed row prints its hash on the EXPECTED line, which
+            // carries its own copy button; a second one beside it
+            // copies the same string twice.
+            if cs.status != CsStatus::Mismatch {
+                actions = actions.push(
+                    crate::gui::widget::copy::copy_btn(
+                        "",
+                        st.copied == Some(CopyTarget::Hash(i)),
+                        Msg::CsCopy(CopyTarget::Hash(i), cs.hash.clone()),
+                    )
+                    .toolbar()
+                    .size(BtnSize::Sm)
+                    .view(t),
                 );
-            let mut row_col = column![
-                row![
+            }
+            actions = actions.push(
+                Btn::new("")
+                    .toolbar()
+                    .icon_only("trash-2")
+                    .size(BtnSize::Sm)
+                    .enabled(removable)
+                    .on_press(Msg::ChecksumRemove(i))
+                    .view(t),
+            );
+            // A failed row *is* the integrity table: the algorithm and
+            // the verdict live in its first two columns, so printing
+            // them again above it said the same thing twice.
+            let diff = (cs.status == CsStatus::Mismatch)
+                .then_some(cs.expected.as_ref())
+                .flatten();
+            let body: Element<'_, Msg> = match diff {
+                Some(got) => mismatch_row(t, cs, i, got, source_label, actions.into(), st.copied),
+                None => row![
                     container(
                         text(cs.algo.label().to_owned())
                             .font(theme::MONO)
@@ -1782,17 +1912,10 @@ fn checksums_tab(st: &State) -> Element<'_, Msg> {
                     actions,
                 ]
                 .spacing(theme::space::S3)
-                .align_y(Alignment::Center),
-            ]
-            .spacing(theme::space::S2);
-            // Stacked Expected/Got diff on mismatch (design §3.4):
-            // Expected = the saved (publisher) hash, Got = the digest
-            // computed from the file on disk (stored in `expected`).
-            if cs.status == CsStatus::Mismatch
-                && let Some(got) = &cs.expected
-            {
-                row_col = row_col.push(hash_mismatch(t, cs.algo.label(), &cs.hash, got));
-            }
+                .align_y(Alignment::Center)
+                .into(),
+            };
+            let row_col = column![body].spacing(theme::space::S2);
             list = list.push(container(row_col).padding([8.0, theme::space::S3]));
             if i + 1 < st.checksums.len() {
                 list = list.push(row_sep(t));

@@ -122,7 +122,11 @@ pub enum Msg {
     HeaderAdd,
     RetryProbe,
     CopyText(String),
-    Submit { start_now: bool },
+    /// The error report's Copy button has confirmed for long enough.
+    CopyExpired,
+    Submit {
+        start_now: bool,
+    },
     Submitted(Result<(), String>),
     Cancel,
     WinResized(f32, f32),
@@ -156,6 +160,8 @@ pub struct AddState {
     edit_id: Option<JobId>,
 
     url: String,
+    /// The probe error's Copy button is showing its confirmation.
+    report_copied: bool,
     probe_gen: u64,
     probing: bool,
     /// Probe outcome; the error side keeps the structured `JobError`
@@ -409,6 +415,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 queues: boot.queues,
                 edit_id: boot.edit.as_ref().map(|j| j.id),
                 url: String::new(),
+                report_copied: false,
                 probe_gen: 0,
                 probing: false,
                 probed: None,
@@ -768,7 +775,17 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
             st.probing = true;
             Task::batch([fit_window(st), start_probe(st)])
         }
-        Msg::CopyText(s) => iced::clipboard::write(s),
+        Msg::CopyText(s) => {
+            st.report_copied = true;
+            Task::batch([
+                iced::clipboard::write(s),
+                Task::perform(crate::gui::widget::copy::expire(), |()| Msg::CopyExpired),
+            ])
+        }
+        Msg::CopyExpired => {
+            st.report_copied = false;
+            Task::none()
+        }
         Msg::Submit { start_now } => {
             let Some(req) = st.build_req() else {
                 st.error = Some("Enter a valid http(s) URL.".to_owned());
@@ -898,6 +915,7 @@ fn ready_view(st: &AddState) -> Element<'_, Msg> {
             PROBE_CHECKLIST,
             Some(Msg::RetryProbe),
             Msg::CopyText(crate::gui::widget::error_panel::error_report(e)),
+            st.report_copied,
         ),
         _ => detect_card(st),
     };

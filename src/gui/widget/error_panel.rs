@@ -466,6 +466,7 @@ pub fn error_recovery_block<'a, M: Clone + 'a>(
     t: &Tokens,
     err: &JobError,
     on_copy: M,
+    copied: bool,
 ) -> Option<Element<'a, M>> {
     let (tone, title, items) = recovery_copy(err)?;
     let mut list = column![].spacing(theme::space::S1);
@@ -488,13 +489,18 @@ pub fn error_recovery_block<'a, M: Clone + 'a>(
     let checks = column![eyebrow(t, title), list]
         .spacing(theme::space::S1)
         .into();
-    Some(panel_toned(t, err, tone, None, checks, on_copy))
+    Some(panel_toned(t, err, tone, None, checks, on_copy, copied))
 }
 
 /// Severe-error block (Download window shape): rust-tinted card with
 /// title + detail, a small "things to check" hint paragraph, and a
 /// quiet monospace code footer with copy.
-pub fn error_block<'a, M: Clone + 'a>(t: &Tokens, err: &JobError, on_copy: M) -> Element<'a, M> {
+pub fn error_block<'a, M: Clone + 'a>(
+    t: &Tokens,
+    err: &JobError,
+    on_copy: M,
+    copied: bool,
+) -> Element<'a, M> {
     let (_, _, _, hint) = error_meta(err);
     let checks = column![
         eyebrow(t, "things to check"),
@@ -506,7 +512,7 @@ pub fn error_block<'a, M: Clone + 'a>(t: &Tokens, err: &JobError, on_copy: M) ->
     ]
     .spacing(theme::space::S1)
     .into();
-    panel(t, err, None, checks, on_copy)
+    panel(t, err, None, checks, on_copy, copied)
 }
 
 /// Severe-error block with a bulleted static checklist and an optional
@@ -518,6 +524,7 @@ pub fn error_checklist_block<'a, M: Clone + 'a>(
     items: &'a [&'a str],
     on_retry: Option<M>,
     on_copy: M,
+    copied: bool,
 ) -> Element<'a, M> {
     let mut list = column![].spacing(theme::space::S1);
     for item in items {
@@ -547,7 +554,7 @@ pub fn error_checklist_block<'a, M: Clone + 'a>(
             .on_press(msg)
             .view(t)
     });
-    panel(t, err, retry, checks, on_copy)
+    panel(t, err, retry, checks, on_copy, copied)
 }
 
 /// Card tone. Design §3.3 draws the restart-required state in ochre:
@@ -581,10 +588,12 @@ fn panel<'a, M: Clone + 'a>(
     head_action: Option<Element<'a, M>>,
     checks: Element<'a, M>,
     on_copy: M,
+    copied: bool,
 ) -> Element<'a, M> {
-    panel_toned(t, err, Tone::Danger, head_action, checks, on_copy)
+    panel_toned(t, err, Tone::Danger, head_action, checks, on_copy, copied)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn panel_toned<'a, M: Clone + 'a>(
     t: &Tokens,
     err: &JobError,
@@ -592,6 +601,7 @@ fn panel_toned<'a, M: Clone + 'a>(
     head_action: Option<Element<'a, M>>,
     checks: Element<'a, M>,
     on_copy: M,
+    copied: bool,
 ) -> Element<'a, M> {
     let t2 = *t;
     let (tone_fg, tone_bg) = (tone.fg(t), tone.bg(t));
@@ -655,11 +665,9 @@ fn panel_toned<'a, M: Clone + 'a>(
         }),
         code_chip,
         iced::widget::Space::new().width(Length::Fill),
-        Btn::new("Copy")
+        crate::gui::widget::copy::copy_btn("Copy", copied, on_copy)
             .toolbar()
             .size(BtnSize::Sm)
-            .icon("copy")
-            .on_press(on_copy)
             .view(t),
     ]
     .spacing(theme::space::S2)

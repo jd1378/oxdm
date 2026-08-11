@@ -73,13 +73,7 @@ const TAMPER_BANNER_H: f32 = 126.0;
 const INTEGRITY_BOX_H: f32 = 80.0;
 /// `.cb-title` is 9.5px, a step under the eyebrows elsewhere.
 const CB_HEAD_SIZE: f32 = 9.5;
-/// One line of an integrity row. Pinned so the algorithm, the chip and
-/// the first value line share a centre — a stacked pair otherwise
-/// leaves them each aligned to something different.
-const CB_LINE_H: f32 = 22.0;
-/// Integrity-table row padding — tighter than a settings row's 12/14.
-const CB_PAD_Y: f32 = 8.0;
-const CB_PAD_X: f32 = 12.0;
+use crate::gui::widget::integrity::{LINE_H as CB_LINE_H, PAD_X as CB_PAD_X, PAD_Y as CB_PAD_Y};
 /// Every checksum past the first adds a row to the table.
 const CB_EXTRA_ROW_H: f32 = 39.0;
 /// The second line an integrity row grows when it has both an expected
@@ -192,28 +186,14 @@ const FILE_TILE_RADIUS: f32 = 7.0;
 const FILE_EXT_SIZE: f32 = 10.0;
 const FILE_NAME_SIZE: f32 = 13.5;
 const FILE_META_SIZE: f32 = 11.0;
-/// How long the copy button shows a check instead of its own glyph
-/// (design `setTimeout(..., 1400)`).
-const HASH_COPIED_MS: u64 = 1400;
-/// `.checksum-box` table metrics: the algorithm and status columns are
-/// fixed so the hashes line up down the box, and a hash is
-/// mid-truncated rather than wrapped.
-const CB_ALGO_W: f32 = 64.0;
-const CB_STATUS_W: f32 = 100.0;
-const CB_LABEL_W: f32 = 64.0;
-const CB_ALGO_SIZE: f32 = 11.0;
-const CB_STATUS_SIZE: f32 = 10.0;
-const CB_HASH_SIZE: f32 = 11.0;
-const CB_LABEL_SIZE: f32 = 9.0;
-/// Design truncates to `12…8`. Ours fits a little more, but the line
-/// must never wrap: the copy button shares the row, and a second line
-/// pushes it out of the box.
-const CB_HASH_CHARS: usize = 24;
-
-/// The edge every failed-integrity panel carries, and the fill they
-/// share (`Tokens::status_danger_bg`). One warning across three panels
-/// reads as one thing; three shades of rust read as three.
-const DANGER_EDGE: iced::Color = color::rust::R300;
+/// Table metrics, the verdict chip and the danger edge come from the
+/// shared integrity widget — the Properties dialog draws the same table
+/// about the same file, and two sets of numbers for it drift.
+use crate::gui::widget::integrity::{
+    ALGO_SIZE as CB_ALGO_SIZE, ALGO_W as CB_ALGO_W, DANGER_EDGE, HASH_CHARS as CB_HASH_CHARS,
+    HASH_SIZE as CB_HASH_SIZE, LABEL_SIZE as CB_LABEL_SIZE, LABEL_W as CB_LABEL_W,
+    STATUS_W as CB_STATUS_W, chip as status_chip,
+};
 
 /// `.seg-table` column widths and row metrics.
 const SEG_NUM_W: f32 = 28.0;
@@ -265,6 +245,14 @@ impl Retry {
         let left = self.until_ms - chrono::Utc::now().timestamp_millis();
         (left > 0).then(|| ((left + 999) / 1000) as u64)
     }
+}
+
+/// The page's plain copy buttons, the ones outside the integrity table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyField {
+    Url,
+    Path,
+    Report,
 }
 
 /// Which hash line in the integrity table an interaction refers to:
@@ -333,6 +321,7 @@ pub enum Msg {
     HashHover(Option<HashLine>),
     HashCopy(HashLine, String),
     HashCopied(HashLine),
+    CopyExpired(CopyField),
     /// Delete the saved file, via the confirmation.
     DeleteAsk,
     /// Escape: closes whichever confirmation is open.
@@ -345,7 +334,7 @@ pub enum Msg {
     CloseWin,
     MinimizeTray,
     // Completed view — copy / reveal / checksum verify
-    Copy(String),
+    Copy(CopyField, String),
     Reveal(PathBuf),
     WinResized(f32, f32),
     WinFocused(bool),
@@ -377,9 +366,12 @@ pub struct State {
     refusal: Option<String>,
     /// Hash line under the pointer, and the one that was just copied —
     /// the design highlights on hover and flips the copy mark to a
-    /// check for a moment (`HASH_COPIED_MS`).
+    /// check for a moment (`widget::copy::COPIED_MS`).
     hash_hover: Option<HashLine>,
     hash_copied: Option<HashLine>,
+    /// Which of the page's plain copy buttons (URL, saved path, error
+    /// report) is showing its confirmation.
+    field_copied: Option<CopyField>,
     /// Retries odl has scheduled, keyed by part. The whole-download key
     /// is `None` — a retry of the probe belongs to no segment.
     retries: std::collections::HashMap<Option<String>, Retry>,
@@ -666,6 +658,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 refusal: None,
                 hash_hover: None,
                 hash_copied: None,
+                field_copied: None,
                 retries: std::collections::HashMap::new(),
                 total_seen: None,
                 url_field: String::new(),
@@ -1216,7 +1209,23 @@ fn update_state(st: &mut State, msg: Msg) -> Task<Msg> {
             Some(shot) => shot.save_and_exit(s),
             None => Task::none(),
         },
-        Msg::Copy(s) => iced::clipboard::write(s),
+        Msg::Copy(field, s) => {
+            st.field_copied = Some(field);
+            Task::batch([
+                iced::clipboard::write(s),
+                Task::perform(crate::gui::widget::copy::expire(), move |()| {
+                    Msg::CopyExpired(field)
+                }),
+            ])
+        }
+        Msg::CopyExpired(field) => {
+            // Only clear our own: a second copy started while this one
+            // was still showing owns the mark now.
+            if st.field_copied == Some(field) {
+                st.field_copied = None;
+            }
+            Task::none()
+        }
         Msg::HashHover(line) => {
             st.hash_hover = line;
             Task::none()
@@ -1227,7 +1236,7 @@ fn update_state(st: &mut State, msg: Msg) -> Task<Msg> {
                 iced::clipboard::write(hash),
                 Task::perform(
                     async move {
-                        tokio::time::sleep(Duration::from_millis(HASH_COPIED_MS)).await;
+                        crate::gui::widget::copy::expire().await;
                     },
                     move |()| Msg::HashCopied(line),
                 ),
@@ -1478,9 +1487,17 @@ fn running_view(st: &State) -> Element<'_, Msg> {
         let block = crate::gui::widget::error_panel::error_recovery_block(
             &st.tokens,
             err,
-            Msg::Copy(report.clone()),
+            Msg::Copy(CopyField::Report, report.clone()),
+            st.field_copied == Some(CopyField::Report),
         )
-        .unwrap_or_else(|| error_block(&st.tokens, err, Msg::Copy(report)));
+        .unwrap_or_else(|| {
+            error_block(
+                &st.tokens,
+                err,
+                Msg::Copy(CopyField::Report, report),
+                st.field_copied == Some(CopyField::Report),
+            )
+        });
         crate::gui::widget::vscroll(block)
             .height(Length::Fill)
             .into()
@@ -2500,12 +2517,14 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
                 .mono()
                 .read_only(Msg::Noop)
                 .view(t),
-            Btn::new("")
-                .secondary()
-                .icon_only("copy")
-                .size(BtnSize::Md)
-                .on_press(Msg::Copy(address.clone()))
-                .view(t),
+            crate::gui::widget::copy::copy_btn(
+                "",
+                st.field_copied == Some(CopyField::Url),
+                Msg::Copy(CopyField::Url, address.clone()),
+            )
+            .secondary()
+            .size(BtnSize::Md)
+            .view(t),
         ]
         .spacing(6.0)
         .align_y(Alignment::Center),
@@ -2520,12 +2539,14 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
                 .mono()
                 .read_only(Msg::Noop)
                 .view(t),
-            Btn::new("")
-                .secondary()
-                .icon_only("copy")
-                .size(BtnSize::Md)
-                .on_press(Msg::Copy(path.clone()))
-                .view(t),
+            crate::gui::widget::copy::copy_btn(
+                "",
+                st.field_copied == Some(CopyField::Path),
+                Msg::Copy(CopyField::Path, path.clone()),
+            )
+            .secondary()
+            .size(BtnSize::Md)
+            .view(t),
             Btn::new("")
                 .secondary()
                 .icon_only("folder-open")
@@ -3058,32 +3079,6 @@ fn bar_look(
 }
 
 /// Status chip in a table row: a glyph and a word on a solid pill.
-fn status_chip<'a>(
-    icon: &'a str,
-    label: &'a str,
-    bg: iced::Color,
-    fg: iced::Color,
-) -> Element<'a, Msg> {
-    container(
-        row![
-            icons::icon(icon, 10.0, fg),
-            text(label).font(theme::BODY).size(CB_STATUS_SIZE).color(fg),
-        ]
-        .spacing(theme::space::S1)
-        .align_y(Alignment::Center),
-    )
-    .padding([2.0, 6.0])
-    .style(move |_| container::Style {
-        background: Some(bg.into()),
-        border: iced::Border {
-            radius: theme::radius::PILL.into(),
-            ..Default::default()
-        },
-        ..Default::default()
-    })
-    .into()
-}
-
 /// The bare digest out of whatever the engine reported. odl phrases a
 /// mismatch as `md5("<hex>", hex)`; the table wants the hex, and the
 /// wrapper reads as noise beside the expected value next to it.
@@ -3166,11 +3161,9 @@ fn hash_value<'a>(st: &'a State, hash: &str, line: HashLine, bad: bool) -> Eleme
     row![
         value,
         iced::widget::Space::new().width(Length::Fill),
-        Btn::new("")
+        crate::gui::widget::copy::copy_btn("", copied, Msg::HashCopy(line, owned))
             .toolbar()
-            .icon_only(if copied { "check" } else { "copy" })
             .size(BtnSize::Sm)
-            .on_press(Msg::HashCopy(line, owned))
             .view(t),
     ]
     .spacing(theme::space::S2)

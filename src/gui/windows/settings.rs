@@ -902,10 +902,7 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
             st.pair_copied = true;
             Task::batch([
                 iced::clipboard::write(st.s.ext_token.clone()),
-                Task::perform(
-                    tokio::time::sleep(std::time::Duration::from_millis(PAIR_COPIED_MS)),
-                    |()| Msg::PairCopyDone,
-                ),
+                Task::perform(crate::gui::widget::copy::expire(), |()| Msg::PairCopyDone),
             ])
         }
         Msg::PairCopyDone => {
@@ -1103,10 +1100,6 @@ fn splash<'a>(msg: String) -> Element<'a, Msg> {
 }
 
 /// Design `.settings-nav .s-item`: 500 12.5px, 600 when selected.
-/// How long the pairing code's Copy button confirms with a check —
-/// long enough to read, short enough not to look like a mode.
-const PAIR_COPIED_MS: u64 = 1400;
-
 const NAV_FONT: f32 = 12.5;
 /// The label's line box reserves descender room below the baseline that
 /// a word like "General" never uses, so centring the *boxes* leaves the
@@ -2234,11 +2227,13 @@ fn browser_section(st: &State) -> Element<'_, Msg> {
                             },
                             ..Default::default()
                         }),
-                        Btn::new(if st.pair_copied { "Copied" } else { "Copy" })
-                            .toolbar()
-                            .icon(if st.pair_copied { "check" } else { "copy" })
-                            .on_press(Msg::CopyPairing)
-                            .view(t),
+                        crate::gui::widget::copy::copy_btn(
+                            "Copy",
+                            st.pair_copied,
+                            Msg::CopyPairing,
+                        )
+                        .toolbar()
+                        .view(t),
                         Btn::new("Regenerate")
                             .toolbar()
                             .icon("rotate-cw")
