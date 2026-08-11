@@ -1291,17 +1291,16 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
 
     // A refusal belongs next to the button that was pressed, not in a
     // log the user never reads.
-    let left: Element<'_, Msg> = match &st.save_error {
-        Some(e) => row![
-            icons::icon("circle-alert", 14.0, t.status_danger),
-            text(e.clone()).font(theme::BODY).size(12.0).color(t.fg_2),
-        ]
+    // Beside Cancel rather than instead of it: a refusal is not a
+    // reason to take the way out away.
+    let mut left = row![Btn::new("Cancel").ghost().on_press(Msg::Cancel).view(t)]
         .spacing(theme::space::S2)
-        .align_y(Alignment::Center)
-        .into(),
-        None => Btn::new("Cancel").ghost().on_press(Msg::Cancel).view(t),
-    };
-    let footer_el = crate::gui::windows::add::footer(t, left, right.into());
+        .align_y(Alignment::Center);
+    if let Some(e) = &st.save_error {
+        left = left.push(icons::icon("circle-alert", 14.0, t.status_danger));
+        left = left.push(text(e.clone()).font(theme::BODY).size(12.0).color(t.fg_2));
+    }
+    let footer_el = crate::gui::windows::add::footer(t, left.into(), right.into());
 
     let page = column![
         titlebar::titlebar(t, "Settings", false, Msg::Window),
