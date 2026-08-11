@@ -42,7 +42,7 @@ pub fn note(input: &str, dest: &Destination, known_name: Option<&str>) -> Option
     let resolved = dest.display_path();
     if Path::new(input.trim()) != resolved {
         return Some(Note {
-            text: format!("Save as {}", resolved.display()),
+            text: format!("Will save to {}", resolved.display()),
             warning: false,
         });
     }
@@ -78,7 +78,7 @@ mod tests {
     fn the_note_appears_only_when_the_text_understates_where_it_goes() {
         let d = dest("/home/u/Videos", Some("clip.mkv"));
         let n = note("/home/u/Videos", &d, Some("clip.mkv")).expect("a note");
-        assert_eq!(n.text, "Save as /home/u/Videos/clip.mkv");
+        assert_eq!(n.text, "Will save to /home/u/Videos/clip.mkv");
         assert!(!n.warning);
         assert!(note("/home/u/Videos/clip.mkv", &d, Some("clip.mkv")).is_none());
         // Trailing separators and stray spaces are spelling, not a
@@ -114,6 +114,6 @@ mod tests {
     fn only_one_line_at_a_time() {
         let d = dest("/home/u/Videos", Some("clip.mkv"));
         let n = note("/home/u/Videos", &d, Some("clip.mkv")).expect("a note");
-        assert!(n.text.starts_with("Save as "));
+        assert!(n.text.starts_with("Will save to "));
     }
 }

@@ -501,7 +501,7 @@ fn save_note(st: &State) -> Option<crate::gui::save_path::Note> {
 fn save_to_block(st: &State, editable: bool) -> Element<'_, Msg> {
     let t = &st.tokens;
     let mut col = column![
-        text("Save to")
+        text("Save as")
             .font(theme::BODY_MEDIUM)
             .size(12.0)
             .color(t.fg_1),

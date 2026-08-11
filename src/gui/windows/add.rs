@@ -1,6 +1,6 @@
 //! Add / Edit download window (`oxdm gui add [<id>] [--url <u>]`).
 //! URL row + paste, detection card (empty / probing / detected /
-//! error), location & category row, queue & segments row, Advanced
+//! error), save-as row, category / queue / segments row, Advanced
 //! collapsible (Proxy / Headers / Auth / User agent / Cookies),
 //! footer with Cancel / Add-to-queue / Download-now.
 
@@ -48,9 +48,12 @@ const ADVANCED_H: f32 = 531.0;
 /// The "cannot be resumed" line and the gap above it: one 12px line of
 /// bold text plus the body column's spacing.
 const NOT_RESUMABLE_H: f32 = 27.0;
-/// The "Save as …" line under the save path, plus its gap: one 11px
-/// line of body text.
-const SAVE_NOTE_H: f32 = 22.0;
+/// The "Will save to …" line under the save path, plus its gap: an 11px
+/// line (14.3 at this line height) and the body column's 12px spacing,
+/// rounded up. Rounded *up* on purpose: a pixel short and the page
+/// grows a scrollbar to reach content that is one hairline away, which
+/// is worse than a pixel of slack nobody can see.
+const SAVE_NOTE_H: f32 = 28.0;
 /// Dash length of the empty card's outline. Short: at this size the
 /// outline is a hint that something goes here, not a fence around it.
 const DASH_LEN: f32 = 3.0;
@@ -349,7 +352,7 @@ fn wanted_height(st: &AddState) -> f32 {
     content + chrome::overhead_h()
 }
 
-/// Resize only when the "Save as" line appeared or went away. The
+/// Resize only when the "Will save to" line appeared or went away. The
 /// dialog is sized to its contents, and re-fitting on every keystroke
 /// would pull the window about while someone is typing a path.
 fn refit_if_note_changed(st: &mut AddState, had_note: bool) -> Task<Msg> {
@@ -689,7 +692,7 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
             fit_window(st)
         }
         Msg::SavePathChanged(p) => {
-            // The "Save as" line comes and goes as the path is typed,
+            // The note line comes and goes as the path is typed,
             // and the dialog is sized to its contents. Resizing only on
             // that transition keeps the window still while someone is
             // typing inside a path that already has one.
@@ -977,9 +980,16 @@ fn ready_view(st: &AddState) -> Element<'_, Msg> {
     }
 
     if st.detected().is_some() {
+        // The path first: it is the answer the dialog exists to give,
+        // and the pickers under it are the knobs that move it. Its own
+        // full-width line because it is the one field here that runs
+        // long.
+        body = body.push(labeled(t, "save as", save_field(st)));
+        if let Some(n) = save_note(st) {
+            body = body.push(save_note_line(&st.tokens, n));
+        }
         body = body.push(
             row![
-                labeled(t, "save to", save_field(st)),
                 labeled(
                     t,
                     "category",
@@ -994,34 +1004,25 @@ fn ready_view(st: &AddState) -> Element<'_, Msg> {
                         Length::Fill,
                     )
                 ),
+                labeled(
+                    t,
+                    "queue",
+                    combo(
+                        t,
+                        st.queues.iter().map(|(_, n)| n.clone()).collect(),
+                        st.queues
+                            .iter()
+                            .find(|(id, _)| *id == st.queue)
+                            .map(|(_, n)| n.clone()),
+                        Msg::SetQueue,
+                        Length::Fill,
+                    )
+                ),
+                labeled(t, "segments", segments_combo(st)),
             ]
             .spacing(theme::space::S3),
         );
-        if let Some(n) = save_note(st) {
-            body = body.push(save_note_line(&st.tokens, n));
-        }
-        body = body
-            .push(
-                row![
-                    labeled(
-                        t,
-                        "queue",
-                        combo(
-                            t,
-                            st.queues.iter().map(|(_, n)| n.clone()).collect(),
-                            st.queues
-                                .iter()
-                                .find(|(id, _)| *id == st.queue)
-                                .map(|(_, n)| n.clone()),
-                            Msg::SetQueue,
-                            Length::Fill,
-                        )
-                    ),
-                    labeled(t, "segments", segments_combo(st)),
-                ]
-                .spacing(theme::space::S3),
-            )
-            .push(advanced_section(st));
+        body = body.push(advanced_section(st));
     }
 
     if let Some(e) = &st.error {
