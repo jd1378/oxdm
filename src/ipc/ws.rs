@@ -1,7 +1,9 @@
 //! Loopback WebSocket bridge for browser extensions.
 //!
 //! Bound to `127.0.0.1:<port>` only — never any external interface.
-//! First message must be `{"token":"…"}` matching `AppState::ext_token`.
+//! The handshake's `Origin` must be a browser-extension one (or absent,
+//! for non-browser callers), and the first message must be
+//! `{"token":"…"}` matching a non-empty `AppState::ext_token`.
 //!
 //! Protocol: each post-auth frame is JSON. Two shapes accepted:
 //!   - **Tagged** — has a `kind` field (`capture` / `list_queues` /
@@ -51,20 +53,67 @@ struct AuthFrame {
     token: String,
 }
 
-async fn handle(state: Arc<AppState>, stream: tokio::net::TcpStream) -> Result<(), IpcError> {
-    let mut ws = tokio_tungstenite::accept_async(stream)
-        .await
-        .map_err(|e| IpcError::Other(e.to_string()))?;
+/// Which `Origin`s may open the bridge.
+///
+/// A browser sends `Origin` on every WebSocket handshake it makes on a
+/// page's behalf, so this is what separates "the extension we pair
+/// with" from "any site the user happens to be visiting", which can
+/// otherwise reach 127.0.0.1 freely. Extension schemes are allowed;
+/// web schemes are refused. A missing header means the caller is not a
+/// browser page at all (the CLI, a test) and is left to the token.
+fn origin_allowed(origin: Option<&str>) -> bool {
+    match origin {
+        None => true,
+        Some(o) => {
+            let o = o.trim();
+            o.starts_with("chrome-extension://")
+                || o.starts_with("moz-extension://")
+                || o.starts_with("safari-web-extension://")
+                || o.starts_with("extension://")
+        }
+    }
+}
 
-    // Auth.
-    let first = match ws.next().await {
-        Some(Ok(Message::Text(t))) => t,
-        _ => return Err(IpcError::Other("missing auth frame".into())),
+async fn handle(state: Arc<AppState>, stream: tokio::net::TcpStream) -> Result<(), IpcError> {
+    use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
+
+    let mut ws = tokio_tungstenite::accept_hdr_async(
+        stream,
+        |req: &Request, res: Response| -> Result<Response, ErrorResponse> {
+            let origin = req
+                .headers()
+                .get("origin")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
+            if origin_allowed(origin.as_deref()) {
+                return Ok(res);
+            }
+            tracing::warn!(origin = ?origin, "ws handshake refused: origin is not an extension");
+            let mut deny = ErrorResponse::new(Some("origin not allowed".into()));
+            *deny.status_mut() = tokio_tungstenite::tungstenite::http::StatusCode::FORBIDDEN;
+            Err(deny)
+        },
+    )
+    .await
+    .map_err(|e| IpcError::Other(e.to_string()))?;
+
+    // Auth. Bounded: an unauthenticated connection that says nothing
+    // holds a task and a socket for as long as it likes otherwise.
+    let first = match tokio::time::timeout(std::time::Duration::from_secs(10), ws.next()).await {
+        Ok(Some(Ok(Message::Text(t)))) => t,
+        Ok(_) => return Err(IpcError::Other("missing auth frame".into())),
+        Err(_) => {
+            let _ = ws.close(None).await;
+            return Err(IpcError::Other("auth frame timed out".into()));
+        }
     };
     let auth: AuthFrame =
         serde_json::from_str(&first).map_err(|e| IpcError::Other(format!("bad auth json: {e}")))?;
     let expected = state.ext_token().await;
-    if !expected.is_empty() && auth.token != expected {
+    // An empty stored token used to mean "accept anything", which is
+    // exactly backwards: no token means nothing has been paired yet, so
+    // there is nobody to let in.
+    if expected.is_empty() || !crate::ipc_local::auth::token_matches(&expected, &auth.token) {
         let _ = ws.close(None).await;
         return Err(IpcError::Other("auth rejected".into()));
     }
@@ -232,5 +281,26 @@ async fn dispatch(state: &Arc<AppState>, text: &str) -> CaptureResponse {
                 },
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_extension_pages_may_open_the_bridge() {
+        assert!(origin_allowed(Some("chrome-extension://abcdefg")));
+        assert!(origin_allowed(Some("moz-extension://abcdefg")));
+        // Not a browser page at all — the token is the gate there.
+        assert!(origin_allowed(None));
+    }
+
+    #[test]
+    fn a_web_page_may_not() {
+        assert!(!origin_allowed(Some("https://example.com")));
+        assert!(!origin_allowed(Some("http://localhost:3000")));
+        assert!(!origin_allowed(Some("null")));
+        assert!(!origin_allowed(Some("")));
     }
 }

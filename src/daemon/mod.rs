@@ -55,6 +55,9 @@ fn spawn_workers(
     force_tray: bool,
 ) {
     let _g = rt.enter();
+    // Cookies a previous run staged for a batch dialog that never
+    // consumed them. Before anything can stage a new one.
+    crate::ipc::batch::sweep_stale();
     {
         // A hash check the last run did not finish. Nothing waits on
         // it, and there is normally none — the marker only survives a
