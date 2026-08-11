@@ -1036,8 +1036,14 @@ impl AppState {
     }
 
     /// Watcher: after a job leaves running state, if its queue has no
-    /// more running or queued jobs, fire `QueueFinished` and clear the
-    /// active flag. Called from the runner outcome handler.
+    /// more running or queued jobs, close the run. Called from the
+    /// runner outcome handler.
+    ///
+    /// `QueueFinished` — and with it the on-finish hooks, which can
+    /// shut the machine down — only for a queue that was running. A
+    /// download the user started by hand is one download: the last one
+    /// in the queue finishing means their download finished, not that
+    /// the queue worked through its list.
     async fn maybe_finish_queue(self: &Arc<Self>, queue_id: QueueId) {
         let still_busy = self.jobs.read().await.values().any(|e| {
             e.job.queue_id == queue_id
@@ -1048,13 +1054,18 @@ impl AppState {
             return;
         }
         let mut active = self.active_queues.write().await;
-        if let Some(tally) = active.remove(&queue_id) {
-            let _ = self.events.send(DomainEvent::QueueFinished {
-                id: queue_id,
-                completed: tally.completed,
-                failed: tally.failed,
-            });
+        let Some(tally) = active.remove(&queue_id) else {
+            return;
+        };
+        drop(active);
+        if !tally.queue_run {
+            return;
         }
+        let _ = self.events.send(DomainEvent::QueueFinished {
+            id: queue_id,
+            completed: tally.completed,
+            failed: tally.failed,
+        });
     }
 
     /// Record one job's terminal outcome against its queue's current
@@ -2880,24 +2891,23 @@ impl AppState {
             id,
             phase: Phase::Evaluating,
         });
-        // First started job in a queue also fires QueueStarted, so a
-        // manual single-job Start surfaces on_start hooks the same as a
-        // schedule-driven start_queue.
-        {
-            // Join the queue's run, never replace it. `insert` here
-            // overwrote the tally on every start — which threw away the
-            // completed/failed counts the finish notification reports,
-            // and cleared the flag that says this is a queue run, so
-            // the queue stopped feeding itself after the first job it
-            // started this way.
-            let mut active = self.active_queues.write().await;
-            let fresh = !active.contains_key(&queue_id);
-            active.entry(queue_id).or_default();
-            drop(active);
-            if fresh {
-                let _ = self.events.send(DomainEvent::QueueStarted { id: queue_id });
-            }
-        }
+        // Join the queue's run, never replace it. `insert` here
+        // overwrote the tally on every start — which threw away the
+        // completed/failed counts the finish notification reports, and
+        // cleared the flag that says this is a queue run, so the queue
+        // stopped feeding itself after the first job it started this
+        // way.
+        //
+        // No `QueueStarted`: on-start hooks belong to the queue
+        // starting, and `start_queue` sends that itself. One download
+        // the user pressed play on is not the queue starting, and the
+        // entry made here only exists so that download's outcome is
+        // counted.
+        self.active_queues
+            .write()
+            .await
+            .entry(queue_id)
+            .or_default();
         tokio::spawn(async move {
             let outcome = runner.run(job_clone).await;
             // Re-read the entry: anything that rebuilds a job — a
