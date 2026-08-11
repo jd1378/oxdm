@@ -954,7 +954,10 @@ fn extensions_dialog<'a>(
     } else {
         Msg::CloseOverlay
     };
-    modal(t, base, card.into(), 560.0, Some(dismiss))
+    // Wider than the design's 560: the privacy line is one sentence
+    // and reads as one, and at 560 it wrapped mid-clause. Still well
+    // inside the 900px minimum window width.
+    modal(t, base, card.into(), 500.0, Some(dismiss))
 }
 
 pub fn secrets_locked<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg> {
