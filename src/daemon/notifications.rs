@@ -47,12 +47,17 @@ pub fn spawn(state: Arc<AppState>) {
                     if !wanted {
                         continue;
                     }
-                    let title = if conflict {
-                        "Download needs your answer"
-                    } else {
-                        "Download failed"
+                    // The body is the cause in its own words — the
+                    // title already says it is waiting, and repeating
+                    // "needs your answer" there costs the one line the
+                    // user has to work out *which* question it is.
+                    let (title, body) = match error {
+                        crate::domain::JobError::ConflictPending(cause) => {
+                            ("Download needs your answer", cause.to_string())
+                        }
+                        other => ("Download failed", other.to_string()),
                     };
-                    notify(title, &error.to_string());
+                    notify(title, &body);
                 }
                 _ => {}
             }

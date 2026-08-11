@@ -220,8 +220,14 @@ pub enum JobError {
     PermissionDenied(String),
     /// A conflict came up with no window open to ask in. The job is
     /// parked at the end of the queue; the user resumes it to answer.
-    #[error("paused due to conflict: {0}")]
-    ConflictPending(String),
+    ///
+    /// Carries the error that stopped it rather than a sentence about
+    /// it: what the user has to decide is *which* conflict this is —
+    /// a changed file is not a taken filename — and flattening it to
+    /// a string left every surface saying "there was a conflict" and
+    /// nothing more.
+    #[error("needs your answer: {0}")]
+    ConflictPending(Box<JobError>),
     #[error("{0}")]
     Other(String),
 }

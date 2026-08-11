@@ -1699,18 +1699,25 @@ fn error_footer<'a>(t: &Tokens, err: &JobError) -> Element<'a, Msg> {
                 .view(t),
             cancel,
         ],
-        // A parked conflict: the bytes are fine and the question is
-        // still open, so the way forward is to run it again with this
-        // window in front — which is what Continue does, and why it is
-        // not called Retry: nothing failed.
-        JobError::ConflictPending(_) => row![
-            Btn::new("Continue")
-                .primary()
-                .icon("play")
-                .on_press(Msg::PauseResume)
-                .view(t),
-            cancel,
-        ],
+        // A parked conflict offers what its cause offers, plus
+        // Continue: running it again with this window in front is how
+        // the question gets asked, and it is not called Retry because
+        // nothing failed. A changed file is the exception — continuing
+        // would splice two files, so only starting over is honest.
+        JobError::ConflictPending(cause) => {
+            let go = || {
+                Btn::new("Continue")
+                    .primary()
+                    .icon("play")
+                    .on_press(Msg::PauseResume)
+                    .view(t)
+            };
+            match cause.as_ref() {
+                JobError::FileChanged(_) => row![restart("Restart from 0", true), cancel],
+                JobError::NotResumable(_) => row![restart("Restart from 0", false), go(), cancel],
+                _ => row![go(), cancel],
+            }
+        }
         // Transient network/DNS + everything else: retry then cancel.
         _ => row![retry(), cancel],
     };

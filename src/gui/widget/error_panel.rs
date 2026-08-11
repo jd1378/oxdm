@@ -145,13 +145,14 @@ pub fn error_meta(err: &JobError) -> (&'static str, &'static str, &'static str, 
             "IO",
             "Couldn't write to disk. Check free space and folder permissions, or save to a different folder.",
         ),
-        JobError::ConflictPending(_) => (
-            "triangle-alert",
-            "Needs your answer",
-            "CONFLICT_PENDING",
-            "Continue the download and oxdm asks the question again with this window \
-             in front, where you can answer it.",
-        ),
+        // The framing is the conflict's; everything else is the cause's.
+        // "There was a conflict" is not something a user can act on —
+        // a changed file and a taken filename need different answers,
+        // and the code is what makes a copied report diagnosable.
+        JobError::ConflictPending(cause) => {
+            let (_, _, code, hint) = error_meta(cause);
+            ("triangle-alert", "Needs your answer", code, hint)
+        }
         JobError::Other(_) => (
             "circle-alert",
             "Something went wrong",
@@ -310,10 +311,13 @@ pub fn error_detail(err: &JobError) -> String {
                 .into()
         }
         JobError::Io(_) => "The download stopped while reading or writing the file on disk.".into(),
-        JobError::ConflictPending(_) => {
-            "This download stopped on something only you can settle and is waiting. \
-             The bytes it already has are kept."
-                .into()
+        // What stopped it, in the cause's own words, plus the one fact
+        // the parked state adds: it is waiting rather than over.
+        JobError::ConflictPending(cause) => {
+            format!(
+                "{} The download is waiting for your answer.",
+                error_detail(cause)
+            )
         }
         JobError::Other(_) => {
             "The download stopped for a reason oxdm doesn't have a better explanation for.".into()
@@ -442,6 +446,9 @@ fn recovery_copy(err: &JobError) -> Option<(Tone, &'static str, &'static [&'stat
                  save folder need room for it while it finishes.",
             ],
         ),
+        // A parked conflict gets the cause's own advice: the question
+        // it is waiting on is that error's question.
+        JobError::ConflictPending(cause) => return recovery_copy(cause),
         JobError::PermissionDenied(_) => (
             Tone::Danger,
             TRY,
@@ -750,4 +757,34 @@ pub fn hash_mismatch<'a, M: 'a>(
         ..Default::default()
     })
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A parked conflict has to say *which* conflict it is. The user
+    /// cannot answer "there was a conflict" — a file that changed on
+    /// the server and a filename already taken need different answers,
+    /// and the panel is where they read which one they have.
+    #[test]
+    fn a_parked_conflict_carries_its_cause() {
+        let cause = JobError::FileChanged("etag differs".into());
+        let parked = JobError::ConflictPending(Box::new(cause.clone()));
+
+        assert!(
+            error_detail(&parked).starts_with(&error_detail(&cause)),
+            "the cause's own words lead the detail"
+        );
+        assert_eq!(
+            error_meta(&parked).2,
+            error_meta(&cause).2,
+            "a copied report names the real error"
+        );
+        assert_eq!(error_meta(&parked).1, "Needs your answer");
+        assert!(
+            recovery_copy(&parked).is_some(),
+            "and the cause's recovery advice comes with it"
+        );
+    }
 }

@@ -1532,9 +1532,9 @@ impl AppState {
     ///
     /// "No auto-retry" is implicit: oxdm never auto-retries after a
     /// terminal phase. The user explicitly Resumes from the queue row.
-    pub async fn park_with_conflict(self: &Arc<Self>, id: JobId, msg: String) {
+    pub async fn park_with_conflict(self: &Arc<Self>, id: JobId, cause: JobError) {
         self.move_to_queue_end(id).await;
-        let err = JobError::ConflictPending(msg);
+        let err = JobError::ConflictPending(Box::new(cause));
         if let Some(entry) = self.jobs.read().await.get(&id) {
             entry.set_phase(Phase::Conflict);
             entry.reset_live_speed();
@@ -2897,7 +2897,7 @@ impl AppState {
                             | JobError::SaveConflict(_)
                     );
                     if park_on_conflict && is_conflict {
-                        state.park_with_conflict(id, err.to_string()).await;
+                        state.park_with_conflict(id, err).await;
                     } else {
                         let _ = state.events.send(DomainEvent::JobFailed { id, error: err });
                     }
