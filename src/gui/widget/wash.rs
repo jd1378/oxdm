@@ -28,7 +28,16 @@ const H: u32 = 48;
 const EXTENT: f32 = 0.92;
 
 /// Opacity at the centre.
-const PEAK: f32 = 0.9;
+const PEAK: f32 = 0.8;
+
+/// The falloff. Smoothstep, not a power curve: a squared falloff pulls
+/// the light into a tight core with a long dim skirt, which reads as a
+/// small hard glow. This keeps a broad centre and lets go gently at
+/// the rim, which is what a CSS radial-gradient looks like.
+fn falloff(d: f32) -> f32 {
+    let t = (1.0 - d).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t) * PEAK
+}
 
 /// An elliptical `tint`-to-transparent glow, centred, sized to whatever
 /// box it is drawn into.
@@ -54,10 +63,7 @@ fn render(rgb: [u8; 3]) -> image::Handle {
             let dx = (x as f32 + 0.5) / (W as f32 / 2.0) - 1.0;
             let dy = (y as f32 + 0.5) / (H as f32 / 2.0) - 1.0;
             let d = (dx * dx + dy * dy).sqrt() / EXTENT;
-            // Squared falloff: linear reads as a disc with a visible
-            // rim, this reads as light.
-            let a = (1.0 - d).clamp(0.0, 1.0).powf(2.0) * PEAK;
-            px.extend_from_slice(&[rgb[0], rgb[1], rgb[2], (a * 255.0) as u8]);
+            px.extend_from_slice(&[rgb[0], rgb[1], rgb[2], (falloff(d) * 255.0) as u8]);
         }
     }
     image::Handle::from_rgba(W, H, px)
@@ -75,8 +81,7 @@ mod tests {
         let alpha = |x: u32, y: u32| -> u8 {
             let dx = (x as f32 + 0.5) / (W as f32 / 2.0) - 1.0;
             let dy = (y as f32 + 0.5) / (H as f32 / 2.0) - 1.0;
-            let d = (dx * dx + dy * dy).sqrt() / EXTENT;
-            ((1.0 - d).clamp(0.0, 1.0).powf(2.0) * PEAK * 255.0) as u8
+            (falloff((dx * dx + dy * dy).sqrt() / EXTENT) * 255.0) as u8
         };
         assert!(alpha(W / 2, H / 2) > 200, "the centre carries the colour");
         for x in 0..W {

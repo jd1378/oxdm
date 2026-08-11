@@ -88,6 +88,9 @@ pub struct Btn<'a, M> {
     enabled: bool,
     selected: bool,
     accent: bool,
+    /// Horizontal padding, when the caller wants something other than
+    /// the size's own.
+    pad_x: Option<f32>,
     /// Render the *selected* state as the design's `.radio-pill .on`
     /// clay tint instead of the generic sunken + brand border. Used by
     /// `segmented`, so a one-of-N row reads the same everywhere.
@@ -119,6 +122,7 @@ impl<'a, M: Clone + 'a> Btn<'a, M> {
             enabled: true,
             selected: false,
             accent: false,
+            pad_x: None,
             pill: false,
             tb_metrics: false,
             danger_hover: false,
@@ -214,6 +218,13 @@ impl<'a, M: Clone + 'a> Btn<'a, M> {
     }
     pub fn font_size(mut self, size: f32) -> Self {
         self.font_size = Some(size);
+        self
+    }
+
+    /// Override the horizontal padding the size would give. For the
+    /// odd button whose proportions the design states outright.
+    pub fn pad_x(mut self, pad: f32) -> Self {
+        self.pad_x = Some(pad);
         self
     }
     pub fn icon_size(mut self, size: f32) -> Self {
@@ -434,6 +445,8 @@ impl<'a, M: Clone + 'a> Btn<'a, M> {
 
         let pad_x = if self.icon_only {
             ((height - icon_size) * 0.5).max(0.0)
+        } else if let Some(pad) = self.pad_x {
+            pad
         } else if toolbar {
             10.0
         } else {
@@ -469,6 +482,7 @@ impl<'a, M: Clone + 'a> Btn<'a, M> {
             fill_width: false,
             font_size: None,
             icon_size: None,
+            pad_x: None,
             on_press: None,
         };
 

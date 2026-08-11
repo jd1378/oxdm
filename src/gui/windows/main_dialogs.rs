@@ -602,8 +602,10 @@ pub fn remove_warning<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Ms
 // ------------------------------------------------------ browser extensions
 
 /// The art band: the 72px glyphs plus the room the wash needs to fade
-/// out in. Taller than the art on purpose — the fade is the point.
-const HERO_BAND_H: f32 = 132.0;
+/// out in. Much taller than the art on purpose — the glow reads as
+/// light on the page only if it has room to let go in; boxed tightly
+/// around the artwork it reads as a smudge behind it.
+const HERO_BAND_H: f32 = 156.0;
 
 /// The browser glyph in the hero art (design `.fr-browser-glyph`).
 const GLYPH_RADIUS: f32 = 10.0;
@@ -661,7 +663,6 @@ fn extensions_dialog<'a>(
     // Hero band (design `.fr-hero`): the flow the extension creates,
     // drawn rather than described — a browser window, an arrow, and
     // the app's own mark — over a clay wash, with the copy beneath it.
-    let tile_bg = color::mix(t.bg_surface, t.action_primary, 0.20);
 
     // `.fr-browser-glyph`: a 96×72 window with a chrome bar of three
     // dots and a download arrow in the page. Deliberately no vendor's
@@ -844,26 +845,10 @@ fn extensions_dialog<'a>(
 
     let mut list = column![].spacing(6.0);
     for (name, store, url) in BROWSER_STORES {
-        let mark = container(
-            text(name.chars().next().unwrap_or('?').to_string())
-                .font(theme::DISPLAY)
-                .size(15.0)
-                .color(t.action_primary),
-        )
-        .width(Length::Fixed(32.0))
-        .height(Length::Fixed(32.0))
-        .align_x(Alignment::Center)
-        .align_y(Alignment::Center)
-        .style(move |_| container::Style {
-            background: Some(tile_bg.into()),
-            border: iced::Border {
-                radius: theme::radius::SM.into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        });
+        // No mark: a browser's own logo is theirs, and a tile with the
+        // first letter of a name that is written beside it in full is
+        // a placeholder standing in for nothing.
         let r = row![
-            mark,
             column![
                 text(name).font(theme::BODY_BOLD).size(13.0).color(t.fg_1),
                 text(store).font(theme::MONO).size(10.5).color(t.fg_3),
@@ -879,6 +864,7 @@ fn extensions_dialog<'a>(
                 .accent(true)
                 .size(BtnSize::Sm)
                 .font_size(11.5)
+                .pad_x(11.0)
                 .icon("external-link")
                 .on_press(Msg::OpenStore(url))
                 .view(t),
@@ -904,8 +890,8 @@ fn extensions_dialog<'a>(
     let privacy = row![
         icons::icon("shield", 14.0, t.status_success),
         text(
-            "The extension stores and sends nothing about the pages you visit — only the \
-             download's address and the headers needed to fetch it.",
+            "The extension only acts on download URLs. It never stores or transmits \
+             anything about the pages you visit.",
         )
         .font(theme::BODY)
         .size(11.0)
@@ -936,7 +922,7 @@ fn extensions_dialog<'a>(
         row![
             iced::widget::Space::new().width(Length::Fill),
             Btn::new("Close")
-                .ghost()
+                .primary()
                 .on_press(Msg::CloseOverlay)
                 .view(t),
         ]
