@@ -2823,6 +2823,50 @@ impl AppState {
         }
     }
 
+    /// Take the name and folder of the file that was actually written.
+    ///
+    /// A save conflict is resolved by odl, not by oxdm: with no window
+    /// open to ask in, `AddNumberToNameAndContinue` renames the output
+    /// and carries on. Nothing wrote that name back, so the row, its
+    /// window, and Open all pointed at the name that was taken — an
+    /// unrelated file already sitting in the folder.
+    async fn adopt_final_path(&self, id: JobId, path: std::path::PathBuf) {
+        let Some(name) = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .filter(|n| !n.is_empty())
+        else {
+            return;
+        };
+        let mut jobs = self.jobs.write().await;
+        let Some(old) = jobs.get(&id).cloned() else {
+            return;
+        };
+        let dir = path.parent().map(|p| p.to_path_buf());
+        let name_differs = old.job.filename.as_deref() != Some(name.as_str());
+        let dir_differs = dir.as_ref().is_some_and(|d| *d != old.job.save_dir);
+        if !name_differs && !dir_differs {
+            return;
+        }
+        let mut job = old.job.clone();
+        job.filename = Some(name.clone());
+        if let Some(dir) = dir {
+            job.save_dir = dir;
+        }
+        let phase = old.phase();
+        let entry = clone_entry_with_job(&old, job.clone()).await;
+        jobs.insert(id, entry);
+        drop(jobs);
+        if let Err(e) = self.store.upsert_job(&job).await {
+            tracing::warn!(id = %id, error = %e, "could not record the name the file was saved under");
+        }
+        tracing::info!(id = %id, %name, "the saved file was renamed; the download follows it");
+        let _ = self
+            .events
+            .send(DomainEvent::JobFilenameResolved { id, filename: name });
+        let _ = self.events.send(DomainEvent::JobUpdated { id, phase });
+    }
+
     /// Remember the folder this job's partials went into, so a later
     /// change to the cache-folder setting cannot strand or re-fetch
     /// them. Best effort: failing to persist it only means the job
@@ -4558,8 +4602,16 @@ impl LiveBridge for StateLiveBridge {
             && let Some(entry) = jobs.get(&id)
             && let Ok(mut slot) = entry.final_path.write()
         {
-            *slot = Some(path);
+            *slot = Some(path.clone());
         }
+        // odl may have chosen a different name than the job carries —
+        // a file of that name was already in the folder, so it wrote
+        // `setup (1).exe`. Only the runtime slot used to learn that, so
+        // the row, and everything keyed off it, went on naming a file
+        // belonging to somebody else.
+        tokio::spawn(async move {
+            state.adopt_final_path(id, path).await;
+        });
     }
 
     async fn on_server_checksums(&self, id: JobId, checksums: Vec<crate::domain::Checksum>) {

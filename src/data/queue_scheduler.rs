@@ -23,6 +23,12 @@ use crate::domain::{CondKind, Queue, QueueId, QueueSchedule};
 
 const TICK: Duration = Duration::from_secs(30);
 
+/// How long a one-shot schedule with no end time stays due after its
+/// start. Long enough that a machine asleep at the appointed hour still
+/// runs the queue when it wakes; short enough that a launch days later
+/// does not resurrect it.
+const ONESHOT_WINDOW_HOURS: i64 = 12;
+
 /// Cached verdict of one queue's condition command.
 struct CmdPoll {
     /// The command the verdict belongs to; a config edit invalidates it.
@@ -153,7 +159,19 @@ fn should_run(
             }
             match stop {
                 Some(stop) => now < *stop,
-                None => false, // one-shot start with no end window
+                // No end time: start the queue and let it run until it
+                // has nothing left. `None` used to answer "not now"
+                // both before and after `start`, which made the whole
+                // one-shot option dead — the queue never ran, and
+                // nothing said why.
+                //
+                // Bounded by a window rather than open-ended, because
+                // the scheduler cannot remember across restarts that it
+                // already fired: without it, every launch weeks later
+                // would start a queue that was scheduled for one
+                // afternoon. The window is wide enough to cover a
+                // machine that was asleep when the time came.
+                None => now < *start + chrono::Duration::hours(ONESHOT_WINDOW_HOURS),
             }
         }
         QueueSchedule::Condition(set) => set.holds(available, |kind| match kind {
@@ -193,6 +211,90 @@ mod tests {
             Some(on_ac),
             Some(Duration::from_secs(idle_secs)),
         )
+    }
+
+    /// The one-shot option was dead: `stop: None` answered "not now"
+    /// at every tick, before and after the appointed time.
+    #[test]
+    fn a_one_off_schedule_with_no_end_time_fires() {
+        let now = Local::now();
+        let due = queue_with(QueueSchedule::Once {
+            start: now - chrono::Duration::minutes(1),
+            stop: None,
+        });
+        assert!(should_run(&due, now, ALL, &snap(true, true, 0), None));
+
+        let not_yet = queue_with(QueueSchedule::Once {
+            start: now + chrono::Duration::minutes(1),
+            stop: None,
+        });
+        assert!(!should_run(&not_yet, now, ALL, &snap(true, true, 0), None));
+
+        // Not resurrected days later by a fresh daemon.
+        let stale = queue_with(QueueSchedule::Once {
+            start: now - chrono::Duration::hours(ONESHOT_WINDOW_HOURS + 1),
+            stop: None,
+        });
+        assert!(!should_run(&stale, now, ALL, &snap(true, true, 0), None));
+    }
+
+    #[test]
+    fn a_one_off_schedule_with_an_end_time_is_its_window() {
+        let now = Local::now();
+        let inside = queue_with(QueueSchedule::Once {
+            start: now - chrono::Duration::minutes(5),
+            stop: Some(now + chrono::Duration::minutes(5)),
+        });
+        assert!(should_run(&inside, now, ALL, &snap(true, true, 0), None));
+
+        let past = queue_with(QueueSchedule::Once {
+            start: now - chrono::Duration::hours(2),
+            stop: Some(now - chrono::Duration::hours(1)),
+        });
+        assert!(!should_run(&past, now, ALL, &snap(true, true, 0), None));
+    }
+
+    #[test]
+    fn a_daily_window_runs_on_its_days_and_hours() {
+        let base = Local::now()
+            .with_hour(10)
+            .unwrap()
+            .with_minute(0)
+            .unwrap()
+            .with_second(0)
+            .unwrap();
+        let every_day = crate::domain::WeekDayMask::ALL;
+        let q = queue_with(QueueSchedule::Daily {
+            start: NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
+            stop: Some(NaiveTime::from_hms_opt(11, 0, 0).unwrap()),
+            days: every_day,
+        });
+        assert!(should_run(&q, base, ALL, &snap(true, true, 0), None));
+
+        let before = base.with_hour(8).unwrap();
+        assert!(!should_run(&q, before, ALL, &snap(true, true, 0), None));
+
+        // A window that wraps past midnight is inside at 23:30.
+        let overnight = queue_with(QueueSchedule::Daily {
+            start: NaiveTime::from_hms_opt(23, 0, 0).unwrap(),
+            stop: Some(NaiveTime::from_hms_opt(2, 0, 0).unwrap()),
+            days: every_day,
+        });
+        let late = base.with_hour(23).unwrap().with_minute(30).unwrap();
+        assert!(should_run(
+            &overnight,
+            late,
+            ALL,
+            &snap(true, true, 0),
+            None
+        ));
+        assert!(!should_run(
+            &overnight,
+            base,
+            ALL,
+            &snap(true, true, 0),
+            None
+        ));
     }
 
     #[test]

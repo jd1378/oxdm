@@ -993,8 +993,7 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             let client = m.client.clone();
             if m.phase(id) == Phase::Completed {
                 if let Some(job) = m.snap.jobs.iter().find(|j| j.id == id) {
-                    let path = job.save_dir.join(job.filename.as_deref().unwrap_or(""));
-                    crate::platform::open_path(&path);
+                    crate::platform::open_path(&saved_file(job));
                 }
                 Task::none()
             } else {
@@ -1935,6 +1934,19 @@ fn close_context_menu(m: &mut Main) {
 }
 
 /// Move the open submenu's window over its list, stopping at both ends.
+/// Where this download's file actually is.
+///
+/// `final_path` is what the run wrote, which is not always
+/// `save_dir/filename`: odl renames around a name already taken in the
+/// folder. Preferring it means Open opens the file this row is about,
+/// and never a stranger's file that happens to have the name.
+fn saved_file(job: &crate::domain::Job) -> std::path::PathBuf {
+    job.status
+        .final_path
+        .clone()
+        .unwrap_or_else(|| job.save_dir.join(job.filename.as_deref().unwrap_or("")))
+}
+
 fn scroll_submenu(m: &mut Main, dir: i8) {
     let len = match m.submenu {
         Some(SubMenu::Category) => Category::ALL_ASSIGNABLE.len(),
@@ -1957,9 +1969,7 @@ fn context_action(m: &mut Main, action: ContextAction) -> Task<Msg> {
             for id in &ids {
                 if let Some(job) = m.snap.jobs.iter().find(|j| j.id == *id) {
                     let path = match action {
-                        ContextAction::Open => {
-                            job.save_dir.join(job.filename.as_deref().unwrap_or(""))
-                        }
+                        ContextAction::Open => saved_file(job),
                         _ => job.save_dir.clone(),
                     };
                     crate::platform::open_path(&path);

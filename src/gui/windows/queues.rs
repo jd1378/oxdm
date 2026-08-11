@@ -632,7 +632,14 @@ impl State {
                 start: parse_once_date(&self.once_date)
                     .zip(parse_once_time(&self.once_time))
                     .map(|(d, t)| d.and_time(t))
-                    .and_then(|n| n.and_local_timezone(chrono::Local).single())
+                    // `earliest`, not `single`: on the night the clocks
+                    // go back a local time happens twice and `single`
+                    // is `None`, and on the night they go forward the
+                    // chosen hour may not exist at all. `single` sent
+                    // both cases to `unwrap_or(now)`, which silently
+                    // rewrote "run this at 02:30 on Sunday" to "run it
+                    // the moment I pressed Save".
+                    .and_then(|n| n.and_local_timezone(chrono::Local).earliest())
                     .unwrap_or_else(chrono::Local::now),
                 stop: None,
             },
