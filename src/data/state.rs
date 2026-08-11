@@ -845,66 +845,98 @@ impl AppState {
             if budget == 0 {
                 break;
             }
+            // Only what this queue actually starts is marked as the
+            // queue's: a download already running because the user
+            // pressed Resume stays theirs, and a later Stop queue
+            // leaves it alone.
+            if !phase.is_startable() {
+                continue;
+            }
             self.mark_run_intent(jid, false).await;
-            if phase.is_startable() && self.start_job(jid).await.is_ok() {
+            if self.start_job(jid).await.is_ok() {
                 started_any = true;
                 budget -= 1;
             }
         }
 
-        let mut active = self.active_queues.write().await;
-        let tally = QueueRunTally {
-            queue_run: true,
-            ..QueueRunTally::default()
+        if !started_any {
+            return Ok(());
+        }
+        // A fresh run, so a fresh tally — what the finish notification
+        // reports is this run, not what a hand-started download left in
+        // the entry beforehand.
+        let was_running = {
+            let mut active = self.active_queues.write().await;
+            let old = active.insert(
+                id,
+                QueueRunTally {
+                    queue_run: true,
+                    ..QueueRunTally::default()
+                },
+            );
+            old.is_some_and(|t| t.queue_run)
         };
-        if started_any && active.insert(id, tally).is_none() {
+        if !was_running {
             let _ = self.events.send(DomainEvent::QueueStarted { id });
         }
         Ok(())
     }
 
-    /// True when the queue has been started (via `start_queue` or
-    /// scheduler) and has not yet emitted `QueueFinished`.
+    /// True when the queue itself is running: someone pressed Start
+    /// queue, or the scheduler did, and the run has not ended.
+    ///
+    /// A download the user started by hand does not put its queue in
+    /// this state. It joins the tally so its outcome is counted, but
+    /// "this one download is running" and "the queue is working
+    /// through its list" are different things, and the toolbar offers
+    /// Stop queue on the strength of the second.
     pub async fn is_queue_active(&self, id: QueueId) -> bool {
-        self.active_queues.read().await.contains_key(&id)
-    }
-
-    /// Snapshot of currently active queue ids.
-    pub async fn active_queue_ids(&self) -> std::collections::HashSet<QueueId> {
-        self.active_queues.read().await.keys().copied().collect()
-    }
-
-    /// Pause every running job in the queue. Emits `QueueFinished` on
-    /// the active→inactive transition.
-    pub async fn stop_queue(self: &Arc<Self>, id: QueueId) -> Result<(), String> {
-        // Assembly is excluded rather than asked and refused: writing
-        // the final file is not a transfer this queue can stop, and a
-        // pause it will reject is not worth sending.
-        let ids: Vec<JobId> = self
-            .jobs
+        self.active_queues
             .read()
             .await
-            .values()
-            .filter(|e| {
-                // By phase, not by the `running` flag: a job that is
-                // evaluating or reconnecting is a download this queue
-                // is doing, and the flag lags the phase by a moment at
-                // both ends of a run.
-                e.job.queue_id == id && e.phase().is_running() && e.phase() != Phase::Assembling
-            })
-            .map(|e| e.job.id)
-            .collect();
+            .get(&id)
+            .is_some_and(|t| t.queue_run)
+    }
+
+    /// Snapshot of currently running queues. Same rule as
+    /// [`Self::is_queue_active`].
+    pub async fn active_queue_ids(&self) -> std::collections::HashSet<QueueId> {
+        self.active_queues
+            .read()
+            .await
+            .iter()
+            .filter(|(_, t)| t.queue_run)
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    /// End the queue's run: pause what the queue started, and leave
+    /// what the user started alone.
+    pub async fn stop_queue(self: &Arc<Self>, id: QueueId) -> Result<(), String> {
+        let ids = queue_stop_targets(&*self.jobs.read().await, id);
         for jid in ids {
             let _ = self.pause(jid).await;
         }
+        // The run ends, but the tally entry stays as long as a
+        // hand-started download in this queue is still going: it is
+        // what counts that download's outcome and, once it ends, lets
+        // the finish watcher close the entry.
+        let manual_running = self.jobs.read().await.values().any(|e| {
+            e.job.queue_id == id && e.phase().is_running() && e.manual_run.load(Ordering::Acquire)
+        });
         let mut active = self.active_queues.write().await;
-        if let Some(tally) = active.remove(&id) {
-            let _ = self.events.send(DomainEvent::QueueFinished {
-                id,
-                completed: tally.completed,
-                failed: tally.failed,
-            });
+        match active.get_mut(&id) {
+            Some(tally) if manual_running => tally.queue_run = false,
+            Some(_) => {
+                active.remove(&id);
+            }
+            None => return Ok(()),
         }
+        drop(active);
+        // Stopped, not finished: on-finish hooks belong to a queue that
+        // ran out of work, and arming a shutdown because someone
+        // pressed Stop queue is a decision oxdm does not get to make.
+        let _ = self.events.send(DomainEvent::QueueStopped { id });
         Ok(())
     }
 
@@ -3814,6 +3846,33 @@ fn name_is_taken(jobs: &IndexMap<JobId, Arc<JobEntry>>, name: &str, except: Opti
         .any(|n| crate::domain::name_key(n) == key)
 }
 
+/// The downloads "Stop queue" pauses: the ones the queue is running of
+/// its own accord.
+///
+/// Membership is by phase, not by the `running` flag: a job that is
+/// evaluating or reconnecting is a download this queue is doing, and
+/// the flag lags the phase by a moment at both ends of a run.
+///
+/// Assembly is excluded rather than asked and refused: writing the
+/// final file is not a transfer a queue can stop, and a pause it will
+/// reject is not worth sending.
+///
+/// A hand-started download is excluded because the user asked for that
+/// download, not for the queue. Stopping the queue takes back what the
+/// queue decided to run; taking back their press as well would make
+/// Resume on a row mean "until the queue is next stopped".
+fn queue_stop_targets(jobs: &IndexMap<JobId, Arc<JobEntry>>, queue: QueueId) -> Vec<JobId> {
+    jobs.values()
+        .filter(|e| {
+            e.job.queue_id == queue
+                && e.phase().is_running()
+                && e.phase() != Phase::Assembling
+                && !e.manual_run.load(Ordering::Acquire)
+        })
+        .map(|e| e.job.id)
+        .collect()
+}
+
 /// `name`, or the numbered variant of it that no other job holds.
 fn free_name(jobs: &IndexMap<JobId, Arc<JobEntry>>, name: &str, except: Option<JobId>) -> String {
     crate::domain::unique_name(name, |candidate| name_is_taken(jobs, candidate, except))
@@ -4349,6 +4408,43 @@ mod tests {
         // A job with no name yet claims nothing, and neither does a
         // blank enquiry.
         assert!(!name_is_taken(&jobs, "   ", None));
+    }
+
+    /// Stop queue ends the queue's run. A download the user started by
+    /// hand is not part of that run and keeps going.
+    #[test]
+    fn stopping_a_queue_leaves_hand_started_downloads_alone() {
+        let queue = crate::domain::QueueId::new();
+        let mut jobs: IndexMap<JobId, Arc<JobEntry>> = IndexMap::new();
+        let mut add = |phase: Phase, manual: bool| -> JobId {
+            let mut entry = entry_in(phase);
+            entry.job.queue_id = queue;
+            entry.manual_run.store(manual, Ordering::Release);
+            let id = entry.job.id;
+            jobs.insert(id, Arc::new(entry));
+            id
+        };
+        let by_queue = add(Phase::Downloading, false);
+        let by_hand = add(Phase::Downloading, true);
+        let connecting = add(Phase::Evaluating, false);
+        let assembling = add(Phase::Assembling, false);
+        let paused = add(Phase::Paused, false);
+
+        let targets = queue_stop_targets(&jobs, queue);
+        assert!(targets.contains(&by_queue));
+        assert!(targets.contains(&connecting), "reconnecting is still a run");
+        assert!(!targets.contains(&by_hand), "the user asked for this one");
+        assert!(!targets.contains(&assembling), "not a transfer to stop");
+        assert!(!targets.contains(&paused), "nothing to stop");
+    }
+
+    #[test]
+    fn another_queues_downloads_are_not_touched() {
+        let mut entry = entry_in(Phase::Downloading);
+        entry.job.queue_id = crate::domain::QueueId::new();
+        let jobs: IndexMap<JobId, Arc<JobEntry>> =
+            IndexMap::from([(entry.job.id, Arc::new(entry))]);
+        assert!(queue_stop_targets(&jobs, crate::domain::QueueId::new()).is_empty());
     }
 
     #[test]

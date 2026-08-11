@@ -13,6 +13,16 @@ async fn main() {
         eprintln!("no queue named {want}");
         std::process::exit(2);
     };
+    // What the toolbar reads: is the queue itself running, and what is
+    // running inside it.
+    if std::env::args().any(|a| a == "--status") {
+        let snap = client.snapshot().await.expect("snapshot");
+        println!("queue_active={}", snap.active_queues.contains(&q.id));
+        for j in snap.jobs.iter().filter(|j| j.queue_id == q.id) {
+            println!("{} {:?} {:?}", j.id, j.filename, j.status.phase);
+        }
+        return;
+    }
     if std::env::args().any(|a| a == "--stop") {
         match client.stop_queue(q.id).await {
             Ok(()) => println!("stopped {}", q.name),

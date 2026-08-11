@@ -12,7 +12,7 @@
 //! while a rule holds is caught on the next tick. Nothing is persisted —
 //! after a restart the rules simply re-evaluate.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,8 +28,10 @@ const LOW_BATTERY_PERCENT: u8 = 20;
 
 pub fn spawn(state: Arc<AppState>) {
     tokio::spawn(async move {
-        // Jobs this guard paused, and therefore may resume.
-        let mut held: HashSet<JobId> = HashSet::new();
+        // Jobs this guard paused, and therefore may resume, each with
+        // the run intent it had — a download the user started by hand
+        // is still theirs after the guard hands it back.
+        let mut held: HashMap<JobId, bool> = HashMap::new();
         loop {
             tokio::time::sleep(TICK).await;
             let settings = state.settings().await;
@@ -39,17 +41,17 @@ pub fn spawn(state: Arc<AppState>) {
             match reason {
                 Some(reason) => {
                     for id in state.running_job_ids().await {
+                        let manual = state.is_manual_run(id).await;
                         if state.pause(id).await.is_ok() {
                             tracing::info!(job = %id, reason, "paused by environment guard");
-                            held.insert(id);
+                            held.insert(id, manual);
                         }
                     }
                 }
                 None => {
-                    for id in std::mem::take(&mut held) {
+                    for (id, manual) in std::mem::take(&mut held) {
                         // A job removed meanwhile simply fails to resume.
-                        // Automatic: the guard resumed it, not the user.
-                        state.mark_run_intent(id, false).await;
+                        state.mark_run_intent(id, manual).await;
                         if state.resume(id).await.is_ok() {
                             tracing::info!(job = %id, "resumed by environment guard");
                         }
