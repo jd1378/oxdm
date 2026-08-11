@@ -7,6 +7,7 @@ pub mod checksum;
 pub mod headers;
 pub mod job;
 pub mod queue;
+pub mod save_path;
 pub mod settings;
 pub mod user_agent;
 pub mod watch_limit;
@@ -26,6 +27,7 @@ pub use queue::{
     QueueHook, QueueId, QueueSchedule, WeekDayMask, finish_summary, finish_title,
     random_vivid_color,
 };
+pub use save_path::{Destination, Resolver as SavePathResolver};
 pub use settings::{
     Settings, Theme, default_category_folder, default_category_folders, detected_download_dir,
 };

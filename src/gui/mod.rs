@@ -12,6 +12,7 @@ pub mod diff;
 pub mod format;
 pub mod icons;
 pub mod ipc;
+pub mod save_path;
 pub mod shot;
 pub mod theme;
 pub mod ui_prefs;

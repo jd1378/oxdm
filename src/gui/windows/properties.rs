@@ -473,6 +473,62 @@ fn header_bag(rows: &[(String, String)]) -> Vec<(String, String)> {
     v
 }
 
+/// Where the typed save path points, keeping the job's own file name
+/// when the path names a folder.
+fn pending_destination(st: &State) -> crate::domain::Destination {
+    crate::gui::save_path::destination(
+        &st.settings,
+        &st.save_path,
+        st.entry.job.filename.as_deref(),
+    )
+}
+
+/// The destination spelled out, when the field does not spell it.
+fn save_note(st: &State) -> Option<String> {
+    crate::gui::save_path::note(&st.save_path, &pending_destination(st))
+}
+
+/// The save-path field, with the destination spelled out underneath
+/// whenever the text alone does not spell it. Deleting the file name to
+/// retarget the folder is how people retarget the folder; the line is
+/// where they see that the name comes back, rather than the folder
+/// being written over as a file.
+fn save_to_block(st: &State, editable: bool) -> Element<'_, Msg> {
+    let t = &st.tokens;
+    let mut col = column![
+        text("Save to")
+            .font(theme::BODY_MEDIUM)
+            .size(12.0)
+            .color(t.fg_1),
+        row![
+            TextInput::new(&st.save_path)
+                .mono()
+                .enabled(editable)
+                .on_input(Msg::SavePath)
+                .view(t),
+            Btn::new("")
+                .secondary()
+                .icon_only("folder")
+                .enabled(editable)
+                .on_press(Msg::BrowseSave)
+                .view(t),
+        ]
+        .spacing(6.0)
+        .align_y(Alignment::Center),
+    ]
+    .spacing(6.0);
+    if let Some(n) = save_note(st) {
+        col = col.push(
+            text(n)
+                .font(theme::MONO)
+                .size(11.0)
+                .color(t.fg_2)
+                .wrapping(iced::widget::text::Wrapping::None),
+        );
+    }
+    col.into()
+}
+
 /// How many of the job's settings this form would change. The secret
 /// fields count when freshly typed: an empty one means "keep", so it is
 /// not a change, which is exactly what `pending_advanced` encodes.
@@ -482,8 +538,11 @@ fn count_changes(st: &State) -> usize {
     if st.url.trim() != job.url.as_str() {
         n += 1;
     }
-    let saved_path = job.save_dir.join(job.filename.as_deref().unwrap_or(""));
-    if std::path::Path::new(st.save_path.trim()) != saved_path {
+    // Compared as the destination it resolves to, not as text: a path
+    // the user reshaped without moving the file (dropping the name off
+    // its own folder, say) is not a change to count.
+    let dest = pending_destination(st);
+    if dest.dir != job.save_dir || dest.filename != job.filename {
         n += 1;
     }
     let (stored, stored_referrer) = saved_identity(job);
@@ -759,13 +818,15 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             Task::none()
         }
         Msg::BrowseSave => {
-            let start = PathBuf::from(st.save_path.trim());
+            // Opens where the field points, not one level above it.
+            let start = pending_destination(st).dir;
             Task::perform(
                 async move {
                     let dlg = rfd::AsyncFileDialog::new();
-                    let dlg = match start.parent() {
-                        Some(d) if d.exists() => dlg.set_directory(d),
-                        _ => dlg,
+                    let dlg = if start.is_dir() {
+                        dlg.set_directory(start)
+                    } else {
+                        dlg
                     };
                     dlg.pick_folder().await.map(|h| h.path().to_path_buf())
                 },
@@ -773,10 +834,7 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             )
         }
         Msg::BrowsedSave(Some(dir)) => {
-            let name = PathBuf::from(st.save_path.trim())
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
+            let name = pending_destination(st).filename.unwrap_or_default();
             st.save_path = dir.join(name).display().to_string();
             st.dirty_source = true;
             mark(st);
@@ -1125,13 +1183,8 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                 );
                 return Task::none();
             };
-            let p = PathBuf::from(st.save_path.trim());
-            let (save_dir, filename) = (
-                p.parent()
-                    .map(|d| d.to_path_buf())
-                    .unwrap_or_else(|| st.entry.job.save_dir.clone()),
-                p.file_name().map(|n| n.to_string_lossy().into_owned()),
-            );
+            let dest = pending_destination(st);
+            let (save_dir, filename) = (dest.dir, dest.filename);
 
             let adv = pending_advanced(st);
             // Header/cookie edits need `UpdateJobLocation` — the only
@@ -2027,31 +2080,7 @@ fn general_tab(st: &State) -> Element<'_, Msg> {
             row_sep(t),
             kv_row(t, "Size", size_str, true),
             row_sep(t),
-            container(
-                column![
-                    text("Save to")
-                        .font(theme::BODY_MEDIUM)
-                        .size(12.0)
-                        .color(t.fg_1),
-                    row![
-                        TextInput::new(&st.save_path)
-                            .mono()
-                            .enabled(editable)
-                            .on_input(Msg::SavePath)
-                            .view(t),
-                        Btn::new("")
-                            .secondary()
-                            .icon_only("folder")
-                            .enabled(editable)
-                            .on_press(Msg::BrowseSave)
-                            .view(t),
-                    ]
-                    .spacing(6.0)
-                    .align_y(Alignment::Center),
-                ]
-                .spacing(6.0)
-            )
-            .padding([10.0, theme::space::S3]),
+            container(save_to_block(st, editable)).padding([10.0, theme::space::S3]),
         ]
         .into(),
     );

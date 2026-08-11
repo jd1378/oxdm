@@ -327,6 +327,17 @@ impl Settings {
     pub fn fallback_dir(&self) -> PathBuf {
         self.category_folder(Category::Other)
     }
+
+    /// Every folder oxdm saves into. A category folder is created on
+    /// first use, so this is how a typed path can be recognised as a
+    /// folder before anything exists at it — see
+    /// [`crate::domain::save_path::Resolver`].
+    pub fn known_dirs(&self) -> Vec<PathBuf> {
+        Category::ALL_ASSIGNABLE
+            .iter()
+            .map(|c| self.category_folder(*c))
+            .collect()
+    }
 }
 
 /// A global proxy has nothing to inherit from: unset means "System",

@@ -48,6 +48,9 @@ const ADVANCED_H: f32 = 531.0;
 /// The "cannot be resumed" line and the gap above it: one 12px line of
 /// bold text plus the body column's spacing.
 const NOT_RESUMABLE_H: f32 = 27.0;
+/// The "Saves as …" line under the save path, plus its gap: one 11px
+/// line of body text.
+const SAVE_NOTE_H: f32 = 22.0;
 /// Dash length of the empty card's outline. Short: at this size the
 /// outline is a hint that something goes here, not a fence around it.
 const DASH_LEN: f32 = 3.0;
@@ -219,21 +222,28 @@ impl AddState {
             .unwrap_or(false)
     }
 
+    /// The name to write under when the save path names only a folder:
+    /// what the probe found, else what the URL suggests. `None` leaves
+    /// the naming to the daemon, which knows more than either.
+    fn known_name(&self) -> Option<String> {
+        self.detected()
+            .map(|p| p.filename.clone())
+            .or_else(|| Some(name_from_url(self.url.trim())))
+            .filter(|n| !n.trim().is_empty())
+    }
+
+    fn destination(&self) -> crate::domain::Destination {
+        crate::gui::save_path::destination(
+            &self.settings,
+            &self.save_path,
+            self.known_name().as_deref(),
+        )
+    }
+
     fn build_req(&self) -> Option<AddJobReq> {
         let url: url::Url = self.url.trim().parse().ok()?;
-        let p = PathBuf::from(self.save_path.trim());
-        let (save_dir, filename) = if self.save_path.trim().is_empty() {
-            (self.settings.fallback_dir(), None)
-        } else if self.save_path.ends_with('/') || p.extension().is_none() && p.is_dir() {
-            (p, None)
-        } else {
-            let dir = p
-                .parent()
-                .map(|d| d.to_path_buf())
-                .unwrap_or_else(|| self.settings.fallback_dir());
-            let name = p.file_name().map(|n| n.to_string_lossy().into_owned());
-            (dir, name)
-        };
+        let dest = self.destination();
+        let (save_dir, filename) = (dest.dir, dest.filename);
         let proxy = match self.proxy_kind {
             ProxyKind::None => None,
             kind if !self.proxy_host.trim().is_empty() => {
@@ -310,6 +320,14 @@ fn wanted_height(st: &AddState) -> f32 {
         Some(p) if !p.is_resumable => NOT_RESUMABLE_H,
         _ => 0.0,
     };
+    // Same story for the line under the save path: it appears only
+    // when the typed path and the file's destination differ.
+    let warning = warning
+        + if save_note(st).is_some() {
+            SAVE_NOTE_H
+        } else {
+            0.0
+        };
     // The painted titlebar is part of the page when the user opts into
     // custom chrome, and space the heights below never counted: every
     // one of them was measured on an OS-decorated window.
@@ -329,6 +347,17 @@ fn wanted_height(st: &AddState) -> f32 {
         }
     };
     content + chrome::overhead_h()
+}
+
+/// Resize only when the "Saves as" line appeared or went away. The
+/// dialog is sized to its contents, and re-fitting on every keystroke
+/// would pull the window about while someone is typing a path.
+fn refit_if_note_changed(st: &mut AddState, had_note: bool) -> Task<Msg> {
+    if save_note(st).is_some() == had_note {
+        Task::none()
+    } else {
+        fit_window(st)
+    }
 }
 
 /// Resize to fit, and move the floor with it.
@@ -638,15 +667,9 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
             st.probing = false;
             let mut classified = false;
             if let Ok(p) = &res {
-                // derive save path: dir + detected filename
-                let dir = PathBuf::from(st.save_path.trim());
-                let dir = if dir.is_dir() {
-                    dir
-                } else {
-                    dir.parent()
-                        .map(|d| d.to_path_buf())
-                        .unwrap_or_else(|| st.settings.fallback_dir())
-                };
+                // The probe finally knows the name: keep the folder the
+                // field points at and put the real name in it.
+                let dir = st.destination().dir;
                 st.save_path = dir.join(&p.filename).display().to_string();
                 if st.category.is_none() {
                     st.category = Some(crate::domain::classify(
@@ -666,18 +689,27 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
             fit_window(st)
         }
         Msg::SavePathChanged(p) => {
+            // The "Saves as" line comes and goes as the path is typed,
+            // and the dialog is sized to its contents. Resizing only on
+            // that transition keeps the window still while someone is
+            // typing inside a path that already has one.
+            let had_note = save_note(st).is_some();
             st.save_path = p;
             st.save_dirty = true;
-            Task::none()
+            refit_if_note_changed(st, had_note)
         }
         Msg::BrowseSave => {
-            let start = PathBuf::from(st.save_path.trim());
+            // Opens where the field points, not one level above it: the
+            // field usually holds a folder plus a file name, and the
+            // folder is the thing being re-picked.
+            let start = st.destination().dir;
             Task::perform(
                 async move {
                     let dlg = rfd::AsyncFileDialog::new();
-                    let dlg = match start.parent() {
-                        Some(d) if d.exists() => dlg.set_directory(d),
-                        _ => dlg,
+                    let dlg = if start.is_dir() {
+                        dlg.set_directory(start)
+                    } else {
+                        dlg
                     };
                     dlg.pick_folder().await.map(|h| h.path().to_path_buf())
                 },
@@ -685,16 +717,15 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
             )
         }
         Msg::BrowsedSave(Some(dir)) => {
-            let name = PathBuf::from(st.save_path.trim())
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
+            let had_note = save_note(st).is_some();
+            let name = st.destination().filename.unwrap_or_default();
             st.save_path = dir.join(name).display().to_string();
             st.save_dirty = true;
-            Task::none()
+            refit_if_note_changed(st, had_note)
         }
         Msg::BrowsedSave(None) => Task::none(),
         Msg::SetCategory(label) => {
+            let had_note = save_note(st).is_some();
             let prev = st.category;
             st.category = Category::ALL_ASSIGNABLE
                 .iter()
@@ -704,7 +735,7 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
             if st.category != prev {
                 apply_category_prefill(st);
             }
-            Task::none()
+            refit_if_note_changed(st, had_note)
         }
         Msg::SetQueue(name) => {
             if let Some((id, _)) = st.queues.iter().find(|(_, n)| *n == name) {
@@ -949,15 +980,7 @@ fn ready_view(st: &AddState) -> Element<'_, Msg> {
         body = body
             .push(
                 row![
-                    labeled(
-                        t,
-                        "save to",
-                        FileInput::new(&st.save_path)
-                            .mono()
-                            .on_input(Msg::SavePathChanged)
-                            .on_browse(Msg::BrowseSave)
-                            .view(t)
-                    ),
+                    labeled(t, "save to", save_field(st)),
                     labeled(
                         t,
                         "category",
@@ -1097,6 +1120,36 @@ fn segments_combo(st: &AddState) -> Element<'_, Msg> {
         )
     };
     combo(t, options, selected, Msg::SetSegments, Length::Fill)
+}
+
+/// What the field would resolve to, when that is not what it says.
+fn save_note(st: &AddState) -> Option<String> {
+    crate::gui::save_path::note(&st.save_path, &st.destination())
+}
+
+/// The save-path field, with the destination spelled out underneath
+/// whenever the text alone does not spell it. Deleting the file name to
+/// retarget the folder is how people retarget the folder; the line is
+/// how they see that the name comes back.
+fn save_field(st: &AddState) -> Element<'_, Msg> {
+    let field = FileInput::new(&st.save_path)
+        .mono()
+        .on_input(Msg::SavePathChanged)
+        .on_browse(Msg::BrowseSave)
+        .view(&st.tokens);
+    match save_note(st) {
+        Some(n) => column![
+            field,
+            text(n)
+                .font(theme::MONO)
+                .size(11.0)
+                .color(st.tokens.fg_2)
+                .wrapping(iced::widget::text::Wrapping::None)
+        ]
+        .spacing(theme::space::S1)
+        .into(),
+        None => field,
+    }
 }
 
 fn labeled<'a>(t: &Tokens, label: &str, body: Element<'a, Msg>) -> Element<'a, Msg> {
