@@ -86,22 +86,25 @@ const WIN_ERROR_CHROME_H: f32 = 206.0;
 
 // --- Speed tab (design §3.3 "Speed" pane) ----------------------------
 /// Max parallel connections stepper bounds — mirrors the runner's
-/// per-job part cap (`ApplySpeed` filters to `1..=16`).
-const MAX_CONN_MIN: i64 = 1;
-const MAX_CONN_MAX: i64 = 16;
+/// per-job part cap (`ApplySpeed` filters to `1..=16`). Shared with the
+/// Properties dialog, which offers the same two controls for the next
+/// run: two sets of bounds would let one window accept what the other
+/// refuses.
+pub(crate) const MAX_CONN_MIN: i64 = 1;
+pub(crate) const MAX_CONN_MAX: i64 = 16;
 /// Stepper seed when the job has no explicit `max_connections` (auto).
-const MAX_CONN_DEFAULT: i64 = 8;
+pub(crate) const MAX_CONN_DEFAULT: i64 = 8;
 const BYTES_PER_KB: u64 = 1024;
 const KB_PER_MB: u64 = 1024;
 /// Width of the speed-limit value input (KB/s ‖ MB/s numeric field).
-const LIMIT_INPUT_W: f32 = 80.0;
+pub(crate) const LIMIT_INPUT_W: f32 = 80.0;
 /// Idle time after the last keystroke before the typed limit is pushed
 /// to the daemon. Longer than the Add window's URL-probe debounce: a
 /// half-typed limit is a *live* throttle on a running transfer, so it
 /// is worth waiting until the user has clearly stopped typing.
 const LIMIT_DEBOUNCE_MS: u64 = 700;
 /// Dashed quick-preset pills (design `.qp`), values in KB/s.
-const SPEED_PRESETS_KBS: &[(&str, u64)] = &[
+pub(crate) const SPEED_PRESETS_KBS: &[(&str, u64)] = &[
     ("64 KB/s", 64),
     ("256 KB/s", 256),
     ("1 MB/s", 1024),

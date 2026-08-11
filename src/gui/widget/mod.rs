@@ -19,7 +19,8 @@ pub use cards::{
     section_card_count, sibling, surface, vdivider, vscroll,
 };
 pub use controls::{
-    checkbox, col_header, col_header_sortable, combo, number_stepper, segmented, toggle,
+    checkbox, col_header, col_header_sortable, combo, locked_combo, number_stepper, segmented,
+    toggle,
 };
 pub use dashed::{dashed_frame, dashed_rule};
 pub use ellipsis::ellipsized;

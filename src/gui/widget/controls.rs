@@ -315,7 +315,10 @@ where
 
 /// A `combo` with nothing to pick: the field, its value and a dimmed
 /// chevron, minus the menu.
-fn locked_combo<'a, M: 'a>(t: &Tokens, value: Option<String>, width: Length) -> Element<'a, M> {
+/// A combo that cannot be opened: the current value, dimmed, in the
+/// field's own shape. Used where the choice is real but not available
+/// right now — a setting the running download has already read.
+pub fn locked_combo<'a, M: 'a>(t: &Tokens, value: Option<String>, width: Length) -> Element<'a, M> {
     let t = *t;
     let label = value.unwrap_or_default();
     let field = container(

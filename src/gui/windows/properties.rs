@@ -21,6 +21,11 @@ use crate::gui::widget::{
     Btn, BtnSize, TabBtn, TextInput, checkbox, combo, eyebrow, hairline, pill_progress, toggle,
 };
 use crate::gui::windows::add::footer;
+// The same bounds and presets the download window's Speed tab uses:
+// these two controls exist in both places and must agree.
+use crate::gui::windows::download::{
+    LIMIT_INPUT_W, MAX_CONN_DEFAULT, MAX_CONN_MAX, MAX_CONN_MIN, SPEED_PRESETS_KBS,
+};
 use crate::gui::{color, icons};
 use crate::ipc_local::Client;
 use crate::ipc_local::protocol::{Event, JobEntryView};
@@ -129,6 +134,11 @@ pub enum Msg {
     HeaderAdd,
     /// A copy button's confirmation has run its course.
     CopyExpired,
+    MaxConn(String),
+    UseLimiter(bool),
+    LimitValue(String),
+    LimitUnit(bool),
+    SpeedPreset(u64),
     SetCategory(String),
     SetQueue(String),
     // Checksums (#5)
@@ -203,6 +213,13 @@ pub struct State {
     /// Same rule as `proxy_pass_edited`, for the cookie editor.
     cookies_edited: bool,
     headers: Vec<(String, String)>,
+    /// Per-job transfer limits, staged like every other field here.
+    /// Empty `max_conn` means "let oxdm choose"; the limit is kept as
+    /// value + unit so the field reads the way the user typed it.
+    max_conn: String,
+    limit_on: bool,
+    limit_value: String,
+    limit_unit_mb: bool,
     /// Where the download files itself, and which queue runs it. Both
     /// are staged like every other field on this tab and go out on
     /// Apply.
@@ -389,6 +406,12 @@ fn count_changes(st: &State) -> usize {
     if st.queue != job.queue_id {
         n += 1;
     }
+    if pending_max_conn(st) != job.max_connections {
+        n += 1;
+    }
+    if pending_speed_limit(st) != job.speed_limit_override {
+        n += 1;
+    }
     n
 }
 
@@ -445,6 +468,46 @@ fn hydrate(st: &mut State) {
     st.checksums = job.checksums.clone();
     st.category = job.category;
     st.queue = job.queue_id;
+    st.max_conn = job
+        .max_connections
+        .map(|n| n.to_string())
+        .unwrap_or_default();
+    // Shown in whichever unit divides evenly, the way the download
+    // window and Settings both show a cap.
+    st.limit_on = job.speed_limit_override.is_some();
+    let bps = job.speed_limit_override.unwrap_or(0);
+    st.limit_unit_mb = bps > 0 && bps.is_multiple_of(1024 * 1024);
+    st.limit_value = match bps {
+        0 => String::new(),
+        b if st.limit_unit_mb => (b / 1024 / 1024).to_string(),
+        b => (b / 1024).to_string(),
+    };
+}
+
+/// The connection cap this form would send: `None` is "let oxdm
+/// choose", and anything outside 1–16 is not a cap the daemon accepts.
+fn pending_max_conn(st: &State) -> Option<u64> {
+    st.max_conn
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|n| (MAX_CONN_MIN as u64..=MAX_CONN_MAX as u64).contains(n))
+}
+
+/// The per-job speed cap this form would send, in bytes per second.
+/// `None` is unlimited — which is what an empty or unparseable value
+/// means too, since a limit nobody can read is not a limit.
+fn pending_speed_limit(st: &State) -> Option<u64> {
+    if !st.limit_on {
+        return None;
+    }
+    let unit = if st.limit_unit_mb { 1024 * 1024 } else { 1024 };
+    st.limit_value
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|v| *v > 0)
+        .map(|v| v * unit)
 }
 
 pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
@@ -480,6 +543,10 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 has_stored_cookies: false,
                 cookies_edited: false,
                 headers: Vec::new(),
+                max_conn: String::new(),
+                limit_on: false,
+                limit_value: String::new(),
+                limit_unit_mb: false,
                 category: entry.job.category,
                 queue: entry.job.queue_id,
                 queues,
@@ -739,6 +806,57 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             mark(st);
             Task::none()
         }
+        // Guards mirror the disabled controls: a message can still
+        // arrive from a click that raced the phase changing under it.
+        Msg::MaxConn(_)
+        | Msg::UseLimiter(_)
+        | Msg::LimitValue(_)
+        | Msg::LimitUnit(_)
+        | Msg::SpeedPreset(_)
+        | Msg::SetCategory(_)
+            if st.locked() =>
+        {
+            Task::none()
+        }
+        Msg::MaxConn(v) => {
+            st.max_conn = v.trim().to_owned();
+            mark(st);
+            Task::none()
+        }
+        Msg::UseLimiter(on) => {
+            st.limit_on = on;
+            // A limit switched on with no number is not a limit. The
+            // default is the one the presets start from.
+            if on && st.limit_value.trim().is_empty() {
+                st.limit_value = LIMIT_SEED_KBS.to_string();
+                st.limit_unit_mb = false;
+            }
+            mark(st);
+            Task::none()
+        }
+        Msg::LimitValue(v) => {
+            st.limit_value = v.trim().to_owned();
+            mark(st);
+            Task::none()
+        }
+        Msg::LimitUnit(mb) => {
+            st.limit_unit_mb = mb;
+            mark(st);
+            Task::none()
+        }
+        Msg::SpeedPreset(kbs) => {
+            // Pressing a preset *is* the request to limit, so it turns
+            // the switch on the way the download window's does.
+            st.limit_on = true;
+            st.limit_unit_mb = kbs >= 1024 && kbs.is_multiple_of(1024);
+            st.limit_value = if st.limit_unit_mb {
+                (kbs / 1024).to_string()
+            } else {
+                kbs.to_string()
+            };
+            mark(st);
+            Task::none()
+        }
         Msg::SetCategory(label) => {
             if let Some(c) = crate::domain::Category::ALL_ASSIGNABLE
                 .iter()
@@ -933,6 +1051,13 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             let source_dirty = st.dirty_source;
             let category = (st.category != st.entry.job.category).then_some(st.category);
             let queue = (st.queue != st.entry.job.queue_id).then_some(st.queue);
+            // Sent only when they differ: both are separate daemon
+            // calls that rewrite the job, and re-sending an unchanged
+            // value would churn the row for nothing.
+            let max_conn = pending_max_conn(st);
+            let max_conn = (max_conn != st.entry.job.max_connections).then_some(max_conn);
+            let speed = pending_speed_limit(st);
+            let speed = (speed != st.entry.job.speed_limit_override).then_some(speed);
             // Optimistic: `dirty` re-arms on Applied(Err); the
             // sub-flags only clear once the daemon confirmed.
             st.dirty = false;
@@ -948,6 +1073,12 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                     }
                     if let Some(queue) = queue {
                         client.set_job_queue(id, queue).await?;
+                    }
+                    if let Some(max_conn) = max_conn {
+                        client.set_max_connections(id, max_conn).await?;
+                    }
+                    if let Some(speed) = speed {
+                        client.set_persistent_speed_limit(id, speed).await?;
                     }
                     client.set_job_advanced(id, adv).await
                 },
@@ -1170,6 +1301,150 @@ fn confirm_copy(st: &mut State, what: CopyTarget, text: String) -> Task<Msg> {
     ])
 }
 
+/// The two limits the download window's Speed tab drives live, in the
+/// form this dialog uses for everything else: staged, applied together,
+/// and about the *next* run rather than the one in flight — which is
+/// why they lock while the job is running, and why the live pair stays
+/// where it can take effect immediately.
+fn transfer_section(st: &State) -> Element<'_, Msg> {
+    let t = &st.tokens;
+    let editable = !st.locked();
+
+    // Blank = auto (the daemon picks); a number is an explicit 1–16
+    // override, the same reading the Speed tab gives it.
+    let conn_auto = pending_max_conn(st).is_none();
+    let conn_val = pending_max_conn(st)
+        .map(|n| n as i64)
+        .unwrap_or(MAX_CONN_DEFAULT);
+    let mut conns = row![crate::gui::widget::segmented(
+        t,
+        &[("Auto", None), ("Custom", None)],
+        if conn_auto { 0 } else { 1 },
+        BtnSize::Sm,
+        move |i| Msg::MaxConn(if i == 0 {
+            String::new()
+        } else {
+            MAX_CONN_DEFAULT.to_string()
+        }),
+    )]
+    .spacing(theme::space::S2)
+    .align_y(Alignment::Center);
+    if !conn_auto {
+        conns = conns.push(crate::gui::widget::number_stepper(
+            t,
+            conn_val,
+            MAX_CONN_MIN,
+            MAX_CONN_MAX,
+            true,
+            false,
+            |n| Msg::MaxConn(n.to_string()),
+        ));
+    }
+
+    let value_row = row![
+        // Editable while the switch is off: the number is the limit you
+        // *would* apply, and nothing is sent until Apply.
+        TextInput::new(&st.limit_value)
+            .width(Length::Fixed(LIMIT_INPUT_W))
+            .enabled(editable)
+            .on_input(Msg::LimitValue)
+            .view(t),
+        crate::gui::widget::segmented(
+            t,
+            &[("KB/s", None), ("MB/s", None)],
+            if st.limit_unit_mb { 1 } else { 0 },
+            BtnSize::Sm,
+            |i| Msg::LimitUnit(i == 1),
+        ),
+    ]
+    .spacing(theme::space::S2)
+    .align_y(Alignment::Center);
+
+    let mut presets = row![].spacing(theme::space::S2).align_y(Alignment::Center);
+    for (label, kbs) in SPEED_PRESETS_KBS {
+        presets = presets.push(
+            Btn::new(*label)
+                .secondary()
+                .size(BtnSize::Sm)
+                .enabled(editable)
+                .on_press(Msg::SpeedPreset(*kbs))
+                .view(t),
+        );
+    }
+
+    let rows: Vec<Element<'_, Msg>> = if editable {
+        vec![
+            stacked_row(
+                t,
+                "Max parallel connections",
+                Some("Auto lets oxdm choose. Applies to the next run of this download."),
+                conns.into(),
+            ),
+            row_sep(t),
+            stacked_row(
+                t,
+                "Speed limit",
+                Some("Caps this download alone, on top of the global limit."),
+                toggle(t, st.limit_on, editable, Msg::UseLimiter),
+            ),
+            stacked_row(t, "Limit to", None, value_row.into()),
+            stacked_row(t, "Quick set", None, presets.into()),
+        ]
+    } else {
+        // Locked: the values still answer "what is this download set
+        // to", which is the question Properties is open to answer.
+        vec![
+            kv_row(
+                t,
+                "Max parallel connections",
+                match pending_max_conn(st) {
+                    Some(n) => n.to_string(),
+                    None => "Auto".to_owned(),
+                },
+                false,
+            ),
+            row_sep(t),
+            kv_row(
+                t,
+                "Speed limit",
+                match pending_speed_limit(st) {
+                    Some(bps) => crate::gui::format::format_speed(bps as f64),
+                    None => "Unlimited".to_owned(),
+                },
+                false,
+            ),
+        ]
+    };
+    let mut body = column![];
+    for r in rows {
+        body = body.push(r);
+    }
+    section(t, "transfer", body.into())
+}
+
+/// A row whose control sits under its label, the way this dialog's
+/// scheme and proxy-mode rows do.
+fn stacked_row<'a>(
+    t: &Tokens,
+    label: &'a str,
+    hint: Option<&'a str>,
+    control: Element<'a, Msg>,
+) -> Element<'a, Msg> {
+    let mut col = column![
+        text(label)
+            .font(theme::BODY_MEDIUM)
+            .size(12.0)
+            .color(t.fg_1)
+    ]
+    .spacing(6.0);
+    if let Some(hint) = hint {
+        col = col.push(text(hint).font(theme::BODY).size(11.0).color(t.fg_3));
+    }
+    container(col.push(control))
+        .padding([10.0, theme::space::S3])
+        .into()
+}
+
 /// A failed row, laid out the way the download window's file-integrity
 /// table lays it out: the algorithm, a mismatch chip, and the
 /// expected/got pair with the computed digest struck through — plus the
@@ -1251,6 +1526,11 @@ fn mismatch_row<'a>(
     .into()
 }
 
+/// What the limit field starts at when the switch is turned on with no
+/// number in it — the smallest preset, so an accidental toggle costs
+/// throughput rather than surprising the user with a large cap.
+const LIMIT_SEED_KBS: u64 = 64;
+
 /// Width of the General tab's dropdowns — enough for the longest queue
 /// name without the control swallowing the row.
 const PICKER_W: f32 = 220.0;
@@ -1323,10 +1603,11 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
         Tab::Cookies => cookies_tab(st),
         Tab::Headers => headers_tab(st),
     };
-    // Lock banner tops every editable pane while the download runs;
-    // skipped on General (read-only display) and Checksums (its
-    // carve-out is explained inline) — design §3.5 lock rules.
-    let show_lock_banner = st.locked() && !matches!(st.tab, Tab::General | Tab::Checksums);
+    // Lock banner tops every pane that has something locked in it.
+    // General is included: its address, save location and category are
+    // all read by the run that is in flight. Checksums is not — its
+    // carve-out is explained inline, and nothing there is disabled.
+    let show_lock_banner = st.locked() && st.tab != Tab::Checksums;
     let body: Element<'_, Msg> = if show_lock_banner {
         column![lock_banner(t), tab_body]
             .spacing(theme::space::S3)
@@ -1470,9 +1751,10 @@ fn lock_banner(t: &Tokens) -> Element<'_, Msg> {
                     .size(11.5)
                     .color(t.fg_1),
                 text(
-                    "Pause it to edit connection, cookie, or transfer settings. Your \
-                     changes will take effect when you resume. Checksums can still be \
-                     added at any time."
+                    "Pause it to edit its address, save location, category, or \
+                     connection and transfer settings; changes take effect when you \
+                     resume. The queue it runs in and its checksums can be changed at \
+                     any time."
                 )
                 .font(theme::BODY)
                 .size(11.5)
@@ -1600,16 +1882,29 @@ fn general_tab(st: &State) -> Element<'_, Msg> {
             picker_row(
                 t,
                 "Category",
-                combo(
-                    t,
-                    crate::domain::Category::ALL_ASSIGNABLE
-                        .iter()
-                        .map(|c| c.label().to_owned())
-                        .collect(),
-                    Some(st.category.label().to_owned()),
-                    Msg::SetCategory,
-                    Length::Fixed(PICKER_W),
-                ),
+                // Locked while it runs: the folder this download is
+                // writing into was decided when it started, and
+                // re-filing it now would move the label without moving
+                // the file — a setting that appears to work and does
+                // not.
+                if editable {
+                    combo(
+                        t,
+                        crate::domain::Category::ALL_ASSIGNABLE
+                            .iter()
+                            .map(|c| c.label().to_owned())
+                            .collect(),
+                        Some(st.category.label().to_owned()),
+                        Msg::SetCategory,
+                        Length::Fixed(PICKER_W),
+                    )
+                } else {
+                    crate::gui::widget::locked_combo(
+                        t,
+                        Some(st.category.label().to_owned()),
+                        Length::Fixed(PICKER_W),
+                    )
+                },
             ),
             row_sep(t),
             picker_row(
@@ -2704,9 +2999,13 @@ fn connection_tab(st: &State) -> Element<'_, Msg> {
         _ => {}
     }
 
-    column![proxy, section(t, "site authentication", auth_body.into())]
-        .spacing(theme::space::S3)
-        .into()
+    column![
+        transfer_section(st),
+        proxy,
+        section(t, "site authentication", auth_body.into())
+    ]
+    .spacing(theme::space::S3)
+    .into()
 }
 
 fn cookies_tab(st: &State) -> Element<'_, Msg> {
