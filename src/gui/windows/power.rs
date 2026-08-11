@@ -325,7 +325,7 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
     .height(Length::Fill);
 
     let content = container(column![
-        titlebar::titlebar(t, "oxdm — Power action pending", false, Msg::Window),
+        titlebar::titlebar(t, "oxdm - Power action pending", false, Msg::Window),
         body,
     ])
     .width(Length::Fill)
@@ -339,7 +339,7 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
 
 pub fn launch_power() {
     let mut app = iced::application(boot, update, view)
-        .title(|_: &App| "oxdm — Power action pending".to_owned())
+        .title(|_: &App| "oxdm - Power action pending".to_owned())
         .theme(|app: &App| match app {
             App::Ready(st) => st.tokens.iced_theme(),
             _ => Tokens::dark().iced_theme(),

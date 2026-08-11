@@ -482,19 +482,36 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
             .spacing(theme::space::S1)
             .align_y(Alignment::Center)
             .into(),
-            Some(Ok(p)) => text(format!(
-                "{}  ·  {}  ·  {}",
-                p.filename,
-                p.size.map(format_bytes).unwrap_or_else(|| "—".into()),
-                if p.is_resumable {
+            Some(Ok(p)) => row![
+                text(format!(
+                    "{}  ·  {}  ·  ",
+                    p.filename,
+                    // A dash says nothing: the server did not give a
+                    // length, which is worth a word rather than a mark
+                    // the reader has to interpret.
+                    p.size
+                        .map(format_bytes)
+                        .unwrap_or_else(|| "unknown size".into()),
+                ))
+                .font(theme::BODY)
+                .size(11.0)
+                .color(t.fg_3),
+                // The one fact in the line that costs the user
+                // something later: a dropped connection starts this
+                // one over. Coloured, not shouted.
+                text(if p.is_resumable {
                     "resumable"
                 } else {
                     "no resume"
-                },
-            ))
-            .font(theme::BODY)
-            .size(11.0)
-            .color(t.fg_3)
+                })
+                .font(theme::BODY)
+                .size(11.0)
+                .color(if p.is_resumable {
+                    t.fg_3
+                } else {
+                    t.status_warning
+                }),
+            ]
             .into(),
             Some(Err(e)) => text(format!("probe failed: {e}"))
                 .font(theme::BODY)
@@ -589,7 +606,7 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
 
 pub fn launch_batch(_path: PathBuf) {
     let mut app = iced::application(boot, update, view)
-        .title(|_: &App| "oxdm — Add URLs".to_owned())
+        .title(|_: &App| "oxdm - Add URLs".to_owned())
         .theme(|app: &App| match app {
             App::Ready(st) => st.tokens.iced_theme(),
             _ => Tokens::dark().iced_theme(),

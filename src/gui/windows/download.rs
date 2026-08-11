@@ -547,12 +547,12 @@ impl State {
             // makes the user pick one to believe.
             let frac = bar_frac(self.assembly(), self.frac());
             format!(
-                "{name} — {} {}%",
+                "{name} - {} {}%",
                 phase.label(),
                 (frac * 100.0).round() as u32
             )
         } else {
-            format!("{name} — {}", phase.label())
+            format!("{name} - {}", phase.label())
         }
     }
 }
@@ -3448,7 +3448,7 @@ pub fn launch_download(id: JobId) {
         // title bar draws — one implementation, or the two drift.
         .title(|app: &App| match app {
             App::Ready(st) => st.window_title(),
-            _ => "oxdm — download".to_owned(),
+            _ => "oxdm - download".to_owned(),
         })
         .theme(|app: &App| match app {
             App::Ready(st) => st.tokens.iced_theme(),

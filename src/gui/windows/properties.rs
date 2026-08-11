@@ -284,7 +284,7 @@ impl State {
     fn window_title(&self) -> String {
         let job = &self.entry.job;
         let name = job.filename.as_deref().unwrap_or(job.url.as_str());
-        format!("{name} — Properties")
+        format!("{name} - Properties")
     }
 
     /// Mode that synthesizes its own `scheme://host:port` and therefore
@@ -3582,7 +3582,7 @@ pub fn launch_properties(_id: JobId) {
     let mut app = iced::application(boot, update, view)
         .title(|app: &App| match app {
             App::Ready(st) => st.window_title(),
-            _ => "oxdm — Properties".to_owned(),
+            _ => "oxdm - Properties".to_owned(),
         })
         .theme(|app: &App| match app {
             App::Ready(st) => st.tokens.iced_theme(),

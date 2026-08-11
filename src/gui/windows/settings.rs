@@ -2462,7 +2462,7 @@ fn reset_overlay<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a, Msg> 
 
 pub fn launch_settings() {
     let mut app = iced::application(boot, update, view)
-        .title(|_: &App| "oxdm — Settings".to_owned())
+        .title(|_: &App| "oxdm - Settings".to_owned())
         .theme(|app: &App| match app {
             App::Ready(st) => st.tokens.iced_theme(),
             _ => Tokens::dark().iced_theme(),

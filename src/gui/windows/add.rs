@@ -1692,8 +1692,8 @@ pub fn launch_add(_edit_id: Option<JobId>, _prefill: Option<String>) {
     // Args re-parsed in boot() (iced's boot closure takes no params).
     let mut app = iced::application(boot, update, view)
         .title(|app: &App| match app {
-            App::Ready(st) if st.edit_id.is_some() => "oxdm — Edit Download".to_owned(),
-            _ => "oxdm — Download File Info".to_owned(),
+            App::Ready(st) if st.edit_id.is_some() => "oxdm - Edit Download".to_owned(),
+            _ => "oxdm - Download File Info".to_owned(),
         })
         .theme(|app: &App| match app {
             App::Ready(st) => st.tokens.iced_theme(),
