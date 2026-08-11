@@ -25,8 +25,13 @@ pub async fn evaluate(
         return err(id, url, reason);
     }
     let mut hdr = reqwest::header::HeaderMap::new();
-    let ua = user_agent.as_deref().unwrap_or("oxdm/0");
-    if let Ok(v) = reqwest::header::HeaderValue::from_str(ua) {
+    // The browser's own UA when the extension sent one — some hosts
+    // serve nothing else. Without one, the same name the download
+    // itself would carry, not an invented version string.
+    let ua = user_agent
+        .clone()
+        .unwrap_or_else(|| crate::domain::default_user_agent().to_owned());
+    if let Ok(v) = reqwest::header::HeaderValue::from_str(&ua) {
         hdr.insert(reqwest::header::USER_AGENT, v);
     }
     if let Some(r) = referrer.as_ref()
