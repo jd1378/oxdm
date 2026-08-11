@@ -53,10 +53,10 @@ pub fn note(input: &str, dest: &Destination, known_name: Option<&str>) -> Option
     Some(Note {
         text: match change {
             ExtensionChange::Dropped(ext) => {
-                format!("No .{ext} extension — apps may not know how to open it")
+                format!("No .{ext} extension. Apps may not know how to open it")
             }
             ExtensionChange::Replaced { from, to } => {
-                format!("Saved as .{to}, not .{from} — apps may open it with the wrong program")
+                format!("Saved as .{to}, not .{from}. Apps may open it with the wrong program")
             }
         },
         warning: true,
@@ -92,7 +92,7 @@ mod tests {
         let n = note("/home/u/Videos/clip", &d, Some("clip.mkv")).expect("a note");
         assert_eq!(
             n.text,
-            "No .mkv extension — apps may not know how to open it"
+            "No .mkv extension. Apps may not know how to open it"
         );
         assert!(n.warning);
     }
@@ -103,7 +103,7 @@ mod tests {
         let n = note("/home/u/Videos/clip.mp4", &d, Some("clip.mkv")).expect("a note");
         assert_eq!(
             n.text,
-            "Saved as .mp4, not .mkv — apps may open it with the wrong program"
+            "Saved as .mp4, not .mkv. Apps may open it with the wrong program"
         );
         assert!(n.warning);
     }

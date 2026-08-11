@@ -1175,7 +1175,7 @@ fn save_note(st: &AddState) -> Option<crate::gui::save_path::Note> {
         && name == st.free_name(&raw)
     {
         return Some(crate::gui::save_path::Note {
-            text: format!("{raw} is already in the list — this one is {name}"),
+            text: format!("{raw} is already in the list. This one is {name}"),
             warning: false,
         });
     }
@@ -1185,7 +1185,7 @@ fn save_note(st: &AddState) -> Option<crate::gui::save_path::Note> {
     if let Some(name) = dest.filename.as_deref().filter(|n| st.name_taken(n)) {
         return Some(crate::gui::save_path::Note {
             text: format!(
-                "{name} is already in the list — saving as {}",
+                "{name} is already in the list. Saving as {}",
                 st.free_name(name)
             ),
             warning: true,
