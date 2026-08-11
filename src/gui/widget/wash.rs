@@ -27,8 +27,10 @@ const H: u32 = 48;
 /// not have.
 const EXTENT: f32 = 0.92;
 
-/// Opacity at the centre.
-const PEAK: f32 = 0.8;
+/// Opacity at the centre. Low on purpose: this is a wash behind
+/// artwork, and anything strong enough to notice as a shape competes
+/// with the thing it sits behind.
+const PEAK: f32 = 0.5;
 
 /// The falloff. Smoothstep, not a power curve: a squared falloff pulls
 /// the light into a tight core with a long dim skirt, which reads as a
@@ -83,7 +85,13 @@ mod tests {
             let dy = (y as f32 + 0.5) / (H as f32 / 2.0) - 1.0;
             (falloff((dx * dx + dy * dy).sqrt() / EXTENT) * 255.0) as u8
         };
-        assert!(alpha(W / 2, H / 2) > 200, "the centre carries the colour");
+        // Against PEAK, not a number: the wash gets tuned by eye, and
+        // a hard-coded floor turns every tuning pass into a red test.
+        let centre = alpha(W / 2, H / 2) as f32 / 255.0;
+        assert!(
+            (centre - PEAK).abs() < 0.02,
+            "the centre carries the full tint: {centre} vs {PEAK}"
+        );
         for x in 0..W {
             assert_eq!(alpha(x, 0), 0, "top edge at x={x}");
             assert_eq!(alpha(x, H - 1), 0, "bottom edge at x={x}");

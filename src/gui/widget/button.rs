@@ -91,6 +91,8 @@ pub struct Btn<'a, M> {
     /// Horizontal padding, when the caller wants something other than
     /// the size's own.
     pad_x: Option<f32>,
+    /// Height, likewise.
+    height: Option<f32>,
     /// Render the *selected* state as the design's `.radio-pill .on`
     /// clay tint instead of the generic sunken + brand border. Used by
     /// `segmented`, so a one-of-N row reads the same everywhere.
@@ -123,6 +125,7 @@ impl<'a, M: Clone + 'a> Btn<'a, M> {
             selected: false,
             accent: false,
             pad_x: None,
+            height: None,
             pill: false,
             tb_metrics: false,
             danger_hover: false,
@@ -225,6 +228,13 @@ impl<'a, M: Clone + 'a> Btn<'a, M> {
     /// odd button whose proportions the design states outright.
     pub fn pad_x(mut self, pad: f32) -> Self {
         self.pad_x = Some(pad);
+        self
+    }
+
+    /// Override the height the size would give — same reason as
+    /// [`Btn::pad_x`], for the vertical axis.
+    pub fn height(mut self, height: f32) -> Self {
+        self.height = Some(height);
         self
     }
     pub fn icon_size(mut self, size: f32) -> Self {
@@ -414,7 +424,7 @@ impl<'a, M: Clone + 'a> Btn<'a, M> {
 
     pub fn view(self, t: &Tokens) -> Element<'a, M> {
         let t = *t;
-        let height = self.size.height();
+        let height = self.height.unwrap_or_else(|| self.size.height());
         // Design `.toolbar .tb-btn`: 600 12px label, 16px icon, 6/10
         // padding — its own metrics, not `.btn`'s. Every other variant
         // keeps the size scale.
@@ -483,6 +493,7 @@ impl<'a, M: Clone + 'a> Btn<'a, M> {
             font_size: None,
             icon_size: None,
             pad_x: None,
+            height: None,
             on_press: None,
         };
 

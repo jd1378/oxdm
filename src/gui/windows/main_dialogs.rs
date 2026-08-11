@@ -864,7 +864,10 @@ fn extensions_dialog<'a>(
                 .accent(true)
                 .size(BtnSize::Sm)
                 .font_size(11.5)
+                // The design's 5/11 padding around an 11.5px label,
+                // which lands between the Sm and Md heights.
                 .pad_x(11.0)
+                .height(26.0)
                 .icon("external-link")
                 .on_press(Msg::OpenStore(url))
                 .view(t),
@@ -888,6 +891,7 @@ fn extensions_dialog<'a>(
     }
 
     let privacy = row![
+        iced::widget::Space::new().width(Length::Fill),
         icons::icon("shield", 14.0, t.status_success),
         text(
             "The extension only acts on download URLs. It never stores or transmits \
@@ -895,7 +899,9 @@ fn extensions_dialog<'a>(
         )
         .font(theme::BODY)
         .size(11.0)
-        .color(t.fg_3),
+        .color(t.fg_3)
+        .align_x(Alignment::Center),
+        iced::widget::Space::new().width(Length::Fill),
     ]
     .spacing(6.0)
     .align_y(Alignment::Center);
