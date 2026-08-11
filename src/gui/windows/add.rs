@@ -48,7 +48,7 @@ const ADVANCED_H: f32 = 531.0;
 /// The "cannot be resumed" line and the gap above it: one 12px line of
 /// bold text plus the body column's spacing.
 const NOT_RESUMABLE_H: f32 = 27.0;
-/// The "Saves as …" line under the save path, plus its gap: one 11px
+/// The "Save as …" line under the save path, plus its gap: one 11px
 /// line of body text.
 const SAVE_NOTE_H: f32 = 22.0;
 /// Dash length of the empty card's outline. Short: at this size the
@@ -349,7 +349,7 @@ fn wanted_height(st: &AddState) -> f32 {
     content + chrome::overhead_h()
 }
 
-/// Resize only when the "Saves as" line appeared or went away. The
+/// Resize only when the "Save as" line appeared or went away. The
 /// dialog is sized to its contents, and re-fitting on every keystroke
 /// would pull the window about while someone is typing a path.
 fn refit_if_note_changed(st: &mut AddState, had_note: bool) -> Task<Msg> {
@@ -689,7 +689,7 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
             fit_window(st)
         }
         Msg::SavePathChanged(p) => {
-            // The "Saves as" line comes and goes as the path is typed,
+            // The "Save as" line comes and goes as the path is typed,
             // and the dialog is sized to its contents. Resizing only on
             // that transition keeps the window still while someone is
             // typing inside a path that already has one.
@@ -977,27 +977,30 @@ fn ready_view(st: &AddState) -> Element<'_, Msg> {
     }
 
     if st.detected().is_some() {
-        body = body
-            .push(
-                row![
-                    labeled(t, "save to", save_field(st)),
-                    labeled(
+        body = body.push(
+            row![
+                labeled(t, "save to", save_field(st)),
+                labeled(
+                    t,
+                    "category",
+                    combo(
                         t,
-                        "category",
-                        combo(
-                            t,
-                            Category::ALL_ASSIGNABLE
-                                .iter()
-                                .map(|c| c.label().to_owned())
-                                .collect(),
-                            st.category.map(|c| c.label().to_owned()),
-                            Msg::SetCategory,
-                            Length::Fill,
-                        )
-                    ),
-                ]
-                .spacing(theme::space::S3),
-            )
+                        Category::ALL_ASSIGNABLE
+                            .iter()
+                            .map(|c| c.label().to_owned())
+                            .collect(),
+                        st.category.map(|c| c.label().to_owned()),
+                        Msg::SetCategory,
+                        Length::Fill,
+                    )
+                ),
+            ]
+            .spacing(theme::space::S3),
+        );
+        if let Some(n) = save_note(st) {
+            body = body.push(save_note_line(&st.tokens, n));
+        }
+        body = body
             .push(
                 row![
                     labeled(
@@ -1122,9 +1125,10 @@ fn segments_combo(st: &AddState) -> Element<'_, Msg> {
     combo(t, options, selected, Msg::SetSegments, Length::Fill)
 }
 
-/// What the field would resolve to, when that is not what it says.
-fn save_note(st: &AddState) -> Option<String> {
-    crate::gui::save_path::note(&st.save_path, &st.destination())
+/// What the field leaves out: where the file lands, or the extension
+/// the typed name drops.
+fn save_note(st: &AddState) -> Option<crate::gui::save_path::Note> {
+    crate::gui::save_path::note(&st.save_path, &st.destination(), st.known_name().as_deref())
 }
 
 /// The save-path field, with the destination spelled out underneath
@@ -1132,24 +1136,27 @@ fn save_note(st: &AddState) -> Option<String> {
 /// retarget the folder is how people retarget the folder; the line is
 /// how they see that the name comes back.
 fn save_field(st: &AddState) -> Element<'_, Msg> {
-    let field = FileInput::new(&st.save_path)
+    FileInput::new(&st.save_path)
         .mono()
         .on_input(Msg::SavePathChanged)
         .on_browse(Msg::BrowseSave)
-        .view(&st.tokens);
-    match save_note(st) {
-        Some(n) => column![
-            field,
-            text(n)
-                .font(theme::MONO)
-                .size(11.0)
-                .color(st.tokens.fg_2)
-                .wrapping(iced::widget::text::Wrapping::None)
-        ]
-        .spacing(theme::space::S1)
-        .into(),
-        None => field,
-    }
+        .view(&st.tokens)
+}
+
+/// The note under the save row, or nothing taking up its place.
+///
+/// A line of its own under the whole row: a full path is longer than
+/// the half-width the field gets. It is *appended* rather than wrapped
+/// around the field — iced keys widget state to the shape of the tree,
+/// so re-parenting the input would reset it, focus and cursor included,
+/// on the very keystroke that produced the note.
+fn save_note_line<'a>(t: &Tokens, n: crate::gui::save_path::Note) -> Element<'a, Msg> {
+    text(n.text)
+        .font(theme::MONO)
+        .size(11.0)
+        .color(if n.warning { t.status_warning } else { t.fg_2 })
+        .wrapping(iced::widget::text::Wrapping::None)
+        .into()
 }
 
 fn labeled<'a>(t: &Tokens, label: &str, body: Element<'a, Msg>) -> Element<'a, Msg> {

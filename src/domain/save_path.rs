@@ -98,6 +98,36 @@ impl Resolver<'_> {
     }
 }
 
+/// How the name being written differs from the name the file came
+/// with, in the one way that changes what happens when it is opened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExtensionChange {
+    Dropped(String),
+    Replaced { from: String, to: String },
+}
+
+/// The extension `known` carries and `chosen` does not, if any.
+///
+/// Renaming `report.pdf` to `report` or to `report.txt` is a legal
+/// thing to want and oxdm writes what it is told, but on every desktop
+/// the extension is what decides which application opens the file, and
+/// either edit is as easily a slip as a decision. Reporting is not
+/// refusing: the note says what will happen, and the user goes on.
+pub fn extension_change(known: &str, chosen: &str) -> Option<ExtensionChange> {
+    let ext = |p: &str| {
+        Path::new(p)
+            .extension()
+            .map(|e| e.to_string_lossy().into_owned())
+            .filter(|e| !e.is_empty())
+    };
+    let from = ext(known)?;
+    match ext(chosen) {
+        None => Some(ExtensionChange::Dropped(from)),
+        Some(to) if to != from => Some(ExtensionChange::Replaced { from, to }),
+        Some(_) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,6 +223,27 @@ mod tests {
         let d = resolver(&none, &is_dir).resolve("/home/u/Downloads", None);
         assert_eq!(d.dir, Path::new("/home/u/Downloads"));
         assert_eq!(d.filename, None);
+    }
+
+    #[test]
+    fn an_extension_that_goes_missing_or_changes_is_reported() {
+        assert_eq!(
+            extension_change("clip.mkv", "clip"),
+            Some(ExtensionChange::Dropped("mkv".into()))
+        );
+        assert_eq!(
+            extension_change("clip.mkv", "clip.mp4"),
+            Some(ExtensionChange::Replaced {
+                from: "mkv".into(),
+                to: "mp4".into()
+            })
+        );
+        // The name changed, the extension did not: nothing to say.
+        assert_eq!(extension_change("clip.mkv", "holiday.mkv"), None);
+        // Nothing to lose.
+        assert_eq!(extension_change("clip", "anything"), None);
+        // A dotfile is a name, not an extension it just lost.
+        assert_eq!(extension_change(".bashrc", "bashrc"), None);
     }
 
     #[test]

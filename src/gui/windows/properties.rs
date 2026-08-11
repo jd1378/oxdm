@@ -483,9 +483,14 @@ fn pending_destination(st: &State) -> crate::domain::Destination {
     )
 }
 
-/// The destination spelled out, when the field does not spell it.
-fn save_note(st: &State) -> Option<String> {
-    crate::gui::save_path::note(&st.save_path, &pending_destination(st))
+/// What the field leaves out: where the file lands, or the extension
+/// the typed name drops or swaps.
+fn save_note(st: &State) -> Option<crate::gui::save_path::Note> {
+    crate::gui::save_path::note(
+        &st.save_path,
+        &pending_destination(st),
+        st.entry.job.filename.as_deref(),
+    )
 }
 
 /// The save-path field, with the destination spelled out underneath
@@ -519,10 +524,10 @@ fn save_to_block(st: &State, editable: bool) -> Element<'_, Msg> {
     .spacing(6.0);
     if let Some(n) = save_note(st) {
         col = col.push(
-            text(n)
+            text(n.text)
                 .font(theme::MONO)
                 .size(11.0)
-                .color(t.fg_2)
+                .color(if n.warning { t.status_warning } else { t.fg_2 })
                 .wrapping(iced::widget::text::Wrapping::None),
         );
     }
