@@ -938,7 +938,7 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
         Msg::SetFilter(f) => {
             m.filter = f;
             m.selection.clear();
-            Task::none()
+            back_to_top(m)
         }
         Msg::ToggleSection(s) => {
             if !m.collapsed_sections.remove(&s) {
@@ -948,7 +948,7 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
         }
         Msg::SetTab(tab) => {
             m.tab = tab;
-            Task::none()
+            back_to_top(m)
         }
         Msg::SetSort(col) => {
             if m.sort.0 == col {
@@ -960,7 +960,7 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
         }
         Msg::SetSearch(s) => {
             m.search = s;
-            Task::none()
+            back_to_top(m)
         }
         Msg::ClearSelection => {
             m.selection.clear();
@@ -1934,6 +1934,24 @@ fn close_context_menu(m: &mut Main) {
 }
 
 /// Move the open submenu's window over its list, stopping at both ends.
+/// Put the table back at the top.
+///
+/// The row range is computed from the remembered scroll offset, and
+/// nothing reset it when the list underneath changed: searching, or
+/// switching to a tab with fewer rows, left the offset pointing past
+/// the end and the table rendered blank until the scrollable had
+/// clamped itself back over the next dozen frames.
+fn back_to_top(m: &mut Main) -> Task<Msg> {
+    m.table_scroll_y = 0.0;
+    iced::widget::operation::scroll_to(
+        iced::widget::Id::new("tbl-body"),
+        iced::widget::scrollable::AbsoluteOffset {
+            x: None,
+            y: Some(0.0),
+        },
+    )
+}
+
 /// Where this download's file actually is.
 ///
 /// `final_path` is what the run wrote, which is not always
@@ -3198,6 +3216,10 @@ fn table(m: &Main) -> Element<'_, Msg> {
                 .margin(0.0)
         };
         scrollable(rows)
+            // Named so a filter/search/tab change can put it back at
+            // the top; without that the offset outlives the list it
+            // was measured against.
+            .id(iced::widget::Id::new("tbl-body"))
             .direction(scrollable::Direction::Both {
                 vertical: bar(),
                 horizontal: bar(),

@@ -708,7 +708,15 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
                 purge_partial: opts.purge_partial,
                 delete_final_file: opts.delete_final_file,
             };
-            match state.remove(id, opts).await {
+            let removed = state.remove(id, opts).await;
+            if removed.is_ok() {
+                // The windows about this download are about nothing
+                // now. They used to stay on screen showing the last
+                // state they saw, with every button dead.
+                try_close(GuiKind::Download(id));
+                try_close(GuiKind::Properties(id));
+            }
+            match removed {
                 Ok(None) => Reply::Ok,
                 Ok(Some(w)) => Reply::Warning(w),
                 Err(e) => Reply::Err(job_err_string(e)),
@@ -758,6 +766,12 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
             Ok(()) => Reply::Ok,
             Err(e) => Reply::Err(e),
         },
+        Request::UpdateSettingsFields { settings, keys } => {
+            match state.update_settings_fields(*settings, &keys).await {
+                Ok(()) => Reply::Ok,
+                Err(e) => Reply::Err(e),
+            }
+        }
         Request::UpdateSettings(s) => match state.update_settings(*s).await {
             Ok(()) => Reply::Ok,
             Err(e) => Reply::Err(e),

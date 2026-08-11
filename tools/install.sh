@@ -95,26 +95,19 @@ case "$OS" in
 esac
 info "$OS / $ARCH → $TARGET"
 
-# Linux runtime deps. We don't auto-install because doing so silently
-# from a piped script is invasive; instead we detect and warn with
-# distro-specific install hints.
+# Linux runtime deps. The UI is software-rendered and links no toolkit,
+# so the only thing worth checking for is D-Bus, which the tray and
+# desktop notifications use. Its absence is a warning, not an error:
+# oxdm runs without them.
 if [ "$OS" = "Linux" ]; then
-  MISSING=""
-  for pkg in libwebkit2gtk-4.1.so.0 libsoup-3.0.so.0 libgtk-3.so.0 libxdo.so.3; do
-    if ! ldconfig -p 2>/dev/null | grep -q "$pkg"; then
-      MISSING="$MISSING $pkg"
-    fi
-  done
-  if [ -n "$MISSING" ]; then
-    warn "Missing runtime libraries:$MISSING"
+  if ! ldconfig -p 2>/dev/null | grep -q "libdbus-1.so.3"; then
+    warn "libdbus-1 not found — the tray icon and desktop notifications will be unavailable."
     if   [ -f /etc/debian_version ]; then
-      info "Install with: sudo apt install libwebkit2gtk-4.1-0 libsoup-3.0-0 libgtk-3-0 libxdo3"
+      info "Install with: sudo apt install libdbus-1-3"
     elif [ -f /etc/fedora-release ] || [ -f /etc/redhat-release ]; then
-      info "Install with: sudo dnf install webkit2gtk4.1 libsoup3 gtk3 libxdo"
+      info "Install with: sudo dnf install dbus-libs"
     elif [ -f /etc/arch-release ]; then
-      info "Install with: sudo pacman -S webkit2gtk-4.1 libsoup3 gtk3 xdotool"
-    else
-      info "Install the equivalent webkit2gtk-4.1, libsoup-3, gtk3, libxdo packages for your distro."
+      info "Install with: sudo pacman -S dbus"
     fi
   fi
 fi
@@ -149,15 +142,28 @@ tar -xzf "$TMP/$ASSET" -C "$TMP"
 
 OXDM_BIN="$(find "$TMP" -type f -name oxdm | head -n1)"
 HOST_BIN="$(find "$TMP" -type f -name oxdm-native-host | head -n1)"
+UPDATER_BIN="$(find "$TMP" -type f -name oxdm-updater | head -n1)"
 [ -n "$OXDM_BIN" ] || err "binary 'oxdm' not found in archive"
-[ -n "$HOST_BIN" ] || err "binary 'oxdm-native-host' not found in archive"
 
 step "Installing to $INSTALL_DIR"
 mkdir -p "$INSTALL_DIR"
 install -m 0755 "$OXDM_BIN" "$INSTALL_DIR/oxdm"
-install -m 0755 "$HOST_BIN" "$INSTALL_DIR/oxdm-native-host"
 ok "installed: $INSTALL_DIR/oxdm"
-ok "installed: $INSTALL_DIR/oxdm-native-host"
+# The extras are not fatal when an archive lacks them: oxdm runs
+# without the browser bridge, and without the updater it just cannot
+# install its own updates.
+if [ -n "$HOST_BIN" ]; then
+  install -m 0755 "$HOST_BIN" "$INSTALL_DIR/oxdm-native-host"
+  ok "installed: $INSTALL_DIR/oxdm-native-host"
+else
+  warn "'oxdm-native-host' is not in this archive — browser integration will be unavailable."
+fi
+if [ -n "$UPDATER_BIN" ]; then
+  install -m 0755 "$UPDATER_BIN" "$INSTALL_DIR/oxdm-updater"
+  ok "installed: $INSTALL_DIR/oxdm-updater"
+else
+  warn "'oxdm-updater' is not in this archive — oxdm will not be able to update itself."
+fi
 
 # Linux .desktop entry so the app appears in launchers.
 if [ "$OS" = "Linux" ] && [ -z "${OXDM_NO_DESKTOP:-}" ]; then

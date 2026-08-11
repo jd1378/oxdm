@@ -95,11 +95,8 @@ try {
     Warn "could not create start-menu shortcut: $($_.Exception.Message)"
   }
 
-  # WebView2 sanity check.
-  $wv2 = Get-ItemProperty -Path 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' -ErrorAction SilentlyContinue
-  if (-not $wv2) {
-    Warn 'Microsoft Edge WebView2 runtime not detected. Install from https://developer.microsoft.com/microsoft-edge/webview2/'
-  }
+  # No WebView2 or toolkit check: the UI is rendered in software and
+  # links nothing beyond the Windows API.
 
   Ok 'done. Run: oxdm'
 }

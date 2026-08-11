@@ -1030,12 +1030,20 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
         }
         Msg::Save => {
             let s = pending_settings(st);
+            // Only what this window changed. Sending the whole page
+            // wrote back every value as it stood when the window
+            // opened, quietly reverting anything changed elsewhere
+            // since.
+            let keys = crate::gui::diff::changed_keys(&st.original, &s);
             // Keep `st.s` in step with what was sent: the mirrors were
             // just folded in, and `original` is rebased off it on ack.
             st.s = s.clone();
             st.save_error = None;
             let client = st.client.clone();
-            Task::perform(async move { client.update_settings(s).await }, Msg::Saved)
+            Task::perform(
+                async move { client.update_settings_fields(s, keys).await },
+                Msg::Saved,
+            )
         }
         Msg::StrandedChecked(Ok((count, bytes))) => {
             if count > 0 {

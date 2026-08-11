@@ -1,6 +1,6 @@
 # oxdm
 
-Cross-platform download manager built on the [`odl`](https://crates.io/crates/odl) crate, with a Dioxus desktop UI and a pluggable browser-extension bridge.
+Cross-platform download manager built on the [`odl`](https://crates.io/crates/odl) crate, with an [iced](https://iced.rs) desktop UI (software-rendered, no GPU required) and a pluggable browser-extension bridge.
 
 ## Install
 
@@ -16,13 +16,10 @@ Custom directory:
 curl -fsSL https://raw.githubusercontent.com/jd1378/oxdm/main/tools/install.sh | sh -s -- --dir /usr/local/bin
 ```
 
-Linux runtime libraries the script will warn about if missing:
-
-| distro                  | command                                                                       |
-|-------------------------|-------------------------------------------------------------------------------|
-| Debian / Ubuntu         | `sudo apt install libwebkit2gtk-4.1-0 libsoup-3.0-0 libgtk-3-0 libxdo3`       |
-| Fedora / RHEL           | `sudo dnf install webkit2gtk4.1 libsoup3 gtk3 libxdo`                         |
-| Arch                    | `sudo pacman -S webkit2gtk-4.1 libsoup3 gtk3 xdotool`                         |
+The UI is rendered in software and links no toolkit: on Linux the only
+runtime libraries beyond libc are D-Bus and systemd's, both of which a
+desktop session already has. The tray and desktop notifications use
+D-Bus; without it oxdm still runs, minus those two.
 
 ### Windows
 
@@ -30,7 +27,7 @@ Linux runtime libraries the script will warn about if missing:
 irm https://raw.githubusercontent.com/jd1378/oxdm/main/tools/install.ps1 | iex
 ```
 
-Installs to `%LOCALAPPDATA%\Programs\oxdm`, adds it to your user PATH, drops a Start-menu shortcut. Requires the [Edge WebView2 runtime](https://developer.microsoft.com/microsoft-edge/webview2/) (already present on Windows 11 and most Windows 10 installs).
+Installs to `%LOCALAPPDATA%\Programs\oxdm`, adds it to your user PATH, drops a Start-menu shortcut.
 
 ### Build from source
 
@@ -40,12 +37,14 @@ cd oxdm
 cargo build --release --bins
 ```
 
-System dev libs needed on Linux: `webkit2gtk4.1-devel`, `libsoup3-devel`, `gtk3-devel`, `libxdo-devel` (Fedora) — equivalent `-dev` packages on Debian/Ubuntu/Arch.
+No system dev libraries are needed beyond a C toolchain and D-Bus
+headers (`dbus-devel` on Fedora, `libdbus-1-dev` on Debian/Ubuntu).
 
 Outputs:
 
 - `target/release/oxdm` — main app
 - `target/release/oxdm-native-host` — browser native-messaging bridge
+- `target/release/oxdm-updater` — verifies and installs a self-update
 
 For development there is also `cargo run -p oxdm-testserver`, a local
 server whose endpoints each misbehave in one specific way (no ranges,
@@ -94,7 +93,11 @@ Every `odl::config::Config` field is editable from Settings, plus oxdm-only knob
 
 ## Architecture
 
-See [`PLAN.md`](PLAN.md) for the full design. TL;DR — four-layer clean architecture (`domain` → `data` → `ipc` / `app`), `odl` types never leak past the `data` layer, pause/cancel/update channel are all behind traits so future swaps don't touch the UI.
+Four-layer clean architecture (`domain` → `data` → `ipc_local` → `gui`):
+`domain` is pure, `odl` types never leak past `data`, and the GUI
+windows are separate processes that talk to the daemon over a local
+socket. Pause/cancel and the update channel sit behind traits, so
+swapping either does not touch the UI.
 
 ## License
 

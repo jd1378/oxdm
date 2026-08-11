@@ -2190,6 +2190,27 @@ impl AppState {
         }
     }
 
+    /// Save only the fields the caller actually edited.
+    ///
+    /// The Settings window sends the whole page, which meant an Apply
+    /// wrote back every value as it stood when the window opened —
+    /// silently reverting anything changed elsewhere in the meantime
+    /// (dismissing the inotify warning with "don't warn again" in the
+    /// main window, for instance). Merging by key keeps an Apply to
+    /// what the user touched.
+    pub async fn update_settings_fields(
+        &self,
+        edited: Settings,
+        keys: &[String],
+    ) -> Result<(), String> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let current = self.settings().await;
+        let merged = merge_settings_fields(&current, &edited, keys)?;
+        self.update_settings(merged).await
+    }
+
     pub async fn update_settings(&self, mut new: Settings) -> Result<(), String> {
         // Checked here rather than in the Settings window, because the
         // window is not the only caller: this is reachable over IPC.
@@ -2715,6 +2736,13 @@ impl AppState {
         let key = url.as_str().to_owned();
         let mut rx = {
             let mut slots = self.probes.lock().await;
+            // Swept whenever the map is held anyway: entries past
+            // freshness answer nobody, and a long session pasting
+            // links kept every one of them.
+            slots.retain(|_, slot| match slot {
+                ProbeSlot::Done { at, .. } => at.elapsed() < PROBE_FRESH_FOR,
+                ProbeSlot::Running(_) => true,
+            });
             match slots.get(&key) {
                 Some(ProbeSlot::Done { at, result }) if at.elapsed() < PROBE_FRESH_FOR => {
                     return (**result).clone();
@@ -4453,6 +4481,37 @@ fn name_is_taken(jobs: &IndexMap<JobId, Arc<JobEntry>>, name: &str, except: Opti
 /// The downloads "Stop queue" pauses: the ones the queue is running of
 /// its own accord.
 ///
+/// `current` with `keys` taken from `edited`.
+///
+/// By key on the serialized form rather than field by field, so a new
+/// setting cannot be forgotten here and silently stop being saveable.
+fn merge_settings_fields(
+    current: &Settings,
+    edited: &Settings,
+    keys: &[String],
+) -> Result<Settings, String> {
+    let mut base = match serde_json::to_value(current) {
+        Ok(serde_json::Value::Object(map)) => map,
+        _ => return Err("settings are not an object".into()),
+    };
+    let from = match serde_json::to_value(edited) {
+        Ok(serde_json::Value::Object(map)) => map,
+        _ => return Err("settings are not an object".into()),
+    };
+    for key in keys {
+        match from.get(key) {
+            Some(value) => {
+                base.insert(key.clone(), value.clone());
+            }
+            // A key the sender named but does not have: newer client,
+            // older daemon. Ignored rather than failing the save.
+            None => tracing::warn!(%key, "unknown setting in an update; ignoring it"),
+        }
+    }
+    serde_json::from_value(serde_json::Value::Object(base))
+        .map_err(|e| format!("could not apply the settings: {e}"))
+}
+
 /// An update download in flight: which job is fetching it, and what
 /// the feed said it should hash to.
 #[derive(Debug, Clone)]
@@ -5130,6 +5189,39 @@ mod tests {
         assert!(!targets.contains(&by_hand), "the user asked for this one");
         assert!(!targets.contains(&assembling), "not a transfer to stop");
         assert!(!targets.contains(&paused), "nothing to stop");
+    }
+
+    /// A stale Settings window used to write back its whole page,
+    /// reverting whatever had changed elsewhere while it was open.
+    #[test]
+    fn only_the_named_fields_are_taken_from_an_edit() {
+        let current = Settings {
+            max_concurrent_downloads: 3,
+            notify_complete: true,
+            ..Settings::default()
+        };
+        let edited = Settings {
+            max_concurrent_downloads: 7,
+            // What the window had at open, now out of date.
+            notify_complete: false,
+            ..Settings::default()
+        };
+        let merged =
+            merge_settings_fields(&current, &edited, &["max_concurrent_downloads".to_owned()])
+                .unwrap();
+        assert_eq!(merged.max_concurrent_downloads, 7);
+        assert!(merged.notify_complete, "an untouched field is left alone");
+    }
+
+    #[test]
+    fn a_setting_the_daemon_does_not_know_is_ignored() {
+        let current = Settings::default();
+        let merged =
+            merge_settings_fields(&current, &current, &["from_a_newer_build".to_owned()]).unwrap();
+        assert_eq!(
+            merged.max_concurrent_downloads,
+            current.max_concurrent_downloads
+        );
     }
 
     #[test]

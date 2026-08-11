@@ -161,6 +161,13 @@ pub enum Request {
     /// every stack-passed `Request` (clippy `large_enum_variant`).
     /// `Box<T>` serializes identically to `T` — wire shape unchanged.
     UpdateSettings(Box<Settings>),
+    /// Save only the named fields, merged onto whatever the daemon
+    /// currently holds. What the Settings window's Apply sends, so it
+    /// cannot revert a change made somewhere else while it was open.
+    UpdateSettingsFields {
+        settings: Box<Settings>,
+        keys: Vec<String>,
+    },
     /// Mint a pairing code without storing it: the Settings window
     /// stages it and saves it with the rest of the page.
     MintExtToken,

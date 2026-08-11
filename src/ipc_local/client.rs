@@ -340,6 +340,19 @@ impl Client {
         self.expect_ok(Request::DeleteQueue(id)).await
     }
 
+    /// Save just the fields the window edited.
+    pub async fn update_settings_fields(
+        &self,
+        s: Settings,
+        keys: Vec<String>,
+    ) -> Result<(), String> {
+        self.expect_ok(Request::UpdateSettingsFields {
+            settings: Box::new(s),
+            keys,
+        })
+        .await
+    }
+
     pub async fn update_settings(&self, s: Settings) -> Result<(), String> {
         self.expect_ok(Request::UpdateSettings(Box::new(s))).await
     }

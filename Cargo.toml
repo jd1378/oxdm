@@ -62,7 +62,6 @@ iced_anim = { version = "=0.3.1", default-features = false, features = ["widgets
 notify = { version = "8.2.0", default-features = false, features = ["macos_fsevent"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-gtk = "0.18"
 ksni = "0.3.4"
 keyring = { version = "3", features = ["linux-native-sync-persistent"] }
 # Already in-tree via notify-rust; direct use: NetworkManager Metered probe.

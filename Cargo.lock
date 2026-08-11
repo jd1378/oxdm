@@ -4230,7 +4230,6 @@ dependencies = [
  "dirs",
  "fs4",
  "futures",
- "gtk",
  "humantime",
  "iced",
  "iced_anim",
