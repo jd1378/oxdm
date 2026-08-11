@@ -425,8 +425,9 @@ impl<M> canvas::Program<M> for PillProgress {
             // NOTE: tiny-skia's geometry backend ignores `with_clip`
             // (draft/paste drop the clip + offset), so the fill is
             // built as its own correctly-capped shape instead.
-            let path = fill_path(size, self.frac, 1.0);
-            frame.fill(&path, self.fill);
+            if let Some(path) = fill_path(size, self.frac, 1.0) {
+                frame.fill(&path, self.fill);
+            }
         }
         if let Some(label) = &self.label {
             frame.fill_text(canvas::Text {
@@ -444,28 +445,27 @@ impl<M> canvas::Program<M> for PillProgress {
     }
 }
 
-/// Rounded fill strip for a pill progress bar: left caps always
-/// rounded, right edge square until the fill reaches the track's
-/// right cap. `inset` shrinks the fill inside the track.
-pub(crate) fn fill_path(track: Size, frac: f32, inset: f32) -> iced::widget::canvas::Path {
-    let h = track.height - 2.0 * inset;
-    let r = h / 2.0;
-    let fw = (track.width * frac).clamp(0.0, track.width) - inset;
-    let fw = fw.max(2.0 * r);
-    let right_r = if fw >= track.width - inset - r {
-        r
-    } else {
-        0.0
-    };
-    iced::widget::canvas::Path::rounded_rectangle(
-        Point::new(inset, inset),
-        Size::new(fw, h),
-        iced::border::Radius {
-            top_left: r,
-            bottom_left: r,
-            top_right: right_r,
-            bottom_right: right_r,
-        },
+/// Fill strip for a pill progress bar: a plain rectangle, cut to the
+/// track's own outline. `inset` shrinks the fill inside the track.
+///
+/// The fill is not a pill of its own. One that was had to invent a
+/// minimum width, so a download at half a percent drew a full rounded
+/// stub, and had to decide when to round its right edge, so the last
+/// few percent arrived as a jump onto the cap. A rectangle behind a
+/// pill-shaped window has neither problem: it appears as a hairline of
+/// the left cap's curve and swallows the right cap one column at a
+/// time.
+pub(crate) fn fill_path(track: Size, frac: f32, inset: f32) -> Option<iced::widget::canvas::Path> {
+    let inner = Size::new(track.width - 2.0 * inset, track.height - 2.0 * inset);
+    if inner.width <= 0.0 || inner.height <= 0.0 {
+        return None;
+    }
+    let fw = (inner.width * frac.clamp(0.0, 1.0)).min(inner.width);
+    let origin = Point::new(inset, inset);
+    let outline = super::pill_clip::pill_polygon_at(origin, inner, inner.height / 2.0);
+    super::pill_clip::clipped_fill(
+        iced::Rectangle::new(origin, Size::new(fw, inner.height)),
+        &outline,
     )
 }
 

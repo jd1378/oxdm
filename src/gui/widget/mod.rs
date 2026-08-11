@@ -10,6 +10,7 @@ pub mod ellipsis;
 pub mod error_panel;
 pub mod inputs;
 pub mod integrity;
+pub mod pill_clip;
 pub mod pills;
 pub mod settings;
 pub mod striped;

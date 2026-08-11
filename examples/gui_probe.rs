@@ -375,10 +375,10 @@ fn switches_page(t: &theme::Tokens) -> Element<'static, Msg> {
 /// rounded ends decide the picture: just started, halfway, and full.
 fn bars_page(t: &theme::Tokens) -> Element<'static, Msg> {
     let mut col = column![].spacing(24.0).width(Length::Fill);
-    for frac in [0.04_f32, 0.17, 0.5, 1.0] {
+    for frac in [0.002_f32, 0.02, 0.17, 0.5, 0.97, 1.0] {
         col = col.push(
             column![
-                text(format!("{}%", (frac * 100.0).round() as u32))
+                text(format!("{:.1}%", frac * 100.0))
                     .font(theme::BODY)
                     .size(12.0)
                     .color(t.fg_2),

@@ -4,6 +4,8 @@
 use iced::widget::canvas;
 use iced::{Color, Element, Length, Point, Rectangle, Size};
 
+use super::pill_clip::{band_path, clipped_fill, pill_polygon};
+
 use crate::gui::color::{mix, with_alpha};
 
 /// Pill progress with optional horizontal gradient fill and animated
@@ -62,6 +64,11 @@ pub fn striped_progress_hatched<'a, M: 'a>(
     .into()
 }
 
+/// A full-height column of the bar, `x0` to `x1`.
+fn rect(x0: f32, x1: f32, size: Size) -> iced::Rectangle {
+    iced::Rectangle::new(Point::new(x0, 0.0), Size::new(x1 - x0, size.height))
+}
+
 struct Striped {
     frac: f32,
     track: Color,
@@ -99,73 +106,33 @@ impl<M> canvas::Program<M> for Striped {
         }
         let fw = size.width * self.frac;
 
-        // tiny-skia's geometry backend ignores `with_clip`, so all
-        // shapes are constructed pre-clipped.
+        // Every shape inside the track arrives pre-cut to the
+        // track's outline: tiny-skia ignores `with_clip`.
+        let outline = pill_polygon(size, radius);
         match self.fill_gradient {
             None => {
-                let path = super::pills::fill_path(size, self.frac, 0.0);
-                frame.fill(&path, self.fill);
+                if let Some(path) = clipped_fill(rect(0.0, fw, size), &outline) {
+                    frame.fill(&path, self.fill);
+                }
             }
             Some((left, right)) => {
                 let n = ((fw / 8.0) as usize).clamp(2, 24);
                 let slice_w = fw / n as f32;
                 if slice_w < 2.0 {
-                    let path = super::pills::fill_path(size, self.frac, 0.0);
-                    frame.fill(&path, mix(left, right, 0.5));
+                    if let Some(path) = clipped_fill(rect(0.0, fw, size), &outline) {
+                        frame.fill(&path, mix(left, right, 0.5));
+                    }
                 } else {
-                    // Rectangular slices, then both end caps are
-                    // re-fixed with single-color rounded slices.
-                    let radius = size.height / 2.0;
-                    // Where the square slices have to stop. On the left
-                    // that is the cap; on the right it is the cap only
-                    // once the fill has reached it, since a fill that
-                    // ends mid-track ends square by design. Running a
-                    // slice under the cap leaves its corners outside the
-                    // pill: the cap paints its own rounded shape and
-                    // cannot erase what is drawn beyond it.
-                    let right_limit = if fw >= size.width - radius {
-                        size.width - radius
-                    } else {
-                        fw
-                    };
+                    // Slices of flat colour, each cut to the outline,
+                    // so the caps need no special case: the first and
+                    // last simply come out round.
                     for i in 0..n {
                         let t = i as f32 / (n - 1) as f32;
-                        let x = i as f32 * slice_w;
-                        let (x0, x1) = (x.max(radius), (x + slice_w + 0.5).min(right_limit));
-                        if x1 <= x0 {
-                            continue;
+                        let x0 = i as f32 * slice_w;
+                        let x1 = (x0 + slice_w + 0.5).min(fw);
+                        if let Some(path) = clipped_fill(rect(x0, x1, size), &outline) {
+                            frame.fill(&path, mix(left, right, t));
                         }
-                        let path = canvas::Path::rectangle(
-                            Point::new(x0, 0.0),
-                            Size::new(x1 - x0, size.height),
-                        );
-                        frame.fill(&path, mix(left, right, t));
-                    }
-                    // Left cap.
-                    let cap = canvas::Path::rounded_rectangle(
-                        Point::ORIGIN,
-                        Size::new(2.0 * radius, size.height),
-                        iced::border::Radius {
-                            top_left: radius,
-                            bottom_left: radius,
-                            top_right: 0.0,
-                            bottom_right: 0.0,
-                        },
-                    );
-                    frame.fill(&cap, left);
-                    // Right cap when the bar reaches the track end.
-                    if fw >= size.width - radius {
-                        let cap = canvas::Path::rounded_rectangle(
-                            Point::new(size.width - 2.0 * radius, 0.0),
-                            Size::new(2.0 * radius, size.height),
-                            iced::border::Radius {
-                                top_left: 0.0,
-                                bottom_left: 0.0,
-                                top_right: radius,
-                                bottom_right: radius,
-                            },
-                        );
-                        frame.fill(&cap, right);
                     }
                 }
             }
@@ -175,7 +142,6 @@ impl<M> canvas::Program<M> for Striped {
         // of the bar *and* with the bar's own pill outline, so a band
         // stops at the rounded end instead of squaring it off (manual
         // clip — see note above).
-        let outline = pill_polygon(size, radius);
         if self.animate {
             let angle = 45.0_f32.to_radians();
             let perp_period = 14.0;
@@ -237,133 +203,6 @@ fn hatch_bands(frame: &mut canvas::Frame, size: Size, color: Color) {
         }
         x += h_period;
     }
-}
-
-/// The bar's own outline, as a convex polygon fine enough to clip
-/// against.
-///
-/// The stripes are diagonal bands over a pill, and tiny-skia's geometry
-/// backend ignores `with_clip`, so the only way a band stops at the
-/// rounded end is for its *shape* to stop there. Eight segments per cap
-/// put the approximation within `r * 0.02` of the true arc, which at a
-/// 4px radius is under a tenth of a pixel.
-fn pill_polygon(size: Size, radius: f32) -> Vec<Point> {
-    const SEG: usize = 8;
-    let r = radius.min(size.width / 2.0).max(0.0);
-    let mut pts = Vec::with_capacity(2 * (SEG + 1));
-    let arc = |c: Point, from: f32, to: f32, out: &mut Vec<Point>| {
-        for i in 0..=SEG {
-            let a = from + (to - from) * (i as f32 / SEG as f32);
-            out.push(Point::new(c.x + r * a.cos(), c.y + r * a.sin()));
-        }
-    };
-    let (top, bottom) = (r, size.height - r);
-    // Right cap, then left: one closed ring, in one direction.
-    arc(
-        Point::new(size.width - r, top),
-        -std::f32::consts::FRAC_PI_2,
-        std::f32::consts::FRAC_PI_2,
-        &mut pts,
-    );
-    if bottom > top {
-        pts.push(Point::new(size.width - r, bottom));
-    }
-    arc(
-        Point::new(r, bottom),
-        std::f32::consts::FRAC_PI_2,
-        std::f32::consts::PI * 1.5,
-        &mut pts,
-    );
-    pts
-}
-
-/// Sutherland-Hodgman clip of `poly` against the convex `clip`
-/// polygon. Both must be convex; the bands and the pill are.
-fn clip_poly_convex(poly: &[Point], clip: &[Point]) -> Vec<Point> {
-    // Which side of an edge counts as inside depends on which way the
-    // clip polygon is wound, so ask its own area rather than assuming.
-    let area: f32 = (0..clip.len())
-        .map(|i| {
-            let (a, b) = (clip[i], clip[(i + 1) % clip.len()]);
-            a.x * b.y - b.x * a.y
-        })
-        .sum();
-    let orient = if area >= 0.0 { 1.0 } else { -1.0 };
-    let mut pts = poly.to_vec();
-    for i in 0..clip.len() {
-        if pts.len() < 3 {
-            return Vec::new();
-        }
-        let (a, b) = (clip[i], clip[(i + 1) % clip.len()]);
-        let side = |p: &Point| orient * ((b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x));
-        let mut out = Vec::with_capacity(pts.len() + 2);
-        for j in 0..pts.len() {
-            let cur = pts[j];
-            let next = pts[(j + 1) % pts.len()];
-            let (dc, dn) = (side(&cur), side(&next));
-            if dc >= 0.0 {
-                out.push(cur);
-            }
-            if (dc >= 0.0) != (dn >= 0.0) {
-                let t = dc / (dc - dn);
-                out.push(Point::new(
-                    cur.x + t * (next.x - cur.x),
-                    cur.y + t * (next.y - cur.y),
-                ));
-            }
-        }
-        pts = out;
-    }
-    pts
-}
-
-fn poly_path(pts: &[Point]) -> Option<canvas::Path> {
-    if pts.len() < 3 {
-        return None;
-    }
-    let mut b = canvas::path::Builder::new();
-    b.move_to(pts[0]);
-    for p in &pts[1..] {
-        b.line_to(*p);
-    }
-    b.close();
-    Some(b.build())
-}
-
-/// A band clipped to `x0..x1` *and* to the bar's rounded outline.
-fn band_path(poly: &[Point], x0: f32, x1: f32, outline: &[Point]) -> Option<canvas::Path> {
-    let pts = clip_poly_x_pts(poly, x0, x1);
-    if pts.len() < 3 {
-        return None;
-    }
-    poly_path(&clip_poly_convex(&pts, outline))
-}
-
-/// The same x-range clip, handing back the points so a second clip can
-/// run on them.
-fn clip_poly_x_pts(poly: &[Point], x0: f32, x1: f32) -> Vec<Point> {
-    let clip_half = |pts: &[Point], edge: f32, sign: f32| -> Vec<Point> {
-        let inside = |p: &Point| (p.x - edge) * sign <= 0.0;
-        let mut out = Vec::with_capacity(pts.len() + 2);
-        for i in 0..pts.len() {
-            let cur = pts[i];
-            let next = pts[(i + 1) % pts.len()];
-            let (cur_in, next_in) = (inside(&cur), inside(&next));
-            if cur_in {
-                out.push(cur);
-            }
-            if cur_in != next_in {
-                let t = (edge - cur.x) / (next.x - cur.x);
-                out.push(Point::new(edge, cur.y + t * (next.y - cur.y)));
-            }
-        }
-        out
-    };
-    let pts = clip_half(poly, x1, 1.0);
-    if pts.is_empty() {
-        return Vec::new();
-    }
-    clip_half(&pts, x0, -1.0)
 }
 
 /// Transfer-rate chart: dotted gridlines, avg dashed line, polyline +
@@ -476,52 +315,5 @@ impl<M> canvas::Program<M> for RateChart {
         }
 
         vec![frame.into_geometry()]
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Every point of a clipped band has to be inside the pill, or the
-    /// band is what draws the square corner the pill was hiding.
-    #[test]
-    fn a_band_never_reaches_outside_the_pill() {
-        let size = Size::new(200.0, 8.0);
-        let r = size.height / 2.0;
-        let outline = pill_polygon(size, r);
-        // A band lying right across the left cap, the case that leaked.
-        let poly = [
-            Point::new(-4.0, size.height),
-            Point::new(2.0, size.height),
-            Point::new(10.0, 0.0),
-            Point::new(4.0, 0.0),
-        ];
-        let pts = clip_poly_convex(&clip_poly_x_pts(&poly, 0.0, 100.0), &outline);
-        assert!(pts.len() >= 3, "the band survives the clip");
-        for p in &pts {
-            // Distance to the pill's spine, which is `r` at most
-            // anywhere inside it. A hair of slack for the polygon
-            // approximation of the arc.
-            let cx = p.x.clamp(r, size.width - r);
-            let d = ((p.x - cx).powi(2) + (p.y - r).powi(2)).sqrt();
-            assert!(d <= r + 0.05, "{p:?} sits {d} from the spine, r = {r}");
-        }
-    }
-
-    /// Clipping must not eat the middle of the bar, where there is no
-    /// curve to respect.
-    #[test]
-    fn a_band_in_the_straight_middle_is_left_alone() {
-        let size = Size::new(200.0, 8.0);
-        let outline = pill_polygon(size, size.height / 2.0);
-        let poly = [
-            Point::new(100.0, size.height),
-            Point::new(106.0, size.height),
-            Point::new(114.0, 0.0),
-            Point::new(108.0, 0.0),
-        ];
-        let pts = clip_poly_convex(&poly, &outline);
-        assert_eq!(pts.len(), 4, "an untouched band keeps its four corners");
     }
 }
