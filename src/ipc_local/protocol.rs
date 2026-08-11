@@ -153,7 +153,9 @@ pub enum Request {
     /// every stack-passed `Request` (clippy `large_enum_variant`).
     /// `Box<T>` serializes identically to `T` — wire shape unchanged.
     UpdateSettings(Box<Settings>),
-    RegenerateExtToken,
+    /// Mint a pairing code without storing it: the Settings window
+    /// stages it and saves it with the rest of the page.
+    MintExtToken,
     /// Inspect the daemon's secrets-encryption state. Used by the GUI
     /// at boot to decide whether to surface the "master key missing"
     /// wipe-confirmation dialog. Reply is `Reply::SecretsStatus`.
@@ -393,7 +395,7 @@ pub enum Reply {
         cookies: Option<String>,
     },
     DbStatus(Option<String>),
-    /// The pairing code the extension needs, freshly minted.
+    /// A freshly minted pairing code, not yet saved anywhere.
     ExtToken(String),
 }
 

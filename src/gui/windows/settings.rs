@@ -184,6 +184,11 @@ pub enum Msg {
     Regenerate,
     /// The daemon minted a new pairing code (or refused to).
     Regenerated(Result<String, String>),
+    /// The pairing code that is actually stored, re-read after someone
+    /// saved settings.
+    ExtTokenSaved(Result<String, String>),
+    /// The copy confirmation on the pairing code has run its course.
+    PairCopyDone,
     ConflictHidden(String),
     // Notifications
     ShowCompleteDialog(bool),
@@ -266,6 +271,9 @@ pub struct State {
     /// shown, blanks included until the user fills or removes them.
     custom_headers: Vec<(String, String)>,
     shot: Option<Shot>,
+    /// The pairing code was just copied — the button says so with a
+    /// check for a moment.
+    pair_copied: bool,
     /// How many settings differ from what is saved. Drives the footer's
     /// Discard button; recomputed in `update_ready`.
     dirty: usize,
@@ -449,13 +457,6 @@ fn normalize_categories(s: &mut Settings) {
     s.category_queues = queues.into_iter().collect();
 }
 
-/// Take a pairing code the daemon owns into both the form and the
-/// baseline it is diffed against.
-fn adopt_ext_token(st: &mut State, token: String) {
-    st.s.ext_token = token.clone();
-    st.original.ext_token = token;
-}
-
 fn mirror(st: &mut State) {
     // Whatever moved `st.s` wholesale — Reset, Discard, a reload — the
     // preview follows it, the same way picking a theme repaints on the
@@ -569,6 +570,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 tokens: Tokens::from_settings(&settings),
                 section: section_arg(),
                 original: settings.clone(),
+                pair_copied: false,
                 s: settings,
                 work_dir: String::new(),
                 max_retries: String::new(),
@@ -656,12 +658,11 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
                     |t| Msg::Themed(Box::new(t)),
                     Msg::Noop,
                 ),
-                // Same reason the regenerate reply is adopted: whoever
-                // rotated the code, this window must not hold the old
-                // one and write it back on Apply.
+                // Whoever saved a new code, this window must not hold
+                // the old one and write it back on Apply.
                 Task::perform(
                     async move { client.snapshot().await.map(|s| s.settings.ext_token) },
-                    Msg::Regenerated,
+                    Msg::ExtTokenSaved,
                 ),
             ])
         }
@@ -897,24 +898,51 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
             st.ipc_port = v;
             Task::none()
         }
-        Msg::CopyPairing => iced::clipboard::write(st.s.ext_token.clone()),
+        Msg::CopyPairing => {
+            st.pair_copied = true;
+            Task::batch([
+                iced::clipboard::write(st.s.ext_token.clone()),
+                Task::perform(
+                    tokio::time::sleep(std::time::Duration::from_millis(PAIR_COPIED_MS)),
+                    |()| Msg::PairCopyDone,
+                ),
+            ])
+        }
+        Msg::PairCopyDone => {
+            st.pair_copied = false;
+            Task::none()
+        }
+        Msg::ExtTokenSaved(Ok(saved)) => {
+            // Only the baseline moves when a code is staged here:
+            // overwriting the form would throw away the code the user
+            // is looking at and has perhaps already copied.
+            let staged = st.s.ext_token != st.original.ext_token;
+            st.original.ext_token = saved.clone();
+            if !staged {
+                st.s.ext_token = saved;
+            }
+            Task::none()
+        }
+        Msg::ExtTokenSaved(Err(e)) => {
+            tracing::warn!(error = %e, "could not re-read the pairing code");
+            Task::none()
+        }
         Msg::Regenerate => {
             let client = st.client.clone();
             Task::perform(
-                async move { client.regenerate_ext_token().await },
+                async move { client.mint_ext_token().await },
                 Msg::Regenerated,
             )
         }
         Msg::Regenerated(Ok(token)) => {
-            // The code is the daemon's, not a field being edited here:
-            // it lands on the baseline as well as the form, so it does
-            // not read as an unsaved change — and so a later Apply
-            // sends the new code rather than putting the old one back.
-            adopt_ext_token(st, token);
+            // Staged, not saved: a new code unpairs whatever is paired
+            // now, so it waits for Apply like every other field here —
+            // and Discard puts the working one back.
+            st.s.ext_token = token;
             Task::none()
         }
         Msg::Regenerated(Err(e)) => {
-            tracing::warn!(error = %e, "could not regenerate the pairing code");
+            tracing::warn!(error = %e, "could not mint a pairing code");
             Task::none()
         }
         Msg::ConflictHidden(v) => {
@@ -1075,6 +1103,10 @@ fn splash<'a>(msg: String) -> Element<'a, Msg> {
 }
 
 /// Design `.settings-nav .s-item`: 500 12.5px, 600 when selected.
+/// How long the pairing code's Copy button confirms with a check —
+/// long enough to read, short enough not to look like a mode.
+const PAIR_COPIED_MS: u64 = 1400;
+
 const NAV_FONT: f32 = 12.5;
 /// The label's line box reserves descender room below the baseline that
 /// a word like "General" never uses, so centring the *boxes* leaves the
@@ -2202,9 +2234,9 @@ fn browser_section(st: &State) -> Element<'_, Msg> {
                             },
                             ..Default::default()
                         }),
-                        Btn::new("Copy")
+                        Btn::new(if st.pair_copied { "Copied" } else { "Copy" })
                             .toolbar()
-                            .icon("copy")
+                            .icon(if st.pair_copied { "check" } else { "copy" })
                             .on_press(Msg::CopyPairing)
                             .view(t),
                         Btn::new("Regenerate")

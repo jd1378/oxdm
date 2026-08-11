@@ -682,13 +682,7 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
             Ok(()) => Reply::Ok,
             Err(e) => Reply::Err(e),
         },
-        Request::RegenerateExtToken => match state.regenerate_ext_token().await {
-            // Handed back rather than dropped: the window that asked
-            // is showing the old code and has no other way to learn
-            // the new one.
-            Ok(token) => Reply::ExtToken(token),
-            Err(e) => Reply::Err(e),
-        },
+        Request::MintExtToken => Reply::ExtToken(state.mint_ext_token()),
         Request::SecretsStatus => Reply::SecretsStatus {
             locked: state.is_secrets_locked().await,
         },

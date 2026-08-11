@@ -1546,18 +1546,14 @@ impl AppState {
     /// Replace the extension token with a freshly generated one and
     /// persist. Existing extension WebSocket sessions stay open until
     /// they reconnect; new sessions must use the new value.
-    pub async fn regenerate_ext_token(self: &Arc<Self>) -> Result<String, String> {
-        let new = generate_token();
-        let mut settings = self.settings.read().await.clone();
-        settings.ext_token = new.clone();
-        self.store
-            .save_settings(&settings)
-            .await
-            .map_err(|e| e.to_string())?;
-        *self.ext_token.write().await = new.clone();
-        *self.settings.write().await = settings;
-        let _ = self.events.send(DomainEvent::SettingsChanged);
-        Ok(new)
+    /// A fresh pairing code, minted and handed back — *not* stored.
+    ///
+    /// Saving it here would unpair the extension the instant the button
+    /// was pressed, before the user has copied the new code or decided
+    /// to keep it. It becomes real when the settings that carry it are
+    /// saved, like every other field on that page.
+    pub fn mint_ext_token(&self) -> String {
+        generate_token()
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<DomainEvent> {
@@ -1862,6 +1858,10 @@ impl AppState {
             .await
             .map_err(|e| e.to_string())?;
         *self.manager.write().await = Arc::new(manager);
+        // The extension authenticates against this copy, so a saved
+        // pairing code has to land here too — otherwise the code the
+        // window shows only starts working after a restart.
+        *self.ext_token.write().await = new.ext_token.clone();
         *self.settings.write().await = new;
         let _ = self.events.send(DomainEvent::SettingsChanged);
         Ok(())

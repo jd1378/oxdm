@@ -289,9 +289,9 @@ impl Client {
     pub async fn update_settings(&self, s: Settings) -> Result<(), String> {
         self.expect_ok(Request::UpdateSettings(Box::new(s))).await
     }
-    pub async fn regenerate_ext_token(&self) -> Result<String, String> {
+    pub async fn mint_ext_token(&self) -> Result<String, String> {
         match self
-            .request(Request::RegenerateExtToken)
+            .request(Request::MintExtToken)
             .await
             .map_err(|e| e.to_string())?
         {
