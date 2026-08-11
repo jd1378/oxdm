@@ -317,7 +317,11 @@ pub fn remove_confirm<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Ms
                 &format!("Also delete all {n} files on disk"),
             ),
             st.delete_on_disk,
-            true,
+            // Off the table once the answer is being remembered: what
+            // gets stored is "remove the entry", never "and delete the
+            // file", so the box cannot be left ticked under a
+            // preference that will not carry it.
+            !st.dont_ask_again,
             Msg::RemoveDeleteOnDisk,
         ));
     }

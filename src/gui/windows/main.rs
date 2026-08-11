@@ -1386,6 +1386,14 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
         Msg::RemoveDontAsk(v) => {
             if let Some(r) = &mut m.remove {
                 r.dont_ask_again = v;
+                // What gets remembered is "take it off the list", and
+                // only that. A preference that also deleted files would
+                // delete the next one without asking, which is not a
+                // decision anyone makes once for every download to
+                // come, so the two cannot be on together.
+                if v {
+                    r.delete_on_disk = false;
+                }
             }
             Task::none()
         }
