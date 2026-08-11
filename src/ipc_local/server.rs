@@ -17,7 +17,7 @@ use std::sync::atomic::Ordering as AtomicOrd;
 use std::time::Duration;
 
 use interprocess::local_socket::{
-    GenericNamespaced, ListenerOptions, ToNsName, tokio::Stream as IpcStream,
+    ListenerOptions, tokio::Listener as IpcListener, tokio::Stream as IpcStream,
     traits::tokio::Listener as _,
 };
 use tokio::sync::{Mutex, mpsc};
@@ -102,20 +102,24 @@ pub fn close_all_except(keep: &[GuiKind]) {
 /// Bind the IPC socket and run the accept loop until the daemon
 /// terminates. Designed to be `tokio::spawn`ed by the daemon main.
 pub async fn serve(state: Arc<AppState>) -> std::io::Result<()> {
-    let name = super::socket_name();
-    tracing::info!(socket = %name, "ipc_local listening");
-    let ns = name.as_str().to_ns_name::<GenericNamespaced>()?;
-    let listener = match ListenerOptions::new().name(ns).create_tokio() {
-        Ok(l) => l,
-        Err(e) => return Err(e),
-    };
+    // Minted before the socket exists, so no client can ever connect
+    // into a window where the token file is missing or stale.
+    let token = Arc::new(super::auth::install_token()?);
+    let listener = bind_listener()?;
 
     loop {
         match listener.accept().await {
             Ok(stream) => {
+                // Cheap and unforgeable where it is available; the
+                // token handshake below covers the rest.
+                if !super::auth::peer_is_self(&stream) {
+                    tracing::warn!("ipc_local rejected a connection from another user");
+                    continue;
+                }
                 let state = state.clone();
+                let token = token.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_conn(stream, state).await {
+                    if let Err(e) = handle_conn(stream, state, token).await {
                         tracing::debug!(error = %e, "ipc_local conn ended");
                     }
                 });
@@ -126,6 +130,36 @@ pub async fn serve(state: Arc<AppState>) -> std::io::Result<()> {
             }
         }
     }
+}
+
+/// Unix: a filesystem socket, mode 0600, inside the 0700 runtime dir.
+/// `try_overwrite` clears the socket file a crashed predecessor left
+/// behind; the single-instance lock is what guarantees no live daemon
+/// is displaced by it.
+#[cfg(unix)]
+fn bind_listener() -> std::io::Result<IpcListener> {
+    use interprocess::local_socket::{GenericFilePath, ToFsName};
+    use interprocess::os::unix::local_socket::ListenerOptionsExt as _;
+
+    let path = super::auth::socket_path()?;
+    tracing::info!(socket = %path.display(), "ipc_local listening");
+    let name = path.clone().to_fs_name::<GenericFilePath>()?;
+    ListenerOptions::new()
+        .name(name)
+        .mode(0o600)
+        .try_overwrite(true)
+        .max_spin_time(Duration::from_secs(2))
+        .create_tokio()
+}
+
+#[cfg(not(unix))]
+fn bind_listener() -> std::io::Result<IpcListener> {
+    use interprocess::local_socket::{GenericNamespaced, ToNsName};
+
+    let name = super::socket_name();
+    tracing::info!(socket = %name, "ipc_local listening");
+    let ns = name.as_str().to_ns_name::<GenericNamespaced>()?;
+    ListenerOptions::new().name(ns).create_tokio()
 }
 
 #[derive(Default)]
@@ -197,7 +231,11 @@ impl Drop for ConnState {
     }
 }
 
-async fn handle_conn(stream: IpcStream, state: Arc<AppState>) -> Result<(), CodecError> {
+async fn handle_conn(
+    stream: IpcStream,
+    state: Arc<AppState>,
+    token: Arc<String>,
+) -> Result<(), CodecError> {
     let stream = Arc::new(stream);
     let writer = Arc::new(Mutex::new(()));
     let mut conn_state = ConnState::default();
@@ -215,6 +253,12 @@ async fn handle_conn(stream: IpcStream, state: Arc<AppState>) -> Result<(), Code
     // pasted list opens a hundred connections at the same moment.
     let slots = Arc::new(tokio::sync::Semaphore::new(16));
 
+    // A connection that has not proved it can read the token file gets
+    // exactly one thing: the chance to send `Auth`. Anything else ends
+    // the connection rather than answering, so an unauthenticated peer
+    // cannot even probe which requests exist.
+    let mut authed = false;
+
     loop {
         let frame: Frame = {
             let mut r = &*stream;
@@ -227,6 +271,27 @@ async fn handle_conn(stream: IpcStream, state: Arc<AppState>) -> Result<(), Code
         let Frame::Request(req_id, req) = frame else {
             continue;
         };
+
+        if let Request::Auth(got) = &req {
+            authed = super::auth::token_matches(&token, got);
+            let reply = if authed {
+                Reply::Ok
+            } else {
+                tracing::warn!("ipc_local rejected a connection with a bad token");
+                Reply::Err("unauthenticated".into())
+            };
+            let _g = writer.lock().await;
+            let mut w = &*stream;
+            write_frame(&mut w, &Frame::Reply(req_id, reply)).await?;
+            if !authed {
+                return Ok(());
+            }
+            continue;
+        }
+        if !authed {
+            tracing::warn!("ipc_local dropped a connection that skipped the handshake");
+            return Ok(());
+        }
 
         // Subscribe is special: it spawns the event pump tasks rather
         // than producing a payload reply.
@@ -503,6 +568,7 @@ fn job_err_string(e: JobError) -> String {
 
 async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
     match req {
+        Request::Auth(_) => unreachable!("auth handled in the conn loop"),
         Request::Ping => Reply::Ok,
         Request::Subscribe(_) => unreachable!("subscribe handled in the conn loop"),
         Request::Hello(_) => unreachable!("hello handled in the conn loop"),

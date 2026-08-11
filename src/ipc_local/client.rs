@@ -8,10 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use interprocess::local_socket::{
-    GenericNamespaced, ToNsName,
-    tokio::{Stream as IpcStream, prelude::*},
-};
+use interprocess::local_socket::tokio::{Stream as IpcStream, prelude::*};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 use super::codec::{CodecError, read_frame, write_frame};
@@ -23,6 +20,30 @@ use crate::data::{ProbeResult, RemoveOpts, UpdateInfo};
 use crate::domain::{Advanced, Checksum, JobError, JobId, OnCompletion, Queue, QueueId, Settings};
 
 type Pending = std::collections::HashMap<u64, oneshot::Sender<Reply>>;
+
+/// Open the transport the daemon is listening on: a filesystem socket
+/// in the 0700 runtime dir on Unix, the per-user named pipe on Windows.
+async fn connect_stream() -> Result<IpcStream, CodecError> {
+    #[cfg(unix)]
+    {
+        use interprocess::local_socket::{GenericFilePath, ToFsName};
+        let path = super::auth::socket_path().map_err(CodecError::Io)?;
+        let name = path
+            .to_fs_name::<GenericFilePath>()
+            .map_err(CodecError::Io)?;
+        IpcStream::connect(name).await.map_err(CodecError::Io)
+    }
+    #[cfg(not(unix))]
+    {
+        use interprocess::local_socket::{GenericNamespaced, ToNsName};
+        let name_owned = super::socket_name();
+        let name = name_owned
+            .as_str()
+            .to_ns_name::<GenericNamespaced>()
+            .map_err(CodecError::Io)?;
+        IpcStream::connect(name).await.map_err(CodecError::Io)
+    }
+}
 
 /// Background-task-driven IPC client.
 /// Plaintext secrets for a single job, returned in one round-trip by
@@ -48,13 +69,7 @@ pub struct Client {
 
 impl Client {
     pub async fn connect() -> Result<Arc<Self>, CodecError> {
-        let name_owned = super::socket_name();
-        let name = name_owned
-            .as_str()
-            .to_ns_name::<GenericNamespaced>()
-            .map_err(CodecError::Io)?;
-        let stream = IpcStream::connect(name).await.map_err(CodecError::Io)?;
-        let stream = Arc::new(stream);
+        let stream = Arc::new(connect_stream().await?);
 
         let (ev_tx, ev_rx) = mpsc::channel::<Event>(256);
         let pending: Arc<Mutex<Pending>> = Arc::new(Mutex::new(std::collections::HashMap::new()));
@@ -90,13 +105,24 @@ impl Client {
             }
         });
 
-        Ok(Arc::new(Self {
+        let client = Arc::new(Self {
             next_id: AtomicU64::new(1),
             pending,
             stream,
             write_lock: Arc::new(Mutex::new(())),
             events: Mutex::new(Some(ev_rx)),
-        }))
+        });
+
+        // The daemon answers nothing until this lands, so a failure
+        // here is a failed connect, not a degraded one.
+        let token = super::auth::read_token().map_err(CodecError::Io)?;
+        match client.request(Request::Auth(token)).await? {
+            Reply::Ok => Ok(client),
+            other => Err(CodecError::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("ipc handshake refused: {other:?}"),
+            ))),
+        }
     }
 
     /// Connect with retry — the daemon may still be wiring its socket

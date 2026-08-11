@@ -12,6 +12,7 @@
 //! mirrors `data::AppState` method signatures so the GUI client can
 //! offer the same Rust-level API a direct `Arc<AppState>` once did.
 
+pub mod auth;
 pub mod client;
 pub mod codec;
 pub mod protocol;
@@ -21,22 +22,19 @@ pub use client::Client;
 pub use protocol::{Event, Frame, Reply, Request, SubFilter};
 pub use server::serve;
 
-/// Per-user socket name shared by daemon and GUI subprocesses.
-/// Matches `single_instance::socket_name()`'s structure but uses a
-/// dedicated suffix so the two namespaces never collide.
+/// Windows named-pipe name shared by daemon and GUI subprocesses.
+///
+/// Unix does not use this: there the socket is a filesystem socket
+/// inside a 0700 directory ([`auth::socket_path`]) because the abstract
+/// namespace carries no permissions — see [`auth`].
 ///
 /// `OXDM_INSTANCE_SUFFIX` extends the per-user suffix so a sandboxed
 /// secondary instance (e.g. the visual-test harness) doesn't talk to
 /// the host daemon's GUI subprocesses.
+#[cfg(not(unix))]
 pub fn socket_name() -> String {
-    #[cfg(unix)]
-    let base = unsafe { libc::getuid() }.to_string();
-    #[cfg(not(unix))]
     let base = "user".to_string();
-    let suffix = match std::env::var("OXDM_INSTANCE_SUFFIX")
-        .ok()
-        .filter(|s| !s.is_empty())
-    {
+    let suffix = match auth::instance_suffix() {
         Some(s) => format!("{base}-{s}"),
         None => base,
     };

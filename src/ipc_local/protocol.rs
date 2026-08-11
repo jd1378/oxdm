@@ -75,6 +75,10 @@ pub enum GuiKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Request {
     // ── connection management ──────────────────────────────────────
+    /// First frame on every connection: the token from the daemon's
+    /// 0600 token file. Until it arrives and matches, the daemon
+    /// answers nothing else — see `ipc_local::auth`.
+    Auth(String),
     Ping,
     Subscribe(SubFilter),
     /// Identify the calling GUI subprocess so the daemon can de-dup
