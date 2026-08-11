@@ -1618,6 +1618,12 @@ fn advanced_section(st: &AddState) -> Element<'_, Msg> {
                 .placeholder("session_id=…; csrf=…")
                 .font(theme::MONO)
                 .size(12.0)
+                // A cookie string is one long run with no spaces to
+                // break at. Wrapping at words alone leaves it running
+                // out past the box, so a word too long for a line
+                // falls back to breaking mid-run, the way a browser
+                // textarea and every native text view do.
+                .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
                 .height(Length::Fixed(96.0))
                 .on_action(Msg::Cookies)
                 .style(move |_th, _status| text_editor::Style {

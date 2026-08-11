@@ -2713,6 +2713,10 @@ fn add_checksum_form(st: &State) -> Element<'_, Msg> {
             ))
             .font(theme::MONO)
             .size(HASH_TEXT)
+            // A hash has nothing to break at either; without the
+            // glyph fallback the "wraps across lines" above was not
+            // true of any hash longer than the box.
+            .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
             .height(Length::Fixed(HASH_MIN_H))
             .on_action(Msg::ChecksumHash)
             .style(move |_th, _| text_editor::Style {
@@ -3254,6 +3258,7 @@ fn cookies_tab(st: &State) -> Element<'_, Msg> {
                             })
                             .font(theme::MONO)
                             .size(12.0)
+                            .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
                             .height(Length::Fixed(110.0));
                         // Editing gated while the job runs (lock rules;
                         // guardian G2a-2) — no on_action, no edit path.
