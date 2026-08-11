@@ -13,6 +13,7 @@ pub mod integrity;
 pub mod pills;
 pub mod settings;
 pub mod striped;
+pub mod wash;
 
 pub use app_mark::app_mark;
 pub use button::{Btn, BtnSize};

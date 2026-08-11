@@ -253,6 +253,10 @@ impl<'a, M: Clone + 'a> Btn<'a, M> {
                     } else {
                         t.action_primary
                     }
+                } else if self.accent {
+                    // A bordered button whose label is the accent, not
+                    // the ink — the design's `.fr-install-btn`.
+                    t.action_primary
                 } else {
                     t.fg_1
                 }

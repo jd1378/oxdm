@@ -601,30 +601,9 @@ pub fn remove_warning<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Ms
 
 // ------------------------------------------------------ browser extensions
 
-/// `radial-gradient(ellipse at center, <tint> 0%, transparent 70%)`,
-/// as an SVG because that is the one renderer in the stack that can
-/// draw it. Stretched to the band, so the ellipse follows its width.
-fn radial_wash(tint: iced::Color) -> String {
-    let hex = format!(
-        "#{:02X}{:02X}{:02X}",
-        (tint.r * 255.0).round() as u8,
-        (tint.g * 255.0).round() as u8,
-        (tint.b * 255.0).round() as u8,
-    );
-    format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\" \
-         preserveAspectRatio=\"none\">\
-         <defs><radialGradient id=\"g\" cx=\"50%\" cy=\"50%\" r=\"70%\">\
-         <stop offset=\"0%\" stop-color=\"{hex}\" stop-opacity=\"1\"/>\
-         <stop offset=\"70%\" stop-color=\"{hex}\" stop-opacity=\"0\"/>\
-         </radialGradient></defs>\
-         <rect width=\"100\" height=\"100\" fill=\"url(#g)\"/></svg>"
-    )
-}
-
 /// The art band: the 72px glyphs plus the room the wash needs to fade
-/// out in.
-const HERO_BAND_H: f32 = 104.0;
+/// out in. Taller than the art on purpose — the fade is the point.
+const HERO_BAND_H: f32 = 132.0;
 
 /// The browser glyph in the hero art (design `.fr-browser-glyph`).
 const GLYPH_RADIUS: f32 = 10.0;
@@ -707,6 +686,10 @@ fn extensions_dialog<'a>(
         crate::gui::theme::ResolvedTheme::Dark => (color::earth::E700, color::earth::E500),
         _ => (color::earth::E100, color::earth::E300),
     };
+    let (ledge, hairline_c) = match t.theme {
+        crate::gui::theme::ResolvedTheme::Dark => (color::earth::E900, color::earth::E600),
+        _ => (color::earth::E300, t.border_subtle),
+    };
     let browser_glyph = container(
         column![
             container(
@@ -723,10 +706,10 @@ fn extensions_dialog<'a>(
             })
             .style(move |_| container::Style {
                 background: Some(bar_bg.into()),
-                // The chrome bar carries the window's own top corners.
-                // A child's background is painted square regardless of
-                // the parent's radius, so without this the bar's fill
-                // squares off the two corners it sits in.
+                // Top corners only: the bar meets the window's frame
+                // above and a straight rule below. A child's background
+                // is painted square whatever the parent's radius, so
+                // without this it squares off the corners it sits in.
                 border: iced::Border {
                     radius: iced::border::radius(0.0)
                         .top_left(GLYPH_RADIUS - GLYPH_BORDER)
@@ -735,6 +718,15 @@ fn extensions_dialog<'a>(
                 },
                 ..Default::default()
             }),
+            // `border-bottom: 1px` on the bar — iced borders are
+            // all-or-nothing, so the one side that exists is a rule.
+            container(iced::widget::Space::new())
+                .width(Length::Fill)
+                .height(Length::Fixed(1.0))
+                .style(move |_| container::Style {
+                    background: Some(hairline_c.into()),
+                    ..Default::default()
+                }),
             container(icons::icon("download", 28.0, t.action_primary))
                 .width(Length::Fill)
                 .height(Length::Fill)
@@ -745,6 +737,9 @@ fn extensions_dialog<'a>(
     )
     .width(Length::Fixed(96.0))
     .height(Length::Fixed(72.0))
+    // The frame is drawn on the bounds, not around them: without this
+    // pad the bar covers the two pixels of border it should sit inside.
+    .padding(GLYPH_BORDER)
     .clip(true)
     .style(move |_| container::Style {
         background: Some(t2.bg_surface.into()),
@@ -753,11 +748,16 @@ fn extensions_dialog<'a>(
             width: GLYPH_BORDER,
             radius: GLYPH_RADIUS.into(),
         },
+        // The design's `0 2px 0` ledge: a hard offset, no blur, which
+        // is what gives the little window its weight.
+        shadow: iced::Shadow {
+            color: ledge,
+            offset: iced::Vector::new(0.0, 2.0),
+            blur_radius: 0.0,
+        },
         ..Default::default()
     });
 
-    // The design draws the arrow as a 56px stroke; an icon at the same
-    // width is the same picture without a canvas for one line.
     let art = row![
         browser_glyph,
         // 56×20, the design's own proportions. `icons::icon` is square
@@ -793,11 +793,14 @@ fn extensions_dialog<'a>(
             // A band, not a fill: `stack` takes the height of its
             // tallest layer, and a wash asking for Fill would grow to
             // whatever the dialog had left and push the copy off the
-            // bottom.
+            // bottom. The glow is drawn as pixels rather than an SVG —
+            // see `widget::wash`.
             stack![
-                iced::widget::svg(iced::widget::svg::Handle::from_memory(
-                    radial_wash(color::mix(t.bg_page, t.action_primary, 0.20)).into_bytes(),
-                ))
+                iced::widget::image(crate::gui::widget::wash::radial(color::mix(
+                    t.bg_page,
+                    t.action_primary,
+                    0.22,
+                )))
                 .width(Length::Fill)
                 .height(Length::Fixed(HERO_BAND_H))
                 .content_fit(iced::ContentFit::Fill),
@@ -867,10 +870,16 @@ fn extensions_dialog<'a>(
             ]
             .spacing(2.0),
             iced::widget::Space::new().width(Length::Fill),
-            Btn::new("Open store page")
+            // The design's `.fr-install-btn`: a quiet bordered button
+            // with a clay label. The icon says it leaves the app, which
+            // is the honest promise — oxdm cannot install anything, and
+            // cannot tell whether the extension is already there.
+            Btn::new("Install")
                 .secondary()
+                .accent(true)
                 .size(BtnSize::Sm)
-                .icon("globe")
+                .font_size(11.5)
+                .icon("external-link")
                 .on_press(Msg::OpenStore(url))
                 .view(t),
         ]
@@ -894,10 +903,13 @@ fn extensions_dialog<'a>(
 
     let privacy = row![
         icons::icon("shield", 14.0, t.status_success),
-        text("The extension reads only download URLs, never page content or browsing history.")
-            .font(theme::BODY)
-            .size(11.0)
-            .color(t.fg_3),
+        text(
+            "The extension stores and sends nothing about the pages you visit — only the \
+             download's address and the headers needed to fetch it.",
+        )
+        .font(theme::BODY)
+        .size(11.0)
+        .color(t.fg_3),
     ]
     .spacing(6.0)
     .align_y(Alignment::Center);
