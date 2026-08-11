@@ -18,7 +18,8 @@ use crate::gui::ipc::DaemonSignal;
 use crate::gui::shot::Shot;
 use crate::gui::theme::{self, Tokens};
 use crate::gui::widget::{
-    Btn, BtnSize, TabBtn, TextInput, checkbox, combo, eyebrow, hairline, pill_progress, toggle,
+    Btn, BtnSize, TabBtn, TextInput, checkbox, combo, eyebrow, hairline, pill_progress, set_row,
+    toggle,
 };
 use crate::gui::windows::add::footer;
 // The same bounds and presets the download window's Speed tab uses:
@@ -1320,7 +1321,7 @@ fn transfer_section(st: &State) -> Element<'_, Msg> {
         t,
         &[("Auto", None), ("Custom", None)],
         if conn_auto { 0 } else { 1 },
-        BtnSize::Sm,
+        BtnSize::Md,
         move |i| Msg::MaxConn(if i == 0 {
             String::new()
         } else {
@@ -1353,7 +1354,7 @@ fn transfer_section(st: &State) -> Element<'_, Msg> {
             t,
             &[("KB/s", None), ("MB/s", None)],
             if st.limit_unit_mb { 1 } else { 0 },
-            BtnSize::Sm,
+            BtnSize::Md,
             |i| Msg::LimitUnit(i == 1),
         ),
     ]
@@ -1372,23 +1373,27 @@ fn transfer_section(st: &State) -> Element<'_, Msg> {
         );
     }
 
+    // The Speed tab's own shape — label and hint on the left, the
+    // control at the right edge — so the same two settings read the
+    // same way in both windows. Only the surface differs: this tab puts
+    // its rows on a card.
     let rows: Vec<Element<'_, Msg>> = if editable {
         vec![
-            stacked_row(
+            set_row(
                 t,
                 "Max parallel connections",
                 Some("Auto lets oxdm choose. Applies to the next run of this download."),
                 conns.into(),
             ),
             row_sep(t),
-            stacked_row(
+            set_row(
                 t,
                 "Speed limit",
                 Some("Caps this download alone, on top of the global limit."),
                 toggle(t, st.limit_on, editable, Msg::UseLimiter),
             ),
-            stacked_row(t, "Limit to", None, value_row.into()),
-            stacked_row(t, "Quick set", None, presets.into()),
+            set_row(t, "Limit to", None, value_row.into()),
+            set_row(t, "Quick set", None, presets.into()),
         ]
     } else {
         // Locked: the values still answer "what is this download set
@@ -1420,29 +1425,6 @@ fn transfer_section(st: &State) -> Element<'_, Msg> {
         body = body.push(r);
     }
     section(t, "transfer", body.into())
-}
-
-/// A row whose control sits under its label, the way this dialog's
-/// scheme and proxy-mode rows do.
-fn stacked_row<'a>(
-    t: &Tokens,
-    label: &'a str,
-    hint: Option<&'a str>,
-    control: Element<'a, Msg>,
-) -> Element<'a, Msg> {
-    let mut col = column![
-        text(label)
-            .font(theme::BODY_MEDIUM)
-            .size(12.0)
-            .color(t.fg_1)
-    ]
-    .spacing(6.0);
-    if let Some(hint) = hint {
-        col = col.push(text(hint).font(theme::BODY).size(11.0).color(t.fg_3));
-    }
-    container(col.push(control))
-        .padding([10.0, theme::space::S3])
-        .into()
 }
 
 /// A failed row, laid out the way the download window's file-integrity
