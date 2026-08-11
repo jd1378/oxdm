@@ -419,49 +419,16 @@ fn splash<'a>(msg: String) -> Element<'a, Msg> {
 
 fn identity(t: &Tokens) -> Element<'_, Msg> {
     let t2 = *t;
-    let tile_bg = color::mix(t.bg_surface, t.action_primary, 0.20);
-    let handle = crate::gui::app_icon::image_handle(t.theme);
-    let has_glyph = handle.is_some();
-    let glyph: Element<'_, Msg> = match handle {
-        Some(handle) => iced::widget::image(handle)
-            .width(Length::Fixed(64.0))
-            .height(Length::Fixed(64.0))
-            .into(),
-        None => text("OX")
-            .font(theme::DISPLAY)
-            .size(20.0)
-            .color(t.action_primary)
-            .into(),
-    };
     container(
         row![
-            // The app PNG already draws its own rounded plate, so it
-            // sits bare; only the lettermark fallback needs a tile.
             // Dropped against the wordmark rather than aligned to its
             // cap height: "oxdm" is set large enough that a top-aligned
             // mark reads as sitting above the name it belongs to. A
             // spacer, not padding — padding would take the drop out of
-            // the tile's own 64px and shrink the mark inside it.
+            // the mark's own 64px and shrink it.
             column![
                 iced::widget::Space::new().height(Length::Fixed(LOGO_DROP)),
-                container(glyph)
-                    .width(Length::Fixed(64.0))
-                    .height(Length::Fixed(64.0))
-                    .align_x(Alignment::Center)
-                    .align_y(Alignment::Center)
-                    .style(move |_| container::Style {
-                        background: (!has_glyph).then_some(tile_bg.into()),
-                        border: iced::Border {
-                            color: if has_glyph {
-                                iced::Color::TRANSPARENT
-                            } else {
-                                t2.border_default
-                            },
-                            width: if has_glyph { 0.0 } else { 1.0 },
-                            radius: theme::radius::LG.into(),
-                        },
-                        ..Default::default()
-                    }),
+                crate::gui::widget::app_mark(t, 64.0),
             ],
             column![
                 text("oxdm").font(theme::DISPLAY).size(32.0).color(t.fg_1),

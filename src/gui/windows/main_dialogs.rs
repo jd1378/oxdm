@@ -4,7 +4,7 @@
 //! the main view (the egui app used child viewports; one process =
 //! in-window overlays here).
 
-use iced::widget::{column, container, mouse_area, row, text};
+use iced::widget::{column, container, mouse_area, row, stack, text};
 use iced::{Alignment, Element, Length};
 
 use crate::data::ConflictKind;
@@ -601,6 +601,35 @@ pub fn remove_warning<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Ms
 
 // ------------------------------------------------------ browser extensions
 
+/// `radial-gradient(ellipse at center, <tint> 0%, transparent 70%)`,
+/// as an SVG because that is the one renderer in the stack that can
+/// draw it. Stretched to the band, so the ellipse follows its width.
+fn radial_wash(tint: iced::Color) -> String {
+    let hex = format!(
+        "#{:02X}{:02X}{:02X}",
+        (tint.r * 255.0).round() as u8,
+        (tint.g * 255.0).round() as u8,
+        (tint.b * 255.0).round() as u8,
+    );
+    format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\" \
+         preserveAspectRatio=\"none\">\
+         <defs><radialGradient id=\"g\" cx=\"50%\" cy=\"50%\" r=\"70%\">\
+         <stop offset=\"0%\" stop-color=\"{hex}\" stop-opacity=\"1\"/>\
+         <stop offset=\"70%\" stop-color=\"{hex}\" stop-opacity=\"0\"/>\
+         </radialGradient></defs>\
+         <rect width=\"100\" height=\"100\" fill=\"url(#g)\"/></svg>"
+    )
+}
+
+/// The art band: the 72px glyphs plus the room the wash needs to fade
+/// out in.
+const HERO_BAND_H: f32 = 104.0;
+
+/// The browser glyph in the hero art (design `.fr-browser-glyph`).
+const GLYPH_RADIUS: f32 = 10.0;
+const GLYPH_BORDER: f32 = 2.0;
+
 // Each vendor's extension store landing page (design §3.8). We do NOT
 // fake an "Installed ✓" state — there is no reliable detection — so the
 // button always reads "Open store page". Only the two stores the
@@ -650,46 +679,167 @@ fn extensions_dialog<'a>(
         "Install the oxdm helper extension to send links straight to oxdm."
     };
 
-    // Hero band (design `.fr-hero`): clay-tinted glow + flow title.
-    let glow = color::mix(t.bg_surface, t.action_primary, 0.12);
+    // Hero band (design `.fr-hero`): the flow the extension creates,
+    // drawn rather than described — a browser window, an arrow, and
+    // the app's own mark — over a clay wash, with the copy beneath it.
     let tile_bg = color::mix(t.bg_surface, t.action_primary, 0.20);
-    let hero = container(
-        column![
-            container(icons::icon("puzzle", 30.0, t.action_primary))
-                .width(Length::Fixed(56.0))
-                .height(Length::Fixed(56.0))
-                .align_x(Alignment::Center)
-                .align_y(Alignment::Center)
-                .style(move |_| container::Style {
-                    background: Some(tile_bg.into()),
-                    border: iced::Border {
-                        radius: theme::radius::SM.into(),
-                        ..Default::default()
-                    },
+
+    // `.fr-browser-glyph`: a 96×72 window with a chrome bar of three
+    // dots and a download arrow in the page. Deliberately no vendor's
+    // browser: this stands for whichever one the user has.
+    let dot = |c: iced::Color| {
+        container(iced::widget::Space::new())
+            .width(Length::Fixed(5.0))
+            .height(Length::Fixed(5.0))
+            .style(move |_| container::Style {
+                background: Some(c.into()),
+                border: iced::Border {
+                    radius: theme::radius::PILL.into(),
                     ..Default::default()
-                }),
-            text("Capture downloads from your browser")
-                .font(theme::DISPLAY)
-                .size(20.0)
-                .color(t.fg_1),
-            text(sub).font(theme::BODY).size(13.0).color(t.fg_2),
+                },
+                ..Default::default()
+            })
+    };
+    // The chrome bar in the theme's own warm ramp: the design's
+    // earth-100 strip is right on a near-white page and reads as a
+    // light bar taped to a dark dialog anywhere else.
+    let (bar_bg, dot_color) = match t.theme {
+        crate::gui::theme::ResolvedTheme::Dark => (color::earth::E700, color::earth::E500),
+        _ => (color::earth::E100, color::earth::E300),
+    };
+    let browser_glyph = container(
+        column![
+            container(
+                row![dot(dot_color), dot(dot_color), dot(dot_color)]
+                    .spacing(4.0)
+                    .align_y(Alignment::Center),
+            )
+            .width(Length::Fill)
+            .height(Length::Fixed(14.0))
+            .align_y(Alignment::Center)
+            .padding(iced::Padding {
+                left: 6.0,
+                ..Default::default()
+            })
+            .style(move |_| container::Style {
+                background: Some(bar_bg.into()),
+                // The chrome bar carries the window's own top corners.
+                // A child's background is painted square regardless of
+                // the parent's radius, so without this the bar's fill
+                // squares off the two corners it sits in.
+                border: iced::Border {
+                    radius: iced::border::radius(0.0)
+                        .top_left(GLYPH_RADIUS - GLYPH_BORDER)
+                        .top_right(GLYPH_RADIUS - GLYPH_BORDER),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            container(icons::icon("download", 28.0, t.action_primary))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(Alignment::Center)
+                .align_y(Alignment::Center),
         ]
-        .spacing(theme::space::S2)
-        .align_x(Alignment::Center),
+        .spacing(0.0),
     )
-    .width(Length::Fill)
-    .padding(theme::space::S4)
+    .width(Length::Fixed(96.0))
+    .height(Length::Fixed(72.0))
+    .clip(true)
     .style(move |_| container::Style {
-        background: Some(glow.into()),
+        background: Some(t2.bg_surface.into()),
         border: iced::Border {
-            color: t2.border_subtle,
-            width: 1.0,
-            radius: theme::surface::RADIUS.into(),
+            color: t2.border_default,
+            width: GLYPH_BORDER,
+            radius: GLYPH_RADIUS.into(),
         },
         ..Default::default()
     });
 
-    let mut list = column![].spacing(theme::space::S1);
+    // The design draws the arrow as a 56px stroke; an icon at the same
+    // width is the same picture without a canvas for one line.
+    let art = row![
+        browser_glyph,
+        // 56×20, the design's own proportions. `icons::icon` is square
+        // by construction, so this one goes through the svg widget:
+        // a long thin arrow is the whole point of the drawing, and an
+        // arrow glyph scaled to 56px carries a 4px stroke with it.
+        iced::widget::svg(iced::widget::svg::Handle::from_memory(
+            icons::raw_svg("flow-arrow").unwrap_or_default(),
+        ))
+        .width(Length::Fixed(56.0))
+        .height(Length::Fixed(20.0))
+        .style(move |_, _| iced::widget::svg::Style {
+            color: Some(t2.action_primary),
+        }),
+        // The mark the tray and the About window use, at the design's
+        // 64px. The dialog says "your downloads end up *here*", so the
+        // "here" has to be the app's real face.
+        container(crate::gui::widget::app_mark(t, 64.0))
+            .width(Length::Fixed(72.0))
+            .height(Length::Fixed(72.0))
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center),
+    ]
+    .spacing(18.0)
+    .align_y(Alignment::Center);
+
+    // `.fr-hero` is not a card: the art sits on the dialog's own
+    // background under a radial clay wash. iced draws linear gradients
+    // only, so the wash is an SVG — resvg has radial gradients, and one
+    // rect is cheaper than faking the falloff with stacked shapes.
+    let hero = container(
+        column![
+            // A band, not a fill: `stack` takes the height of its
+            // tallest layer, and a wash asking for Fill would grow to
+            // whatever the dialog had left and push the copy off the
+            // bottom.
+            stack![
+                iced::widget::svg(iced::widget::svg::Handle::from_memory(
+                    radial_wash(color::mix(t.bg_page, t.action_primary, 0.20)).into_bytes(),
+                ))
+                .width(Length::Fill)
+                .height(Length::Fixed(HERO_BAND_H))
+                .content_fit(iced::ContentFit::Fill),
+                container(art)
+                    .width(Length::Fill)
+                    .height(Length::Fixed(HERO_BAND_H))
+                    .align_x(Alignment::Center)
+                    .align_y(Alignment::Center),
+            ],
+            text("Capture downloads from your browser")
+                .font(theme::DISPLAY)
+                .size(22.0)
+                .color(t.fg_1)
+                .width(Length::Fill)
+                .align_x(Alignment::Center),
+            container(
+                text(sub)
+                    .font(theme::BODY)
+                    .size(13.0)
+                    .color(t.fg_2)
+                    .width(Length::Fill)
+                    .align_x(Alignment::Center)
+                    .wrapping(text::Wrapping::WordOrGlyph),
+            )
+            .max_width(420.0),
+        ]
+        // Fill, not shrink: a column sized to its widest child centres
+        // its rows against *itself* and then sits at the card's left
+        // edge, which reads as a left-aligned hero with an odd indent.
+        .width(Length::Fill)
+        .spacing(theme::space::S2)
+        .align_x(Alignment::Center),
+    )
+    .width(Length::Fill)
+    .padding(iced::Padding {
+        top: 8.0,
+        right: theme::space::S4,
+        bottom: theme::space::S3,
+        left: theme::space::S4,
+    });
+
+    let mut list = column![].spacing(6.0);
     for (name, store, url) in BROWSER_STORES {
         let mark = container(
             text(name.chars().next().unwrap_or('?').to_string())
@@ -713,7 +863,7 @@ fn extensions_dialog<'a>(
             mark,
             column![
                 text(name).font(theme::BODY_BOLD).size(13.0).color(t.fg_1),
-                text(store).font(theme::MONO).size(10.0).color(t.fg_3),
+                text(store).font(theme::MONO).size(10.5).color(t.fg_3),
             ]
             .spacing(2.0),
             iced::widget::Space::new().width(Length::Fill),
@@ -724,12 +874,12 @@ fn extensions_dialog<'a>(
                 .on_press(Msg::OpenStore(url))
                 .view(t),
         ]
-        .spacing(theme::space::S3)
+        .spacing(theme::space::S2)
         .align_y(Alignment::Center);
         list = list.push(
             container(r)
                 .width(Length::Fill)
-                .padding([theme::space::S1, theme::space::S2])
+                .padding([9.0, 12.0])
                 .style(move |_| container::Style {
                     background: Some(t2.bg_raised.into()),
                     border: iced::Border {

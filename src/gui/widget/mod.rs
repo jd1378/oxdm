@@ -1,5 +1,6 @@
 //! Design-system widget library (port of `src/ui/components/primitives`).
 
+pub mod app_mark;
 pub mod button;
 pub mod cards;
 pub mod controls;
@@ -13,6 +14,7 @@ pub mod pills;
 pub mod settings;
 pub mod striped;
 
+pub use app_mark::app_mark;
 pub use button::{Btn, BtnSize};
 pub use cards::{
     GHOST_ALPHA, SCROLL_GUTTER, TabBtn, card, collapsible_card, drag_ghost, hairline, section_card,
