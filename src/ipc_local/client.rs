@@ -328,6 +328,24 @@ impl Client {
         }
     }
 
+    /// The kernel limit stopping the filesystem watcher, if one is.
+    pub async fn watch_limit(&self) -> Result<Option<crate::domain::WatchLimit>, String> {
+        match self
+            .request(Request::WatchLimit)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            Reply::WatchLimit(v) => Ok(v),
+            Reply::Err(e) => Err(e),
+            other => Err(format!("unexpected reply: {other:?}")),
+        }
+    }
+
+    /// Start the watcher again after the limit was raised.
+    pub async fn retry_file_watch(&self) -> Result<(), String> {
+        self.expect_ok(Request::RetryFileWatch).await
+    }
+
     pub async fn reset_database(&self) -> Result<(), String> {
         self.expect_ok(Request::ResetDatabase).await
     }

@@ -94,6 +94,13 @@ pub struct Settings {
     /// is that nothing is at the recorded path any more.
     #[serde(default)]
     pub forget_moved_files: bool,
+    /// Warn when a kernel limit stops the filesystem watcher. On by
+    /// default because the failure is otherwise invisible — the watch
+    /// setting still reads "on" while nothing is being watched — and
+    /// turned off by the dialog's own "Don't warn again", for a user
+    /// who has decided to live with it.
+    #[serde(default = "yes_default")]
+    pub warn_watch_limit: bool,
     /// Pause running downloads while the connection is metered (cellular
     /// or a phone hotspot), and resume them when it is not.
     #[serde(default = "yes_default")]
@@ -426,6 +433,7 @@ impl Default for Settings {
             remove_confirm_completed: true,
             remove_confirm_clean: true,
             forget_moved_files: false,
+            warn_watch_limit: true,
             pause_on_metered: true,
             pause_on_low_battery: false,
             start_at_login: false,

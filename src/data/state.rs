@@ -397,6 +397,10 @@ pub struct AppState {
     /// against an in-memory fallback. The GUI surfaces this via the
     /// `DbStatus` IPC + a recovery modal that offers Exit / Reset.
     db_error: RwLock<Option<String>>,
+    /// The kernel limit that stopped the filesystem watcher, if one
+    /// did. Set by `file_watch`, read by the UI's warning dialog, and
+    /// cleared the moment a watcher starts.
+    watch_limit: RwLock<Option<crate::domain::WatchLimit>>,
     /// Single-slot grace timer for destructive power actions (queue
     /// hooks + per-job completion actions both go through it).
     power: Arc<crate::data::power::PowerGuard>,
@@ -545,6 +549,7 @@ impl AppState {
             conflict_queue: RwLock::new(std::collections::VecDeque::new()),
             master_key: RwLock::new(master_key),
             db_error: RwLock::new(db_error),
+            watch_limit: RwLock::new(None),
             power,
             probes: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         })
@@ -1607,6 +1612,34 @@ impl AppState {
     /// failed. The GUI uses this to gate the recovery modal.
     pub async fn db_error(&self) -> Option<String> {
         self.db_error.read().await.clone()
+    }
+
+    // ── filesystem watcher health ───────────────────────────────────
+
+    /// The limit currently stopping the watcher, if any.
+    pub async fn watch_limit(&self) -> Option<crate::domain::WatchLimit> {
+        self.watch_limit.read().await.clone()
+    }
+
+    /// Record what the kernel refused, or that it no longer refuses.
+    /// Only announced when it actually changed: the watcher retries on
+    /// its own schedule, and re-announcing the same refusal would put
+    /// the same dialog in front of the user again.
+    pub async fn set_watch_limit(&self, limit: Option<crate::domain::WatchLimit>) {
+        {
+            let mut cur = self.watch_limit.write().await;
+            if *cur == limit {
+                return;
+            }
+            *cur = limit;
+        }
+        let _ = self.events.send(DomainEvent::WatchLimitChanged);
+    }
+
+    /// Ask the watcher to start again — after the user has raised the
+    /// limit, so the repair lands now instead of at the next launch.
+    pub async fn retry_file_watch(&self) {
+        let _ = self.events.send(DomainEvent::FileWatchRetry);
     }
 
     /// User chose "Reset" — from the Advanced danger section, or from

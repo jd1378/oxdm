@@ -4,6 +4,8 @@
 #[cfg(target_os = "windows")]
 pub mod windows;
 
+pub mod watch_limit;
+
 pub fn open_path(path: &std::path::Path) {
     #[cfg(target_os = "linux")]
     let prog = "xdg-open";

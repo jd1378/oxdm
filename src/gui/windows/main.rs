@@ -131,6 +131,18 @@ pub enum SortColumn {
 pub enum Msg {
     Connected(Result<(Arc<Client>, SnapshotData, Option<String>, bool), String>),
     Snapshot(SnapshotData),
+    /// The daemon's answer about the filesystem watcher's health.
+    WatchLimitFetched(Option<crate::domain::WatchLimit>),
+    /// Raise the limit — hands the change to the system's own
+    /// authentication and waits for the answer.
+    WatchLimitRaise,
+    WatchLimitRaised(Result<(), String>),
+    /// Put the sysctl line on the clipboard, for a user who would
+    /// rather apply it themselves.
+    WatchLimitCopy,
+    WatchLimitCopyExpired,
+    /// "Don't warn again" — the degradation is understood and accepted.
+    WatchLimitNever,
     Daemon(DaemonSignal),
     Window(WindowControl),
     SetFilter(SidebarFilter),
@@ -338,6 +350,10 @@ pub enum Overlay {
     /// The daemon refused to start something and said why. Nothing has
     /// happened yet — this is the reason it did not.
     Refused,
+    /// A kernel limit stopped the filesystem watcher. Nothing is
+    /// broken about the downloads themselves — this says what stopped
+    /// working and offers the one change that restores it.
+    WatchLimit,
 }
 
 pub enum App {
@@ -383,6 +399,16 @@ pub struct Main {
     /// Downloads a confirmed restart will start over from zero.
     pub restart_ids: Vec<JobId>,
     pub db_error: Option<String>,
+    /// The kernel limit stopping the filesystem watcher, as last
+    /// reported by the daemon.
+    pub watch_limit: Option<crate::domain::WatchLimit>,
+    /// Why the last attempt to raise it did not take.
+    pub watch_limit_error: Option<String>,
+    /// The sysctl line is on the clipboard.
+    pub watch_limit_copied: bool,
+    /// The warning has been put in front of the user once this
+    /// session. A watcher that keeps failing must not keep asking.
+    pub watch_limit_seen: bool,
     pub modifiers: iced::keyboard::Modifiers,
     pub cursor: (f32, f32),
     /// Cursor position captured when a popup menu opened — menus
@@ -477,6 +503,10 @@ impl Main {
             refusal: None,
             restart_ids: Vec::new(),
             db_error: None,
+            watch_limit: None,
+            watch_limit_error: None,
+            watch_limit_copied: false,
+            watch_limit_seen: false,
             modifiers: iced::keyboard::Modifiers::default(),
             cursor: (0.0, 0.0),
             menu_anchor: (0.0, 0.0),
@@ -736,6 +766,38 @@ fn refresh(client: Arc<Client>) -> Task<Msg> {
     })
 }
 
+/// Raise the warning, if there is one to raise and this is a moment
+/// to raise it in.
+///
+/// Called both when the answer arrives and when an overlay closes: at
+/// startup the welcome and recovery dialogs own the window, and a
+/// warning that is simply dropped because something else was in front
+/// of it is a warning the user never gets.
+///
+/// Once per session. A watcher that keeps failing keeps reporting, and
+/// a dialog that comes back on its own is worse than the degradation
+/// it describes.
+fn maybe_warn_watch_limit(m: &mut Main) {
+    if m.watch_limit.is_some()
+        && m.snap.settings.warn_watch_limit
+        && !m.watch_limit_seen
+        && m.overlay == Overlay::None
+    {
+        m.watch_limit_seen = true;
+        m.overlay = Overlay::WatchLimit;
+    }
+}
+
+/// Ask the daemon what is stopping the filesystem watcher. Asked at
+/// startup and whenever the daemon says it changed, because the answer
+/// is a state rather than an event — a watcher can recover on its own
+/// when the app that exhausted the pool exits.
+fn fetch_watch_limit(client: Arc<Client>) -> Task<Msg> {
+    Task::perform(async move { client.watch_limit().await }, |r| {
+        Msg::WatchLimitFetched(r.ok().flatten())
+    })
+}
+
 /// Push a toast and schedule its expiry. The TTL timer is a one-shot
 /// task keyed to the toast id (no periodic subscription needed).
 fn spawn_toast(m: &mut Main, severity: ToastSeverity, message: String) -> Task<Msg> {
@@ -763,8 +825,11 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 m.overlay = Overlay::Welcome;
                 m.welcome_shown = true;
             }
+            let client = m.client.clone();
             *app = App::Ready(Box::new(m));
-            Task::none()
+            // Asked after the window exists: the answer may raise a
+            // dialog, and there is nothing to raise it over until then.
+            fetch_watch_limit(client)
         }
         Msg::Connected(Err(e)) => {
             *app = App::Failed(e);
@@ -835,6 +900,7 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             | Event::SettingsChanged
             | Event::ActiveQueuesChanged
             | Event::ConflictChanged => refresh(m.client.clone()),
+            Event::WatchLimitChanged => fetch_watch_limit(m.client.clone()),
             // The grace countdown lives in its own window
             // (`gui power`); the main window ignores these.
             Event::ShutdownPending { .. } | Event::ShutdownCancelled => Task::none(),
@@ -951,6 +1017,87 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             m.menu_anchor = m.cursor;
             Task::none()
         }
+        Msg::WatchLimitFetched(limit) => {
+            let fresh = limit.is_some() && limit != m.watch_limit;
+            m.watch_limit = limit;
+            if m.watch_limit.is_none() {
+                // Recovered — by our repair or by whatever was holding
+                // the pool letting go. Take the dialog down with it.
+                if m.overlay == Overlay::WatchLimit {
+                    m.overlay = Overlay::None;
+                }
+                m.watch_limit_seen = false;
+                m.watch_limit_error = None;
+            } else if fresh {
+                maybe_warn_watch_limit(m);
+            }
+            Task::none()
+        }
+        Msg::WatchLimitRaise => {
+            let Some(limit) = m.watch_limit.clone() else {
+                return Task::none();
+            };
+            let Some(value) = limit.suggested else {
+                return Task::none();
+            };
+            m.watch_limit_error = None;
+            let client = m.client.clone();
+            // The authentication prompt blocks until the user answers
+            // it, so it cannot run on the UI thread.
+            Task::perform(
+                async move {
+                    let kind = limit.kind;
+                    let outcome = tokio::task::spawn_blocking(move || {
+                        crate::platform::watch_limit::raise(kind, value)
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()));
+                    // Applied, but the watcher is still not running:
+                    // ask the daemon to try again now.
+                    if outcome.is_ok() {
+                        let _ = client.retry_file_watch().await;
+                    }
+                    outcome
+                },
+                Msg::WatchLimitRaised,
+            )
+        }
+        Msg::WatchLimitRaised(Ok(())) => {
+            m.overlay = Overlay::None;
+            m.watch_limit_error = None;
+            spawn_toast(
+                m,
+                ToastSeverity::Info,
+                "Limit raised — watching your download folders again".to_owned(),
+            )
+        }
+        Msg::WatchLimitRaised(Err(e)) => {
+            m.watch_limit_error = Some(e);
+            Task::none()
+        }
+        Msg::WatchLimitCopy => {
+            let Some(line) = m.watch_limit.as_ref().and_then(|l| l.sysctl_line()) else {
+                return Task::none();
+            };
+            m.watch_limit_copied = true;
+            Task::batch([
+                iced::clipboard::write(line),
+                Task::perform(crate::gui::widget::copy::expire(), |()| {
+                    Msg::WatchLimitCopyExpired
+                }),
+            ])
+        }
+        Msg::WatchLimitCopyExpired => {
+            m.watch_limit_copied = false;
+            Task::none()
+        }
+        Msg::WatchLimitNever => {
+            m.overlay = Overlay::None;
+            m.snap.settings.warn_watch_limit = false;
+            let settings = m.snap.settings.clone();
+            let client = m.client.clone();
+            act(async move { client.update_settings(settings).await })
+        }
         Msg::Refused(reason) => {
             m.refusal = Some(reason);
             m.overlay = Overlay::Refused;
@@ -975,11 +1122,13 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             }
             if !matches!(m.overlay, Overlay::DbError | Overlay::SecretsLocked) {
                 m.overlay = Overlay::None;
+                maybe_warn_watch_limit(m);
             }
             Task::none()
         }
         Msg::WelcomeDismiss => {
             m.overlay = Overlay::None;
+            maybe_warn_watch_limit(m);
             if m.snap.settings.first_run_seen {
                 return Task::none();
             }
@@ -2036,6 +2185,7 @@ fn main_view(m: &Main) -> Element<'_, Msg> {
             Overlay::RemoveWarning => main_dialogs::remove_warning(m, base),
             Overlay::RestartConfirm => main_dialogs::restart_confirm(m, base),
             Overlay::Refused => main_dialogs::refused(m, base),
+            Overlay::WatchLimit => main_dialogs::watch_limit(m, base),
             // Nothing open, and still three layers deep. Every overlay
             // above is a `stack` of base + scrim + panel, and a
             // scrollable keeps its offset by where it sits in the widget

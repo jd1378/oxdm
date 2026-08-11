@@ -410,6 +410,9 @@ fn map_domain_event(filter: SubFilter, ev: DomainEvent) -> Option<Event> {
         }
         DomainEvent::JobFailed { .. } => None,
         DomainEvent::SettingsChanged => Some(Event::SettingsChanged),
+        DomainEvent::WatchLimitChanged => Some(Event::WatchLimitChanged),
+        // Daemon-internal: the watcher listens for it, no client does.
+        DomainEvent::FileWatchRetry => None,
         DomainEvent::ConflictRequested { .. } => Some(Event::ConflictChanged),
         DomainEvent::OpenDownloadDialog { id } => Some(Event::OpenDownloadDialog(id)),
         DomainEvent::ShowMainWindow => Some(Event::ShowMainWindow),
@@ -691,6 +694,11 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
             Err(e) => Reply::Err(e),
         },
         Request::DbStatus => Reply::DbStatus(state.db_error().await),
+        Request::WatchLimit => Reply::WatchLimit(state.watch_limit().await),
+        Request::RetryFileWatch => {
+            state.retry_file_watch().await;
+            Reply::Ok
+        }
         Request::ResetDatabase => match state.reset_database_and_exit().await {
             Ok(()) => Reply::Ok,
             Err(e) => Reply::Err(e),

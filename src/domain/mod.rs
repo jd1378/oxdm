@@ -9,6 +9,7 @@ pub mod job;
 pub mod queue;
 pub mod settings;
 pub mod user_agent;
+pub mod watch_limit;
 
 pub use advanced::{Advanced, AuthAdv, AuthScheme, CustomHeader, ProxyAdv, ProxyMode};
 pub use capture::CaptureRequest;
@@ -29,3 +30,4 @@ pub use settings::{
     Settings, Theme, default_category_folder, default_category_folders, detected_download_dir,
 };
 pub use user_agent::{default_user_agent, effective_user_agent};
+pub use watch_limit::{WatchLimit, WatchLimitKind};

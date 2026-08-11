@@ -876,3 +876,139 @@ pub fn refused<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg> {
     .spacing(theme::space::S3);
     modal(t, base, card.into(), 460.0, Some(Msg::CloseOverlay))
 }
+
+// ---------------------------------------------------- watch limit
+
+/// A kernel limit stopped oxdm watching the download folders.
+///
+/// Nothing about the downloads themselves is wrong, so this is not a
+/// recovery dialog: it names the one thing that stopped working, shows
+/// the exact change that restores it, and offers to make it. The
+/// button is only shown where it can work — elsewhere the command
+/// stands on its own, copyable.
+pub fn watch_limit<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg> {
+    let t = &m.tokens;
+    let Some(limit) = m.watch_limit.as_ref() else {
+        return base;
+    };
+
+    let mut card = column![
+        row![
+            icons::icon("eye-off", 20.0, t.status_warning),
+            title_row(t, "Not watching your download folders"),
+        ]
+        .spacing(theme::space::S2)
+        .align_y(Alignment::Center),
+        text(limit.kind.consequence())
+            .font(theme::BODY)
+            .size(12.0)
+            .color(t.fg_2)
+            .wrapping(text::Wrapping::WordOrGlyph),
+        text(match limit.current {
+            Some(n) => format!(
+                "Your system allows {n} of these at a time ({}), and they are all in \
+                 use — usually by a browser, which takes one per tab process, or an \
+                 editor watching a large project.",
+                limit.kind.sysctl_key()
+            ),
+            None => format!(
+                "The system limit {} is used up — usually by a browser, which takes \
+                 one per tab process, or an editor watching a large project.",
+                limit.kind.sysctl_key()
+            ),
+        })
+        .font(theme::BODY)
+        .size(11.5)
+        .color(t.fg_3)
+        .wrapping(text::Wrapping::WordOrGlyph),
+    ]
+    .spacing(theme::space::S3);
+
+    // The change itself, in the open: it is a system-wide setting, and
+    // a dialog that asks for a password without saying what it will run
+    // is asking for trust it has not earned.
+    if let Some(line) = limit.sysctl_line() {
+        card = card.push(
+            column![
+                row![
+                    text(
+                        "Raising it writes this to /etc/sysctl.d/90-oxdm-inotify.conf \
+                          and applies it now:"
+                    )
+                    .font(theme::BODY)
+                    .size(11.0)
+                    .color(t.fg_3)
+                    .wrapping(text::Wrapping::WordOrGlyph),
+                ],
+                container(
+                    row![
+                        text(line)
+                            .font(theme::MONO)
+                            .size(11.0)
+                            .color(t.fg_1)
+                            .wrapping(text::Wrapping::WordOrGlyph),
+                        iced::widget::Space::new().width(Length::Fill),
+                        crate::gui::widget::copy::copy_btn(
+                            "",
+                            m.watch_limit_copied,
+                            Msg::WatchLimitCopy
+                        )
+                        .toolbar()
+                        .size(BtnSize::Sm)
+                        .view(t),
+                    ]
+                    .spacing(theme::space::S2)
+                    .align_y(Alignment::Center)
+                )
+                .width(Length::Fill)
+                .padding([8.0, 10.0])
+                .style(move |_| container::Style {
+                    background: Some(t.bg_page.into()),
+                    border: iced::Border {
+                        color: t.border_subtle,
+                        width: 1.0,
+                        radius: theme::radius::SM.into(),
+                    },
+                    ..Default::default()
+                }),
+            ]
+            .spacing(theme::space::S2),
+        );
+    }
+
+    if let Some(err) = m.watch_limit_error.as_deref() {
+        card = card.push(
+            text(err)
+                .font(theme::BODY)
+                .size(11.5)
+                .color(t.status_danger)
+                .wrapping(text::Wrapping::WordOrGlyph),
+        );
+    }
+
+    let can_raise = limit.suggested.is_some() && crate::platform::watch_limit::can_raise();
+    let mut actions = row![
+        Btn::new("Don't warn again")
+            .ghost()
+            .on_press(Msg::WatchLimitNever)
+            .view(t),
+        iced::widget::Space::new().width(Length::Fill),
+        Btn::new("Not now")
+            .ghost()
+            .on_press(Msg::CloseOverlay)
+            .view(t),
+    ]
+    .spacing(theme::space::S2)
+    .align_y(Alignment::Center);
+    if can_raise {
+        actions = actions.push(
+            Btn::new("Raise the limit…")
+                .primary()
+                .icon("shield-check")
+                .on_press(Msg::WatchLimitRaise)
+                .view(t),
+        );
+    }
+    card = card.push(actions);
+    modal(t, base, card.into(), 520.0, Some(Msg::CloseOverlay))
+}

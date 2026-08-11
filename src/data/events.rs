@@ -111,6 +111,14 @@ pub enum DomainEvent {
     },
     /// The pending power action was cancelled before its deadline.
     ShutdownCancelled,
+    /// The filesystem watcher hit — or stopped hitting — a kernel
+    /// limit. Carries nothing: the UI asks for the detail, so a state
+    /// that changes twice in a row cannot leave a stale copy behind.
+    WatchLimitChanged,
+    /// Try to start the filesystem watcher again. Sent after the user
+    /// raises the limit, so the fix takes effect now rather than at
+    /// the next launch.
+    FileWatchRetry,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

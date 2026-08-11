@@ -43,30 +43,80 @@ use crate::domain::Phase;
 /// and gives a rename-in-place time to land before we call it gone.
 const SETTLE: Duration = Duration::from_millis(750);
 
+/// Start one watcher, and say what stopped it if one did not start.
+///
+/// Every backend can fail: inotify's two kernel limits, or a sandbox
+/// with no filesystem notification at all. Without a watcher the
+/// startup sweep is all there is, so the failure is recorded rather
+/// than degraded into a setting that looks on and does nothing.
+async fn start_watcher(
+    state: &Arc<AppState>,
+    tx: tokio::sync::mpsc::UnboundedSender<()>,
+) -> Option<notify::RecommendedWatcher> {
+    // Test scaffolding: pretend the kernel refused, so the warning and
+    // its repair path can be exercised without filling the machine's
+    // real limit tables. `instances` or `watches`, either with a
+    // `:once` suffix that refuses the first watcher only — which is
+    // what raising the limit looks like from in here.
+    if let Ok(spec) = std::env::var("OXDM_SIMULATE_WATCH_LIMIT") {
+        static SPENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        let (kind, once) = match spec.split_once(':') {
+            Some((k, "once")) => (k, true),
+            _ => (spec.as_str(), false),
+        };
+        let kind = match kind {
+            "watches" => crate::domain::WatchLimitKind::Watches,
+            _ => crate::domain::WatchLimitKind::Instances,
+        };
+        if !(once && SPENT.swap(true, std::sync::atomic::Ordering::Relaxed)) {
+            tracing::warn!(
+                ?kind,
+                "OXDM_SIMULATE_WATCH_LIMIT: pretending the kernel refused"
+            );
+            state.set_watch_limit(Some(watch_limit_now(kind))).await;
+            return None;
+        }
+    }
+    match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        if let Ok(ev) = res
+            && interesting(&ev.kind)
+        {
+            let _ = tx.send(());
+        }
+    }) {
+        Ok(w) => {
+            state.set_watch_limit(None).await;
+            Some(w)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "no filesystem watcher: moved files will only be noticed at startup");
+            state.set_watch_limit(limit_from(&e)).await;
+            None
+        }
+    }
+}
+
+/// The limit behind a `notify` error, if it is one. `notify` wraps the
+/// OS error, so the io error underneath is what carries the errno.
+fn limit_from(e: &notify::Error) -> Option<crate::domain::WatchLimit> {
+    let io = match &e.kind {
+        notify::ErrorKind::Io(io) => io,
+        _ => return None,
+    };
+    crate::domain::watch_limit::classify(io).map(watch_limit_now)
+}
+
+/// A limit paired with the value in force right now.
+fn watch_limit_now(kind: crate::domain::WatchLimitKind) -> crate::domain::WatchLimit {
+    crate::domain::WatchLimit::new(kind, crate::domain::watch_limit::read_limit(kind))
+}
+
 pub fn spawn(state: Arc<AppState>) {
     tokio::spawn(async move {
         let (tx, mut fs_rx) = tokio::sync::mpsc::unbounded_channel();
         // The watcher calls back on its own thread; the channel is the
         // only thing it touches.
-        let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            if let Ok(ev) = res
-                && interesting(&ev.kind)
-            {
-                let _ = tx.send(());
-            }
-        });
-        let mut watcher = match watcher {
-            Ok(w) => Some(w),
-            Err(e) => {
-                // Every backend can fail to start — inotify watch
-                // limits, a sandbox with no FS notification at all.
-                // Without it the startup sweep is all there is, so this
-                // is worth saying out loud rather than degrading
-                // quietly into a setting that looks on and does nothing.
-                tracing::warn!(error = %e, "no filesystem watcher: moved files will only be noticed at startup");
-                None
-            }
-        };
+        let mut watcher = start_watcher(&state, tx.clone()).await;
         let mut watched: HashSet<PathBuf> = HashSet::new();
         let mut events = state.subscribe();
 
@@ -76,7 +126,12 @@ pub fn spawn(state: Arc<AppState>) {
             }
             if state.settings().await.forget_moved_files {
                 sweep(&state).await;
-                resync(&state, watcher.as_mut(), &mut watched).await;
+                if let Some(limit) = resync(&state, watcher.as_mut(), &mut watched).await {
+                    // A folder that could not be watched because the
+                    // watch table is full: the same news as a watcher
+                    // that never started, one folder down.
+                    state.set_watch_limit(Some(limit)).await;
+                }
             } else if !watched.is_empty() {
                 // Turned off: drop the watches rather than keep waking
                 // up to discard their events.
@@ -97,6 +152,15 @@ pub fn spawn(state: Arc<AppState>) {
                         Ok(crate::data::DomainEvent::JobCompleted { .. })
                         | Ok(crate::data::DomainEvent::JobRemoved { .. })
                         | Ok(crate::data::DomainEvent::SettingsChanged) => {}
+                        // The user raised the limit. Try again now:
+                        // the whole point of offering the fix is that
+                        // it works without restarting the daemon.
+                        Ok(crate::data::DomainEvent::FileWatchRetry) => {
+                            if watcher.is_none() {
+                                watcher = start_watcher(&state, tx.clone()).await;
+                                watched.clear();
+                            }
+                        }
                         // Lagged means events were missed, which is
                         // exactly when a full sweep is worth running.
                         Err(RecvError::Lagged(_)) => {}
@@ -118,14 +182,17 @@ fn interesting(kind: &notify::EventKind) -> bool {
 }
 
 /// Watch exactly the folders that currently hold a completed download.
+///
+/// Returns the kernel limit that turned a folder away, when one did —
+/// the watcher is alive but has no room left, which degrades the same
+/// feature and has the same fix.
 async fn resync(
     state: &Arc<AppState>,
     watcher: Option<&mut notify::RecommendedWatcher>,
     watched: &mut HashSet<PathBuf>,
-) {
-    let Some(watcher) = watcher else {
-        return;
-    };
+) -> Option<crate::domain::WatchLimit> {
+    let mut hit = None;
+    let watcher = watcher?;
     // Every folder holding something a job depends on: the folders its
     // finished files are in, and the cache root whose children are the
     // work folders. One watch on the root covers every job in it.
@@ -152,10 +219,15 @@ async fn resync(
             }
             // A folder that cannot be watched is usually a mount that
             // went away, which is the case this deliberately does not
-            // act on — debug, not a warning.
-            Err(e) => tracing::debug!(dir = %dir.display(), error = %e, "cannot watch folder"),
+            // act on — debug, not a warning. A full watch table is the
+            // exception: that one the user can fix.
+            Err(e) => {
+                tracing::debug!(dir = %dir.display(), error = %e, "cannot watch folder");
+                hit = hit.or_else(|| limit_from(&e));
+            }
         }
     }
+    hit
 }
 
 fn unwatch_all(watcher: Option<&mut notify::RecommendedWatcher>, watched: &mut HashSet<PathBuf>) {

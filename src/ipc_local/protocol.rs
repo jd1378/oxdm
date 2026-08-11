@@ -181,6 +181,13 @@ pub enum Request {
     /// sibling and exits — a fresh daemon on next launch creates a
     /// clean DB.
     ResetDatabase,
+    /// What kernel limit, if any, is stopping the filesystem watcher.
+    /// Reply is `Reply::WatchLimit`. Drives the warning dialog that
+    /// offers to raise it.
+    WatchLimit,
+    /// The user raised the limit — start the watcher again, without
+    /// waiting for the next launch.
+    RetryFileWatch,
 
     // ── per-job overrides ──────────────────────────────────────────
     SetSessionSpeedLimit(JobId, Option<u64>),
@@ -395,6 +402,7 @@ pub enum Reply {
         cookies: Option<String>,
     },
     DbStatus(Option<String>),
+    WatchLimit(Option<crate::domain::WatchLimit>),
     /// A freshly minted pairing code, not yet saved anywhere.
     ExtToken(String),
 }
@@ -410,6 +418,9 @@ pub enum Event {
     QueuesChanged,
     SettingsChanged,
     ActiveQueuesChanged,
+    /// The filesystem watcher's health changed; ask for the detail
+    /// with `Request::WatchLimit`.
+    WatchLimitChanged,
     ConflictChanged,
     JobCompleted {
         id: JobId,
