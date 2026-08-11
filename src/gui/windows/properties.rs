@@ -3486,10 +3486,13 @@ fn headers_tab(st: &State) -> Element<'_, Msg> {
         .padding([6.0, theme::space::S3]),
     );
 
+    // Identification sits with the editors, not with the read-only
+    // tables: it is something to change, and the two tables above it
+    // are the report of what changing it did.
     column![
-        section(t, "identification", ident.into()),
         will_send_section,
         captured_section,
+        section(t, "identification", ident.into()),
         section(t, "custom request headers", custom.into())
     ]
     .spacing(theme::space::S3)
