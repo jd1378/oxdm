@@ -2041,6 +2041,13 @@ impl AppState {
     }
 
     pub async fn update_settings(&self, mut new: Settings) -> Result<(), String> {
+        // Checked here rather than in the Settings window, because the
+        // window is not the only caller: this is reachable over IPC.
+        // A blank or relative cache folder is not a small mistake —
+        // `.part` files land relative to wherever the daemon was
+        // started, and the free-space check has no volume to measure,
+        // so it silently passes everything.
+        validate_work_dir(&new.work_dir)?;
         // The proxy password arrives in the clear and leaves as
         // ciphertext; the plaintext never reaches the settings table.
         let typed = std::mem::take(&mut new.proxy.password);
@@ -2409,6 +2416,10 @@ impl AppState {
             enc_cookies,
             speed_limit_override: None,
             queue_id: self.main_queue_id,
+            // Recorded when the first run actually creates the folder,
+            // not now: a job that never runs should not pin a cache
+            // folder the user is still free to change.
+            work_root: None,
             created_at: chrono::Utc::now(),
             started_at: None,
             active_ms: None,
@@ -2812,6 +2823,122 @@ impl AppState {
         }
     }
 
+    /// Remember the folder this job's partials went into, so a later
+    /// change to the cache-folder setting cannot strand or re-fetch
+    /// them. Best effort: failing to persist it only means the job
+    /// falls back to the live setting, which is where it just wrote.
+    async fn record_work_root(&self, id: JobId, root: &std::path::Path) {
+        let mut jobs = self.jobs.write().await;
+        let Some(old) = jobs.get(&id).cloned() else {
+            return;
+        };
+        if old.job.work_root.is_some() {
+            return;
+        }
+        let mut job = old.job.clone();
+        job.work_root = Some(root.to_path_buf());
+        let entry = clone_entry_with_job(&old, job.clone()).await;
+        jobs.insert(id, entry);
+        drop(jobs);
+        if let Err(e) = self.store.upsert_job(&job).await {
+            tracing::warn!(id = %id, error = %e, "could not record the cache folder");
+        }
+    }
+
+    /// Downloads whose partly-fetched data sits under a cache folder
+    /// that is no longer the configured one, with how many bytes are
+    /// down there.
+    ///
+    /// Changing the cache folder leaves them behind by design — they go
+    /// on resuming from where they were written — but the user cannot
+    /// see that folder in the UI, so the window offers to clear it.
+    pub async fn stranded_partials(&self) -> (usize, u64) {
+        let current = self.settings().await.work_dir;
+        let jobs = self.jobs.read().await;
+        let mut count = 0;
+        let mut bytes = 0;
+        for entry in jobs.values() {
+            let Some(root) = entry.job.work_root.as_ref() else {
+                continue;
+            };
+            let downloaded = entry.counters.downloaded().max(entry.job.status.downloaded);
+            if *root != current && downloaded > 0 && !entry.phase().is_running() {
+                count += 1;
+                bytes += downloaded;
+            }
+        }
+        (count, bytes)
+    }
+
+    /// Delete what those downloads have already fetched and set them up
+    /// to start over under the current cache folder.
+    ///
+    /// Only ever from an explicit "yes, delete it": every byte here was
+    /// paid for once already.
+    pub async fn discard_stranded_partials(self: &Arc<Self>) -> Result<usize, String> {
+        let current = self.settings().await.work_dir;
+        let targets: Vec<(JobId, std::path::PathBuf)> = self
+            .jobs
+            .read()
+            .await
+            .values()
+            .filter(|e| !e.phase().is_running())
+            .filter_map(|e| {
+                let root = e.job.work_root.clone()?;
+                (root != current).then_some((e.job.id, root))
+            })
+            .collect();
+
+        let mut discarded = 0;
+        for (id, root) in targets {
+            let dir = per_job_dir(&root, id);
+            if let Err(e) = tokio::fs::remove_dir_all(&dir).await
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(id = %id, dir = %dir.display(), error = %e,
+                    "could not delete the old partial data");
+                continue;
+            }
+            let mut jobs = self.jobs.write().await;
+            let Some(old) = jobs.get(&id).cloned() else {
+                continue;
+            };
+            let mut job = old.job.clone();
+            // Back to "never run": the next start records the folder it
+            // writes into, which is now the configured one.
+            job.work_root = None;
+            job.status.downloaded = 0;
+            let entry = clone_entry_with_job(&old, job.clone()).await;
+            entry.counters.reset_progress();
+            entry.reset_run_stats();
+            entry.set_phase(Phase::Queued);
+            jobs.insert(id, entry);
+            drop(jobs);
+            if let Err(e) = self.store.upsert_job(&job).await {
+                tracing::warn!(id = %id, error = %e, "could not record the restart");
+            }
+            let _ = self.events.send(DomainEvent::JobUpdated {
+                id,
+                phase: Phase::Queued,
+            });
+            discarded += 1;
+        }
+        Ok(discarded)
+    }
+
+    /// The folder holding this job's partials: the one it wrote into,
+    /// or the current setting for a job that has never run.
+    async fn work_root_of(&self, id: JobId) -> std::path::PathBuf {
+        let recorded = self
+            .job_entry(id)
+            .await
+            .and_then(|entry| entry.job.work_root.clone());
+        match recorded {
+            Some(root) => root,
+            None => self.settings().await.work_dir,
+        }
+    }
+
     /// Wait out a run that has been told to stop but has not finished
     /// writing its outcome yet, and hand back the entry to start from.
     ///
@@ -2949,8 +3076,30 @@ impl AppState {
         });
 
         let settings = self.settings.read().await.clone();
-        let _ = tokio::fs::create_dir_all(&settings.work_dir).await;
-        let per_job_dir = Some(per_job_dir(&settings.work_dir, id));
+        // Where this job's partials live. A job that has run before is
+        // held to the folder it wrote into, whatever the setting says
+        // now; a job running for the first time takes the current one
+        // and records it.
+        let work_root = entry
+            .job
+            .work_root
+            .clone()
+            .unwrap_or_else(|| settings.work_dir.clone());
+        if let Err(e) = tokio::fs::create_dir_all(&work_root).await {
+            // A cache folder that cannot be created is not something to
+            // discover part-way through a transfer: odl would write its
+            // parts relative to wherever the daemon happens to be
+            // running, and the free-space check has nothing to measure.
+            entry.running.store(false, Ordering::Release);
+            return Err(JobError::Io(format!(
+                "cannot use the cache folder {}: {e}",
+                work_root.display()
+            )));
+        }
+        if entry.job.work_root.is_none() {
+            self.record_work_root(id, &work_root).await;
+        }
+        let per_job_dir = Some(per_job_dir(&work_root, id));
         let interactive = dialog_open_for(self, id).await;
         // No window to ask in means the download stops and waits. It
         // never opens one of its own: a background download raising a
@@ -3491,8 +3640,9 @@ impl AppState {
         // Best-effort pause; ignore "not running" errors.
         let _ = self.pause(id).await;
 
-        let settings = self.settings.read().await.clone();
-        let dir = per_job_dir(&settings.work_dir, id);
+        // The folder this job actually wrote into, which is not
+        // necessarily the one the setting points at today.
+        let dir = per_job_dir(&self.work_root_of(id).await, id);
         let _ = tokio::fs::remove_dir_all(&dir).await;
 
         entry.reset_live_speed();
@@ -3564,11 +3714,10 @@ impl AppState {
         }
 
         if opts.purge_partial {
-            let settings = self.settings().await;
             // Per-job working dir holds metadata.pb + every .part +
             // lockfile. Recursive remove wipes them all without
             // touching other jobs' folders.
-            let dir = per_job_dir(&settings.work_dir, id);
+            let dir = per_job_dir(&self.work_root_of(id).await, id);
             let _ = tokio::fs::remove_dir_all(&dir).await;
         }
         let mut warning = None;
@@ -4110,6 +4259,25 @@ fn name_is_taken(jobs: &IndexMap<JobId, Arc<JobEntry>>, name: &str, except: Opti
 /// The downloads "Stop queue" pauses: the ones the queue is running of
 /// its own accord.
 ///
+/// A cache folder oxdm can actually write partials into.
+///
+/// Blank and relative are both refused: neither names a place, and the
+/// consequences are silent — parts written next to whatever the daemon
+/// was launched from, and a free-space precheck with no volume to
+/// measure, which then treats every download as fitting.
+fn validate_work_dir(dir: &std::path::Path) -> Result<(), String> {
+    if dir.as_os_str().is_empty() {
+        return Err("the cache folder cannot be blank".into());
+    }
+    if !dir.is_absolute() {
+        return Err(format!(
+            "the cache folder must be a full path — `{}` is relative",
+            dir.display()
+        ));
+    }
+    Ok(())
+}
+
 /// Are all the slots the user allows in use?
 ///
 /// Counted by phase rather than by the `running` flag: the phase is
@@ -4659,6 +4827,7 @@ mod tests {
             enc_cookies: None,
             speed_limit_override: None,
             queue_id: crate::domain::QueueId::new(),
+            work_root: None,
             created_at: chrono::Utc::now(),
             started_at: None,
             active_ms: None,
@@ -4726,6 +4895,16 @@ mod tests {
         assert!(!targets.contains(&by_hand), "the user asked for this one");
         assert!(!targets.contains(&assembling), "not a transfer to stop");
         assert!(!targets.contains(&paused), "nothing to stop");
+    }
+
+    #[test]
+    fn a_cache_folder_has_to_name_a_place() {
+        assert!(validate_work_dir(std::path::Path::new("/var/tmp/oxdm")).is_ok());
+        assert!(validate_work_dir(std::path::Path::new("")).is_err());
+        // Relative: the parts would land wherever the daemon was
+        // started, and the free-space check would have no volume.
+        assert!(validate_work_dir(std::path::Path::new("cache")).is_err());
+        assert!(validate_work_dir(std::path::Path::new("./cache")).is_err());
     }
 
     #[test]

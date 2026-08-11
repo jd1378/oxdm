@@ -516,6 +516,7 @@ mod tests {
             enc_cookies: None,
             speed_limit_override: None,
             queue_id: crate::domain::QueueId::new(),
+            work_root: None,
             created_at: chrono::Utc::now(),
             started_at: None,
             active_ms: None,

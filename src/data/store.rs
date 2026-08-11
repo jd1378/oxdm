@@ -14,7 +14,7 @@ use crate::domain::{Job, JobId, Phase, Queue, QueueHook, QueueId, QueueSchedule,
 
 /// Schema version. Bump on every breaking change. Migrations are a
 /// match on the read-back version; tiny enough to keep DIY.
-const SCHEMA_VERSION: i32 = 8;
+const SCHEMA_VERSION: i32 = 9;
 
 /// Async-friendly handle around a blocking `rusqlite::Connection`.
 #[derive(Clone)]
@@ -130,6 +130,7 @@ impl Store {
                      interruptions         INTEGER NOT NULL DEFAULT 0,
                      verify_pending        INTEGER NOT NULL DEFAULT 0,
                      active_ms             INTEGER,
+                     work_root             TEXT,
                      response_headers_json TEXT NOT NULL DEFAULT 'null',
                      error_json            TEXT NOT NULL DEFAULT 'null',
                      FOREIGN KEY(queue_id) REFERENCES queues(id) ON DELETE RESTRICT
@@ -216,6 +217,11 @@ impl Store {
                     // clock there rather than inventing a duration for a
                     // run that is over.
                     8 => "ALTER TABLE jobs ADD COLUMN active_ms INTEGER;",
+                    // v9: where a job's partials were actually written.
+                    // NULL on existing rows, which reads as "wherever
+                    // the setting points now" — the behaviour they were
+                    // written under.
+                    9 => "ALTER TABLE jobs ADD COLUMN work_root TEXT;",
                     _ => {
                         return Err(StoreError::Corrupt(format!(
                             "schema_version {n} on disk, expected {SCHEMA_VERSION}, no migration to {next}"
@@ -529,7 +535,7 @@ impl Store {
                             advanced_json, checksums_json, category, \
                             started_at, finished_at, retries, interruptions, \
                             verify_pending, response_headers_json, \
-                            error_json, active_ms \
+                            error_json, active_ms, work_root \
                      FROM jobs ORDER BY queue_position ASC, created_at ASC",
                 )?;
                 let iter = stmt.query_map([], |row| {
@@ -566,6 +572,7 @@ impl Store {
                             .unwrap_or_else(|_| "null".into()),
                         error_json: row.get::<_, String>(28).unwrap_or_else(|_| "null".into()),
                         active_ms: row.get(29).ok().flatten(),
+                        work_root: row.get(30).ok().flatten(),
                     })
                 })?;
                 iter.collect::<Result<Vec<_>, _>>()
@@ -646,8 +653,8 @@ impl Store {
                     auth_password_enc, proxy_password_enc, cookies_enc, \
                     advanced_json, checksums_json, category, \
                     started_at, finished_at, retries, interruptions, verify_pending, \
-                    response_headers_json, error_json, active_ms) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30) \
+                    response_headers_json, error_json, active_ms, work_root) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31) \
                  ON CONFLICT(id) DO UPDATE SET \
                     url=excluded.url, save_dir=excluded.save_dir, \
                     filename=excluded.filename, referrer=excluded.referrer, \
@@ -674,7 +681,8 @@ impl Store {
                     verify_pending=excluded.verify_pending, \
                     response_headers_json=excluded.response_headers_json, \
                     error_json=excluded.error_json, \
-                    active_ms=excluded.active_ms",
+                    active_ms=excluded.active_ms, \
+                    work_root=excluded.work_root",
                 params![
                     row.id,
                     row.url,
@@ -706,6 +714,7 @@ impl Store {
                     row.response_headers_json,
                     row.error_json,
                     row.active_ms,
+                    row.work_root,
                 ],
             )
         })
@@ -813,6 +822,7 @@ struct JobRow {
     created_at: String,
     speed_limit_override: Option<i64>,
     queue_id: String,
+    work_root: Option<String>,
     downloaded: i64,
     total: Option<i64>,
     final_path: Option<String>,
@@ -918,6 +928,10 @@ impl JobRow {
             created_at: job.created_at.to_rfc3339(),
             speed_limit_override: job.speed_limit_override.map(|v| v as i64),
             queue_id: job.queue_id.to_string(),
+            work_root: job
+                .work_root
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned()),
             downloaded: job.status.downloaded as i64,
             total: job.status.total.map(|v| v as i64),
             final_path: job
@@ -1030,6 +1044,7 @@ impl JobRow {
             enc_cookies: self.cookies_enc.filter(|s| !s.is_empty()),
             speed_limit_override: self.speed_limit_override.map(|v| v as u64),
             queue_id,
+            work_root: self.work_root.map(PathBuf::from),
             created_at,
             started_at,
             active_ms,
@@ -1165,6 +1180,7 @@ mod tests {
             enc_proxy_password: None,
             enc_cookies: None,
             queue_id,
+            work_root: None,
             created_at: chrono::Utc::now(),
             started_at: None,
             active_ms: None,

@@ -761,6 +761,17 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
             Ok(()) => Reply::Ok,
             Err(e) => Reply::Err(e),
         },
+        Request::StrandedPartials => {
+            let (count, bytes) = state.stranded_partials().await;
+            Reply::StrandedPartials {
+                count: count as u64,
+                bytes,
+            }
+        }
+        Request::DiscardStrandedPartials => match state.discard_stranded_partials().await {
+            Ok(n) => Reply::Count(n as u64),
+            Err(e) => Reply::Err(e),
+        },
         Request::DbStatus => Reply::DbStatus {
             error: state.db_error().await,
             warning: state.db_warning().await,

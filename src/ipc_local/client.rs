@@ -368,6 +368,33 @@ impl Client {
         self.expect_ok(Request::WipeJobSecrets).await
     }
 
+    /// `(count, bytes)` of partly-fetched data left under a cache
+    /// folder that is no longer the configured one.
+    pub async fn stranded_partials(&self) -> Result<(u64, u64), String> {
+        match self
+            .request(Request::StrandedPartials)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            Reply::StrandedPartials { count, bytes } => Ok((count, bytes)),
+            Reply::Err(e) => Err(e),
+            _ => unreachable!("stranded partials reply"),
+        }
+    }
+
+    /// Delete it, and set those downloads up to start over.
+    pub async fn discard_stranded_partials(&self) -> Result<u64, String> {
+        match self
+            .request(Request::DiscardStrandedPartials)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            Reply::Count(n) => Ok(n),
+            Reply::Err(e) => Err(e),
+            _ => unreachable!("discard stranded partials reply"),
+        }
+    }
+
     /// `(error, warning)` — see `Request::DbStatus`.
     pub async fn db_status(&self) -> Result<(Option<String>, Option<String>), String> {
         match self

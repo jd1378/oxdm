@@ -327,6 +327,18 @@ pub struct Job {
     /// queue; deleting a queue reassigns its jobs to the built-in Main
     /// queue.
     pub queue_id: QueueId,
+    /// Where this download's `.part` files live, recorded when the
+    /// first run starts rather than derived from the current settings.
+    ///
+    /// The cache folder is a setting the user may change at any time,
+    /// and the partials do not move when they do. Deriving the path
+    /// from live settings meant a job resumed after a change looked in
+    /// the new folder, found nothing, and started again from byte zero
+    /// — while gigabytes sat stranded under the old root, invisible.
+    /// `None` on jobs added before this was recorded, and on jobs that
+    /// have never run: both fall back to the current setting.
+    #[serde(default)]
+    pub work_root: Option<PathBuf>,
     pub created_at: DateTime<Utc>,
     /// First `Downloading` transition of the current run. `None` until
     /// the job actually starts transferring (a queued-then-removed job
@@ -779,6 +791,7 @@ mod tests {
             enc_cookies: None,
             speed_limit_override: None,
             queue_id: crate::domain::QueueId::new(),
+            work_root: None,
             created_at: chrono::Utc::now(),
             started_at: None,
             active_ms: None,

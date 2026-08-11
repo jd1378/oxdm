@@ -258,7 +258,7 @@ async fn completed_files(state: &Arc<AppState>) -> Vec<(crate::domain::JobId, Pa
 /// has never fetched a byte loses nothing to a folder that was never
 /// created.
 async fn partial_work_dirs(state: &Arc<AppState>) -> Vec<(crate::domain::JobId, PathBuf)> {
-    let work_root = state.settings().await.work_dir;
+    let current_root = state.settings().await.work_dir;
     state
         .list_jobs()
         .await
@@ -268,7 +268,15 @@ async fn partial_work_dirs(state: &Arc<AppState>) -> Vec<(crate::domain::JobId, 
                 && j.status.phase != Phase::Completed
                 && j.status.downloaded > 0
         })
-        .map(|j| (j.id, crate::data::state::per_job_dir(&work_root, j.id)))
+        .map(|j| {
+            // The root the job wrote into, never the live setting: with
+            // the setting freshly changed, every job's partials would
+            // otherwise look missing at once — and with
+            // `forget_moved_files` on, this sweep would then delete
+            // every one of those downloads from the list.
+            let root = j.work_root.clone().unwrap_or_else(|| current_root.clone());
+            (j.id, crate::data::state::per_job_dir(&root, j.id))
+        })
         .collect()
 }
 

@@ -174,6 +174,13 @@ pub enum Request {
     /// dialog opens. Reply is `Reply::JobSecretsPlaintext`; each
     /// field is `None` when no ciphertext is present.
     JobSecretsPlaintext(JobId),
+    /// How many downloads still hold partly-fetched data under a cache
+    /// folder that is no longer the configured one, and how many bytes
+    /// that is. Reply is `Reply::StrandedPartials`.
+    StrandedPartials,
+    /// Delete that data and set those downloads up to start over.
+    /// Reply is `Reply::Count`.
+    DiscardStrandedPartials,
     /// Boot-time health check for the on-disk SQLite store. Reply is
     /// `Reply::DbStatus`: `error` is set when the original
     /// `Store::open` failed and the daemon fell back to an in-memory
@@ -406,6 +413,12 @@ pub enum Reply {
         proxy_password: Option<String>,
         cookies: Option<String>,
     },
+    StrandedPartials {
+        count: u64,
+        bytes: u64,
+    },
+    /// How many items an action affected.
+    Count(u64),
     DbStatus {
         /// The store is unusable; the recovery modal is the answer.
         error: Option<String>,

@@ -206,6 +206,13 @@ pub enum Msg {
     Discard,
     Save,
     Saved(Result<(), String>),
+    /// Answer to "is anything stranded under the old cache folder?".
+    StrandedChecked(Result<(u64, u64), String>),
+    /// Keep the old partial data where it is.
+    StrandedKeep,
+    /// Delete it and start those downloads over.
+    StrandedDiscard,
+    StrandedDiscarded(Result<u64, String>),
     Cancel,
     WinResized(f32, f32),
     ShotTick,
@@ -268,6 +275,14 @@ pub struct State {
     queues: Vec<Queue>,
     /// Reset-oxdm confirm overlay (Advanced danger section).
     confirm_reset: bool,
+    /// Why the last Apply was refused, shown in the footer. The daemon
+    /// validates too — the window is not its only caller — so a refusal
+    /// has to be visible here rather than swallowed.
+    save_error: Option<String>,
+    /// The cache folder changed and downloads still hold partly-fetched
+    /// data under the old one: how many, and how much. Offered for
+    /// deletion, never deleted without an answer.
+    stranded: Option<(u64, u64)>,
     /// Custom request headers as edited: name/value pairs in the order
     /// shown, blanks included until the user fills or removes them.
     custom_headers: Vec<(String, String)>,
@@ -575,6 +590,8 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 pair_copied: false,
                 s: settings,
                 work_dir: String::new(),
+                save_error: None,
+                stranded: None,
                 max_retries: String::new(),
                 fixed_retries: String::new(),
                 retry_wait: String::new(),
@@ -1016,10 +1033,36 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
             // Keep `st.s` in step with what was sent: the mirrors were
             // just folded in, and `original` is rebased off it on ack.
             st.s = s.clone();
+            st.save_error = None;
             let client = st.client.clone();
             Task::perform(async move { client.update_settings(s).await }, Msg::Saved)
         }
+        Msg::StrandedChecked(Ok((count, bytes))) => {
+            if count > 0 {
+                st.stranded = Some((count, bytes));
+            }
+            Task::none()
+        }
+        Msg::StrandedChecked(Err(_)) => Task::none(),
+        Msg::StrandedKeep => {
+            st.stranded = None;
+            Task::none()
+        }
+        Msg::StrandedDiscard => {
+            st.stranded = None;
+            let client = st.client.clone();
+            Task::perform(
+                async move { client.discard_stranded_partials().await },
+                Msg::StrandedDiscarded,
+            )
+        }
+        Msg::StrandedDiscarded(Ok(_)) => Task::none(),
+        Msg::StrandedDiscarded(Err(e)) => {
+            st.save_error = Some(e);
+            Task::none()
+        }
         Msg::Saved(Ok(())) => {
+            let work_dir_before = st.original.work_dir.clone();
             // The window stays open, so "Reset <section>" has to mean
             // "back to what is saved" — which is now this.
             st.original = st.s.clone();
@@ -1027,9 +1070,23 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
             // anything, so the chrome choice has to be readable from
             // disk by the next one that opens.
             crate::gui::ui_prefs::sync_custom_window_chrome(st.s.custom_window_chrome);
+            // A changed cache folder leaves earlier downloads' partly-
+            // fetched data behind in the old one. They go on resuming
+            // from there, but that folder is not somewhere the user can
+            // see, so ask whether to clear it.
+            if st.s.work_dir != work_dir_before {
+                let client = st.client.clone();
+                return Task::perform(
+                    async move { client.stranded_partials().await },
+                    Msg::StrandedChecked,
+                );
+            }
             Task::none()
         }
-        Msg::Saved(Err(_)) => Task::none(),
+        Msg::Saved(Err(e)) => {
+            st.save_error = Some(e);
+            Task::none()
+        }
         Msg::Discard => {
             st.s = st.original.clone();
             mirror(st);
@@ -1224,11 +1281,19 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
             .view(t),
     );
 
-    let footer_el = crate::gui::windows::add::footer(
-        t,
-        Btn::new("Cancel").ghost().on_press(Msg::Cancel).view(t),
-        right.into(),
-    );
+    // A refusal belongs next to the button that was pressed, not in a
+    // log the user never reads.
+    let left: Element<'_, Msg> = match &st.save_error {
+        Some(e) => row![
+            icons::icon("circle-alert", 14.0, t.status_danger),
+            text(e.clone()).font(theme::BODY).size(12.0).color(t.fg_2),
+        ]
+        .spacing(theme::space::S2)
+        .align_y(Alignment::Center)
+        .into(),
+        None => Btn::new("Cancel").ghost().on_press(Msg::Cancel).view(t),
+    };
+    let footer_el = crate::gui::windows::add::footer(t, left, right.into());
 
     let page = column![
         titlebar::titlebar(t, "Settings", false, Msg::Window),
@@ -1253,6 +1318,8 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
 
     let overlaid: Element<'_, Msg> = if st.confirm_reset {
         reset_overlay(st, page.into())
+    } else if let Some((count, bytes)) = st.stranded {
+        stranded_overlay(st, page.into(), count, bytes)
     } else {
         page.into()
     };
@@ -2379,6 +2446,104 @@ fn danger_section(st: &State) -> Element<'_, Msg> {
                 .view(t),
         )],
     )
+}
+
+/// The cache folder changed and earlier downloads' partly-fetched data
+/// is still in the old one.
+///
+/// Keeping it is the default and costs nothing: those downloads go on
+/// resuming from where they were written. Deleting it is offered
+/// because the old folder is not somewhere the UI can show, so bytes
+/// left there are bytes nobody will ever find — but it is a question,
+/// never something done on the user's behalf.
+fn stranded_overlay<'a>(
+    st: &'a State,
+    base: Element<'a, Msg>,
+    count: u64,
+    bytes: u64,
+) -> Element<'a, Msg> {
+    let t = &st.tokens;
+    let t2 = *t;
+    let what = if count == 1 {
+        "1 download has".to_owned()
+    } else {
+        format!("{count} downloads have")
+    };
+    let card = container(
+        column![
+            text("Old partial data left behind")
+                .font(theme::BODY_BOLD)
+                .size(14.0)
+                .color(t.fg_1),
+            text(format!(
+                "{what} {} of partly-downloaded data in the previous cache folder. \
+                 They will carry on from there, so nothing is lost by keeping it. \
+                 Deleting it frees the space, and those downloads start over from \
+                 the beginning.",
+                crate::gui::format::format_bytes(bytes)
+            ))
+            .font(theme::BODY)
+            .size(12.0)
+            .color(t.fg_2),
+            row![
+                iced::widget::Space::new().width(Length::Fill),
+                Btn::new("Keep it")
+                    .ghost()
+                    .on_press(Msg::StrandedKeep)
+                    .view(t),
+                Btn::new("Delete and start over")
+                    .danger_filled()
+                    .icon("trash-2")
+                    .on_press(Msg::StrandedDiscard)
+                    .view(t),
+            ]
+            .spacing(theme::space::S2)
+            .align_y(Alignment::Center),
+        ]
+        .spacing(theme::space::S3),
+    )
+    .width(Length::Fixed(430.0))
+    .padding(theme::space::S4)
+    .style(move |_| container::Style {
+        background: Some(t2.bg_surface.into()),
+        border: iced::Border {
+            color: t2.border_default,
+            width: 1.0,
+            radius: theme::surface::RADIUS.into(),
+        },
+        shadow: iced::Shadow {
+            color: color::with_alpha(iced::Color::BLACK, 80.0 / 255.0),
+            offset: iced::Vector::new(0.0, 4.0),
+            blur_radius: 16.0,
+        },
+        ..Default::default()
+    });
+
+    let scrim = iced::widget::opaque(
+        mouse_area(
+            container(iced::widget::Space::new())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(|_| container::Style {
+                    background: Some(color::with_alpha(iced::Color::BLACK, 120.0 / 255.0).into()),
+                    ..Default::default()
+                }),
+        )
+        // Dismissing is "keep": the safe answer, and the one that
+        // changes nothing.
+        .on_press(Msg::StrandedKeep),
+    );
+
+    iced::widget::stack![
+        base,
+        scrim,
+        container(iced::widget::opaque(card))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center),
+    ]
+    .into()
 }
 
 /// Confirm overlay for the danger Reset (pattern: queues delete_overlay;
