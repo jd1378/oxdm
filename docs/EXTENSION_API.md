@@ -127,10 +127,10 @@ Two frame styles are accepted after auth:
 |---------------|-----------------------|----------|----------------------------------------------------------------------------------|
 | `url`         | string (http/https)   | yes      | Target URL.                                                                      |
 | `filename`    | string                | no       | Suggested filename. oxdm overrides with server-provided name when present.       |
-| `referrer`    | string (URL)          | no       | Used as `Referer` header when not overridden in `headers`.                       |
+| `referrer`    | string (URL)          | no       | Stored on the job and sent as `Referer` on every request. Shown and editable in Properties → Headers → Identification. A `Referer` in `headers` overrides it. Send it whenever the page it came from matters — hosts that check it reject the download otherwise. |
 | `cookies`     | string                | no       | Cookie header value (the extension is the only component that can read jars).    |
-| `user_agent`  | string                | no       | UA header — honoured verbatim so anti-leech servers see the browser's UA.        |
-| `headers`     | `{ string: string }`  | no       | Extra headers. Merged on top of cookies / referrer / UA.                         |
+| `user_agent`  | string                | no       | Stored as the job's `User-Agent` header and honoured verbatim, so anti-leech hosts see the browser's UA. Outranks both the global setting and oxdm's own default (`oxdm/<version> (<platform>; <arch>)`), which is what a job without one sends. |
+| `headers`     | `{ string: string }`  | no       | Extra headers. Merged on top of cookies / referrer / UA — a key here wins over the dedicated field of the same name. |
 | `size`        | integer (bytes)       | no       | Reported size if the extension already saw it.                                   |
 | `mime_type`   | string                | no       | Display-only.                                                                    |
 | `interactive` | bool (default false)  | no       | If `true`, oxdm opens the Add-Download dialog. If `false`, it queues immediately. |

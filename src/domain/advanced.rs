@@ -102,8 +102,11 @@ pub struct CustomHeader {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Advanced {
-    pub user_agent: String,
-    pub referer: String,
+    // No `user_agent` / `referer` here: identification is not a
+    // per-job blob field. The UA rides the job's `User-Agent` header
+    // (which `start_job` promotes to odl's UA option) and the referrer
+    // rides `Job::referrer`. Old blobs still carry both keys; serde
+    // drops them on load.
     pub cookies_enabled: bool,
     pub cookie_jar: String,
     /// See `ProxyAdv::clear_password`. An emptied cookie editor is
@@ -131,8 +134,6 @@ pub struct Advanced {
 impl Default for Advanced {
     fn default() -> Self {
         Self {
-            user_agent: "oxdm/2.4.1 (Macintosh; arm64; like wget)".into(),
-            referer: String::new(),
             cookies_enabled: true,
             cookie_jar: String::new(),
             clear_cookie_jar: false,

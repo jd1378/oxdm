@@ -48,7 +48,11 @@ pub fn settings_to_download_options(
         .max_retries(s.max_retries)
         .wait_between_retries(s.wait_between_retries)
         .n_fixed_retries(s.n_fixed_retries)
-        .user_agent(s.user_agent.clone())
+        // `None` here means "let odl randomize"; the app default is
+        // already folded in (`domain::effective_user_agent`), so a
+        // request never leaves without a name unless the user asked
+        // for a shuffled one.
+        .user_agent(crate::domain::effective_user_agent(s))
         .randomize_user_agent(s.randomize_user_agent)
         // Assembled here and nowhere else: the settings hold the parts,
         // and the password comes straight from the secret store.
@@ -91,7 +95,7 @@ pub fn job_overlay_options(
     apply_job_proxy(&mut b, job, proxy_password)?;
     let bearer = bearer_header(job, auth_secret);
     let cookies_present = cookies.is_some_and(|s| !s.is_empty());
-    if !job.headers.is_empty() || cookies_present || bearer.is_some() {
+    if !job.headers.is_empty() || cookies_present || bearer.is_some() || job.referrer.is_some() {
         // Merge per-job headers on top of global; the decrypted
         // cookie jar (never stored in `Job.headers`) is injected here
         // so it lives only in the per-run overlay.
@@ -99,6 +103,14 @@ pub fn job_overlay_options(
         // case-insensitive, so a job's `x-api-key` has to replace a
         // global `X-API-Key` here rather than ride alongside it.
         let mut merged = base.headers().cloned().unwrap_or_default();
+        // The page the link came from. Captured by the extension and
+        // editable in Properties → Headers; it lives on its own
+        // column rather than in the header bag, so it is spliced in
+        // here — below the job's own headers, so a hand-written
+        // `Referer` still wins.
+        if let Some(r) = job.referrer.as_ref() {
+            crate::domain::upsert_header(&mut merged, "Referer", r.to_string());
+        }
         for (k, v) in job.headers.iter() {
             crate::domain::upsert_header(&mut merged, k, v.clone());
         }

@@ -2491,11 +2491,10 @@ impl AppState {
         {
             headers.insert("User-Agent".into(), ua.into());
         }
-        if let Some(ref r) = req.referrer
-            && !headers.contains_key("Referer")
-        {
-            headers.insert("Referer".into(), r.to_string());
-        }
+        // The referrer is *not* copied into the header bag: it rides
+        // `Job::referrer`, and `mapping::job_overlay_options` splices
+        // it in at request time. Two copies would show up as two rows
+        // in Properties and drift the moment one is edited.
         let cookies = req.cookies.clone().or(captured_cookie);
         // Capture flow keeps the original filename even on collision.
         // Confirm window (`confirm_window.rs`) detects the dup against

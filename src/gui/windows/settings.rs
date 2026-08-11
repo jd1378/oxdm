@@ -2107,16 +2107,16 @@ fn network_section(st: &State) -> Element<'_, Msg> {
                     set_row_stack(
                         t,
                         "Custom User-Agent",
-                        Some("Sent with every request."),
+                        Some("Sent with every request. Empty uses oxdm's own."),
                         TextInput::new(&st.user_agent)
                             .width(Length::Fill)
-                            // Blank really does mean blank: oxdm sets no
-                            // User-Agent of its own, so the header is
-                            // simply absent unless randomising is on.
+                            // Blank means "inherit", and the hint says
+                            // what from: the app's own UA, or a random
+                            // browser one when randomising is on.
                             .hint(if st.s.randomize_user_agent {
-                                "A random browser User-Agent per request"
+                                "A random browser User-Agent per request".to_owned()
                             } else {
-                                "No User-Agent sent"
+                                crate::domain::default_user_agent().to_owned()
                             })
                             .on_input(Msg::UserAgent)
                             .view(t)

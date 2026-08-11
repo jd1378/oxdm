@@ -7,6 +7,7 @@
 //! on.
 //!
 //!     cargo run --example addjob -- http://127.0.0.1:8088/f.bin /tmp --start
+//!             [--referer https://example.com/page] [--ua "curl/8"]
 
 #[tokio::main]
 async fn main() {
@@ -38,6 +39,19 @@ async fn main() {
         .and_then(|i| rest.get(i + 1))
         .and_then(|v| v.parse().ok());
 
+    // Identification, the way a browser capture would arrive with it.
+    let flag = |name: &str| -> Option<String> {
+        rest.iter()
+            .position(|a| a == name)
+            .and_then(|i| rest.get(i + 1))
+            .cloned()
+    };
+    let referrer = flag("--referer").map(|r| r.parse().expect("referer url"));
+    let mut headers: indexmap::IndexMap<String, String> = Default::default();
+    if let Some(ua) = flag("--ua") {
+        headers.insert("User-Agent".to_owned(), ua);
+    }
+
     let client = oxdm::ipc_local::Client::connect_retry(std::time::Duration::from_secs(5))
         .await
         .expect("no daemon");
@@ -47,8 +61,8 @@ async fn main() {
             save_dir: dir.into(),
             // The point of the exercise: no name, no size, no digests.
             filename: None,
-            referrer: None,
-            headers: Default::default(),
+            referrer,
+            headers,
             max_connections: None,
             proxy: None,
             auth_user: user,

@@ -583,6 +583,10 @@ const STORED_PLACEHOLDER: &str = "(stored)";
 /// `data::mapping::job_overlay_options`.
 const COOKIE_KEY: &str = "Cookie";
 const AUTHORIZATION_KEY: &str = "Authorization";
+/// Identification keys, owned by rows of their own above the table's
+/// body — never repeated among the plain header rows.
+const USER_AGENT_KEY: &str = "User-Agent";
+const REFERER_KEY: &str = "Referer";
 
 /// Compute the request headers oxdm will send for `job`, for display.
 ///
@@ -600,24 +604,49 @@ const AUTHORIZATION_KEY: &str = "Authorization";
 /// - Basic auth rides `odl::Credentials` (`runner::build_credentials`,
 ///   legacy `Job::auth_user` + `enc_auth_password`) and reaches the
 ///   wire as an `Authorization: Basic …` header — shown masked;
-/// - the User-Agent is an odl *option*, not a headers-map entry:
-///   `Settings::user_agent` wins; with no explicit UA and
-///   `randomize_user_agent` on, odl picks a random UA per request; the
-///   per-job `Advanced::user_agent` field is dead and NEVER shown.
+/// - the User-Agent is an odl *option*, not a headers-map entry, and
+///   reqwest applies it after the default headers, so it beats any
+///   `User-Agent` in either header bag: a per-job one is promoted to
+///   the option by `state::start_job`, and the global layers are
+///   resolved by `domain::effective_user_agent`;
+/// - `Referer` is spliced from `Job::referrer` in
+///   `mapping::job_overlay_options`, under the job's own headers and
+///   over the global ones.
 pub fn will_send_headers(settings: &super::Settings, job: &Job) -> Vec<WillSendHeader> {
     let mut rows = Vec::new();
 
-    let ua = match (&settings.user_agent, settings.randomize_user_agent) {
-        (Some(ua), _) => ua.clone(),
-        (None, true) => "randomized per request".to_owned(),
-        (None, false) => "(not set)".to_owned(),
+    // Whoever wins the User-Agent, exactly one row says so.
+    let job_ua = job
+        .headers
+        .iter()
+        .find(|(k, _)| super::header_name_eq(k, USER_AGENT_KEY));
+    let (ua, ua_custom) = match job_ua {
+        Some((_, v)) => (v.clone(), true),
+        None => match super::effective_user_agent(settings) {
+            Some(ua) => (ua, false),
+            None => ("randomized per request".to_owned(), false),
+        },
     };
     rows.push(WillSendHeader {
-        name: "User-Agent".to_owned(),
+        name: USER_AGENT_KEY.to_owned(),
         value: ua,
-        custom: false,
+        custom: ua_custom,
         masked: false,
     });
+
+    // The referrer column, unless the job spells the header out itself.
+    let referrer_row = job
+        .referrer
+        .as_ref()
+        .filter(|_| !super::has_header(&job.headers, REFERER_KEY));
+    if let Some(r) = referrer_row {
+        rows.push(WillSendHeader {
+            name: REFERER_KEY.to_owned(),
+            value: r.to_string(),
+            custom: true,
+            masked: false,
+        });
+    }
 
     // Stored cookies are only injected while "Send cookies" is on
     // (`start_job` gates the decryption on `cookies_enabled`).
@@ -645,6 +674,14 @@ pub fn will_send_headers(settings: &super::Settings, job: &Job) -> Vec<WillSendH
         {
             continue; // replaced by the stored-secret row below
         }
+        // Already stated by the identification rows — and outranked
+        // there, so repeating them here would show a value that never
+        // reaches the wire.
+        if super::header_name_eq(k, USER_AGENT_KEY)
+            || (super::header_name_eq(k, REFERER_KEY) && referrer_row.is_some())
+        {
+            continue;
+        }
         rows.push(WillSendHeader {
             name: k.clone(),
             value: v.clone(),
@@ -659,6 +696,7 @@ pub fn will_send_headers(settings: &super::Settings, job: &Job) -> Vec<WillSendH
     for (k, v) in job.headers.iter() {
         if (super::header_name_eq(k, COOKIE_KEY) && cookie_stored)
             || (super::header_name_eq(k, AUTHORIZATION_KEY) && auth_sent)
+            || super::header_name_eq(k, USER_AGENT_KEY)
         {
             continue;
         }
@@ -811,6 +849,87 @@ mod tests {
         assert!(!Phase::Completed.is_startable());
         assert!(!Phase::Downloading.is_startable());
         assert!(!Phase::Evaluating.is_startable());
+    }
+
+    /// The UA has one winner and the table has one row for it: the
+    /// job's own. A second row carrying the global value would name a
+    /// string the request never sends (reqwest applies odl's UA option
+    /// after the default headers).
+    #[test]
+    fn will_send_names_one_user_agent_and_it_is_the_jobs() {
+        let settings = crate::domain::Settings {
+            user_agent: Some("global/1".to_owned()),
+            ..Default::default()
+        };
+        let mut headers = indexmap::IndexMap::new();
+        headers.insert("User-Agent".to_owned(), "browser/2".to_owned());
+        let job = Job {
+            headers,
+            ..sample_job()
+        };
+
+        let rows = will_send_headers(&settings, &job);
+        let uas: Vec<&WillSendHeader> = rows
+            .iter()
+            .filter(|r| r.name.eq_ignore_ascii_case("user-agent"))
+            .collect();
+        assert_eq!(uas.len(), 1, "one User-Agent reaches the wire, so one row");
+        assert_eq!(uas[0].value, "browser/2");
+        assert!(uas[0].custom, "it came from this download");
+    }
+
+    /// With nothing overriding it, the row shows the app's own UA —
+    /// the one `mapping::settings_to_download_options` puts on the
+    /// request — never a blank or "(not set)".
+    #[test]
+    fn will_send_falls_back_to_the_apps_own_user_agent() {
+        let settings = crate::domain::Settings::default();
+        let rows = will_send_headers(&settings, &sample_job());
+        let ua = rows
+            .iter()
+            .find(|r| r.name == "User-Agent")
+            .expect("a User-Agent row");
+        assert_eq!(ua.value, crate::domain::default_user_agent());
+        assert!(!ua.custom);
+    }
+
+    /// The referrer lives on its own column and is spliced in at
+    /// request time (`mapping::job_overlay_options`), so the preview
+    /// has to show it even though no header holds it.
+    #[test]
+    fn will_send_shows_the_referrer_the_capture_brought() {
+        let job = Job {
+            referrer: Some(url::Url::parse("https://example.com/page").unwrap()),
+            ..sample_job()
+        };
+        let rows = will_send_headers(&crate::domain::Settings::default(), &job);
+        let referer = rows
+            .iter()
+            .find(|r| r.name == "Referer")
+            .expect("a Referer row");
+        assert_eq!(referer.value, "https://example.com/page");
+        assert!(referer.custom);
+    }
+
+    /// A hand-written `Referer` header outranks the column, exactly as
+    /// the merge does — and the column's value must not appear beside
+    /// it.
+    #[test]
+    fn a_hand_written_referer_replaces_the_column() {
+        let mut headers = indexmap::IndexMap::new();
+        headers.insert("Referer".to_owned(), "https://typed.example/".to_owned());
+        let job = Job {
+            headers,
+            referrer: Some(url::Url::parse("https://captured.example/page").unwrap()),
+            ..sample_job()
+        };
+        let rows = will_send_headers(&crate::domain::Settings::default(), &job);
+        let values: Vec<&str> = rows
+            .iter()
+            .filter(|r| r.name.eq_ignore_ascii_case("referer"))
+            .map(|r| r.value.as_str())
+            .collect();
+        assert_eq!(values, vec!["https://typed.example/"]);
     }
 
     #[test]

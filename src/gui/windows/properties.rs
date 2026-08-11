@@ -128,7 +128,9 @@ pub enum Msg {
     CookiesEnabled(bool),
     CookiesEdit(text_editor::Action),
     CookiesClear,
-    // Headers
+    // Headers — identification, then the free-form rows
+    UserAgent(String),
+    Referer(String),
     HeaderName(usize, String),
     HeaderValue(usize, String),
     HeaderRemove(usize),
@@ -213,6 +215,14 @@ pub struct State {
     has_stored_cookies: bool,
     /// Same rule as `proxy_pass_edited`, for the cookie editor.
     cookies_edited: bool,
+    /// Identification, lifted out of the header rows below: both keys
+    /// have a winner-takes-all rule of their own on the wire, so
+    /// editing them among ordinary headers would hide which value the
+    /// request actually carries. Empty means "inherit" — the UA falls
+    /// back to Settings, the referrer is simply not sent.
+    ua: String,
+    referer: String,
+    /// Free-form headers, never including `User-Agent` / `Referer`.
     headers: Vec<(String, String)>,
     /// Per-job transfer limits, staged like every other field here.
     /// Empty `max_conn` means "let oxdm choose"; the limit is kept as
@@ -370,6 +380,99 @@ fn pending_advanced(st: &State) -> crate::domain::Advanced {
     adv
 }
 
+const USER_AGENT_KEY: &str = "User-Agent";
+const REFERER_KEY: &str = "Referer";
+
+/// The header bag this form would store: the free-form rows plus the
+/// User-Agent, which travels as an ordinary header (`start_job`
+/// promotes it to odl's UA option at run time). The referrer does not
+/// belong here — it has its own column; see `pending_referrer`.
+fn pending_headers(st: &State) -> Vec<(String, String)> {
+    compose_headers(&st.headers, &st.ua)
+}
+
+/// The composition itself, away from the form: free-form rows first,
+/// then the User-Agent field if it names one. Nameless rows are still
+/// being typed and never reach storage.
+fn compose_headers(rows: &[(String, String)], ua: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = rows
+        .iter()
+        .filter(|(k, _)| !k.trim().is_empty())
+        .map(|(k, v)| (k.trim().to_owned(), v.clone()))
+        .collect();
+    let ua = ua.trim();
+    if !ua.is_empty() {
+        out.push((USER_AGENT_KEY.to_owned(), ua.to_owned()));
+    }
+    out
+}
+
+/// What `hydrate` puts in the form: the User-Agent, the referrer, and
+/// the rows that are neither.
+fn split_identity(job: &crate::domain::Job) -> (String, String, Vec<(String, String)>) {
+    let ua = job
+        .headers
+        .iter()
+        .find(|(k, _)| crate::domain::header_name_eq(k, USER_AGENT_KEY))
+        .map(|(_, v)| v.clone())
+        .unwrap_or_default();
+    let (_, referrer) = saved_identity(job);
+    let rows = job
+        .headers
+        .iter()
+        .filter(|(k, _)| {
+            !crate::domain::header_name_eq(k, USER_AGENT_KEY)
+                && !crate::domain::header_name_eq(k, REFERER_KEY)
+        })
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    (ua, referrer.unwrap_or_default(), rows)
+}
+
+/// The referrer as typed. `Err` is a non-empty field that is not a
+/// URL — Apply refuses rather than dropping it silently, since a
+/// referrer the server never sees looks the same as one it rejected.
+fn pending_referrer(st: &State) -> Result<Option<url::Url>, ()> {
+    let r = st.referer.trim();
+    if r.is_empty() {
+        return Ok(None);
+    }
+    r.parse().map(Some).map_err(|_| ())
+}
+
+/// The saved job as this form reads it: the header bag without the
+/// referrer, and the referrer itself — from its column, or from a
+/// legacy `Referer` header. Comparing against this (rather than the
+/// raw bag) keeps a freshly-opened dialog from reporting the lift
+/// itself as an unsaved change.
+fn saved_identity(job: &crate::domain::Job) -> (Vec<(String, String)>, Option<String>) {
+    let headers = job
+        .headers
+        .iter()
+        .filter(|(k, _)| !crate::domain::header_name_eq(k, REFERER_KEY))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let referrer = job.referrer.as_ref().map(|u| u.to_string()).or_else(|| {
+        job.headers
+            .iter()
+            .find(|(k, _)| crate::domain::header_name_eq(k, REFERER_KEY))
+            .map(|(_, v)| v.clone())
+    });
+    (headers, referrer)
+}
+
+/// Header bags compare by content, not by order: hydration lifts
+/// `User-Agent` out of the middle of the stored bag and `pending_headers`
+/// puts it back at the end, which is the same request either way.
+fn header_bag(rows: &[(String, String)]) -> Vec<(String, String)> {
+    let mut v: Vec<(String, String)> = rows
+        .iter()
+        .map(|(k, val)| (k.to_lowercase(), val.clone()))
+        .collect();
+    v.sort();
+    v
+}
+
 /// How many of the job's settings this form would change. The secret
 /// fields count when freshly typed: an empty one means "keep", so it is
 /// not a change, which is exactly what `pending_advanced` encodes.
@@ -383,19 +486,16 @@ fn count_changes(st: &State) -> usize {
     if std::path::Path::new(st.save_path.trim()) != saved_path {
         n += 1;
     }
-    let headers: Vec<(String, String)> = st
-        .headers
-        .iter()
-        .filter(|(k, _)| !k.trim().is_empty())
-        .map(|(k, v)| (k.trim().to_owned(), v.clone()))
-        .collect();
-    if headers
-        != job
-            .headers
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect::<Vec<_>>()
-    {
+    let (stored, stored_referrer) = saved_identity(job);
+    if header_bag(&pending_headers(st)) != header_bag(&stored) {
+        n += 1;
+    }
+    // An unparseable referrer still counts as a change — it is one the
+    // user made, and Apply is where it gets refused.
+    let typed_referrer = pending_referrer(st)
+        .map(|r| r.map(|u| u.to_string()))
+        .unwrap_or_else(|()| Some(st.referer.trim().to_owned()));
+    if typed_referrer != stored_referrer {
         n += 1;
     }
     if st.checksums != job.checksums {
@@ -453,11 +553,14 @@ fn hydrate(st: &mut State) {
     st.auth_pass.clear();
     st.auth_token.clear();
     st.auth_secret_edited = false;
-    st.headers = job
-        .headers
-        .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
+    // Identification is lifted out of the bag and shown in its own
+    // fields. A hand-written `Referer` header is folded into the
+    // referrer field — it is the same thing said twice otherwise, and
+    // the column is what the runner reads.
+    let (ua, referer, rows) = split_identity(job);
+    st.ua = ua;
+    st.referer = referer;
+    st.headers = rows;
     st.adv = job.advanced.clone();
     st.cookies_enabled = job.advanced.cookies_enabled;
     // `cookie_jar` is only non-empty on legacy blobs written before
@@ -526,6 +629,8 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 tab: Tab::General,
                 url: String::new(),
                 save_path: String::new(),
+                ua: String::new(),
+                referer: String::new(),
                 proxy_mode: ProxyMode::Inherit,
                 proxy_host: String::new(),
                 proxy_port: String::new(),
@@ -777,6 +882,18 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             mark(st);
             Task::none()
         }
+        Msg::UserAgent(v) => {
+            st.ua = v;
+            st.dirty_overlay = true;
+            mark(st);
+            Task::none()
+        }
+        Msg::Referer(v) => {
+            st.referer = v;
+            st.dirty_overlay = true;
+            mark(st);
+            Task::none()
+        }
         Msg::HeaderName(i, v) => {
             if let Some(h) = st.headers.get_mut(i) {
                 h.0 = v;
@@ -1002,6 +1119,12 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                 st.error = Some("Invalid URL".to_owned());
                 return Task::none();
             };
+            let Ok(referrer) = pending_referrer(st) else {
+                st.error = Some(
+                    "Referer must be a full address, like https://example.com/page".to_owned(),
+                );
+                return Task::none();
+            };
             let p = PathBuf::from(st.save_path.trim());
             let (save_dir, filename) = (
                 p.parent()
@@ -1026,14 +1149,12 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                 // Nameless rows are still being typed; case-duplicates
                 // fold onto the first spelling (`normalize_headers`), so
                 // what is stored is what the wire would resolve to.
-                let headers = crate::domain::normalize_headers(st.headers.iter().cloned());
+                let headers = crate::domain::normalize_headers(pending_headers(st));
                 crate::ipc_local::protocol::JobEdit {
                     url: url.clone(),
                     save_dir: save_dir.clone(),
                     filename: filename.clone(),
-                    // No UI for these any more (dead-fields inventory);
-                    // pass the job's current values through unchanged.
-                    referrer: job.referrer.clone(),
+                    referrer: referrer.clone(),
                     max_connections: job.max_connections,
                     // Legacy per-job proxy URL: preserved as-is — the
                     // Connection tab edits `advanced.proxy` instead.
@@ -3083,6 +3204,40 @@ fn cookies_tab(st: &State) -> Element<'_, Msg> {
     )
 }
 
+/// One identification field: name, why it exists, and a full-width
+/// input whose placeholder is what an empty field falls back to.
+fn ident_field<'a>(
+    t: &Tokens,
+    label: &'a str,
+    hint: &'a str,
+    value: &'a str,
+    placeholder: String,
+    editable: bool,
+    on_input: fn(String) -> Msg,
+) -> Element<'a, Msg> {
+    container(
+        column![
+            text(label)
+                .font(theme::BODY_MEDIUM)
+                .size(12.0)
+                .color(t.fg_1),
+            text(hint)
+                .font(theme::BODY)
+                .size(11.0)
+                .color(t.fg_3)
+                .line_height(iced::widget::text::LineHeight::Relative(1.4)),
+            TextInput::new(value)
+                .hint(&placeholder)
+                .enabled(editable)
+                .on_input(on_input)
+                .view(t),
+        ]
+        .spacing(theme::space::S1 + 2.0),
+    )
+    .padding([10.0, theme::space::S3])
+    .into()
+}
+
 /// Read-only header table shared by the will-send and captured-response
 /// sections (design `.prop-hdrs` / `.prop-hdr-row`). `custom` rows get
 /// the clay accent (`.prop-hdr-row-custom`); `masked` rows dim their
@@ -3153,6 +3308,36 @@ fn headers_tab(st: &State) -> Element<'_, Msg> {
     let t = &st.tokens;
     let editable = !st.locked();
 
+    // --- Identification -----------------------------------------------
+    // The two headers with a rule of their own: the UA that outranks
+    // every header bag, and the referrer that lives on its own column.
+    // Empty means inherit, so the UA field shows what it would inherit
+    // as its placeholder rather than a blank that reads as "none".
+    let inherited_ua = crate::domain::effective_user_agent(&st.settings)
+        .unwrap_or_else(|| "randomized per request".to_owned());
+    let ident = column![
+        ident_field(
+            t,
+            "User-Agent",
+            "Override the default UA for this download only.",
+            &st.ua,
+            inherited_ua,
+            editable,
+            Msg::UserAgent,
+        ),
+        row_sep(t),
+        ident_field(
+            t,
+            "Referer",
+            "The page the link came from. Filled in by the browser extension; \
+             some hosts refuse a download without it.",
+            &st.referer,
+            "https://example.com/source-page".to_owned(),
+            editable,
+            Msg::Referer,
+        ),
+    ];
+
     // --- Read-only "Request headers (will send)" table (#7) -----------
     // Derived by the pure domain mirror of the run-time merge.
     let will_send = hdr_table(
@@ -3167,7 +3352,8 @@ fn headers_tab(st: &State) -> Element<'_, Msg> {
             t,
             "Merged from your global settings and this download's overrides: \
              what oxdm sends on the next request. Stored cookies and credentials \
-             are never displayed."
+             are never displayed. The protocol adds its own on top — Accept-Encoding, \
+             a Range per part, and a digest request on the first probe."
                 .to_owned(),
         ),
     ]
@@ -3301,6 +3487,7 @@ fn headers_tab(st: &State) -> Element<'_, Msg> {
     );
 
     column![
+        section(t, "identification", ident.into()),
         will_send_section,
         captured_section,
         section(t, "custom request headers", custom.into())
@@ -3332,5 +3519,91 @@ pub fn launch_properties(_id: JobId) {
     if let Err(e) = app.run() {
         eprintln!("gui error: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn job_with(headers: &[(&str, &str)], referrer: Option<&str>) -> crate::domain::Job {
+        let mut job = crate::domain::Job {
+            id: JobId::new(),
+            url: "https://example.com/f.bin".parse().unwrap(),
+            save_dir: std::path::PathBuf::from("/tmp"),
+            filename: None,
+            referrer: None,
+            headers: Default::default(),
+            max_connections: None,
+            proxy: None,
+            auth_user: None,
+            enc_auth_password: None,
+            enc_proxy_password: None,
+            enc_cookies: None,
+            speed_limit_override: None,
+            queue_id: crate::domain::QueueId::new(),
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            finished_at: None,
+            retries: 0,
+            interruptions: 0,
+            verify_pending: false,
+            status: Default::default(),
+            advanced: crate::domain::Advanced::default(),
+            checksums: Vec::new(),
+            category: crate::domain::Category::Other,
+            captured_response: None,
+        };
+        job.headers = headers
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        job.referrer = referrer.map(|r| r.parse().unwrap());
+        job
+    }
+
+    /// Opening the dialog and applying it unchanged must store the
+    /// same request: the User-Agent goes back into the bag it came
+    /// from, and the referrer stays on its column.
+    #[test]
+    fn identification_survives_a_round_trip_through_the_form() {
+        let job = job_with(
+            &[("User-Agent", "browser/2"), ("X-Api-Key", "k")],
+            Some("https://example.com/page"),
+        );
+        let (ua, referer, rows) = split_identity(&job);
+        assert_eq!(ua, "browser/2");
+        assert_eq!(referer, "https://example.com/page");
+        assert_eq!(rows, vec![("X-Api-Key".to_owned(), "k".to_owned())]);
+
+        let (stored, stored_referrer) = saved_identity(&job);
+        assert_eq!(
+            header_bag(&compose_headers(&rows, &ua)),
+            header_bag(&stored),
+            "a form nobody touched proposes the bag it was given"
+        );
+        assert_eq!(stored_referrer.as_deref(), Some(referer.as_str()));
+    }
+
+    /// A job from before the referrer had its own column carries it as
+    /// a plain header. The form shows it in the referrer field, and
+    /// the comparison baseline says so too — otherwise the dialog
+    /// opens already claiming an unsaved change.
+    #[test]
+    fn a_legacy_referer_header_opens_clean() {
+        let job = job_with(&[("Referer", "https://old.example/page")], None);
+        let (_, referer, rows) = split_identity(&job);
+        assert_eq!(referer, "https://old.example/page");
+        assert!(rows.is_empty(), "not repeated among the free-form rows");
+
+        let (stored, stored_referrer) = saved_identity(&job);
+        assert!(stored.is_empty());
+        assert_eq!(stored_referrer.as_deref(), Some("https://old.example/page"));
+    }
+
+    #[test]
+    fn an_emptied_user_agent_stops_being_a_header() {
+        let rows = vec![("X-Api-Key".to_owned(), "k".to_owned())];
+        assert_eq!(compose_headers(&rows, "   "), rows);
     }
 }

@@ -257,6 +257,12 @@ impl AddState {
                 headers.insert(k.trim().to_owned(), v.clone());
             }
         }
+        // The UA travels as an ordinary header; `start_job` promotes it
+        // to odl's User-Agent option, which outranks every header bag.
+        // Empty inherits the one from Settings.
+        if !self.user_agent.trim().is_empty() {
+            headers.insert("User-Agent".to_owned(), self.user_agent.trim().to_owned());
+        }
         // Non-resumable downloads are forced to a single connection (the
         // Segments combo is locked to "1 connection (forced)" in that state).
         let segments = if self.detected().is_some_and(|p| !p.is_resumable) {
@@ -461,7 +467,14 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                     .to_string();
                 st.save_path = full;
                 for (k, v) in &job.headers {
-                    st.headers.push((k.clone(), v.clone()));
+                    // Shown in the User-Agent field, not among the
+                    // free-form rows — two editors for one header
+                    // would race each other on submit.
+                    if crate::domain::header_name_eq(k, "User-Agent") {
+                        st.user_agent = v.clone();
+                    } else {
+                        st.headers.push((k.clone(), v.clone()));
+                    }
                 }
                 st.probe_gen += 1;
                 st.probing = true;
@@ -1456,7 +1469,7 @@ fn advanced_section(st: &AddState) -> Element<'_, Msg> {
             t,
             "user agent",
             TextInput::new(&st.user_agent)
-                .hint("oxdm/1.0")
+                .hint(crate::domain::default_user_agent())
                 .on_input(Msg::UserAgent)
                 .view(t),
         ),
