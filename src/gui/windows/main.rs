@@ -1403,6 +1403,10 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                 return Task::none();
             };
             let trash = matches!(r.kind, RemoveKind::Trash);
+            // Asked once, here, so no path into a removal can answer it
+            // differently: a remembered answer never carries a deletion,
+            // whichever version of oxdm stored it.
+            let deletes_file = r.deletes_file();
             // Resolve final paths up-front (the snapshot is borrowed
             // here; the async block must own its data).
             let trash_paths: Vec<std::path::PathBuf> = if trash {
@@ -1454,9 +1458,7 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                                 *id,
                                 crate::data::RemoveOpts {
                                     purge_partial: !r.completed,
-                                    // Trash already moved the file; never
-                                    // double-delete on disk.
-                                    delete_final_file: r.has_files && r.delete_on_disk && !trash,
+                                    delete_final_file: deletes_file,
                                 },
                             )
                             .await

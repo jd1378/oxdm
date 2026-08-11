@@ -45,6 +45,23 @@ impl RemoveState {
     pub fn finished(&self) -> bool {
         self.completed || self.has_files
     }
+
+    /// Whether this removal takes the file with it.
+    ///
+    /// The single place that question is answered, because the answer
+    /// has to hold on every path into a removal, not only the one the
+    /// dialog draws. Deleting a file is a per-answer choice and never a
+    /// stored one: an answer being remembered ("don't ask again") can
+    /// only ever mean "take the entry off the list", so it cancels the
+    /// disk deletion even if some other path set the flag. Trash is
+    /// excluded because it moved the file itself, and deleting after
+    /// that would empty the Trash behind the user.
+    pub fn deletes_file(&self) -> bool {
+        self.has_files
+            && self.delete_on_disk
+            && !self.dont_ask_again
+            && self.kind != RemoveKind::Trash
+    }
 }
 
 // ---------------------------------------------------------------- scaffolding
@@ -1252,4 +1269,52 @@ pub fn watch_limit<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg> 
     }
     card = card.push(actions);
     modal(t, base, card.into(), 520.0, Some(Msg::CloseOverlay))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state(kind: RemoveKind) -> RemoveState {
+        RemoveState {
+            ids: vec![crate::domain::JobId::new()],
+            filename: "f.bin".into(),
+            completed: true,
+            has_files: true,
+            kind,
+            delete_on_disk: true,
+            dont_ask_again: false,
+            clean: false,
+        }
+    }
+
+    #[test]
+    fn a_ticked_box_deletes_the_file() {
+        assert!(state(RemoveKind::Entry).deletes_file());
+    }
+
+    /// The stored preference means "take the entry off the list" and
+    /// nothing else, so it cancels the deletion however the flag got
+    /// set: a state restored from an older version, or a future path
+    /// that forgets to clear it.
+    #[test]
+    fn a_remembered_answer_never_deletes_the_file() {
+        let mut st = state(RemoveKind::Entry);
+        st.dont_ask_again = true;
+        assert!(!st.deletes_file());
+    }
+
+    /// Trash already moved it; deleting after that empties the Trash
+    /// behind the user.
+    #[test]
+    fn trash_does_not_delete_a_second_time() {
+        assert!(!state(RemoveKind::Trash).deletes_file());
+    }
+
+    #[test]
+    fn nothing_on_disk_means_nothing_to_delete() {
+        let mut st = state(RemoveKind::Entry);
+        st.has_files = false;
+        assert!(!st.deletes_file());
+    }
 }
