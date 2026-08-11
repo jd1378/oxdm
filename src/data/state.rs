@@ -4310,8 +4310,8 @@ mod tests {
 
     #[test]
     fn a_free_name_is_found_around_what_the_table_holds() {
-        let jobs = table(&[Some("foo.zip"), Some("foo (1).zip")]);
-        assert_eq!(free_name(&jobs, "foo.zip", None), "foo (2).zip");
+        let jobs = table(&[Some("foo.zip"), Some("foo_1.zip")]);
+        assert_eq!(free_name(&jobs, "foo.zip", None), "foo_2.zip");
         assert_eq!(free_name(&jobs, "other.zip", None), "other.zip");
     }
 

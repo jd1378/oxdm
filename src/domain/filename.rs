@@ -20,9 +20,10 @@ pub fn name_key(name: &str) -> String {
 
 /// A name near `desired` that `taken` does not claim.
 ///
-/// `foo.zip` becomes `foo (1).zip`, then `foo (2).zip`, in the style
-/// every browser's download folder already uses. The extension stays
-/// on the end where the system looks for it.
+/// `foo.zip` becomes `foo_1.zip`, then `foo_2.zip`. The extension
+/// stays on the end where the system looks for it, and the suffix
+/// carries no spaces or brackets, so the name stays easy to type at a
+/// shell and needs no quoting.
 ///
 /// An empty `desired` comes back empty: a job with no name yet has
 /// nothing to make unique, and the daemon names it when the run
@@ -34,7 +35,7 @@ pub fn unique_name(desired: &str, taken: impl Fn(&str) -> bool) -> String {
     }
     let path = Path::new(desired);
     // `file_stem`/`extension` split at the *last* dot, so `foo.tar.gz`
-    // numbers as `foo.tar (1).gz`. That keeps the extension the system
+    // numbers as `foo.tar_1.gz`. That keeps the extension the system
     // dispatches on intact, which is the part that matters.
     let stem = path
         .file_stem()
@@ -48,12 +49,12 @@ pub fn unique_name(desired: &str, taken: impl Fn(&str) -> bool) -> String {
     // ceiling is far past any real download list, and the last
     // candidate is returned even if it clashes rather than looping.
     for n in 1..10_000 {
-        let candidate = format!("{stem} ({n}){ext}");
+        let candidate = format!("{stem}_{n}{ext}");
         if !taken(&candidate) {
             return candidate;
         }
     }
-    format!("{stem} ({}){ext}", 10_000)
+    format!("{stem}_{}{ext}", 10_000)
 }
 
 #[cfg(test)]
@@ -72,18 +73,18 @@ mod tests {
 
     #[test]
     fn a_taken_name_is_numbered() {
-        assert_eq!(unique_name("foo.zip", taken(&["foo.zip"])), "foo (1).zip");
+        assert_eq!(unique_name("foo.zip", taken(&["foo.zip"])), "foo_1.zip");
     }
 
     #[test]
     fn numbering_skips_the_numbers_already_out_there() {
-        let t = taken(&["foo.zip", "foo (1).zip", "foo (2).zip"]);
-        assert_eq!(unique_name("foo.zip", t), "foo (3).zip");
+        let t = taken(&["foo.zip", "foo_1.zip", "foo_2.zip"]);
+        assert_eq!(unique_name("foo.zip", t), "foo_3.zip");
     }
 
     #[test]
     fn a_name_without_an_extension_still_numbers() {
-        assert_eq!(unique_name("foo", taken(&["foo"])), "foo (1)");
+        assert_eq!(unique_name("foo", taken(&["foo"])), "foo_1");
     }
 
     /// The extension the system dispatches on stays last.
@@ -91,16 +92,13 @@ mod tests {
     fn only_the_final_extension_is_kept_on_the_end() {
         assert_eq!(
             unique_name("archive.tar.gz", taken(&["archive.tar.gz"])),
-            "archive.tar (1).gz"
+            "archive.tar_1.gz"
         );
     }
 
     #[test]
     fn case_and_padding_do_not_hide_a_clash() {
-        assert_eq!(
-            unique_name("Foo.ZIP", taken(&["  foo.zip  "])),
-            "Foo (1).ZIP"
-        );
+        assert_eq!(unique_name("Foo.ZIP", taken(&["  foo.zip  "])), "Foo_1.ZIP");
     }
 
     #[test]
