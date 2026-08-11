@@ -1676,9 +1676,23 @@ fn error_footer<'a>(t: &Tokens, err: &JobError) -> Element<'a, Msg> {
         // The server will not continue from the bytes on disk: retry in
         // case it was transient, or discard them and start over.
         JobError::NotResumable(_) => row![restart("Restart from 0", false), retry(), cancel],
-        // Continuing would splice two different files, so retrying is
-        // not on offer — only starting over, or giving up.
-        JobError::FileChanged(_) => row![restart("Restart from 0", true), cancel],
+        // Starting over is the sure way through, but not the only one:
+        // the link may be replaceable (Properties → General) and the
+        // difference may have been the server mid-deploy. Trying again
+        // cannot splice two files — every run re-checks the server
+        // first and stops here again if it still differs.
+        JobError::FileChanged(_) => row![
+            restart("Restart from 0", true),
+            // Quieter than restarting: it works only if the server has
+            // gone back to the file this download started, or the link
+            // has been replaced with one that serves it.
+            Btn::new("Try again")
+                .toolbar()
+                .icon("rotate-cw")
+                .on_press(Msg::PauseResume)
+                .view(t),
+            cancel,
+        ],
         // Write / disk problems: offer the folder so the user can free
         // space or fix permissions, then cancel.
         JobError::Io(_) | JobError::SaveConflict(_) => row![
@@ -1713,7 +1727,15 @@ fn error_footer<'a>(t: &Tokens, err: &JobError) -> Element<'a, Msg> {
                     .view(t)
             };
             match cause.as_ref() {
-                JobError::FileChanged(_) => row![restart("Restart from 0", true), cancel],
+                JobError::FileChanged(_) => row![
+                    restart("Restart from 0", true),
+                    Btn::new("Try again")
+                        .toolbar()
+                        .icon("rotate-cw")
+                        .on_press(Msg::PauseResume)
+                        .view(t),
+                    cancel,
+                ],
                 JobError::NotResumable(_) => row![restart("Restart from 0", false), go(), cancel],
                 _ => row![go(), cancel],
             }

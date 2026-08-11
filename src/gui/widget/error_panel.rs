@@ -414,16 +414,22 @@ fn recovery_copy(err: &JobError) -> Option<(Tone, &'static str, &'static [&'stat
                  already downloaded are discarded.",
             ],
         ),
-        // Nothing is broken — the download simply cannot continue from
-        // where it stopped, so the list says what restarting costs
-        // rather than offering remedies.
+        // Nothing is broken, so the list says what starting over costs
+        // — and that starting over is not the only way out. A link can
+        // be replaced and a server can be mid-deploy; trying again is
+        // safe because every run re-checks the server first and stops
+        // here again if it still differs.
         JobError::FileChanged(_) => (
             Tone::Warning,
-            "what will happen",
+            TRY,
             &[
-                "This starts over from byte 0.",
-                "Everything downloaded so far is fetched again.",
-                "The file you would get now is not the file this download started.",
+                "Restarting fetches everything again from byte 0, and what arrives is \
+                 the file the server has now — not the one this download started.",
+                "If the link expired or moved, replace it under Properties → General \
+                 and try again; the bytes already downloaded are kept.",
+                "If the server was mid-update, trying again later may find the original \
+                 file back. oxdm checks before it continues, so a mismatch stops here \
+                 rather than mixing two files.",
             ],
         ),
         JobError::DiskFull(_) => (
