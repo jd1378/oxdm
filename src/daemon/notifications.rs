@@ -19,7 +19,7 @@ use crate::data::{AppState, DomainEvent};
 pub fn spawn(state: Arc<AppState>) {
     tokio::spawn(async move {
         let mut rx = state.subscribe();
-        while let Ok(ev) = rx.recv().await {
+        while let Some(ev) = crate::data::next_event(&mut rx, "notifications").await {
             match ev {
                 DomainEvent::JobCompleted { path, .. } => {
                     if !state.settings().await.notify_complete {

@@ -15,7 +15,7 @@ use crate::domain::{PowerAction, QueueHook, QueueId};
 pub fn spawn(state: Arc<AppState>) {
     let mut rx = state.subscribe();
     tokio::spawn(async move {
-        while let Ok(event) = rx.recv().await {
+        while let Some(event) = crate::data::next_event(&mut rx, "queue hooks").await {
             match event {
                 DomainEvent::QueueStarted { id } => run_hooks(&state, id, HookPhase::Start).await,
                 DomainEvent::QueueFinished {

@@ -42,7 +42,10 @@ pub fn install(rt: Handle, state: Arc<AppState>) {
                 if tx.send(jobs).is_err() {
                     break;
                 }
-                if rx.recv().await.is_err() {
+                if crate::data::next_event(&mut rx, "tray icon")
+                    .await
+                    .is_none()
+                {
                     break;
                 }
             }

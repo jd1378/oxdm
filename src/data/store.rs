@@ -770,7 +770,10 @@ impl Store {
     {
         let conn = self.inner.clone();
         spawn_blocking(move || {
-            let mut guard = conn.lock().expect("store mutex poisoned");
+            // Poisoning is not a reason to lose the database: the
+            // connection is still a connection, and whatever panicked
+            // was one query, not the file.
+            let mut guard = conn.lock().unwrap_or_else(|e| e.into_inner());
             f(&mut guard)
         })
         .await

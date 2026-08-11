@@ -38,6 +38,7 @@ pub fn run_tray() {
 }
 
 fn run_inner(guard: Option<InstanceGuard>, force_tray: bool) {
+    install_panic_hook();
     let rt = Runtime::new().expect("tokio runtime");
     let state = rt.block_on(AppState::load());
     spawn_workers(&rt, state.clone(), guard, force_tray);
@@ -138,13 +139,41 @@ fn spawn_workers(
     }
 }
 
+/// Log panics through `tracing` instead of only to stderr.
+///
+/// A panic in a spawned task takes that task down and nothing else —
+/// the daemon carries on with one worker silently missing. Whatever
+/// else that costs, the user's log should at least say it happened, and
+/// where.
+fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let payload = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_owned())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "<non-string panic>".to_owned());
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "<unknown location>".to_owned());
+        let thread = std::thread::current()
+            .name()
+            .unwrap_or("<unnamed>")
+            .to_owned();
+        tracing::error!(%payload, %location, %thread, "panic");
+        previous(info);
+    }));
+}
+
 /// Surface the grace-countdown window whenever a destructive power
 /// action arms. The window itself handles Cancel / Confirm-now and
 /// closes on `ShutdownCancelled` or when the deadline passes.
 fn spawn_power_prompt(state: std::sync::Arc<crate::data::AppState>) {
     tokio::spawn(async move {
         let mut rx = state.subscribe();
-        while let Ok(ev) = rx.recv().await {
+        while let Some(ev) = crate::data::next_event(&mut rx, "power prompt").await {
             if matches!(ev, crate::data::DomainEvent::ShutdownPending { .. }) {
                 tray::spawn_power_gui();
             }

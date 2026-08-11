@@ -2930,7 +2930,7 @@ impl AppState {
         // already cancelled (pause trips it); installing a new one lets
         // resume actually run instead of returning Cancelled instantly.
         let token = CancellationToken::new();
-        *entry.cancel.lock().expect("cancel mutex poisoned") = token.clone();
+        *entry.cancel.lock().unwrap_or_else(|e| e.into_inner()) = token.clone();
         // Whatever the last run concluded is no longer about this job.
         let entry = self.supersede_last_run(id, entry).await;
         // The previous run's segments are stale, but not worthless:
@@ -3105,7 +3105,26 @@ impl AppState {
             .entry(queue_id)
             .or_default();
         tokio::spawn(async move {
-            let outcome = runner.run(job_clone).await;
+            // Caught rather than allowed to unwind out of the task: the
+            // epilogue below is what clears `running`, writes the phase
+            // and frees the queue slot. Without it a panicked run left
+            // the job flagged running for the life of the daemon —
+            // `remove` refused it, `start_job` returned Ok without
+            // starting anything, and the slot was never given back.
+            let outcome = match futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+                runner.run(job_clone),
+            ))
+            .await
+            {
+                Ok(outcome) => outcome,
+                Err(_) => {
+                    // The hook has already logged what and where.
+                    tracing::error!(id = %id, "the download task panicked");
+                    Err(JobError::Other(
+                        "oxdm hit an internal error running this download".into(),
+                    ))
+                }
+            };
             // Re-read the entry: anything that rebuilds a job — a
             // checksum merge, a settings edit, a queue move — replaces
             // the `Arc` in the map, and the one captured at spawn time
@@ -3353,7 +3372,11 @@ impl AppState {
         Self::refuse_while_assembling(&entry)?;
         let handle = JobHandle {
             id,
-            cancel: entry.cancel.lock().expect("cancel mutex poisoned").clone(),
+            cancel: entry
+                .cancel
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
         };
         let res = self.pause_strategy.pause(&handle).await;
         // Whatever this download was waiting for, it is not waiting any
@@ -3401,7 +3424,11 @@ impl AppState {
         }
         let handle = JobHandle {
             id,
-            cancel: entry.cancel.lock().expect("cancel mutex poisoned").clone(),
+            cancel: entry
+                .cancel
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
         };
         let ctx = StateResumeContext {
             state: Arc::downgrade(self),
@@ -4142,7 +4169,7 @@ async fn clone_entry_with_job(old: &Arc<JobEntry>, new_job: Job) -> Arc<JobEntry
     // Pre-collect every sync-locked field before the await so no
     // !Send guard is held across it.
     let parts = old.parts.read().map(|g| g.clone()).unwrap_or_default();
-    let cancel_token = old.cancel.lock().expect("cancel mutex poisoned").clone();
+    let cancel_token = old.cancel.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let on_completion = old
         .on_completion
         .read()

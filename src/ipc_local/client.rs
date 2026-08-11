@@ -103,6 +103,12 @@ impl Client {
                     }
                 }
             }
+            // Nobody else will ever answer these. Dropping the senders
+            // resolves every parked `request` to `Closed`; left in the
+            // map they kept their own senders alive, so a window that
+            // asked a question the daemon never answered waited for it
+            // for the rest of its life.
+            pending_for_task.lock().await.clear();
         });
 
         let client = Arc::new(Self {
@@ -142,6 +148,15 @@ impl Client {
         }
     }
 
+    /// How long a request waits for its reply.
+    ///
+    /// Generous, because the daemon answers some of these with real
+    /// work behind them — a probe of an unreachable host waits out its
+    /// own connect timeout, and hashing a large file takes minutes.
+    /// This is the backstop for a reply that is never coming at all,
+    /// not a service-level promise.
+    const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+
     pub async fn request(&self, req: Request) -> Result<Reply, CodecError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
@@ -149,9 +164,20 @@ impl Client {
         {
             let _g = self.write_lock.lock().await;
             let mut w = &*self.stream;
-            write_frame(&mut w, &Frame::Request(id, req)).await?;
+            if let Err(e) = write_frame(&mut w, &Frame::Request(id, req)).await {
+                self.pending.lock().await.remove(&id);
+                return Err(e);
+            }
         }
-        rx.await.map_err(|_| CodecError::Closed)
+        match tokio::time::timeout(Self::REQUEST_TIMEOUT, rx).await {
+            Ok(Ok(reply)) => Ok(reply),
+            Ok(Err(_)) => Err(CodecError::Closed),
+            Err(_) => {
+                self.pending.lock().await.remove(&id);
+                tracing::warn!(id, "no reply from the daemon; giving up on the request");
+                Err(CodecError::Closed)
+            }
+        }
     }
 
     /// Take the event receiver (one-consumer model). Returns `None`

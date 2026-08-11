@@ -24,7 +24,7 @@ pub mod store;
 mod update_channel;
 
 pub use conditions::available_conditions;
-pub use events::{ConflictKind, DomainEvent};
+pub use events::{ConflictKind, DomainEvent, next_event};
 pub use file_watch::spawn as spawn_file_watch;
 pub use hooks::spawn as spawn_hook_executor;
 pub use pause::{CancelResumeStrategy, PauseStrategy};

@@ -130,3 +130,58 @@ pub enum ConflictKind {
     SameDownloadExists,
     FinalFileExists,
 }
+
+/// The next event, riding out a lag instead of ending the subscription.
+///
+/// `broadcast::Receiver::recv` reports `Lagged` when a consumer falls
+/// behind the channel's buffer. It is recoverable — the next `recv`
+/// succeeds — but the obvious `while let Ok(ev) = rx.recv().await`
+/// treats it as the end of the stream, and the daemon has no
+/// supervision: a task that exits that way is gone for the rest of the
+/// process, silently. That is how queue hooks, notifications,
+/// completion actions and the power prompt could all stop working at
+/// once after a single burst.
+///
+/// Returns `None` only when the sender is gone, which for the domain
+/// bus means the daemon is going down.
+pub async fn next_event(
+    rx: &mut tokio::sync::broadcast::Receiver<DomainEvent>,
+    who: &'static str,
+) -> Option<DomainEvent> {
+    loop {
+        match rx.recv().await {
+            Ok(ev) => return Some(ev),
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                tracing::warn!(who, skipped, "fell behind the event bus");
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::JobId;
+
+    /// A consumer that falls behind used to lose its subscription for
+    /// the life of the process.
+    #[tokio::test]
+    async fn falling_behind_costs_events_not_the_subscription() {
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<DomainEvent>(2);
+        for _ in 0..5 {
+            tx.send(DomainEvent::JobAdded { id: JobId::new() }).unwrap();
+        }
+        let survivor = JobId::new();
+        tx.send(DomainEvent::JobAdded { id: survivor }).unwrap();
+
+        // The oldest events are gone, but the stream goes on.
+        let ev = next_event(&mut rx, "test").await.expect("still subscribed");
+        assert!(matches!(ev, DomainEvent::JobAdded { .. }));
+
+        // And it keeps delivering until the sender is dropped.
+        assert!(next_event(&mut rx, "test").await.is_some());
+        drop(tx);
+        assert!(next_event(&mut rx, "test").await.is_none());
+    }
+}

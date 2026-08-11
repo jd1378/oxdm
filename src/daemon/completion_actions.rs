@@ -20,7 +20,7 @@ use crate::domain::ShutdownAction;
 pub fn spawn(state: Arc<AppState>) {
     tokio::spawn(async move {
         let mut rx = state.subscribe();
-        while let Ok(ev) = rx.recv().await {
+        while let Some(ev) = crate::data::next_event(&mut rx, "completion actions").await {
             if let DomainEvent::JobFailed { id, error } = &ev {
                 let conflict = matches!(error, crate::domain::JobError::ConflictPending(_));
                 // Only a hand-started run gets a window; automation

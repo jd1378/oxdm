@@ -117,7 +117,7 @@ impl PowerGuard {
         }
         let delay = grace_period();
         let deadline_ms = chrono::Utc::now().timestamp_millis() + delay.as_millis() as i64;
-        let mut g = self.pending.lock().expect("power guard mutex poisoned");
+        let mut g = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         if g.1.is_some() {
             tracing::info!(?action, "power action already pending; new arm ignored");
             return false;
@@ -135,7 +135,7 @@ impl PowerGuard {
                 _ = fire_rx => {}
             }
             let claimed = {
-                let mut g = guard.pending.lock().expect("power guard mutex poisoned");
+                let mut g = guard.pending.lock().unwrap_or_else(|e| e.into_inner());
                 match &g.1 {
                     Some(p) if p.seq == seq => {
                         g.1 = None;
@@ -172,7 +172,7 @@ impl PowerGuard {
     /// nothing pending (including "the timer just fired") is a no-op.
     pub fn cancel(&self) {
         let taken = {
-            let mut g = self.pending.lock().expect("power guard mutex poisoned");
+            let mut g = self.pending.lock().unwrap_or_else(|e| e.into_inner());
             g.1.take()
         };
         let Some(p) = taken else {
@@ -191,7 +191,7 @@ impl PowerGuard {
     /// wins or loses atomically.
     pub fn confirm(&self) -> bool {
         let fire = {
-            let mut g = self.pending.lock().expect("power guard mutex poisoned");
+            let mut g = self.pending.lock().unwrap_or_else(|e| e.into_inner());
             g.1.as_mut().and_then(|p| p.fire.take())
         };
         match fire {
@@ -208,7 +208,7 @@ impl PowerGuard {
     pub fn pending(&self) -> Option<(PowerAction, i64)> {
         self.pending
             .lock()
-            .expect("power guard mutex poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .1
             .as_ref()
             .map(|p| (p.action, p.deadline_ms))

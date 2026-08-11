@@ -37,7 +37,10 @@ pub fn install(rt: Handle, state: Arc<AppState>) {
         let mut rx = state_loop.subscribe();
         loop {
             rebuild(&cell_loop, &state_loop).await;
-            if rx.recv().await.is_err() {
+            if crate::data::next_event(&mut rx, "ksni tray")
+                .await
+                .is_none()
+            {
                 break;
             }
         }
