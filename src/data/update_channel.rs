@@ -80,7 +80,10 @@ pub struct HttpFeedUpdateChannel {
 impl HttpFeedUpdateChannel {
     pub fn new(feed_url: url::Url, current_version: String) -> Self {
         let client = reqwest::Client::builder()
-            .user_agent(format!("oxdm/{current_version} (update-check)"))
+            // Same identity as every other request, plus what this one
+            // is for. `current_version` is for comparing against the
+            // feed, not for naming ourselves.
+            .user_agent(crate::domain::user_agent::app_user_agent("update-check"))
             .build()
             .expect("reqwest client");
         Self {

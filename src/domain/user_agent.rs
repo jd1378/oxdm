@@ -31,6 +31,17 @@ pub const fn default_user_agent() -> &'static str {
     concat!("oxdm/", env!("CARGO_PKG_VERSION"))
 }
 
+/// The same identity with a purpose comment, for the requests oxdm
+/// makes on its own behalf rather than a user's — the update check,
+/// and anything like it.
+///
+/// Built from `default_user_agent`, never spelled out again: a second
+/// hand-written `oxdm/{version}` is a version that stops matching the
+/// app the day someone forgets it.
+pub fn app_user_agent(purpose: &str) -> String {
+    format!("{} ({purpose})", default_user_agent())
+}
+
 /// The UA the global layer contributes: an explicit override if the
 /// user typed one, `None` when they asked for randomization and left
 /// the field empty (odl picks one per request), the app default
@@ -75,6 +86,16 @@ mod tests {
         let ua = default_user_agent();
         assert_eq!(ua, format!("oxdm/{}", env!("CARGO_PKG_VERSION")));
         assert!(!ua.contains('('), "no platform comment: {ua}");
+    }
+
+    /// Every UA oxdm sends is the crate version. A hand-written one
+    /// somewhere else is a version that stops matching the app on the
+    /// next release, and nothing fails until a server logs it.
+    #[test]
+    fn the_purpose_variant_is_built_from_the_default() {
+        let ua = app_user_agent("update-check");
+        assert_eq!(ua, format!("{} (update-check)", default_user_agent()));
+        assert!(ua.contains(env!("CARGO_PKG_VERSION")));
     }
 
     #[test]
