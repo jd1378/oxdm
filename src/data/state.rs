@@ -4207,6 +4207,7 @@ impl LiveBridge for StateLiveBridge {
                             downloaded: AtomicU64::new(0),
                             speed_bps_bits: AtomicU64::new(0),
                             finished: AtomicBool::new(false),
+                            sampled_at_ms: std::sync::atomic::AtomicI64::new(0),
                         }),
                     );
                 }
@@ -4239,6 +4240,11 @@ impl LiveBridge for StateLiveBridge {
                         && let Some(p) = parts.get(ulid)
                     {
                         p.apply_progress(*downloaded, *total);
+                        // odl samples every part it has in flight on a
+                        // fixed cadence, so this arriving is the part
+                        // saying it still holds a connection — even in
+                        // a tick where no bytes landed.
+                        p.mark_sampled(now_ms());
                     }
                     // This part is making progress again — drop it from
                     // the retrying set. Removing by ulid (not a blanket
@@ -4303,6 +4309,7 @@ impl LiveBridge for StateLiveBridge {
                 {
                     p.speed_bps_bits
                         .store(bytes_per_second.to_bits(), Ordering::Relaxed);
+                    p.mark_sampled(now_ms());
                 }
             }
             OdlProgressEvent::PartFinished { ulid } => {

@@ -3291,9 +3291,12 @@ fn seg_state(
     match phase {
         Phase::Failed => (t.status_danger, t.status_danger, "Failed"),
         _ if !phase.is_running() => (t.fg_4, t.fg_3, "Paused"),
-        // Moving bytes this sample, versus allocated and waiting its
-        // turn — the rampup starts parts a few at a time.
-        _ if p.speed_bps > 1.0 => (color::clay::C500, color::clay::C300, "Active"),
+        // Connected, versus allocated and waiting its turn — the
+        // rampup starts parts a few at a time. Not keyed on the part's
+        // rate: a slow link moves no bytes for whole sampling windows,
+        // and this row would blink between the two states while the
+        // part was transferring the whole time.
+        _ if p.active => (color::clay::C500, color::clay::C300, "Active"),
         _ => (t.border_default, t.fg_3, "Pending"),
     }
 }

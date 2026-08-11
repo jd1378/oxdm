@@ -466,6 +466,7 @@ fn snapshot_counters(id: JobId, entry: &JobEntry) -> JobCounters {
     let is_resumable = entry.is_resumable.load(AtomicOrd::Acquire);
     let running = entry.running.load(AtomicOrd::Acquire);
     let retries = entry.retries.load(AtomicOrd::Relaxed);
+    let now_ms = chrono::Utc::now().timestamp_millis();
     let parts = entry
         .parts
         .read()
@@ -478,6 +479,7 @@ fn snapshot_counters(id: JobId, entry: &JobEntry) -> JobCounters {
                     downloaded: p.downloaded.load(AtomicOrd::Relaxed),
                     speed_bps: f64::from_bits(p.speed_bps_bits.load(AtomicOrd::Relaxed)),
                     finished: p.finished.load(AtomicOrd::Relaxed),
+                    active: p.is_connected(now_ms),
                 })
                 .collect()
         })

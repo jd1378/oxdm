@@ -39,7 +39,25 @@ pub struct PartCounters {
     pub downloaded: std::sync::atomic::AtomicU64,
     pub speed_bps_bits: std::sync::atomic::AtomicU64,
     pub finished: std::sync::atomic::AtomicBool,
+    /// When odl last sampled this part, in epoch milliseconds. `0`
+    /// means never.
+    ///
+    /// odl samples every part it currently has in flight on a fixed
+    /// cadence, whether or not bytes arrived in that tick, and samples
+    /// nothing for a part it has allocated but not started. So "was
+    /// there a sample just now" answers "does this part have a live
+    /// connection" — which the part's *rate* does not: on a slow link a
+    /// part can legitimately move no bytes for a whole sampling window.
+    pub sampled_at_ms: std::sync::atomic::AtomicI64,
 }
+
+/// How long after odl's last sample a part still counts as connected.
+///
+/// odl's cadence is 125 ms and the daemon pushes counters every 250 ms,
+/// so this is several missed ticks of slack — long enough that a busy
+/// machine cannot blink a row, short enough that a part which really
+/// has stopped stops claiming otherwise within a repaint or two.
+pub const PART_SAMPLE_GRACE_MS: i64 = 1_500;
 
 /// A part's size as reported by odl, with its "no end in sight"
 /// sentinel folded into oxdm's own marker for the same thing.
@@ -66,6 +84,26 @@ impl PartCounters {
         use std::sync::atomic::Ordering;
         self.downloaded.store(downloaded, Ordering::Relaxed);
         self.size.store(part_size(total), Ordering::Relaxed);
+    }
+
+    /// odl sampled this part just now, so it is one of the parts
+    /// currently in flight.
+    pub fn mark_sampled(&self, now_ms: i64) {
+        self.sampled_at_ms
+            .store(now_ms, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Is odl transferring this part right now?
+    ///
+    /// Answered from the sampling itself rather than from the sampled
+    /// rate: a part crawling along at 40 B/s reports 0 for whole
+    /// windows, and reading that as "not started" made the row flicker
+    /// between Active and Pending on a slow link.
+    pub fn is_connected(&self, now_ms: i64) -> bool {
+        let last = self
+            .sampled_at_ms
+            .load(std::sync::atomic::Ordering::Relaxed);
+        last > 0 && now_ms.saturating_sub(last) <= PART_SAMPLE_GRACE_MS
     }
 
     /// odl finished this part.
@@ -656,6 +694,7 @@ mod tests {
             downloaded: std::sync::atomic::AtomicU64::new(0),
             speed_bps_bits: std::sync::atomic::AtomicU64::new(0),
             finished: std::sync::atomic::AtomicBool::new(false),
+            sampled_at_ms: std::sync::atomic::AtomicI64::new(0),
         }
     }
 
@@ -680,6 +719,31 @@ mod tests {
         // of the file to answer for.
         p.apply_progress(100 * 1024, 144 * 1024);
         assert_eq!(seen(&p), (100 * 1024, 144 * 1024));
+    }
+
+    /// A part on a slow link reports 0 B/s for whole sampling windows
+    /// while transferring perfectly well, so what makes it "connected"
+    /// is being sampled at all.
+    #[test]
+    fn a_crawling_part_is_still_connected() {
+        let now = 1_000_000i64;
+        let p = part(4096);
+        assert!(!p.is_connected(now), "never sampled, never started");
+
+        p.mark_sampled(now);
+        // Not one byte since the last sample, and still connected.
+        assert!(p.is_connected(now));
+        assert!(p.is_connected(now + PART_SAMPLE_GRACE_MS));
+    }
+
+    /// A part odl has stopped sampling has stopped transferring, and
+    /// the row must not go on claiming otherwise.
+    #[test]
+    fn a_part_that_stops_being_sampled_falls_quiet() {
+        let now = 1_000_000i64;
+        let p = part(4096);
+        p.mark_sampled(now);
+        assert!(!p.is_connected(now + PART_SAMPLE_GRACE_MS + 1));
     }
 
     /// A server that declares no length leaves odl with a part whose

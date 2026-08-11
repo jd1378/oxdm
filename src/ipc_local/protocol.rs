@@ -520,6 +520,15 @@ pub struct PartView {
     pub downloaded: u64,
     pub speed_bps: f64,
     pub finished: bool,
+    /// odl is transferring this part right now, as opposed to having
+    /// allocated it and not started it yet.
+    ///
+    /// Sent rather than inferred from `speed_bps`: a part on a slow
+    /// link reports no bytes for whole sampling windows, and a reader
+    /// that reads that as "not started" flickers the segment between
+    /// Active and Pending.
+    #[serde(default)]
+    pub active: bool,
 }
 
 /// Per-download window snapshot. Adds metadata + per-job overrides
