@@ -30,7 +30,10 @@ use crate::gui::windows::add::footer;
 use crate::ipc_local::Client;
 use crate::ipc_local::protocol::{Event, JobEntryView};
 
+/// A minute of history at `CHART_INTERVAL`, which is what the plot's
+/// width is scaled to.
 const CHART_SAMPLES: usize = 120;
+const CHART_INTERVAL: Duration = Duration::from_millis(500);
 
 // --- Window geometry -------------------------------------------------
 /// The window opens at its floor height: the tab bodies scroll, so extra
@@ -676,7 +679,16 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 imposed_h: LAUNCH_H.get().copied(),
                 rate_open: false,
                 segments_open: false,
-                samples: Vec::new(),
+                // A window opening on a download that is not running
+                // starts with a full window of zeros, so the chart
+                // reads as a flat line at rest rather than as an empty
+                // plot waiting for something. A running one starts
+                // empty and draws itself in from the left.
+                samples: if entry.counters.phase.is_running() {
+                    Vec::new()
+                } else {
+                    vec![0.0; CHART_SAMPLES]
+                },
                 peak: 0.0,
                 anim_t: 0.0,
                 use_limiter: limit.is_some() || entry.session_speed_override > 0,
@@ -963,7 +975,16 @@ fn update_state(st: &mut State, msg: Msg) -> Task<Msg> {
             Task::none()
         }
         Msg::SampleTick => {
-            let s = st.entry.counters.speed_bps as f32;
+            // While the transfer runs, the live speed. After it stops,
+            // zeros at the same cadence until the trace has drained to
+            // a flat line: a chart frozen at the last speed reads as if
+            // the download were still going. Once it is flat there is
+            // nothing left to show, and `sampling` stops asking.
+            let s = if st.phase().is_running() {
+                st.entry.counters.speed_bps as f32
+            } else {
+                0.0
+            };
             st.samples.push(s);
             st.peak = st.peak.max(s);
             if st.samples.len() > CHART_SAMPLES {
@@ -1276,6 +1297,20 @@ fn final_path(entry: &JobEntryView) -> PathBuf {
     })
 }
 
+/// Whether the rate chart still has anything to record.
+///
+/// While the transfer runs, always — whether or not the Transfer rate
+/// section is open, so opening it shows the minute that just went past
+/// rather than starting from nothing. After it stops, only until the
+/// trace has drained to zero: a flat line at zero never changes, and
+/// waking twice a second to redraw it is work with nothing behind it.
+///
+/// This history is the chart's alone. The completion page's average
+/// comes from bytes over time, so nothing here can bend it.
+fn sampling(st: &State) -> bool {
+    st.phase().is_running() || st.samples.iter().any(|v| *v > 0.0)
+}
+
 pub fn subscription(app: &App) -> Subscription<Msg> {
     let App::Ready(st) = app else {
         return Subscription::none();
@@ -1304,16 +1339,15 @@ pub fn subscription(app: &App) -> Subscription<Msg> {
     if st.shot.is_some() {
         subs.push(Shot::frames().map(|_| Msg::ShotTick));
     }
-    if st.phase().is_running() {
+    if st.phase().is_running() && !st.reduce_motion {
         // The 30fps tick only drives motion (barber-pole stripes,
         // reconnect pulse); skip it under reduce_motion (W6). Rate
-        // sampling is data, not motion, so it stays.
-        if !st.reduce_motion {
-            subs.push(iced::time::every(Duration::from_millis(33)).map(|_| Msg::AnimTick));
-        }
-        if st.rate_open {
-            subs.push(iced::time::every(Duration::from_millis(500)).map(|_| Msg::SampleTick));
-        }
+        // sampling is data, not motion, so it runs on its own clock
+        // below.
+        subs.push(iced::time::every(Duration::from_millis(33)).map(|_| Msg::AnimTick));
+    }
+    if sampling(st) {
+        subs.push(iced::time::every(CHART_INTERVAL).map(|_| Msg::SampleTick));
     }
     Subscription::batch(subs)
 }
@@ -1878,6 +1912,7 @@ fn info_tab(st: &State) -> Element<'_, Msg> {
     let rate_body = {
         let chart = RateChart {
             samples: st.samples.clone(),
+            capacity: CHART_SAMPLES,
             max,
             avg,
             accent: t.action_primary,
@@ -3341,13 +3376,25 @@ fn completion_stats(st: &State) -> Option<Element<'_, Msg>> {
     // Every cell renders, dash where the fact is missing (design shows
     // "—" for both timing cells): three columns that come and go would
     // move the interruption line around under the user.
-    let (avg, taken) = match (job.started_at, job.finished_at) {
-        (Some(started), Some(finished)) => {
-            let secs = (finished - started).num_seconds().max(0) as u64;
+    // Time spent transferring, not time between the two timestamps:
+    // wall clock counts pauses, retry waits and the stretch a queued
+    // job sat behind others, and dividing bytes by it reports a speed
+    // the transfer never ran at. Rows written before the daemon kept
+    // the tally have no such number, and fall back to the clock rather
+    // than showing nothing.
+    let secs = match (job.active_ms, job.started_at, job.finished_at) {
+        (Some(ms), _, _) => Some(ms / 1000),
+        (None, Some(started), Some(finished)) => {
+            Some((finished - started).num_seconds().max(0) as u64)
+        }
+        _ => None,
+    };
+    let (avg, taken) = match secs {
+        Some(secs) => {
             let avg = (secs > 0).then(|| format_speed(downloaded as f64 / secs as f64));
             (avg, Some(format_eta(secs)))
         }
-        _ => (None, None),
+        None => (None, None),
     };
     let finished = job.finished_at.map(|f| {
         f.with_timezone(&chrono::Local)

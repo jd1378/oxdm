@@ -49,6 +49,15 @@ pub struct JobEntry {
     /// the live bridge; reset on restart / cancel-to-queued. Spliced
     /// onto `Job::started_at` for the UI.
     pub started_at_ms: AtomicI64,
+    /// Milliseconds this run has spent in `Downloading`, excluding the
+    /// stretch it is in right now (see `active_ms`). Wall clock between
+    /// start and finish is a different number: it counts pauses, retry
+    /// waits and the time a queued job sat behind others, and dividing
+    /// bytes by it reports a speed the transfer never ran at.
+    pub active_ms: AtomicI64,
+    /// When the current `Downloading` stretch began, epoch
+    /// milliseconds. `0` = not downloading.
+    pub downloading_since_ms: AtomicI64,
     /// `Completed` transition timestamp, epoch milliseconds. `0` = None.
     /// Spliced onto `Job::finished_at`.
     pub finished_at_ms: AtomicI64,
@@ -229,6 +238,7 @@ impl JobEntry {
         // Seed the run-stat atomics from the persisted snapshot so a
         // freshly loaded entry already reports its last-known
         // started_at / finished_at / retries. `0` = None.
+        let job_active_ms = job.active_ms.unwrap_or(0) as i64;
         let started_at_ms = job.started_at.map(|d| d.timestamp_millis()).unwrap_or(0);
         let finished_at_ms = job.finished_at.map(|d| d.timestamp_millis()).unwrap_or(0);
         let retries = job.retries;
@@ -242,6 +252,8 @@ impl JobEntry {
             job,
             live_phase: AtomicU8::new(encode_phase(phase)),
             counters,
+            active_ms: AtomicI64::new(job_active_ms),
+            downloading_since_ms: AtomicI64::new(0),
             started_at_ms: AtomicI64::new(started_at_ms),
             finished_at_ms: AtomicI64::new(finished_at_ms),
             retries: AtomicU32::new(retries),
@@ -270,7 +282,34 @@ impl JobEntry {
     }
 
     pub fn set_phase(&self, p: Phase) {
+        // Time in `Downloading` is banked as it is left, so every path
+        // out of it counts the same: pausing, failing, finishing, or a
+        // connection dropping the job back to a wait.
+        let was_downloading = self.phase() == Phase::Downloading;
+        if p == Phase::Downloading {
+            if !was_downloading {
+                self.downloading_since_ms.store(now_ms(), Ordering::Release);
+            }
+        } else if was_downloading {
+            let since = self.downloading_since_ms.swap(0, Ordering::AcqRel);
+            if since > 0 {
+                self.active_ms
+                    .fetch_add((now_ms() - since).max(0), Ordering::AcqRel);
+            }
+        }
         self.live_phase.store(encode_phase(p), Ordering::Release);
+    }
+
+    /// Milliseconds this run has actually spent downloading, the
+    /// stretch in progress included.
+    pub fn active_ms(&self) -> i64 {
+        let banked = self.active_ms.load(Ordering::Acquire);
+        let since = self.downloading_since_ms.load(Ordering::Acquire);
+        if since > 0 {
+            banked + (now_ms() - since).max(0)
+        } else {
+            banked
+        }
     }
 
     /// Clear the per-run stats (started_at / finished_at / retries /
@@ -279,6 +318,8 @@ impl JobEntry {
     /// its timing and retry tally from scratch. Set-once within a run,
     /// cleared on re-run (plan W4).
     pub fn reset_run_stats(&self) {
+        self.active_ms.store(0, Ordering::Release);
+        self.downloading_since_ms.store(0, Ordering::Release);
         self.started_at_ms.store(0, Ordering::Release);
         self.finished_at_ms.store(0, Ordering::Release);
         self.retries.store(0, Ordering::Release);
@@ -2229,6 +2270,7 @@ impl AppState {
             queue_id: self.main_queue_id,
             created_at: chrono::Utc::now(),
             started_at: None,
+            active_ms: None,
             finished_at: None,
             retries: 0,
             interruptions: 0,
@@ -3612,6 +3654,11 @@ pub(crate) fn splice_live(entry: &JobEntry) -> Job {
     // `persist_job` round-trips them back to the store via this same
     // splice, so the columns stay in sync.
     j.started_at = ms_to_datetime(entry.started_at_ms.load(Ordering::Relaxed));
+    // Zero means the run never reached `Downloading`, which is not the
+    // same fact as "nothing recorded" and would read as an instant
+    // transfer.
+    let active = entry.active_ms();
+    j.active_ms = (active > 0).then_some(active as u64);
     j.finished_at = ms_to_datetime(entry.finished_at_ms.load(Ordering::Relaxed));
     j.retries = entry.retries.load(Ordering::Relaxed);
     j.interruptions = entry.interruptions.load(Ordering::Relaxed);
@@ -3803,6 +3850,8 @@ async fn clone_entry_with_job(old: &Arc<JobEntry>, new_job: Job) -> Arc<JobEntry
         job: new_job,
         live_phase: AtomicU8::new(old.live_phase.load(Ordering::Acquire)),
         counters: old.counters.clone(),
+        active_ms: AtomicI64::new(old.active_ms.load(Ordering::Acquire)),
+        downloading_since_ms: AtomicI64::new(old.downloading_since_ms.load(Ordering::Acquire)),
         started_at_ms: AtomicI64::new(old.started_at_ms.load(Ordering::Acquire)),
         finished_at_ms: AtomicI64::new(old.finished_at_ms.load(Ordering::Acquire)),
         retries: AtomicU32::new(old.retries.load(Ordering::Acquire)),
@@ -4263,6 +4312,7 @@ mod tests {
             queue_id: crate::domain::QueueId::new(),
             created_at: chrono::Utc::now(),
             started_at: None,
+            active_ms: None,
             finished_at: None,
             retries: 0,
             interruptions: 0,
@@ -4313,6 +4363,34 @@ mod tests {
         let jobs = table(&[Some("foo.zip"), Some("foo_1.zip")]);
         assert_eq!(free_name(&jobs, "foo.zip", None), "foo_2.zip");
         assert_eq!(free_name(&jobs, "other.zip", None), "other.zip");
+    }
+
+    /// The completion page divides bytes by this, so it has to be the
+    /// time the transfer was running and nothing else: a job that was
+    /// paused for an hour did not average a byte a second.
+    #[test]
+    fn time_is_banked_only_while_downloading() {
+        let entry = entry_in(Phase::Queued);
+        assert_eq!(entry.active_ms(), 0, "nothing before it starts");
+
+        entry.set_phase(Phase::Downloading);
+        std::thread::sleep(std::time::Duration::from_millis(12));
+        assert!(entry.active_ms() >= 10, "the stretch in progress counts");
+
+        entry.set_phase(Phase::Paused);
+        let banked = entry.active_ms();
+        std::thread::sleep(std::time::Duration::from_millis(12));
+        assert_eq!(entry.active_ms(), banked, "a pause adds nothing");
+
+        entry.set_phase(Phase::Downloading);
+        std::thread::sleep(std::time::Duration::from_millis(12));
+        assert!(
+            entry.active_ms() > banked,
+            "resuming picks the tally back up"
+        );
+
+        entry.reset_run_stats();
+        assert_eq!(entry.active_ms(), 0, "a fresh run starts from zero");
     }
 
     /// Writing the final file is the one thing no command may cut

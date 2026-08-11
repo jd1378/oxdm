@@ -327,6 +327,13 @@ pub struct Job {
     /// cancel-to-queued. Persisted in the `started_at` column.
     #[serde(default)]
     pub started_at: Option<DateTime<Utc>>,
+    /// Milliseconds this download actually spent transferring, summed
+    /// over every stretch it was in `Downloading`. `None` on rows
+    /// written before the daemon kept the tally. Wall clock between
+    /// start and finish counts pauses and retry waits with it, so it is
+    /// the wrong divisor for an average speed.
+    #[serde(default)]
+    pub active_ms: Option<u64>,
     /// `Completed` transition timestamp. `None` until completion.
     /// Persisted in the `finished_at` column.
     #[serde(default)]
@@ -767,6 +774,7 @@ mod tests {
             queue_id: crate::domain::QueueId::new(),
             created_at: chrono::Utc::now(),
             started_at: None,
+            active_ms: None,
             finished_at: None,
             retries: 0,
             interruptions: 0,

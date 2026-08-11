@@ -518,6 +518,7 @@ mod tests {
             queue_id: crate::domain::QueueId::new(),
             created_at: chrono::Utc::now(),
             started_at: None,
+            active_ms: None,
             finished_at: None,
             retries: 0,
             interruptions: 0,

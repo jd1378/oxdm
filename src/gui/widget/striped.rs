@@ -209,6 +209,14 @@ fn hatch_bands(frame: &mut canvas::Frame, size: Size, color: Color) {
 /// translucent area fill.
 pub struct RateChart {
     pub samples: Vec<f32>,
+    /// How many samples the window holds. The x step is fixed at
+    /// `width / (capacity - 1)`, so the trace starts at the left and
+    /// grows rightwards until the window is full, then slides. Scaling
+    /// the step to the sample count instead would squeeze the whole
+    /// history into the plot: every new point would move every old one,
+    /// which reads as a chart that never stops rescaling rather than as
+    /// a minute of history going past.
+    pub capacity: usize,
     pub max: f32,
     pub avg: f32,
     pub accent: Color,
@@ -284,7 +292,7 @@ impl<M> canvas::Program<M> for RateChart {
         }
 
         if self.samples.len() >= 2 {
-            let step = size.width / (self.samples.len() - 1) as f32;
+            let step = size.width / (self.capacity.max(2) - 1) as f32;
             let pt = |i: usize| {
                 Point::new(
                     i as f32 * step,
@@ -297,7 +305,10 @@ impl<M> canvas::Program<M> for RateChart {
             for i in 0..self.samples.len() {
                 area.line_to(pt(i));
             }
-            area.line_to(Point::new(size.width, size.height));
+            // Down to the baseline under the *last* sample, not under
+            // the right edge: a half-filled window would otherwise
+            // shade the empty part of the plot.
+            area.line_to(Point::new(pt(self.samples.len() - 1).x, size.height));
             area.close();
             frame.fill(&area.build(), with_alpha(self.accent, 36.0 / 255.0));
             // Polyline.
