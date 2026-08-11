@@ -1368,10 +1368,15 @@ impl AppState {
             return None;
         }
         let mut new_job = old.job.clone();
-        new_job.filename = Some(name.to_owned());
+        // The run learned a name the table may already hold — two
+        // links to `setup.exe` are the common case. Numbering it here
+        // is the last point where it can be done without a user
+        // waiting on an answer.
+        new_job.filename = Some(free_name(&jobs, name, Some(id)));
         let mut moved_to = None;
+        let stored_name = new_job.filename.clone().unwrap_or_default();
         if new_job.category == Category::Other {
-            new_job.category = classify(name, &settings.category_extensions);
+            new_job.category = classify(&stored_name, &settings.category_extensions);
             // The folder follows the category while it still can. The
             // parts live in the per-job work dir and the file is
             // assembled at the end, so this run's destination is still
@@ -1391,7 +1396,7 @@ impl AppState {
         }
         let _ = self.events.send(DomainEvent::JobFilenameResolved {
             id,
-            filename: name.to_owned(),
+            filename: stored_name,
         });
         let _ = self.events.send(DomainEvent::JobUpdated { id, phase });
         moved_to
@@ -1418,6 +1423,13 @@ impl AppState {
             return Err(JobError::Other(
                 "cannot change source while the download is running".into(),
             ));
+        }
+        if let Some(name) = filename.as_deref().filter(|n| !n.trim().is_empty())
+            && name_is_taken(&jobs, name, Some(id))
+        {
+            return Err(JobError::NameTaken {
+                filename: name.trim().to_owned(),
+            });
         }
         let mut new_job = old.job.clone();
         new_job.url = url;
@@ -2139,10 +2151,13 @@ impl AppState {
     /// Insert a new job in `Queued` state. Caller decides whether to
     /// also `start_job` (Download Now) or leave it (Download Later).
     ///
-    /// Filename collisions are no longer pre-checked here — the UI
-    /// asks the user (Add dialog overwrite overlay) before this is
-    /// called. The runner-level `SaveConflictResolver` still handles
-    /// on-disk collisions if one slips through.
+    /// The name is made unique against the whole table before the job
+    /// is stored: one name identifies one download, whatever folder
+    /// each saves into. Adds are numbered rather than refused — a
+    /// capture or a batch has nobody to ask — while a *rename* of an
+    /// existing job is refused (`JobError::NameTaken`), because there
+    /// the name is one someone just typed. The runner-level
+    /// `SaveConflictResolver` still handles files already on disk.
     #[allow(clippy::too_many_arguments)]
     pub async fn add_job(
         self: &Arc<Self>,
@@ -2197,7 +2212,7 @@ impl AppState {
         let enc_cookies = self
             .encrypt_field(id, crate::data::crypto::Field::Cookies, cookies.as_deref())
             .await?;
-        let job = Job {
+        let mut job = Job {
             id,
             url,
             save_dir,
@@ -2227,10 +2242,6 @@ impl AppState {
             category,
             captured_response: None,
         };
-        self.store
-            .upsert_job(&job)
-            .await
-            .map_err(|e| JobError::Io(e.to_string()))?;
         let completion = seeded_completion(&self.settings().await);
         let url = job.url.clone();
         // A job with credentials is not one a bare probe can describe:
@@ -2242,10 +2253,19 @@ impl AppState {
             && job.auth_user.is_none()
             && job.enc_auth_password.is_none()
             && job.enc_cookies.is_none();
-        self.jobs
-            .write()
-            .await
-            .insert(id, Arc::new(JobEntry::with_completion(job, completion)));
+        // The name is made unique and the job goes in under the same
+        // lock: two adds landing together must not both decide the
+        // same name is free. The store write stays inside it too, so
+        // nothing is announced that failed to persist.
+        let mut jobs = self.jobs.write().await;
+        if let Some(name) = job.filename.as_deref() {
+            job.filename = Some(free_name(&jobs, name, None));
+        }
+        if let Err(e) = self.store.upsert_job(&job).await {
+            return Err(JobError::Io(e.to_string()));
+        }
+        jobs.insert(id, Arc::new(JobEntry::with_completion(job, completion)));
+        drop(jobs);
         let _ = self.events.send(DomainEvent::JobAdded { id });
         if probe_worth_it {
             self.probe_in_background(id, url);
@@ -2274,6 +2294,13 @@ impl AppState {
             .await
             .ok_or_else(|| JobError::Other("job not found".into()))?;
 
+        if let Some(name) = edit.filename.as_deref().filter(|n| !n.trim().is_empty())
+            && name_is_taken(&*self.jobs.read().await, name, Some(id))
+        {
+            return Err(JobError::NameTaken {
+                filename: name.trim().to_owned(),
+            });
+        }
         let mut new_job = entry.job.clone();
         new_job.url = edit.url;
         new_job.save_dir = edit.save_dir;
@@ -2432,9 +2459,14 @@ impl AppState {
         let mut changed = false;
         let named = new_job.filename.as_deref().is_some_and(|n| !n.is_empty());
         if !named && !probe.filename.trim().is_empty() {
-            new_job.filename = Some(probe.filename.clone());
+            // Numbered against the table, the same as every other way
+            // a job gets its name: three links to the same `clip.mkv`
+            // are three downloads, and the list has to be able to say
+            // which is which.
+            let name = free_name(&jobs, &probe.filename, Some(id));
+            new_job.filename = Some(name.clone());
             if new_job.category == Category::Other {
-                new_job.category = classify(&probe.filename, &settings.category_extensions);
+                new_job.category = classify(&name, &settings.category_extensions);
                 // Nothing has run yet, so the destination is still
                 // nobody's decision but the app's own guess — which
                 // this just improved on.
@@ -2529,11 +2561,8 @@ impl AppState {
         // it in at request time. Two copies would show up as two rows
         // in Properties and drift the moment one is edited.
         let cookies = req.cookies.clone().or(captured_cookie);
-        // Capture flow keeps the original filename even on collision.
-        // Confirm window (`confirm_window.rs`) detects the dup against
-        // the live snapshot and offers an overwrite confirmation
-        // overlay; deferring the decision to the user matches the
-        // manual Add dialog behaviour.
+        // A capture has nobody to ask, so a name the table already
+        // holds is numbered by `add_job` rather than refused.
         let filename = req.filename;
         // Per-category routing (feature #10) applies only on this
         // non-interactive path (guardian F5) — the Add dialog prefills
@@ -3720,6 +3749,29 @@ fn purge_work_dir_partials(work_dir: &std::path::Path) -> usize {
     purged
 }
 
+/// Is another job already called `name`?
+///
+/// Every job in the table counts, whatever folder it saves to and
+/// whatever state it is in: the point is that one name identifies one
+/// download, in the list as much as on disk. `except` is the job doing
+/// the asking, so an edit that leaves the name alone is not a clash
+/// with itself.
+fn name_is_taken(jobs: &IndexMap<JobId, Arc<JobEntry>>, name: &str, except: Option<JobId>) -> bool {
+    let key = crate::domain::name_key(name);
+    if key.is_empty() {
+        return false;
+    }
+    jobs.iter()
+        .filter(|(id, _)| Some(**id) != except)
+        .filter_map(|(_, e)| e.job.filename.as_deref())
+        .any(|n| crate::domain::name_key(n) == key)
+}
+
+/// `name`, or the numbered variant of it that no other job holds.
+fn free_name(jobs: &IndexMap<JobId, Arc<JobEntry>>, name: &str, except: Option<JobId>) -> String {
+    crate::domain::unique_name(name, |candidate| name_is_taken(jobs, candidate, except))
+}
+
 /// Rebuild a `JobEntry` carrying every sticky field forward but with a
 /// new `Job` value. `JobEntry` is held inside an `Arc` shared with
 /// active runners, so we cannot mutate in place — produce a fresh `Arc`
@@ -4223,6 +4275,44 @@ mod tests {
         };
         job.status.phase = phase;
         JobEntry::with_completion(job, crate::domain::OnCompletion::default())
+    }
+
+    fn table(names: &[Option<&str>]) -> IndexMap<JobId, Arc<JobEntry>> {
+        names
+            .iter()
+            .map(|n| {
+                let mut entry = entry_in(Phase::Queued);
+                entry.job.filename = n.map(|n| n.to_owned());
+                (entry.job.id, Arc::new(entry))
+            })
+            .collect()
+    }
+
+    /// One name, one download — whatever folder each saves into and
+    /// whatever state it is in.
+    #[test]
+    fn a_name_another_job_holds_is_taken() {
+        let jobs = table(&[Some("foo.zip"), None]);
+        assert!(name_is_taken(&jobs, "foo.zip", None));
+        assert!(name_is_taken(&jobs, "  FOO.ZIP ", None), "case and padding");
+        assert!(!name_is_taken(&jobs, "bar.zip", None));
+        // A job with no name yet claims nothing, and neither does a
+        // blank enquiry.
+        assert!(!name_is_taken(&jobs, "   ", None));
+    }
+
+    #[test]
+    fn a_job_does_not_clash_with_its_own_name() {
+        let jobs = table(&[Some("foo.zip")]);
+        let id = *jobs.keys().next().unwrap();
+        assert!(!name_is_taken(&jobs, "foo.zip", Some(id)));
+    }
+
+    #[test]
+    fn a_free_name_is_found_around_what_the_table_holds() {
+        let jobs = table(&[Some("foo.zip"), Some("foo (1).zip")]);
+        assert_eq!(free_name(&jobs, "foo.zip", None), "foo (2).zip");
+        assert_eq!(free_name(&jobs, "other.zip", None), "other.zip");
     }
 
     /// Writing the final file is the one thing no command may cut

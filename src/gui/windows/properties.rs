@@ -83,6 +83,11 @@ pub struct Session {
     entry: JobEntryView,
     settings: crate::domain::Settings,
     queues: Vec<(crate::domain::QueueId, String)>,
+    /// Name keys the *other* downloads hold. One name identifies one
+    /// download, so renaming onto a taken one is refused here as well
+    /// as by the daemon — locally so the message names the field the
+    /// user is looking at rather than arriving as a failed Apply.
+    taken_names: Vec<String>,
 }
 
 /// Which copy button was pressed. Row indices, so a list that changes
@@ -183,6 +188,8 @@ pub struct State {
     id: JobId,
     entry: JobEntryView,
     settings: crate::domain::Settings,
+    /// See `Session::taken_names`.
+    taken_names: Vec<String>,
     tab: Tab,
 
     url: String,
@@ -333,11 +340,19 @@ pub fn boot() -> (App, Task<Msg>) {
                     .iter()
                     .map(|q| (q.id, q.name.clone()))
                     .collect::<Vec<_>>();
+                let taken_names = snap
+                    .jobs
+                    .iter()
+                    .filter(|j| j.id != id)
+                    .filter_map(|j| j.filename.as_deref())
+                    .map(crate::domain::name_key)
+                    .collect::<Vec<_>>();
                 Ok(Box::new(Session {
                     client,
                     entry,
                     settings: snap.settings,
                     queues,
+                    taken_names,
                 }))
             },
             Msg::Connected,
@@ -483,9 +498,31 @@ fn pending_destination(st: &State) -> crate::domain::Destination {
     )
 }
 
+/// Does another download already answer to this name?
+fn name_taken(st: &State, name: &str) -> bool {
+    let key = crate::domain::name_key(name);
+    !key.is_empty() && st.taken_names.contains(&key)
+}
+
+/// The name this form would save under, when there is one.
+fn pending_name(st: &State) -> Option<String> {
+    pending_destination(st)
+        .filename
+        .filter(|n| !n.trim().is_empty())
+}
+
 /// What the field leaves out: where the file lands, or the extension
 /// the typed name drops or swaps.
 fn save_note(st: &State) -> Option<crate::gui::save_path::Note> {
+    // Refused rather than numbered: the name in the field is one the
+    // user typed, and renaming it behind them would be a worse answer
+    // than saying it is taken.
+    if let Some(name) = pending_name(st).filter(|n| name_taken(st, n)) {
+        return Some(crate::gui::save_path::Note {
+            text: format!("Another download is already called {name}"),
+            warning: true,
+        });
+    }
     crate::gui::save_path::note(
         &st.save_path,
         &pending_destination(st),
@@ -686,6 +723,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 entry,
                 settings,
                 queues,
+                taken_names,
             } = *boxed;
             let mut st = State {
                 tokens: Tokens::from_settings(&settings),
@@ -737,6 +775,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 client,
                 entry,
                 settings,
+                taken_names,
             };
             hydrate(&mut st);
             *app = App::Ready(Box::new(st));
@@ -1188,6 +1227,12 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                 );
                 return Task::none();
             };
+            if let Some(name) = pending_name(st).filter(|n| name_taken(st, n)) {
+                st.error = Some(format!(
+                    "Another download is already called `{name}`. One name, one download."
+                ));
+                return Task::none();
+            }
             let dest = pending_destination(st);
             let (save_dir, filename) = (dest.dir, dest.filename);
 

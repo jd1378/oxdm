@@ -126,7 +126,7 @@ Two frame styles are accepted after auth:
 | field         | type                  | required | meaning                                                                          |
 |---------------|-----------------------|----------|----------------------------------------------------------------------------------|
 | `url`         | string (http/https)   | yes      | Target URL.                                                                      |
-| `filename`    | string                | no       | Suggested filename. oxdm overrides with server-provided name when present.       |
+| `filename`    | string                | no       | Suggested filename. oxdm overrides with the server-provided name when present, and numbers it (`file (1).zip`) if another download in the list already has that name — names identify downloads, so they are unique across the whole list regardless of folder. |
 | `referrer`    | string (URL)          | no       | Stored on the job and sent as `Referer` on every request. Shown and editable in Properties → Headers → Identification. A `Referer` in `headers` overrides it. Send it whenever the page it came from matters — hosts that check it reject the download otherwise. |
 | `cookies`     | string                | no       | Cookie header value (the extension is the only component that can read jars).    |
 | `user_agent`  | string                | no       | Stored as the job's `User-Agent` header and honoured verbatim, so anti-leech hosts see the browser's UA. Outranks both the global setting and oxdm's own default (`oxdm/<version>`), which is what a job without one sends. |

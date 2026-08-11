@@ -190,6 +190,14 @@ pub enum JobError {
     SaveConflict(String),
     #[error("a download with filename `{filename}` is already in progress in {save_dir}")]
     DuplicateActive { filename: String, save_dir: String },
+    /// The name belongs to another download. One name, one download —
+    /// two rows called `foo.zip` are two rows nobody can tell apart,
+    /// whatever folders they save to. Refused rather than numbered:
+    /// this arrives from someone editing the name by hand, and a
+    /// silent rename of what they just typed is worse than a refusal
+    /// they can answer.
+    #[error("another download is already called `{filename}`")]
+    NameTaken { filename: String },
     #[error("checksum mismatch: expected {expected}, got {actual}")]
     ChecksumMismatch { expected: String, actual: String },
     #[error("cancelled")]

@@ -150,6 +150,11 @@ pub struct Boot {
     main_queue: QueueId,
     edit: Option<Box<crate::domain::Job>>,
     prefill: Option<String>,
+    /// Names other downloads already hold, as comparison keys. The
+    /// daemon is the one that enforces this; the dialog carries the
+    /// list so it can suggest a free name instead of letting the user
+    /// type one that gets silently numbered behind them.
+    taken_names: Vec<String>,
 }
 
 pub enum App {
@@ -204,6 +209,8 @@ pub struct AddState {
 
     error: Option<String>,
     shot: Option<Shot>,
+    /// Name keys the rest of the table holds; see `Boot::taken_names`.
+    taken_names: Vec<String>,
 }
 
 impl AddState {
@@ -228,11 +235,25 @@ impl AddState {
     /// The name to write under when the save path names only a folder:
     /// what the probe found, else what the URL suggests. `None` leaves
     /// the naming to the daemon, which knows more than either.
+    /// `desired`, or the numbered variant no other download holds.
+    fn free_name(&self, desired: &str) -> String {
+        crate::domain::unique_name(desired, |c| self.name_taken(c))
+    }
+
+    fn name_taken(&self, name: &str) -> bool {
+        let key = crate::domain::name_key(name);
+        !key.is_empty() && self.taken_names.contains(&key)
+    }
+
     fn known_name(&self) -> Option<String> {
         self.detected()
             .map(|p| p.filename.clone())
             .or_else(|| Some(name_from_url(self.url.trim())))
             .filter(|n| !n.trim().is_empty())
+            // Suggested already free: the daemon would number a taken
+            // name anyway, and a name the user never saw is a worse
+            // way to find that out than the field showing it.
+            .map(|n| self.free_name(&n))
     }
 
     fn destination(&self) -> crate::domain::Destination {
@@ -420,6 +441,13 @@ pub fn boot() -> (App, Task<Msg>) {
                     Some(id) => snap.jobs.iter().find(|j| j.id == id).cloned().map(Box::new),
                     None => None,
                 };
+                let taken_names = snap
+                    .jobs
+                    .iter()
+                    .filter(|j| Some(j.id) != edit_id)
+                    .filter_map(|j| j.filename.as_deref())
+                    .map(crate::domain::name_key)
+                    .collect::<Vec<_>>();
                 Ok(Boot {
                     client,
                     settings: snap.settings,
@@ -427,6 +455,7 @@ pub fn boot() -> (App, Task<Msg>) {
                     main_queue,
                     edit,
                     prefill,
+                    taken_names,
                 })
             },
             Msg::Connected,
@@ -479,6 +508,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 error: None,
                 shot: Shot::from_env(),
                 settings: boot.settings,
+                taken_names: boot.taken_names,
             };
             let mut task = Task::none();
             if let Some(job) = boot.edit {
@@ -592,13 +622,10 @@ fn apply_category_prefill(st: &mut AddState) {
         // never retargeted still has a folder, and it is the one the
         // Settings pane shows them.
         let folder = st.settings.category_folder(cat);
-        // Keep the detected filename; before detection the path is a
-        // bare directory (a trailing separator marks it as such for
-        // `build_req`).
-        let name = st
-            .detected()
-            .map(|p| p.filename.clone())
-            .unwrap_or_default();
+        // Keep the detected filename, numbered if the table already
+        // holds it; before detection the path is a bare directory (a
+        // trailing separator marks it as such for `build_req`).
+        let name = st.known_name().unwrap_or_default();
         st.save_path = folder.join(name).display().to_string();
     }
     if !st.queue_dirty
@@ -673,7 +700,7 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
                 // The probe finally knows the name: keep the folder the
                 // field points at and put the real name in it.
                 let dir = st.destination().dir;
-                st.save_path = dir.join(&p.filename).display().to_string();
+                st.save_path = dir.join(st.free_name(&p.filename)).display().to_string();
                 if st.category.is_none() {
                     st.category = Some(crate::domain::classify(
                         &p.filename,
@@ -1128,8 +1155,43 @@ fn segments_combo(st: &AddState) -> Element<'_, Msg> {
 
 /// What the field leaves out: where the file lands, or the extension
 /// the typed name drops.
+/// The name the file arrived with, before anything was done about a
+/// clash: what the probe found, else what the URL suggests.
+fn raw_name(st: &AddState) -> Option<String> {
+    st.detected()
+        .map(|p| p.filename.clone())
+        .or_else(|| Some(name_from_url(st.url.trim())))
+        .filter(|n| !n.trim().is_empty())
+}
+
 fn save_note(st: &AddState) -> Option<crate::gui::save_path::Note> {
-    crate::gui::save_path::note(&st.save_path, &st.destination(), st.known_name().as_deref())
+    let dest = st.destination();
+    // The dialog numbered the name for the user. Nothing is wrong, but
+    // a name they did not choose should not appear without a reason
+    // beside it.
+    if let Some(raw) = raw_name(st)
+        && let Some(name) = dest.filename.as_deref()
+        && name != raw
+        && name == st.free_name(&raw)
+    {
+        return Some(crate::gui::save_path::Note {
+            text: format!("{raw} is already in the list — this one is {name}"),
+            warning: false,
+        });
+    }
+    // Only reachable by typing a taken name by hand — what the dialog
+    // suggests is already free. Saying what will happen beats letting
+    // the daemon number it after the window has closed.
+    if let Some(name) = dest.filename.as_deref().filter(|n| st.name_taken(n)) {
+        return Some(crate::gui::save_path::Note {
+            text: format!(
+                "{name} is already in the list — saving as {}",
+                st.free_name(name)
+            ),
+            warning: true,
+        });
+    }
+    crate::gui::save_path::note(&st.save_path, &dest, st.known_name().as_deref())
 }
 
 /// The save-path field, with the destination spelled out underneath

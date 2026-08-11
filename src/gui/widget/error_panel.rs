@@ -127,6 +127,12 @@ pub fn error_meta(err: &JobError) -> (&'static str, &'static str, &'static str, 
             "DUPLICATE",
             "A download with this name is already in progress in the same folder. Wait for it or rename this one.",
         ),
+        JobError::NameTaken { .. } => (
+            "copy",
+            "That name is taken",
+            "NAME-TAKEN",
+            "Another download in the list already has this name. Give this one a different name.",
+        ),
         JobError::ChecksumMismatch { .. } => (
             "shield-alert",
             "Integrity check failed",
@@ -283,6 +289,9 @@ pub fn error_detail(err: &JobError) -> String {
         }
         JobError::DuplicateActive { filename, save_dir } => {
             format!("`{filename}` is already downloading into {save_dir}.")
+        }
+        JobError::NameTaken { filename } => {
+            format!("Another download is already called `{filename}`.")
         }
         JobError::ChecksumMismatch { .. } => {
             "The bytes that arrived don't match the hash they were supposed to have, so the \
