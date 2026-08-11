@@ -34,9 +34,9 @@ pub struct UiResolver {
     events: broadcast::Sender<DomainEvent>,
     pending: Mutex<HashMap<u64, oneshot::Sender<Resolution>>>,
     next_token: std::sync::atomic::AtomicU64,
-    /// If set to `false`, the UI is hidden and `conflict_while_hidden` is
-    /// `NotifyAndPark` — the resolver returns the abort variant instead of
-    /// awaiting user input. The caller (runner) handles the park.
+    /// If set to `false`, no window is open to host the question — the
+    /// resolver returns the abort variant instead of awaiting user
+    /// input, and the caller (runner) handles the park.
     interactive: bool,
     /// The job's live byte count — what a restart would throw away.
     /// A conflict that costs the user nothing is not worth a dialog.

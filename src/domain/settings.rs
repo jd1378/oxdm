@@ -68,12 +68,6 @@ pub struct Settings {
     /// Settings; the value lives here so it survives restarts.
     #[serde(default)]
     pub ext_token: String,
-    /// Behavior when a job in background mode hits a server / save
-    /// conflict. `AutoPopup` re-opens the dialog. `NotifyAndPark` shows
-    /// a system notification, moves the job to the end of the queue,
-    /// marks it failed-with-conflict, and waits for explicit Resume.
-    #[serde(default)]
-    pub conflict_while_hidden: ConflictWhileHidden,
     /// Suppress the Remove confirmation for incomplete downloads when
     /// the user has previously checked "Don't ask again." File data is
     /// still purged unconditionally — only the prompt is skipped.
@@ -257,19 +251,6 @@ pub enum Theme {
     Warm,
 }
 
-/// Per `PLAN §9 / §5`: how oxdm reacts when a backgrounded job hits a
-/// conflict and there is no visible dialog to host the prompt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum ConflictWhileHidden {
-    /// Re-show the dialog. IDM-like, more intrusive.
-    #[default]
-    AutoPopup,
-    /// Notify, move to end of queue, mark failed-with-conflict, no
-    /// auto-retry. User must explicitly Resume.
-    NotifyAndPark,
-}
-
 /// "Unlimited" concurrent downloads. Not a sentinel the scheduler knows
 /// about — a ceiling no real queue reaches, so the limit simply never
 /// binds while the field stays an ordinary number.
@@ -428,7 +409,6 @@ impl Default for Settings {
             headers: IndexMap::new(),
             ipc_port: 27812,
             ext_token: String::new(),
-            conflict_while_hidden: ConflictWhileHidden::AutoPopup,
             remove_confirm_incomplete: true,
             remove_confirm_completed: true,
             remove_confirm_clean: true,

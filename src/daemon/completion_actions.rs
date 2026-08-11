@@ -21,10 +21,7 @@ pub fn spawn(state: Arc<AppState>) {
     tokio::spawn(async move {
         let mut rx = state.subscribe();
         while let Ok(ev) = rx.recv().await {
-            if let DomainEvent::JobFailed { id, error } = &ev {
-                // A conflict parks the job pending an answer and has its
-                // own dialog; only real failures raise this one.
-                let conflict = matches!(error, crate::domain::JobError::ConflictPending(_));
+            if let DomainEvent::JobFailed { id, .. } = &ev {
                 // Only a hand-started run gets a window; automation
                 // reports its failures elsewhere.
                 let manual = state.is_manual_run(*id).await;
@@ -36,11 +33,11 @@ pub fn spawn(state: Arc<AppState>) {
                 let already_watching = crate::ipc_local::server::is_focused(
                     crate::ipc_local::protocol::GuiKind::Download(*id),
                 );
-                if !conflict
-                    && manual
-                    && !already_watching
-                    && state.settings().await.show_failed_dialog
-                {
+                // A parked conflict comes through here too: it is a
+                // download that stopped and wants the user, which is
+                // what this window is for. It reads as failed in the
+                // list and it is surfaced by the same rule.
+                if manual && !already_watching && state.settings().await.show_failed_dialog {
                     crate::daemon::tray::spawn_download_gui(*id);
                 }
                 continue;

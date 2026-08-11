@@ -27,8 +27,8 @@ use crate::data::runner::{JobRunner, LiveBridge, PartCounters};
 use crate::data::store::{Store, default_db_path};
 use crate::data::update_channel::{NoopUpdateChannel, UpdateChannel};
 use crate::domain::{
-    CaptureRequest, Category, ConflictWhileHidden, Job, JobError, JobId, JobStatus, LiveCounters,
-    Phase, Queue, QueueId, Settings, classify,
+    CaptureRequest, Category, Job, JobError, JobId, JobStatus, LiveCounters, Phase, Queue, QueueId,
+    Settings, classify,
 };
 
 /// In-memory record per job. Lives in `AppState::jobs`.
@@ -1525,8 +1525,8 @@ impl AppState {
 
     /// Park a job at the end of the queue, mark it `Failed` with a
     /// `ConflictPending` payload, and send a notification. Used by the
-    /// runner when `conflict_while_hidden = NotifyAndPark` and the
-    /// job's dialog is not visible.
+    /// runner when a conflict comes up and the job's dialog is not the
+    /// window on screen to host the question.
     ///
     /// "No auto-retry" is implicit: oxdm never auto-retries after a
     /// terminal phase. The user explicitly Resumes from the queue row.
@@ -2604,8 +2604,14 @@ impl AppState {
         let _ = tokio::fs::create_dir_all(&settings.work_dir).await;
         let per_job_dir = Some(per_job_dir(&settings.work_dir, id));
         let interactive = dialog_open_for(self, id).await;
-        let park_on_conflict =
-            !interactive && settings.conflict_while_hidden == ConflictWhileHidden::NotifyAndPark;
+        // No window to ask in means the download stops and waits. It
+        // never opens one of its own: a background download raising a
+        // dialog over whatever the user is doing puts a question under
+        // their keystrokes, and the answer is not urgent — nothing
+        // expires while it waits. Surfacing is left to the same rules
+        // every other stopped download follows (`show_failed_dialog`,
+        // `notify_failed`).
+        let park_on_conflict = !interactive;
 
         // Effective settings overlay:
         //   global Settings → per-job overrides.

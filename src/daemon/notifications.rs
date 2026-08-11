@@ -34,11 +34,15 @@ pub fn spawn(state: Arc<AppState>) {
                     notify("Download complete", &body);
                 }
                 DomainEvent::JobFailed { error, .. } => {
-                    let conflict = matches!(error, crate::domain::JobError::ConflictPending(_));
-                    if !conflict && !state.settings().await.notify_failed {
+                    if !state.settings().await.notify_failed {
                         continue;
                     }
-                    let title = if conflict {
+                    // A conflict is a stopped download that wants an
+                    // answer — the same news as any other failure, and
+                    // under the same setting. Only the word differs,
+                    // because "failed" would suggest there is nothing
+                    // left to do.
+                    let title = if matches!(error, crate::domain::JobError::ConflictPending(_)) {
                         "Download paused"
                     } else {
                         "Download failed"

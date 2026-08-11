@@ -203,10 +203,8 @@ pub enum JobError {
     /// The destination folder rejected the write.
     #[error("can't write to the destination: {0}")]
     PermissionDenied(String),
-    /// Conflict surfaced while the job was running in background mode
-    /// and the user has set `conflict_while_hidden = NotifyAndPark`.
-    /// The job is parked at the end of the queue; user must explicitly
-    /// resume to retry.
+    /// A conflict came up with no window open to ask in. The job is
+    /// parked at the end of the queue; the user resumes it to answer.
     #[error("paused due to conflict: {0}")]
     ConflictPending(String),
     #[error("{0}")]

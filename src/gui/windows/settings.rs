@@ -189,7 +189,6 @@ pub enum Msg {
     ExtTokenSaved(Result<String, String>),
     /// The copy confirmation on the pairing code has run its course.
     PairCopyDone,
-    ConflictHidden(String),
     // Notifications
     ShowCompleteDialog(bool),
     NotifyComplete(bool),
@@ -405,7 +404,6 @@ fn copy_section(dst: &mut Settings, src: &Settings, section: Section) {
         }
         Section::Browser => {
             dst.ipc_port = src.ipc_port;
-            dst.conflict_while_hidden = src.conflict_while_hidden;
         }
         Section::Notifications => {
             dst.show_complete_dialog = src.show_complete_dialog;
@@ -942,15 +940,6 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
             tracing::warn!(error = %e, "could not mint a pairing code");
             Task::none()
         }
-        Msg::ConflictHidden(v) => {
-            use crate::domain::ConflictWhileHidden;
-            st.s.conflict_while_hidden = CONFLICT_CHOICES
-                .iter()
-                .find(|(_, label)| *label == v)
-                .map(|(value, _)| *value)
-                .unwrap_or(ConflictWhileHidden::AutoPopup);
-            Task::none()
-        }
         Msg::ShowCompleteDialog(v) => {
             st.s.show_complete_dialog = v;
             Task::none()
@@ -1101,41 +1090,6 @@ fn splash<'a>(msg: String) -> Element<'a, Msg> {
 }
 
 /// Design `.settings-nav .s-item`: 500 12.5px, 600 when selected.
-/// What the conflict picker offers, in the order it offers it.
-const CONFLICT_CHOICES: [(crate::domain::ConflictWhileHidden, &str); 2] = [
-    (
-        crate::domain::ConflictWhileHidden::AutoPopup,
-        "Open the download's window and ask",
-    ),
-    (
-        crate::domain::ConflictWhileHidden::NotifyAndPark,
-        "Notify me and leave it waiting",
-    ),
-];
-
-fn conflict_label(v: crate::domain::ConflictWhileHidden) -> &'static str {
-    CONFLICT_CHOICES
-        .iter()
-        .find(|(value, _)| *value == v)
-        .map(|(_, label)| *label)
-        .unwrap_or("")
-}
-
-/// One sentence on what the chosen setting actually does — including
-/// the part that costs something, since both options do.
-fn conflict_hint(v: crate::domain::ConflictWhileHidden) -> &'static str {
-    match v {
-        crate::domain::ConflictWhileHidden::AutoPopup => {
-            "The window comes to the front with the question, over whatever you \
-             were doing. The download waits for your answer rather than guessing."
-        }
-        crate::domain::ConflictWhileHidden::NotifyAndPark => {
-            "Nothing opens. The download stops, moves to the end of its queue and \
-             sends a notification; it stays stopped until you resume it."
-        }
-    }
-}
-
 const NAV_FONT: f32 = 12.5;
 /// The label's line box reserves descender room below the baseline that
 /// a word like "General" never uses, so centring the *boxes* leaves the
@@ -2219,10 +2173,6 @@ fn header_rows(st: &State) -> Vec<Element<'_, Msg>> {
 fn browser_section(st: &State) -> Element<'_, Msg> {
     let t = &st.tokens;
     let t2 = *t;
-    // The stored value is a key; what the user picks from is a
-    // sentence. A dropdown reading "auto_popup" made them guess what
-    // pops up, and when.
-    let conflict = conflict_label(st.s.conflict_while_hidden);
     pane(
         t,
         Section::Browser,
@@ -2280,37 +2230,6 @@ fn browser_section(st: &State) -> Element<'_, Msg> {
                     .align_y(Alignment::Center)
                     .into(),
                 ),
-                set_row_stack(
-                    t,
-                    "When a download needs an answer and its window is closed",
-                    Some(
-                        "Some downloads stop to ask: the file changed on the server, \
-                         the name is taken, the hash did not match.",
-                    ),
-                    column![
-                        combo(
-                            t,
-                            CONFLICT_CHOICES
-                                .iter()
-                                .map(|(_, l)| (*l).to_owned())
-                                .collect(),
-                            Some(conflict.to_owned()),
-                            Msg::ConflictHidden,
-                            Length::Fill,
-                        ),
-                        // Under the picker rather than beside both
-                        // options: the choice is binary, and the one
-                        // sentence that matters is what the current
-                        // setting will do.
-                        text(conflict_hint(st.s.conflict_while_hidden))
-                            .font(theme::BODY)
-                            .size(11.0)
-                            .color(t.fg_3)
-                            .line_height(iced::widget::text::LineHeight::Relative(1.4)),
-                    ]
-                    .spacing(theme::space::S1)
-                    .into(),
-                ),
             ],
         ),
     )
@@ -2349,14 +2268,21 @@ fn notifications_section(st: &State) -> Element<'_, Msg> {
                     toggle_row(
                         t,
                         "Show dialog",
-                        Some("Opens the job's window on the error, where you can retry."),
+                        Some(
+                            "Opens the job's window on the error, where you can retry. \
+                             Covers a download stopped by a conflict too — it is waiting \
+                             for an answer, and this is where you give it.",
+                        ),
                         st.s.show_failed_dialog,
                         Msg::ShowFailedDialog,
                     ),
                     toggle_row(
                         t,
                         "System notification",
-                        Some("Reports the failure without taking focus."),
+                        Some(
+                            "Reports the failure — or a download stopped by a conflict — \
+                             without taking focus.",
+                        ),
                         st.s.notify_failed,
                         Msg::NotifyFailed,
                     ),
