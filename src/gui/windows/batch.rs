@@ -30,7 +30,17 @@ pub struct Row {
 
 #[derive(Clone)]
 pub enum Msg {
-    Connected(Result<Box<(Arc<Client>, Vec<(QueueId, String)>, crate::domain::Settings)>, String>),
+    Connected(
+        Result<
+            Box<(
+                Arc<Client>,
+                Vec<(QueueId, String)>,
+                crate::domain::Settings,
+                Vec<String>,
+            )>,
+            String,
+        >,
+    ),
     Window(WindowControl),
     Daemon(crate::gui::ipc::DaemonSignal),
     Probed(usize, Result<Box<ProbeResult>, String>),
@@ -63,6 +73,11 @@ pub struct State {
     start_now: bool,
     save_dir: PathBuf,
     shot: Option<Shot>,
+    /// Name keys the download list already holds, as comparison keys.
+    /// A batch has nobody to ask, so the daemon numbers a name rather
+    /// than refusing it; the window carries the list so a row can say
+    /// that before the send instead of after.
+    taken_names: Vec<String>,
 }
 
 fn staged_path() -> Option<PathBuf> {
@@ -86,6 +101,12 @@ pub fn boot() -> (App, Task<Msg>) {
                 let snap = client.snapshot().await?;
                 let items =
                     crate::ipc::batch::load_and_consume(&path).map_err(|e| e.to_string())?;
+                let taken_names = snap
+                    .jobs
+                    .iter()
+                    .filter_map(|j| j.filename.as_deref())
+                    .map(crate::domain::name_key)
+                    .collect::<Vec<_>>();
                 Ok(Box::new((
                     client,
                     snap.queues
@@ -94,6 +115,7 @@ pub fn boot() -> (App, Task<Msg>) {
                         .collect::<Vec<_>>(),
                     snap.settings,
                     items,
+                    taken_names,
                 )))
             },
             |r: Result<
@@ -102,16 +124,18 @@ pub fn boot() -> (App, Task<Msg>) {
                     Vec<(QueueId, String)>,
                     crate::domain::Settings,
                     Vec<CaptureRequest>,
+                    Vec<String>,
                 )>,
                 String,
             >| {
                 match r {
                     Ok(b) => {
-                        let (client, queues, settings, items) = *b;
+                        let (client, queues, settings, items, taken_names) = *b;
                         Msg::Connected(Ok(Box::new((
                             client,
                             queues,
                             settings_with_items(settings, items),
+                            taken_names,
                         ))))
                     }
                     Err(e) => Msg::Connected(Err(e)),
@@ -136,7 +160,7 @@ fn settings_with_items(
 pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
     match msg {
         Msg::Connected(Ok(boxed)) => {
-            let (client, queues, settings) = *boxed;
+            let (client, queues, settings, taken_names) = *boxed;
             let items = ITEMS.get().cloned().unwrap_or_default();
             let rows: Vec<Row> = items
                 .into_iter()
@@ -172,6 +196,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 save_dir: settings.fallback_dir(),
                 shot: Shot::from_env(),
                 client,
+                taken_names,
             }));
             Task::batch(probes)
         }
@@ -355,6 +380,53 @@ fn splash<'a>(msg: String) -> Element<'a, Msg> {
         .into()
 }
 
+/// The name each row will actually be added under.
+///
+/// Walked in send order, and only over the selected rows, because that
+/// is what the daemon will see: a batch of three `clip.mkv` adds one
+/// name and numbers the next two, and unticking a row gives its name
+/// back to the row below.
+///
+/// `None` where nothing needs saying: an unselected row, a row whose
+/// name is not known yet, or one whose name is free.
+fn planned_names(st: &State) -> Vec<Option<String>> {
+    let wanted: Vec<Option<String>> = st
+        .rows
+        .iter()
+        .map(|r| r.selected.then(|| row_name(r)).flatten())
+        .collect();
+    plan(&st.taken_names, &wanted)
+}
+
+/// The renames a list of wanted names implies, given what is taken.
+/// Split out from the rows so it can be tested without a window.
+fn plan(taken: &[String], wanted: &[Option<String>]) -> Vec<Option<String>> {
+    let mut taken: Vec<String> = taken.to_vec();
+    wanted
+        .iter()
+        .map(|w| {
+            let raw = w.as_deref()?;
+            let planned =
+                crate::domain::unique_name(raw, |c| taken.contains(&crate::domain::name_key(c)));
+            taken.push(crate::domain::name_key(&planned));
+            (planned != raw).then_some(planned)
+        })
+        .collect()
+}
+
+/// What this row would be saved as, as far as the window knows: the
+/// captured name, else what the probe found.
+fn row_name(r: &Row) -> Option<String> {
+    r.req
+        .filename
+        .clone()
+        .or_else(|| match &r.probe {
+            Some(Ok(p)) => Some(p.filename.clone()),
+            _ => None,
+        })
+        .filter(|n| !n.trim().is_empty())
+}
+
 fn ready_view(st: &State) -> Element<'_, Msg> {
     let t = &st.tokens;
     let t2 = *t;
@@ -391,6 +463,7 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
     .spacing(theme::space::S2)
     .align_y(Alignment::Center);
 
+    let planned = planned_names(st);
     let mut list = column![].spacing(2.0);
     list = list.push(checkbox(t, "Select all", all, true, Msg::SelectAll));
     list = list.push(hairline(t.border_subtle));
@@ -429,18 +502,29 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
                 .color(t.status_danger)
                 .into(),
         };
+        let mut lines = column![
+            text(r.req.url.to_string())
+                .font(theme::MONO)
+                .size(12.0)
+                .color(t.fg_1),
+            detail,
+        ]
+        .spacing(2.0);
+        // One name, one download: the daemon numbers a name the list
+        // already holds, and this is where that stops being a surprise.
+        if let Some(name) = planned.get(i).and_then(|n| n.clone()) {
+            lines = lines.push(
+                text(format!("will be added as {name}"))
+                    .font(theme::MONO)
+                    .size(11.0)
+                    .color(t.status_warning),
+            );
+        }
         list = list.push(
             container(
                 row![
                     checkbox(t, "", r.selected, true, move |v| Msg::Select(i, v)),
-                    column![
-                        text(r.req.url.to_string())
-                            .font(theme::MONO)
-                            .size(12.0)
-                            .color(t.fg_1),
-                        detail,
-                    ]
-                    .spacing(2.0),
+                    lines,
                 ]
                 .spacing(theme::space::S2)
                 .align_y(Alignment::Center),
@@ -523,5 +607,51 @@ pub fn launch_batch(_path: PathBuf) {
     if let Err(e) = app.run() {
         eprintln!("gui error: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn keys(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| crate::domain::name_key(n)).collect()
+    }
+
+    fn wanted(names: &[Option<&str>]) -> Vec<Option<String>> {
+        names.iter().map(|n| n.map(str::to_owned)).collect()
+    }
+
+    /// The first row keeps the name; the rest of the batch numbers
+    /// around it, the same way the daemon will when they arrive.
+    #[test]
+    fn a_batch_numbers_within_itself() {
+        let out = plan(
+            &[],
+            &wanted(&[Some("clip.mkv"), Some("clip.mkv"), Some("clip.mkv")]),
+        );
+        assert_eq!(out[0], None, "nothing to say about the first");
+        assert_eq!(out[1].as_deref(), Some("clip_1.mkv"));
+        assert_eq!(out[2].as_deref(), Some("clip_2.mkv"));
+    }
+
+    #[test]
+    fn what_the_list_already_holds_counts_too() {
+        let out = plan(&keys(&["clip.mkv"]), &wanted(&[Some("clip.mkv")]));
+        assert_eq!(out[0].as_deref(), Some("clip_1.mkv"));
+    }
+
+    /// An unticked row is not being added, so it neither takes a name
+    /// nor needs a hint.
+    #[test]
+    fn a_row_that_is_not_going_takes_no_name() {
+        let out = plan(&[], &wanted(&[None, Some("clip.mkv")]));
+        assert_eq!(out, vec![None, None]);
+    }
+
+    #[test]
+    fn a_free_name_says_nothing() {
+        let out = plan(&keys(&["other.mkv"]), &wanted(&[Some("clip.mkv")]));
+        assert_eq!(out, vec![None]);
     }
 }
