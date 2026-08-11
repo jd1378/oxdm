@@ -1441,10 +1441,10 @@ impl AppState {
         id: JobId,
         filename: String,
     ) -> Option<std::path::PathBuf> {
-        let name = filename.trim();
-        if name.is_empty() {
-            return None;
-        }
+        // odl took this from the server's `Content-Disposition` or the
+        // URL; it is a suggestion, not a path.
+        let name = crate::domain::filename::sanitize(&filename)?;
+        let name = name.as_str();
         let settings = self.settings.read().await.clone();
         let mut jobs = self.jobs.write().await;
         let old = jobs.get(&id).cloned()?;
@@ -1508,6 +1508,7 @@ impl AppState {
                 "cannot change source while the download is running".into(),
             ));
         }
+        let filename = filename.and_then(|n| crate::domain::filename::sanitize(&n));
         if let Some(name) = filename.as_deref().filter(|n| !n.trim().is_empty())
             && name_is_taken(&jobs, name, Some(id))
         {
@@ -2264,6 +2265,11 @@ impl AppState {
         probe: ProbeFacts,
     ) -> Result<JobId, JobError> {
         let id = JobId::new();
+        // Nobody downstream re-checks this: `save_dir.join(filename)` is
+        // where the bytes land and what "delete file" removes. Most
+        // names here were written by the server (`Content-Disposition`,
+        // or the URL's last path segment), so this is the boundary.
+        let filename = filename.and_then(|n| crate::domain::filename::sanitize(&n));
         // Whether this job arrives knowing anything about the file. A
         // caller that probed says so by passing what it found; one that
         // did not gets the answer filled in behind it.
@@ -2379,7 +2385,10 @@ impl AppState {
             .await
             .ok_or_else(|| JobError::Other("job not found".into()))?;
 
-        if let Some(name) = edit.filename.as_deref().filter(|n| !n.trim().is_empty())
+        let edit_filename = edit
+            .filename
+            .and_then(|n| crate::domain::filename::sanitize(&n));
+        if let Some(name) = edit_filename.as_deref().filter(|n| !n.trim().is_empty())
             && name_is_taken(&*self.jobs.read().await, name, Some(id))
         {
             return Err(JobError::NameTaken {
@@ -2389,7 +2398,7 @@ impl AppState {
         let mut new_job = entry.job.clone();
         new_job.url = edit.url;
         new_job.save_dir = edit.save_dir;
-        new_job.filename = edit.filename;
+        new_job.filename = edit_filename;
         new_job.referrer = edit.referrer;
         new_job.headers = edit.headers;
         new_job.max_connections = edit.max_connections;
