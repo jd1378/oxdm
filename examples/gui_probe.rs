@@ -274,6 +274,7 @@ fn inputs_page(t: &theme::Tokens) -> Element<'static, Msg> {
         container(widget::rate_chart(
             widget::RateChart {
                 samples: vec![0.2, 0.5, 1.4, 2.5, 2.2, 2.5, 1.9],
+                capacity: 7,
                 max: 2.5,
                 avg: 1.6,
                 accent: t.action_primary,
@@ -402,6 +403,58 @@ fn bars_page(t: &theme::Tokens) -> Element<'static, Msg> {
     container(col).padding(24.0).width(Length::Fill).into()
 }
 
+/// The download window's transfer-rate chart, at the width it renders
+/// at there: a full window of history, and a partly filled one.
+fn chart_page(t: &theme::Tokens) -> Element<'static, Msg> {
+    // A plausible trace: a ramp up, a plateau with the wobble a real
+    // connection has, and a dip.
+    let series = |n: usize| -> Vec<f32> {
+        (0..n)
+            .map(|i| {
+                let x = i as f32;
+                let base = (x / 6.0).min(1.0) * 900_000.0;
+                let wobble = (x * 0.7).sin() * 60_000.0 + (x * 0.23).cos() * 40_000.0;
+                let dip = if (18..24).contains(&i) {
+                    -350_000.0
+                } else {
+                    0.0
+                };
+                (base + wobble + dip).max(0.0)
+            })
+            .collect()
+    };
+    let one = |label: &'static str, samples: Vec<f32>| {
+        let max = samples.iter().copied().fold(1.0_f32, f32::max);
+        let avg = samples.iter().sum::<f32>() / samples.len().max(1) as f32;
+        column![
+            text(label).font(theme::BODY).size(12.0).color(t.fg_2),
+            container(widget::rate_chart(
+                widget::RateChart {
+                    samples,
+                    capacity: 60,
+                    max,
+                    avg,
+                    accent: t.action_primary,
+                    grid: color::with_alpha(t.fg_4, 170.0 / 255.0),
+                    label_color: t.fg_3,
+                },
+                104.0,
+            ))
+            .width(Length::Fixed(460.0)),
+        ]
+        .spacing(6.0)
+    };
+    container(
+        column![
+            one("full window (60 samples)", series(60)),
+            one("filling (22 samples)", series(22)),
+        ]
+        .spacing(24.0),
+    )
+    .padding(24.0)
+    .into()
+}
+
 fn view(state: &Probe) -> Element<'_, Msg> {
     let t = state.tokens;
     match state.page.as_str() {
@@ -409,6 +462,7 @@ fn view(state: &Probe) -> Element<'_, Msg> {
         "inputs" => return page_bg(&t, inputs_page(&t)),
         "switches" => return page_bg(&t, switches_page(&t)),
         "bars" => return page_bg(&t, bars_page(&t)),
+        "chart" => return page_bg(&t, chart_page(&t)),
         "canvas" => {
             return iced::widget::canvas(DebugCanvas)
                 .width(Length::Fill)
