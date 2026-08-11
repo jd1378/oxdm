@@ -175,10 +175,11 @@ pub enum Request {
     /// field is `None` when no ciphertext is present.
     JobSecretsPlaintext(JobId),
     /// Boot-time health check for the on-disk SQLite store. Reply is
-    /// `Reply::DbStatus(None)` when the original `Store::open` call
-    /// succeeded, or `Reply::DbStatus(Some(msg))` when the daemon
-    /// fell back to an in-memory store. The GUI uses this to drive
-    /// the Exit / Reset recovery modal.
+    /// `Reply::DbStatus`: `error` is set when the original
+    /// `Store::open` failed and the daemon fell back to an in-memory
+    /// store (the GUI drives its Exit / Reset recovery modal off it),
+    /// `warning` when the store opened but something inside it could
+    /// not be read — settings, or individual job rows.
     DbStatus,
     /// User acknowledged the "database broken" recovery dialog and
     /// picked Reset. Daemon renames the corrupt file to a `.bak`
@@ -405,7 +406,12 @@ pub enum Reply {
         proxy_password: Option<String>,
         cookies: Option<String>,
     },
-    DbStatus(Option<String>),
+    DbStatus {
+        /// The store is unusable; the recovery modal is the answer.
+        error: Option<String>,
+        /// The store is fine but something in it would not read.
+        warning: Option<String>,
+    },
     WatchLimit(Option<crate::domain::WatchLimit>),
     /// A freshly minted pairing code, not yet saved anywhere.
     ExtToken(String),

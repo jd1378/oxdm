@@ -161,131 +161,108 @@ impl Store {
         // into the same in-memory recovery branch that file corruption
         // / sqlite IO errors take, and the GUI offers Exit / Reset.
         if let Some(mut n) = stored_version {
-            while n < SCHEMA_VERSION {
-                let next = n + 1;
-                match next {
-                    2 => {
-                        // v2: per-job Advanced / Checksums blobs. New
-                        // columns default to empty JSON so existing
-                        // rows hydrate to the Advanced::default() /
-                        // empty Vec<Checksum> shape on next load.
-                        self.with_conn(|conn| {
-                            conn.execute_batch(
-                                "ALTER TABLE jobs ADD COLUMN advanced_json TEXT NOT NULL DEFAULT '{}';
-                                 ALTER TABLE jobs ADD COLUMN checksums_json TEXT NOT NULL DEFAULT '[]';",
-                            )
-                        })
-                        .await
-                        .map_err(StoreError::Sql)?;
-                    }
-                    3 => {
-                        // v3: per-job run stats. `started_at` /
-                        // `finished_at` are nullable RFC3339 timestamps
-                        // (NULL = not yet started / finished);
-                        // `retries` counts PartRetrying events and
-                        // defaults to 0 so existing rows hydrate clean.
-                        self.with_conn(|conn| {
-                            conn.execute_batch(
-                                "ALTER TABLE jobs ADD COLUMN started_at TEXT;
-                                 ALTER TABLE jobs ADD COLUMN finished_at TEXT;
-                                 ALTER TABLE jobs ADD COLUMN retries INTEGER NOT NULL DEFAULT 0;",
-                            )
-                        })
-                        .await
-                        .map_err(StoreError::Sql)?;
-                    }
-                    4 => {
-                        // v4: captured response headers from the last
-                        // evaluate probe. `'null'` hydrates to
-                        // `captured_response: None` — "never probed",
-                        // which is what an existing row means.
-                        self.with_conn(|conn| {
-                            conn.execute_batch(
-                                "ALTER TABLE jobs ADD COLUMN response_headers_json TEXT NOT NULL DEFAULT 'null';",
-                            )
-                        })
-                        .await
-                        .map_err(StoreError::Sql)?;
-                    }
-                    7 => {
-                        // v7: an unfinished hash check. 0 on existing
-                        // rows — a check that was running before this
-                        // column existed is one nothing recorded, and
-                        // hashing every completed file on first launch
-                        // to find out would cost more than it is worth.
-                        self.with_conn(|conn| {
-                            conn.execute_batch(
-                                "ALTER TABLE jobs ADD COLUMN verify_pending INTEGER NOT NULL DEFAULT 0;",
-                            )
-                        })
-                        .await
-                        .map_err(StoreError::Sql)?;
-                    }
-                    6 => {
-                        // v6: retries + resumes folded into one
-                        // user-facing "interruptions" count. 0 on
-                        // existing rows: the runs they describe are
-                        // over, and inventing a number for them would
-                        // be a guess.
-                        self.with_conn(|conn| {
-                            conn.execute_batch(
-                                "ALTER TABLE jobs ADD COLUMN interruptions INTEGER NOT NULL DEFAULT 0;",
-                            )
-                        })
-                        .await
-                        .map_err(StoreError::Sql)?;
-                    }
-                    5 => {
-                        // v5: why the last run failed. `'null'`
-                        // hydrates to `status.error: None` — an
-                        // existing failed row simply has no reason
-                        // recorded, which is what it meant before.
-                        self.with_conn(|conn| {
-                            conn.execute_batch(
-                                "ALTER TABLE jobs ADD COLUMN error_json TEXT NOT NULL DEFAULT 'null';",
-                            )
-                        })
-                        .await
-                        .map_err(StoreError::Sql)?;
-                    }
-                    8 => {
-                        // v8: how long a run actually spent
-                        // transferring. NULL on existing rows, which
-                        // reads as "not recorded": the completion page
-                        // falls back to wall clock there rather than
-                        // inventing a duration for a run that is over.
-                        self.with_conn(|conn| {
-                            conn.execute_batch("ALTER TABLE jobs ADD COLUMN active_ms INTEGER;")
-                        })
-                        .await
-                        .map_err(StoreError::Sql)?;
-                    }
-                    _ => {
-                        return Err(StoreError::Corrupt(format!(
-                            "schema_version {n} on disk, expected {SCHEMA_VERSION}, no migration to {next}"
-                        )));
-                    }
-                }
-                n = next;
-            }
             if n > SCHEMA_VERSION {
                 return Err(StoreError::Corrupt(format!(
                     "schema_version {n} on disk is newer than this build ({SCHEMA_VERSION})"
                 )));
             }
-            // Bump the recorded version. UPDATE is fine because the row
-            // was inserted on first boot; never deleted.
-            self.with_conn(|conn| {
-                conn.execute(
-                    "UPDATE schema_version SET version = ?1",
-                    params![SCHEMA_VERSION],
-                )
-            })
-            .await
-            .map_err(StoreError::Sql)?;
+            while n < SCHEMA_VERSION {
+                let next = n + 1;
+                let ddl = match next {
+                    // v2: per-job Advanced / Checksums blobs. New
+                    // columns default to empty JSON so existing rows
+                    // hydrate to the Advanced::default() / empty
+                    // Vec<Checksum> shape on next load.
+                    2 => {
+                        "ALTER TABLE jobs ADD COLUMN advanced_json TEXT NOT NULL DEFAULT '{}';
+                         ALTER TABLE jobs ADD COLUMN checksums_json TEXT NOT NULL DEFAULT '[]';"
+                    }
+                    // v3: per-job run stats. `started_at` /
+                    // `finished_at` are nullable RFC3339 timestamps
+                    // (NULL = not yet started / finished); `retries`
+                    // counts PartRetrying events and defaults to 0 so
+                    // existing rows hydrate clean.
+                    3 => {
+                        "ALTER TABLE jobs ADD COLUMN started_at TEXT;
+                         ALTER TABLE jobs ADD COLUMN finished_at TEXT;
+                         ALTER TABLE jobs ADD COLUMN retries INTEGER NOT NULL DEFAULT 0;"
+                    }
+                    // v4: captured response headers from the last
+                    // evaluate probe. `'null'` hydrates to
+                    // `captured_response: None` — "never probed", which
+                    // is what an existing row means.
+                    4 => {
+                        "ALTER TABLE jobs ADD COLUMN response_headers_json TEXT NOT NULL DEFAULT 'null';"
+                    }
+                    // v5: why the last run failed. `'null'` hydrates to
+                    // `status.error: None` — an existing failed row
+                    // simply has no reason recorded, which is what it
+                    // meant before.
+                    5 => "ALTER TABLE jobs ADD COLUMN error_json TEXT NOT NULL DEFAULT 'null';",
+                    // v6: retries + resumes folded into one user-facing
+                    // "interruptions" count. 0 on existing rows: the
+                    // runs they describe are over, and inventing a
+                    // number for them would be a guess.
+                    6 => "ALTER TABLE jobs ADD COLUMN interruptions INTEGER NOT NULL DEFAULT 0;",
+                    // v7: an unfinished hash check. 0 on existing rows —
+                    // a check that was running before this column
+                    // existed is one nothing recorded, and hashing every
+                    // completed file on first launch to find out would
+                    // cost more than it is worth.
+                    7 => "ALTER TABLE jobs ADD COLUMN verify_pending INTEGER NOT NULL DEFAULT 0;",
+                    // v8: how long a run actually spent transferring.
+                    // NULL on existing rows, which reads as "not
+                    // recorded": the completion page falls back to wall
+                    // clock there rather than inventing a duration for a
+                    // run that is over.
+                    8 => "ALTER TABLE jobs ADD COLUMN active_ms INTEGER;",
+                    _ => {
+                        return Err(StoreError::Corrupt(format!(
+                            "schema_version {n} on disk, expected {SCHEMA_VERSION}, no migration to {next}"
+                        )));
+                    }
+                };
+                self.apply_migration(next, ddl).await?;
+                n = next;
+            }
         }
 
         self.bootstrap_main_queue().await?;
+        Ok(())
+    }
+
+    /// Apply one rung of the ladder: its DDL **and** the version bump,
+    /// in a single transaction.
+    ///
+    /// The ladder used to run each step in its own autocommit and write
+    /// the version once at the end, so a daemon killed (or an IO error
+    /// hit) part-way left columns applied under a stale version. The
+    /// next launch would replay the same `ALTER`, get `duplicate column
+    /// name`, and fail `Store::open` — permanently, since nothing about
+    /// the situation changes by retrying, leaving Reset (which deletes
+    /// the database) as the user's only way forward.
+    ///
+    /// SQLite makes DDL transactional, so with the bump inside the
+    /// transaction a half-applied step simply never happened. The
+    /// `table_info` check on top of that recovers a database already
+    /// stranded by the old behaviour.
+    async fn apply_migration(&self, version: i32, ddl: &'static str) -> Result<(), StoreError> {
+        self.with_conn(move |conn| {
+            let tx = conn.transaction()?;
+            for stmt in ddl.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+                if let Some(column) = added_column(stmt)
+                    && column_exists(&tx, "jobs", column)?
+                {
+                    continue;
+                }
+                tx.execute_batch(stmt)?;
+            }
+            tx.execute("UPDATE schema_version SET version = ?1", params![version])?;
+            tx.commit()
+        })
+        .await
+        .map_err(StoreError::Sql)?;
+        tracing::info!(version, "applied schema migration");
         Ok(())
     }
 
@@ -533,7 +510,15 @@ impl Store {
         .map_err(StoreError::Sql)
     }
 
-    pub async fn list_jobs(&self) -> Result<Vec<Job>, StoreError> {
+    /// Every job the database holds, plus how many rows could not be
+    /// read.
+    ///
+    /// One unreadable row used to fail the whole call, and the caller
+    /// turned that into an empty list with no message: the user opened
+    /// oxdm to no downloads at all, with every row intact on disk.
+    /// Skipping the row loses one download from the list instead of all
+    /// of them, and the count gives the boot path something to say.
+    pub async fn list_jobs(&self) -> Result<JobsLoaded, StoreError> {
         let rows = self
             .with_conn(|conn| {
                 let mut stmt = conn.prepare(
@@ -588,7 +573,18 @@ impl Store {
             .await
             .map_err(StoreError::Sql)?;
 
-        rows.into_iter().map(JobRow::into_job).collect()
+        let mut loaded = JobsLoaded::default();
+        for row in rows {
+            let id = row.id.clone();
+            match row.into_job() {
+                Ok(job) => loaded.jobs.push(job),
+                Err(e) => {
+                    tracing::warn!(id = %id, error = %e, "skipping an unreadable job row");
+                    loaded.skipped += 1;
+                }
+            }
+        }
+        Ok(loaded)
     }
 
     /// Send a job to the back of the list.
@@ -780,6 +776,14 @@ impl Store {
         .await
         .expect("store task join")
     }
+}
+
+/// What a `list_jobs` read found: the jobs it could build, and how many
+/// rows it had to leave behind.
+#[derive(Debug, Default)]
+pub struct JobsLoaded {
+    pub jobs: Vec<Job>,
+    pub skipped: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1043,6 +1047,27 @@ impl JobRow {
     }
 }
 
+/// The column an `ALTER TABLE ... ADD COLUMN <name> ...` statement adds,
+/// so a step already applied under a stale version can be skipped
+/// rather than failing the launch.
+fn added_column(stmt: &str) -> Option<&str> {
+    let lower = stmt.to_ascii_lowercase();
+    let idx = lower.find("add column")?;
+    stmt[idx + "add column".len()..].split_whitespace().next()
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, rusqlite::Error> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name.eq_ignore_ascii_case(column) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn phase_to_str(p: Phase) -> &'static str {
     match p {
         Phase::Queued => "queued",
@@ -1274,7 +1299,7 @@ mod tests {
         // Reopen.
         drop(store);
         let store = Store::open(db).await.unwrap();
-        let mut listed = store.list_jobs().await.unwrap();
+        let mut listed = store.list_jobs().await.unwrap().jobs;
         listed.sort_by_key(|j| j.created_at);
 
         assert_eq!(listed.len(), 3);
@@ -1299,7 +1324,7 @@ mod tests {
 
         // Delete one.
         store.delete_job(a.id).await.unwrap();
-        let after = store.list_jobs().await.unwrap();
+        let after = store.list_jobs().await.unwrap().jobs;
         assert_eq!(after.len(), 2);
         assert!(after.iter().all(|j| j.id != a.id));
     }
@@ -1316,7 +1341,7 @@ mod tests {
 
         drop(store);
         let store = Store::open(db).await.unwrap();
-        let listed = store.list_jobs().await.unwrap();
+        let listed = store.list_jobs().await.unwrap().jobs;
         assert_eq!(listed.len(), 1);
         // No runner exists post-restart; transient phases must demote.
         assert_eq!(listed[0].status.phase, Phase::Paused);
@@ -1379,7 +1404,7 @@ mod tests {
 
         // Open via Store → migration ladder runs 2 → 3.
         let store = Store::open(db).await.unwrap();
-        let listed = store.list_jobs().await.unwrap();
+        let listed = store.list_jobs().await.unwrap().jobs;
         assert_eq!(listed.len(), 1);
         let j = &listed[0];
         assert_eq!(j.filename.as_deref(), Some("old.zip"));
@@ -1410,7 +1435,7 @@ mod tests {
             probed_at: 1_700_000_000,
         });
         store.upsert_job(&updated).await.unwrap();
-        let reread = store.list_jobs().await.unwrap();
+        let reread = store.list_jobs().await.unwrap().jobs;
         assert_eq!(reread[0].retries, 4);
         assert_eq!(reread[0].interruptions, 6);
         assert!(
@@ -1419,6 +1444,80 @@ mod tests {
         );
         assert!(reread[0].finished_at.is_some());
         assert_eq!(reread[0].captured_response, updated.captured_response);
+    }
+
+    /// The state an interrupted upgrade used to leave behind: columns
+    /// applied, version stale. It must not be terminal.
+    #[tokio::test]
+    async fn a_half_applied_migration_finishes_instead_of_bricking_the_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("oxdm.db");
+        {
+            let store = Store::open(db.clone()).await.unwrap();
+            drop(store);
+            // Rewind the recorded version while leaving every column in
+            // place — what a kill between the ALTER and the bump used to
+            // produce.
+            let conn = Connection::open(&db).unwrap();
+            conn.execute("UPDATE schema_version SET version = 2", [])
+                .unwrap();
+        }
+
+        let store = Store::open(db.clone()).await.unwrap();
+        assert_eq!(store.list_jobs().await.unwrap().jobs.len(), 0);
+
+        // And the ladder actually finished rather than stopping at the
+        // first already-applied rung.
+        let conn = Connection::open(&db).unwrap();
+        let v: i32 = conn
+            .query_row("SELECT version FROM schema_version LIMIT 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn a_migration_step_names_the_column_it_adds() {
+        assert_eq!(
+            added_column("ALTER TABLE jobs ADD COLUMN active_ms INTEGER"),
+            Some("active_ms")
+        );
+        assert_eq!(
+            added_column("alter table jobs add column error_json TEXT NOT NULL DEFAULT 'null'"),
+            Some("error_json")
+        );
+        assert_eq!(added_column("UPDATE jobs SET retries = 0"), None);
+    }
+
+    /// One unreadable row used to take the whole list with it.
+    #[tokio::test]
+    async fn a_broken_row_is_skipped_and_counted_not_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("oxdm.db");
+        let store = Store::open(db.clone()).await.unwrap();
+        let queue_id = store.main_queue_id().await.unwrap();
+
+        let good = sample_job(&store, "keeper.zip", Phase::Paused).await;
+        store.upsert_job(&good).await.unwrap();
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute(
+                "INSERT INTO jobs (id, url, save_dir, filename, queue_id, phase, created_at) \
+                 VALUES (?1, 'not a url', '/tmp', 'broken.zip', ?2, 'paused', ?3)",
+                params![
+                    JobId::new().to_string(),
+                    queue_id.to_string(),
+                    chrono::Utc::now().to_rfc3339(),
+                ],
+            )
+            .unwrap();
+        }
+
+        let loaded = store.list_jobs().await.unwrap();
+        assert_eq!(loaded.skipped, 1);
+        assert_eq!(loaded.jobs.len(), 1);
+        assert_eq!(loaded.jobs[0].filename.as_deref(), Some("keeper.zip"));
     }
 
     #[tokio::test]

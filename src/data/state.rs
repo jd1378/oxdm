@@ -438,6 +438,12 @@ pub struct AppState {
     /// against an in-memory fallback. The GUI surfaces this via the
     /// `DbStatus` IPC + a recovery modal that offers Exit / Reset.
     db_error: RwLock<Option<String>>,
+    /// Something in the store could not be read, but the store itself
+    /// is fine: unparsable settings, a job row that would not hydrate.
+    /// Deliberately separate from `db_error` — the recovery modal's
+    /// only remedy is deleting the database, which is far too much to
+    /// offer for one bad row. The GUI raises this as a warning toast.
+    db_warning: RwLock<Option<String>>,
     /// The kernel limit that stopped the filesystem watcher, if one
     /// did. Set by `file_watch`, read by the UI's warning dialog, and
     /// cleared the moment a watcher starts.
@@ -492,18 +498,33 @@ impl AppState {
             }
         };
 
-        let mut settings = store.load_settings().await.unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "failed to load settings; using defaults");
-            Settings::default()
-        });
+        // A settings row that will not parse is a read failure, and a
+        // read failure must never become a write: `save_settings` is
+        // DELETE + re-INSERT, so persisting the defaults on top would
+        // destroy the user's folders, proxy, limits and pairing token
+        // rather than merely ignoring them for this run.
+        let mut db_warning: Option<String> = None;
+        let (mut settings, settings_are_readable) = match store.load_settings().await {
+            Ok(s) => (s, true),
+            Err(e) => {
+                tracing::error!(error = %e, "failed to load settings; running on defaults without saving");
+                db_warning = Some(format!(
+                    "Your settings could not be read ({e}). oxdm is running on defaults \
+                     and will not overwrite them."
+                ));
+                (Settings::default(), false)
+            }
+        };
 
         // Generate ext token on first launch and persist it. Token is
         // used by browser extensions to authenticate against the local
         // WebSocket bridge — see `ipc::ws`.
         if settings.ext_token.is_empty() {
             settings.ext_token = generate_token();
-            if let Err(e) = store.save_settings(&settings).await {
-                tracing::warn!(error = %e, "failed to persist generated ext token");
+            if settings_are_readable {
+                if let Err(e) = store.save_settings(&settings).await {
+                    tracing::warn!(error = %e, "failed to persist generated ext token");
+                }
             }
         }
 
@@ -540,7 +561,31 @@ impl AppState {
             _ => None,
         };
         let manager = build_manager(&settings, boot_proxy_password.as_deref());
-        let stored_jobs = store.list_jobs().await.unwrap_or_default();
+        // A failed read here is not "you have no downloads" — the rows
+        // are still on disk. Say so instead of showing an empty list.
+        let stored_jobs = match store.list_jobs().await {
+            Ok(loaded) => {
+                if loaded.skipped > 0 {
+                    let msg = format!(
+                        "{} download{} could not be read and {} left out of the list.",
+                        loaded.skipped,
+                        if loaded.skipped == 1 { "" } else { "s" },
+                        if loaded.skipped == 1 { "was" } else { "were" },
+                    );
+                    tracing::error!("{msg}");
+                    db_warning = db_warning.or(Some(msg));
+                }
+                loaded.jobs
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "failed to read the download list");
+                db_warning = db_warning.or(Some(format!(
+                    "The download list could not be read ({e}). Your downloads are still \
+                     on disk — do not add new ones until this is sorted out."
+                )));
+                Vec::new()
+            }
+        };
         let mut jobs = IndexMap::new();
         let completion = seeded_completion(&settings);
         for j in stored_jobs {
@@ -590,6 +635,7 @@ impl AppState {
             conflict_queue: RwLock::new(std::collections::VecDeque::new()),
             master_key: RwLock::new(master_key),
             db_error: RwLock::new(db_error),
+            db_warning: RwLock::new(db_warning),
             watch_limit: RwLock::new(None),
             power,
             probes: tokio::sync::Mutex::new(std::collections::HashMap::new()),
@@ -1709,6 +1755,12 @@ impl AppState {
     /// failed. The GUI uses this to gate the recovery modal.
     pub async fn db_error(&self) -> Option<String> {
         self.db_error.read().await.clone()
+    }
+
+    /// Something the store could not read while the store itself stayed
+    /// usable. Surfaced as a warning, never as the recovery modal.
+    pub async fn db_warning(&self) -> Option<String> {
+        self.db_warning.read().await.clone()
     }
 
     // ── filesystem watcher health ───────────────────────────────────

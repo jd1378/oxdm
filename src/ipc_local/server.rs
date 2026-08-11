@@ -761,7 +761,10 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
             Ok(()) => Reply::Ok,
             Err(e) => Reply::Err(e),
         },
-        Request::DbStatus => Reply::DbStatus(state.db_error().await),
+        Request::DbStatus => Reply::DbStatus {
+            error: state.db_error().await,
+            warning: state.db_warning().await,
+        },
         Request::WatchLimit => Reply::WatchLimit(state.watch_limit().await),
         Request::RetryFileWatch => {
             state.retry_file_watch().await;

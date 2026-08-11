@@ -342,13 +342,14 @@ impl Client {
         self.expect_ok(Request::WipeJobSecrets).await
     }
 
-    pub async fn db_status(&self) -> Result<Option<String>, String> {
+    /// `(error, warning)` — see `Request::DbStatus`.
+    pub async fn db_status(&self) -> Result<(Option<String>, Option<String>), String> {
         match self
             .request(Request::DbStatus)
             .await
             .map_err(|e| e.to_string())?
         {
-            Reply::DbStatus(v) => Ok(v),
+            Reply::DbStatus { error, warning } => Ok((error, warning)),
             Reply::Err(e) => Err(e),
             _ => unreachable!("db status reply"),
         }

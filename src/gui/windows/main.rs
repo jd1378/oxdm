@@ -129,7 +129,18 @@ pub enum SortColumn {
 
 #[derive(Clone)]
 pub enum Msg {
-    Connected(Result<(Arc<Client>, SnapshotData, Option<String>, bool), String>),
+    Connected(
+        Result<
+            (
+                Arc<Client>,
+                SnapshotData,
+                Option<String>,
+                Option<String>,
+                bool,
+            ),
+            String,
+        >,
+    ),
     Snapshot(SnapshotData),
     /// The daemon's answer about the filesystem watcher's health.
     WatchLimitFetched(Option<crate::domain::WatchLimit>),
@@ -694,11 +705,11 @@ pub fn boot() -> (App, Task<Msg>) {
                     .hello(crate::ipc_local::protocol::GuiKind::Main)
                     .await?;
                 let snap = client.snapshot().await?;
-                let db_error = client.db_status().await.ok().flatten();
+                let (db_error, db_warning) = client.db_status().await.unwrap_or_default();
                 // `secrets_status` returns `locked` directly (true =
                 // keyring/master key unavailable).
                 let secrets_locked = client.secrets_status().await.unwrap_or(false);
-                Ok((client, snap, db_error, secrets_locked))
+                Ok((client, snap, db_error, db_warning, secrets_locked))
             },
             Msg::Connected,
         ),
@@ -812,7 +823,7 @@ fn spawn_toast(m: &mut Main, severity: ToastSeverity, message: String) -> Task<M
 
 pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
     match msg {
-        Msg::Connected(Ok((client, snap, db_error, secrets_locked))) => {
+        Msg::Connected(Ok((client, snap, db_error, db_warning, secrets_locked))) => {
             let mut m = Main::new(client, snap);
             if let Some(e) = db_error {
                 m.db_error = Some(e);
@@ -826,10 +837,17 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 m.welcome_shown = true;
             }
             let client = m.client.clone();
+            // Something in the store would not read while the store
+            // itself stayed usable — said as a toast, because the
+            // recovery modal's only remedy is deleting the database.
+            let warned = db_warning.map(|w| spawn_toast(&mut m, ToastSeverity::Error, w));
             *app = App::Ready(Box::new(m));
             // Asked after the window exists: the answer may raise a
             // dialog, and there is nothing to raise it over until then.
-            fetch_watch_limit(client)
+            match warned {
+                Some(toast) => Task::batch([toast, fetch_watch_limit(client)]),
+                None => fetch_watch_limit(client),
+            }
         }
         Msg::Connected(Err(e)) => {
             *app = App::Failed(e);
