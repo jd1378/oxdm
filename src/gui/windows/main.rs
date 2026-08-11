@@ -129,18 +129,7 @@ pub enum SortColumn {
 
 #[derive(Clone)]
 pub enum Msg {
-    Connected(
-        Result<
-            (
-                Arc<Client>,
-                SnapshotData,
-                Option<String>,
-                Option<String>,
-                bool,
-            ),
-            String,
-        >,
-    ),
+    Connected(Result<Connection, String>),
     Snapshot(SnapshotData),
     /// The daemon's answer about the filesystem watcher's health.
     WatchLimitFetched(Option<crate::domain::WatchLimit>),
@@ -314,6 +303,17 @@ pub enum RemoveKind {
     /// ⇧⌥ "Delete permanently" — irreversible on-disk delete.
     Permanent,
 }
+
+/// What a successful connect hands back: the client, the first
+/// snapshot, the store's error and warning (see `Request::DbStatus`),
+/// and whether job secrets are locked.
+type Connection = (
+    Arc<Client>,
+    SnapshotData,
+    Option<String>,
+    Option<String>,
+    bool,
+);
 
 /// Toast severity drives the 3px left-accent color (design `.toast`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

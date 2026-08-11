@@ -74,6 +74,9 @@ fn origin_allowed(origin: Option<&str>) -> bool {
     }
 }
 
+// The refusal type is tungstenite's `ErrorResponse`, whose size is not
+// ours to choose.
+#[allow(clippy::result_large_err)]
 async fn handle(state: Arc<AppState>, stream: tokio::net::TcpStream) -> Result<(), IpcError> {
     use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 

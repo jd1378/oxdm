@@ -521,10 +521,8 @@ impl AppState {
         // WebSocket bridge — see `ipc::ws`.
         if settings.ext_token.is_empty() {
             settings.ext_token = generate_token();
-            if settings_are_readable {
-                if let Err(e) = store.save_settings(&settings).await {
-                    tracing::warn!(error = %e, "failed to persist generated ext token");
-                }
+            if settings_are_readable && let Err(e) = store.save_settings(&settings).await {
+                tracing::warn!(error = %e, "failed to persist generated ext token");
             }
         }
 
