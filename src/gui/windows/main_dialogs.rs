@@ -1064,12 +1064,12 @@ pub fn watch_limit<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg> 
         text(match limit.current {
             Some(n) => format!(
                 "Your system allows {n} of these at a time ({}), and they are all in \
-                 use — usually by a browser, which takes one per tab process, or an \
+                 use, usually by a browser, which takes one per tab process, or an \
                  editor watching a large project.",
                 limit.kind.sysctl_key()
             ),
             None => format!(
-                "The system limit {} is used up — usually by a browser, which takes \
+                "The system limit {} is used up, usually by a browser, which takes \
                  one per tab process, or an editor watching a large project.",
                 limit.kind.sysctl_key()
             ),

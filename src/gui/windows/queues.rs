@@ -2736,7 +2736,7 @@ fn pending_order(st: &State) -> Element<'_, Msg> {
     let starting = st.max_concurrent.min(count);
     let help = format!(
         "Downloads start from the top, {} at a time. Reordering takes effect immediately and \
-         never interrupts one already running — it decides what goes next.",
+         never interrupts one already running. It decides what goes next.",
         starting
     );
 

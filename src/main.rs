@@ -127,7 +127,7 @@ fn main() {
 }
 
 fn print_help() {
-    println!("oxdm — cross-platform download manager");
+    println!("oxdm - cross-platform download manager");
     println!();
     println!("USAGE:");
     println!("    oxdm                      Start (or surface) the daemon + main window");

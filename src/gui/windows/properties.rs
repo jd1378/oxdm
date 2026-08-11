@@ -3431,7 +3431,7 @@ fn headers_tab(st: &State) -> Element<'_, Msg> {
             t,
             "Merged from your global settings and this download's overrides: \
              what oxdm sends on the next request. Stored cookies and credentials \
-             are never displayed. The protocol adds its own on top — Accept-Encoding, \
+             are never displayed. The protocol adds its own on top: Accept-Encoding, \
              a Range per part, and a digest request on the first probe."
                 .to_owned(),
         ),

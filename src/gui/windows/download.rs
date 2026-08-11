@@ -3305,7 +3305,7 @@ fn nonresume_banner(st: &State) -> Option<Element<'_, Msg>> {
             st.tokens.status_warning,
             st.tokens.status_warning_bg,
             "plug-zap",
-            "Single connection · no resume — pausing or losing the connection restarts \
+            "Single connection · no resume. Pausing or losing the connection restarts \
              this download from the beginning."
                 .to_owned(),
         )

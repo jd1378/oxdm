@@ -1068,7 +1068,7 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             spawn_toast(
                 m,
                 ToastSeverity::Info,
-                "Limit raised — watching your download folders again".to_owned(),
+                "Limit raised. Watching your download folders again".to_owned(),
             )
         }
         Msg::WatchLimitRaised(Err(e)) => {
@@ -3669,7 +3669,7 @@ fn free_disk_str(path: &std::path::Path) -> String {
     };
     match fs4::available_space(probe) {
         Ok(free) => format!("{} free", format_bytes(free)),
-        Err(_) => "— free".to_owned(),
+        Err(_) => "Free space unknown".to_owned(),
     }
 }
 

@@ -1706,8 +1706,8 @@ fn general_section(st: &State) -> Element<'_, Msg> {
                     t,
                     "Forget downloads whose files are gone",
                     Some(
-                        "Watch what each download has on disk — the saved file, or \
-                         the cached parts of an unfinished one — and clear its entry \
+                        "Watch what each download has on disk (the saved file, or \
+                         the cached parts of an unfinished one) and clear its entry \
                          as soon as that is no longer there. Nothing is deleted, and \
                          an entry on a drive that is unplugged is kept."
                     ),
@@ -2301,8 +2301,8 @@ fn notifications_section(st: &State) -> Element<'_, Msg> {
                         t,
                         "Show dialog",
                         Some(
-                            "Opens the job's window on the question — a file that changed \
-                             on the server, a name already taken — where you answer it.",
+                            "Opens the job's window on the question, a file that changed \
+                             on the server or a name already taken, so you can answer it.",
                         ),
                         st.s.show_conflict_dialog,
                         Msg::ShowConflictDialog,

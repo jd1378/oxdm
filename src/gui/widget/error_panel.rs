@@ -433,7 +433,7 @@ fn recovery_copy(err: &JobError) -> Option<(Tone, &'static str, &'static [&'stat
             TRY,
             &[
                 "Restarting fetches everything again from byte 0, and what arrives is \
-                 the file the server has now — not the one this download started.",
+                 the file the server has now, not the one this download started.",
                 "If the link expired or moved, replace it under Properties → General \
                  and try again; the bytes already downloaded are kept.",
                 "If the server was mid-update, trying again later may find the original \
