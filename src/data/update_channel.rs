@@ -131,10 +131,49 @@ pub fn from_settings(s: &crate::domain::Settings) -> Arc<dyn UpdateChannel> {
         return Arc::new(NoopUpdateChannel);
     }
     match url::Url::parse(url) {
-        Ok(u) => Arc::new(HttpFeedUpdateChannel::new(
+        // https only: the feed decides which binary oxdm replaces
+        // itself with, so anyone able to rewrite it in flight chooses
+        // the next thing the user runs. The artifact's digest comes
+        // from the same document, which is exactly why the document
+        // itself has to be authenticated.
+        Ok(u) if u.scheme() == "https" => Arc::new(HttpFeedUpdateChannel::new(
             u,
             env!("CARGO_PKG_VERSION").to_string(),
         )),
+        Ok(u) => {
+            tracing::warn!(url = %u, "update feed ignored: only https feeds are used");
+            Arc::new(NoopUpdateChannel)
+        }
         Err(_) => Arc::new(NoopUpdateChannel),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::Settings;
+
+    fn channel_for(url: &str) -> Arc<dyn UpdateChannel> {
+        from_settings(&Settings {
+            update_feed_url: url.to_owned(),
+            ..Settings::default()
+        })
+    }
+
+    #[test]
+    fn only_an_https_feed_is_used() {
+        assert!(
+            channel_for("https://example.com/feed.json")
+                .feed_url()
+                .is_some()
+        );
+        assert!(
+            channel_for("http://example.com/feed.json")
+                .feed_url()
+                .is_none()
+        );
+        assert!(channel_for("file:///tmp/feed.json").feed_url().is_none());
+        assert!(channel_for("  ").feed_url().is_none());
+        assert!(channel_for("not a url").feed_url().is_none());
     }
 }

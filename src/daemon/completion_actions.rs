@@ -49,7 +49,16 @@ pub fn spawn(state: Arc<AppState>) {
                 }
                 continue;
             }
-            if let DomainEvent::JobCompleted { id, .. } = ev {
+            if let DomainEvent::JobCompleted { id, ref path, .. } = ev {
+                // The self-update artifact is a download like any
+                // other until it lands; from here it is the executable
+                // oxdm is about to become, so it goes to the helper
+                // that checks its digest rather than to the folder-
+                // opening, notification-raising path below.
+                if state.pending_update().await.is_some_and(|p| p.job == id) {
+                    state.stage_update(path.clone()).await;
+                    continue;
+                }
                 let Some(entry) = state.job_entry(id).await else {
                     continue;
                 };

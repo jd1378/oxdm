@@ -97,10 +97,14 @@ pub enum Request {
 
     // ── job lifecycle ──────────────────────────────────────────────
     AddJob(AddJobReq),
-    AddUpdateJob {
-        url: Url,
-        filename: Option<String>,
-    },
+    /// Fetch an update artifact as a hidden download. The daemon holds
+    /// on to the digest from the feed and checks the artifact against
+    /// it before anything is offered for installing.
+    AddUpdateJob(UpdateInfo),
+    /// Replace the running executable with the staged update and
+    /// relaunch. Only answered once an update has reached
+    /// `Event::UpdateStaged`.
+    InstallUpdate,
     /// Start a job. `manual` marks a gesture aimed at this one
     /// download (a row's Start, Add → Download now): only those raise
     /// the failure window. Bulk senders (batch triage) pass `false`.
@@ -472,6 +476,15 @@ pub enum Event {
         server_requested: bool,
     },
     Updater(UpdaterEvent),
+    /// An update artifact has been fetched and verified against the
+    /// digest the feed published. Installing it is the user's call.
+    UpdateStaged {
+        version: String,
+    },
+    /// The update stopped short of being installable.
+    UpdateFailed {
+        message: String,
+    },
     /// A destructive power action was armed; it executes at
     /// `deadline_ms` (epoch milliseconds) unless cancelled via
     /// `Request::CancelPendingShutdown`. GUIs derive the remaining

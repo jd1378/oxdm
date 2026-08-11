@@ -115,6 +115,15 @@ pub enum DomainEvent {
     /// limit. Carries nothing: the UI asks for the detail, so a state
     /// that changes twice in a row cannot leave a stale copy behind.
     WatchLimitChanged,
+    /// An update artifact has been fetched and its SHA-256 checked
+    /// against the feed. Nothing is replaced until the user says so.
+    UpdateStaged {
+        version: String,
+    },
+    /// The update did not get as far as being installable.
+    UpdateFailed {
+        message: String,
+    },
     /// Try to start the filesystem watcher again. Sent after the user
     /// raises the limit, so the fix takes effect now rather than at
     /// the next launch.

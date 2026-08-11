@@ -412,6 +412,12 @@ pub struct AppState {
     /// Held across "count what is running, then claim a slot" so two
     /// starts landing together cannot both see the last free slot.
     admission: tokio::sync::Mutex<()>,
+    /// The update being fetched, and the digest its artifact must
+    /// have. Cleared when it installs or fails.
+    pending_update: RwLock<Option<PendingUpdate>>,
+    /// The `oxdm-updater` helper, once it holds a verified artifact and
+    /// is waiting to be told to go ahead.
+    updater: tokio::sync::Mutex<Option<tokio::process::Child>>,
     /// Set once the daemon has been asked to quit and never cleared:
     /// the process is on its way out, waiting only for whatever cannot
     /// be interrupted. Everything that would start new work checks it,
@@ -637,6 +643,8 @@ impl AppState {
             hidden_jobs: RwLock::new(std::collections::HashSet::new()),
             run_finished: tokio::sync::Notify::new(),
             admission: tokio::sync::Mutex::new(()),
+            pending_update: RwLock::new(None),
+            updater: tokio::sync::Mutex::new(None),
             exiting: AtomicBool::new(false),
             main_queue_id,
             queues: RwLock::new(queues),
@@ -1185,11 +1193,25 @@ impl AppState {
     /// helper for verification + swap + relaunch.
     pub async fn add_update_job(
         self: &Arc<Self>,
-        url: url::Url,
-        suggested_filename: Option<String>,
+        info: crate::data::UpdateInfo,
     ) -> Result<JobId, JobError> {
-        let save_dir = std::env::temp_dir().join("oxdm-updates");
-        let _ = tokio::fs::create_dir_all(&save_dir).await;
+        // Checked before a byte is fetched: an artifact nobody can
+        // verify is one that must never reach the swap, and finding
+        // that out after the download has run is finding it out too
+        // late to mean anything.
+        if !is_sha256_hex(&info.sha256) {
+            return Err(JobError::Other(
+                "this update has no usable SHA-256, so it cannot be verified".into(),
+            ));
+        }
+        if info.url.scheme() != "https" {
+            return Err(JobError::Other(
+                "updates are only fetched over https".into(),
+            ));
+        }
+        let save_dir = update_staging_dir().map_err(|e| JobError::Io(e.to_string()))?;
+        let suggested_filename = Some(format!("oxdm-update-{}", info.version));
+        let url = info.url.clone();
         let id = self
             .add_job(
                 url,
@@ -1209,9 +1231,137 @@ impl AppState {
             )
             .await?;
         self.hidden_jobs.write().await.insert(id);
-        self.mark_run_intent(id, false).await;
+        // Remembered so the completion can be recognised: the digest to
+        // check the artifact against belongs to this download and no
+        // other.
+        *self.pending_update.write().await = Some(PendingUpdate { job: id, info });
+        // Aimed at by a person pressing a button, so it runs now rather
+        // than queueing behind the download list.
+        self.mark_run_intent(id, true).await;
         self.start_job(id).await?;
         Ok(id)
+    }
+
+    /// The update download in flight, if there is one.
+    pub async fn pending_update(&self) -> Option<PendingUpdate> {
+        self.pending_update.read().await.clone()
+    }
+
+    /// Hand the finished artifact to `oxdm-updater`, which verifies it
+    /// and reports back.
+    ///
+    /// Nothing is replaced here: the helper stops at `ready` and waits
+    /// for [`Self::install_update`]. The daemon only learns whether the
+    /// bytes it fetched are the bytes the feed promised.
+    pub async fn stage_update(self: &Arc<Self>, artifact: std::path::PathBuf) {
+        let Some(pending) = self.pending_update().await else {
+            return;
+        };
+        let exe = match crate::platform::current_exe() {
+            Ok(p) => p,
+            Err(e) => {
+                self.fail_update(format!("cannot find the running oxdm: {e}"))
+                    .await;
+                return;
+            }
+        };
+        let updater = exe.with_file_name(if cfg!(windows) {
+            "oxdm-updater.exe"
+        } else {
+            "oxdm-updater"
+        });
+        if !updater.exists() {
+            self.fail_update(format!(
+                "the updater helper is missing from this install ({})",
+                updater.display()
+            ))
+            .await;
+            return;
+        }
+
+        let mut child = match tokio::process::Command::new(&updater)
+            .arg("--exe")
+            .arg(&exe)
+            .arg("--pid")
+            .arg(std::process::id().to_string())
+            .arg("--artifact")
+            .arg(&artifact)
+            .arg("--sha256")
+            .arg(&pending.info.sha256)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                self.fail_update(format!("could not run the updater: {e}"))
+                    .await;
+                return;
+            }
+        };
+
+        let stdout = child.stdout.take();
+        *self.updater.lock().await = Some(child);
+        let Some(stdout) = stdout else {
+            self.fail_update("the updater said nothing".into()).await;
+            return;
+        };
+
+        let state = Arc::clone(self);
+        let version = pending.info.version.clone();
+        tokio::spawn(async move {
+            use tokio::io::AsyncBufReadExt;
+            let mut lines = tokio::io::BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let Ok(ev) = serde_json::from_str::<crate::data::UpdaterEvent>(&line) else {
+                    continue;
+                };
+                match ev {
+                    // Verified and waiting: this is the only point at
+                    // which offering to install is honest.
+                    crate::data::UpdaterEvent::Ready => {
+                        let _ = state.events.send(DomainEvent::UpdateStaged {
+                            version: version.clone(),
+                        });
+                    }
+                    crate::data::UpdaterEvent::Error { message } => {
+                        state.fail_update(message).await;
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        });
+    }
+
+    /// Greenlight the swap: the helper replaces the executable once
+    /// this process is gone, then relaunches it.
+    pub async fn install_update(self: &Arc<Self>) -> Result<(), String> {
+        use tokio::io::AsyncWriteExt;
+        let mut guard = self.updater.lock().await;
+        let child = guard
+            .as_mut()
+            .ok_or_else(|| "no update is ready to install".to_string())?;
+        let stdin = child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| "the updater is not listening".to_string())?;
+        stdin
+            .write_all(b"go\n")
+            .await
+            .map_err(|e| format!("could not tell the updater to go ahead: {e}"))?;
+        stdin
+            .flush()
+            .await
+            .map_err(|e| format!("could not tell the updater to go ahead: {e}"))?;
+        Ok(())
+    }
+
+    async fn fail_update(&self, message: String) {
+        tracing::warn!(%message, "update did not install");
+        *self.pending_update.write().await = None;
+        let _ = self.events.send(DomainEvent::UpdateFailed { message });
     }
 
     pub async fn is_hidden(&self, id: JobId) -> bool {
@@ -4303,6 +4453,39 @@ fn name_is_taken(jobs: &IndexMap<JobId, Arc<JobEntry>>, name: &str, except: Opti
 /// The downloads "Stop queue" pauses: the ones the queue is running of
 /// its own accord.
 ///
+/// An update download in flight: which job is fetching it, and what
+/// the feed said it should hash to.
+#[derive(Debug, Clone)]
+pub struct PendingUpdate {
+    pub job: JobId,
+    pub info: crate::data::UpdateInfo,
+}
+
+/// Is this a SHA-256 digest at all? An artifact whose digest is
+/// missing or malformed cannot be checked, and an unverifiable update
+/// is one oxdm has no business running.
+fn is_sha256_hex(s: &str) -> bool {
+    s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Where update artifacts are staged: a per-user 0700 folder, never
+/// the shared temp dir — the file becomes the executable oxdm replaces
+/// itself with, so anyone able to write it owns the next launch.
+fn update_staging_dir() -> std::io::Result<std::path::PathBuf> {
+    let dir = dirs::data_local_dir()
+        .or_else(dirs::data_dir)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("oxdm")
+        .join("updates");
+    std::fs::create_dir_all(&dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(dir)
+}
+
 /// A cache folder oxdm can actually write partials into.
 ///
 /// Blank and relative are both refused: neither names a place, and the
@@ -4947,6 +5130,19 @@ mod tests {
         assert!(!targets.contains(&by_hand), "the user asked for this one");
         assert!(!targets.contains(&assembling), "not a transfer to stop");
         assert!(!targets.contains(&paused), "nothing to stop");
+    }
+
+    #[test]
+    fn an_update_digest_has_to_be_a_digest() {
+        assert!(is_sha256_hex(&"a".repeat(64)));
+        assert!(is_sha256_hex(
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ));
+        // Nothing to check the artifact against.
+        assert!(!is_sha256_hex(""));
+        assert!(!is_sha256_hex(&"a".repeat(63)));
+        assert!(!is_sha256_hex(&"a".repeat(65)));
+        assert!(!is_sha256_hex(&"z".repeat(64)));
     }
 
     #[test]

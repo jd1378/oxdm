@@ -173,6 +173,21 @@ fn pid_alive(_pid: u32) -> bool {
 }
 
 fn swap_executable(staged: &PathBuf, target: &PathBuf) -> Result<(), String> {
+    // The staging folder is under the user's data dir and the install
+    // may be on another filesystem, where rename fails with EXDEV. Copy
+    // next to the target first so the final step is still a rename
+    // within one filesystem, and so a half-written executable is never
+    // what the user is left with.
+    let staged = match std::fs::rename(staged, target.with_extension("oxdm-new")) {
+        Ok(()) => target.with_extension("oxdm-new"),
+        Err(_) => {
+            let beside = target.with_extension("oxdm-new");
+            std::fs::copy(staged, &beside)
+                .map_err(|e| format!("staging next to the install failed: {e}"))?;
+            beside
+        }
+    };
+    let staged = &staged;
     let mut last_err = None;
     for _ in 0..40 {
         match std::fs::rename(staged, target) {

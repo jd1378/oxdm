@@ -49,7 +49,17 @@ pub enum UpdateUi {
     Checking,
     UpToDate,
     Available(crate::data::UpdateInfo),
-    Downloading(String),
+    /// Fetching the artifact through oxdm's own download machinery, so
+    /// the user can watch it arrive rather than stare at a spinner.
+    Downloading {
+        version: String,
+        job: crate::domain::JobId,
+        done: u64,
+        total: Option<u64>,
+    },
+    /// Fetched, and its SHA-256 matched what the feed published. The
+    /// swap happens on the user's word, not before.
+    Staged(String),
     Error(String),
 }
 
@@ -61,6 +71,13 @@ pub enum Msg {
     CheckUpdate,
     Checked(Result<Option<crate::data::UpdateInfo>, String>),
     DownloadUpdate,
+    DownloadStarted(Result<crate::domain::JobId, String>),
+    /// Ask the daemon how far the update download has got.
+    ProgressTick,
+    Progress(Option<(u64, Option<u64>)>),
+    /// Restart into the new version.
+    InstallNow,
+    Installed(Result<(), String>),
     ReleaseNotes,
     Repository,
     Donate,
@@ -162,6 +179,14 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                 |t| Msg::Themed(Box::new(t)),
                 Msg::Noop,
             ),
+            Event::UpdateStaged { version } => {
+                st.update = UpdateUi::Staged(version);
+                Task::none()
+            }
+            Event::UpdateFailed { message } => {
+                st.update = UpdateUi::Error(message);
+                Task::none()
+            }
             Event::Close => iced::exit(),
             Event::Focus => iced::window::latest().and_then(iced::window::gain_focus),
             _ => Task::none(),
@@ -183,15 +208,64 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             let UpdateUi::Available(info) = st.update.clone() else {
                 return Task::none();
             };
-            st.update = UpdateUi::Downloading(info.version.clone());
             let client = st.client.clone();
             Task::perform(
-                async move {
-                    let name = format!("oxdm-update-{}", info.version);
-                    client.add_update_job(info.url.clone(), Some(name)).await
-                },
-                |_| Msg::Noop,
+                async move { client.add_update_job(info).await },
+                Msg::DownloadStarted,
             )
+        }
+        Msg::DownloadStarted(Ok(job)) => {
+            let version = match &st.update {
+                UpdateUi::Available(info) => info.version.clone(),
+                _ => String::new(),
+            };
+            st.update = UpdateUi::Downloading {
+                version,
+                job,
+                done: 0,
+                total: None,
+            };
+            Task::none()
+        }
+        Msg::DownloadStarted(Err(e)) => {
+            st.update = UpdateUi::Error(e);
+            Task::none()
+        }
+        Msg::ProgressTick => {
+            let UpdateUi::Downloading { job, .. } = &st.update else {
+                return Task::none();
+            };
+            let (client, job) = (st.client.clone(), *job);
+            Task::perform(
+                async move {
+                    client
+                        .job_entry(job)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|e| (e.counters.downloaded, e.counters.total))
+                },
+                Msg::Progress,
+            )
+        }
+        Msg::Progress(Some((got, size))) => {
+            if let UpdateUi::Downloading { done, total, .. } = &mut st.update {
+                *done = got;
+                *total = size;
+            }
+            Task::none()
+        }
+        Msg::Progress(None) => Task::none(),
+        Msg::InstallNow => {
+            let client = st.client.clone();
+            Task::perform(async move { client.install_update().await }, Msg::Installed)
+        }
+        // The daemon is on its way out and the helper takes over from
+        // here; the window closes with everything else.
+        Msg::Installed(Ok(())) => Task::none(),
+        Msg::Installed(Err(e)) => {
+            st.update = UpdateUi::Error(e);
+            Task::none()
         }
         Msg::ReleaseNotes => {
             crate::platform::open_url(RELEASES_URL);
@@ -258,6 +332,12 @@ pub fn subscription(app: &App) -> Subscription<Msg> {
         }),
         crate::gui::ipc::lifecycle_events(GuiKind::About).map(Msg::Daemon),
     ];
+    if matches!(st.update, UpdateUi::Downloading { .. }) {
+        // Polled rather than subscribed to the counter pump: this is
+        // one hidden job, and the About window has no other use for a
+        // stream of every download's counters.
+        subs.push(iced::time::every(Duration::from_millis(500)).map(|_| Msg::ProgressTick));
+    }
     if st.shot.is_some() {
         subs.push(Shot::frames().map(|_| Msg::ShotTick));
     }
@@ -495,11 +575,37 @@ fn updates(st: &State) -> Element<'_, Msg> {
                 .filter(|n| !n.trim().is_empty())
                 .unwrap_or_else(|| "A newer release is available to install.".into()),
         ),
-        UpdateUi::Downloading(v) => (
+        UpdateUi::Downloading {
+            version,
+            done,
+            total,
+            ..
+        } => (
             "download",
             t.action_primary,
-            format!("Downloading v{v}…"),
-            "The update was added to your downloads.".into(),
+            match total {
+                Some(size) if *size > 0 => format!(
+                    "Downloading v{version}… {}%",
+                    (*done as f64 / *size as f64 * 100.0).round() as u64
+                ),
+                _ => format!("Downloading v{version}…"),
+            },
+            match total {
+                Some(size) => format!(
+                    "{} of {}",
+                    crate::gui::format::format_bytes(*done),
+                    crate::gui::format::format_bytes(*size)
+                ),
+                None => crate::gui::format::format_bytes(*done),
+            },
+        ),
+        UpdateUi::Staged(v) => (
+            "circle-check",
+            t.status_success,
+            format!("Version {v} is ready to install"),
+            "Downloaded and checked against the release checksum. oxdm restarts to \
+             finish, and your downloads pause first."
+                .into(),
         ),
         UpdateUi::Error(e) => (
             "circle-alert",
@@ -526,12 +632,28 @@ fn updates(st: &State) -> Element<'_, Msg> {
         ]
         .spacing(theme::space::S2)
         .into(),
-        UpdateUi::Downloading(_) => Btn::new("Release notes")
+        UpdateUi::Downloading { .. } => Btn::new("Release notes")
             .ghost()
             .size(BtnSize::Md)
             .icon("file-text")
             .on_press(Msg::ReleaseNotes)
             .view(t),
+        UpdateUi::Staged(_) => row![
+            Btn::new("Restart and install")
+                .primary()
+                .size(BtnSize::Md)
+                .icon("refresh-cw")
+                .on_press(Msg::InstallNow)
+                .view(t),
+            Btn::new("Release notes")
+                .ghost()
+                .size(BtnSize::Md)
+                .icon("file-text")
+                .on_press(Msg::ReleaseNotes)
+                .view(t),
+        ]
+        .spacing(theme::space::S2)
+        .into(),
         UpdateUi::UpToDate | UpdateUi::Error(_) => Btn::new("Check again")
             .ghost()
             .size(BtnSize::Md)

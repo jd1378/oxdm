@@ -241,13 +241,15 @@ impl Client {
         self.expect_added(Request::AddJob(req)).await
     }
 
-    pub async fn add_update_job(
-        &self,
-        url: url::Url,
-        filename: Option<String>,
-    ) -> Result<JobId, String> {
-        self.expect_added(Request::AddUpdateJob { url, filename })
-            .await
+    /// Fetch an update artifact as a hidden download.
+    pub async fn add_update_job(&self, info: UpdateInfo) -> Result<JobId, String> {
+        self.expect_added(Request::AddUpdateJob(info)).await
+    }
+
+    /// Install the staged update: the daemon exits and the helper puts
+    /// the new executable in place and relaunches it.
+    pub async fn install_update(&self) -> Result<(), String> {
+        self.expect_ok(Request::InstallUpdate).await
     }
 
     /// Start one download on the user's explicit request.

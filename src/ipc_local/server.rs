@@ -476,6 +476,8 @@ fn map_domain_event(filter: SubFilter, ev: DomainEvent) -> Option<Event> {
         DomainEvent::JobFailed { .. } => None,
         DomainEvent::SettingsChanged => Some(Event::SettingsChanged),
         DomainEvent::WatchLimitChanged => Some(Event::WatchLimitChanged),
+        DomainEvent::UpdateStaged { version } => Some(Event::UpdateStaged { version }),
+        DomainEvent::UpdateFailed { message } => Some(Event::UpdateFailed { message }),
         // Daemon-internal: the watcher listens for it, no client does.
         DomainEvent::FileWatchRetry => None,
         DomainEvent::ConflictRequested { .. } => Some(Event::ConflictChanged),
@@ -649,12 +651,19 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
             Ok(id) => Reply::JobAdded(id),
             Err(e) => Reply::Err(job_err_string(e)),
         },
-        Request::AddUpdateJob { url, filename } => {
-            match state.add_update_job(url, filename).await {
-                Ok(id) => Reply::JobAdded(id),
-                Err(e) => Reply::Err(job_err_string(e)),
+        Request::AddUpdateJob(info) => match state.add_update_job(info).await {
+            Ok(id) => Reply::JobAdded(id),
+            Err(e) => Reply::Err(job_err_string(e)),
+        },
+        Request::InstallUpdate => match state.install_update().await {
+            // The helper is waiting for this process to exit before it
+            // swaps the executable, so the quit is part of installing.
+            Ok(()) => {
+                crate::daemon::tray::quit_daemon(&tokio::runtime::Handle::current(), state);
+                Reply::Ok
             }
-        }
+            Err(e) => Reply::Err(e),
+        },
         Request::StartJob { id, manual } => {
             state.mark_run_intent(id, manual).await;
             match state.start_job(id).await {
