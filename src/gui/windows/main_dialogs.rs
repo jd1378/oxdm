@@ -124,9 +124,45 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 
 // ---------------------------------------------------------------- remove
 
+/// The round tinted disc the design puts a confirm dialog's icon in
+/// (`.cd-icon`: 36px, danger-tinted, danger-coloured glyph).
+fn confirm_disc<'a>(t: &Tokens, name: &'a str) -> Element<'a, Msg> {
+    let t2 = *t;
+    container(icons::icon(name, 18.0, t.status_danger))
+        .width(Length::Fixed(36.0))
+        .height(Length::Fixed(36.0))
+        .align_x(Alignment::Center)
+        .align_y(Alignment::Center)
+        .style(move |_| container::Style {
+            background: Some(t2.status_danger_bg.into()),
+            border: iced::Border {
+                radius: 18.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .into()
+}
+
+/// A sentence with the download's own name set in bold, the way the
+/// design writes every confirm body. The name is the thing the user
+/// checks before answering, so it carries the weight.
+fn named_body<'a>(t: &Tokens, name: &str, rest: &str) -> Element<'a, Msg> {
+    iced::widget::rich_text::<(), Msg, _, _>([
+        iced::widget::span(name.to_owned())
+            .font(theme::BODY_BOLD)
+            .color(t.fg_1),
+        iced::widget::span(rest.to_owned()),
+    ])
+    .font(theme::BODY)
+    .size(12.0)
+    .line_height(1.5)
+    .color(t.fg_2)
+    .into()
+}
+
 pub fn remove_confirm<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg> {
     let t = &m.tokens;
-    let t2 = *t;
     // Defensive: the overlay is only shown with state present, but a
     // future edit could set `Overlay::Remove` without it — degrade to
     // the base view instead of panicking.
@@ -134,68 +170,121 @@ pub fn remove_confirm<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Ms
         return base;
     };
 
-    // Headline/accent/CTA morph with the pre-selected kind (B4: the
-    // modifier picked the option, this dialog still confirms it).
+    // Headline/icon/body/CTA morph with the pre-selected kind (B4: the
+    // modifier picked the option, this dialog still confirms it). The
+    // body always names what is at stake and what happens to the bytes,
+    // in that order, because that is the question being answered.
     let n = st.ids.len();
-    let (hero_icon, hero_color, message, cta_label, cta_icon): (
-        &str,
-        iced::Color,
-        String,
-        &str,
-        &str,
-    ) = match st.kind {
+    let (icon_name, title, body, cta_label): (&str, String, Element<'a, Msg>, &str) = match st.kind
+    {
         RemoveKind::Trash => (
             "trash-2",
-            color::ochre::O400,
-            plural(
-                n,
-                "The file will be moved to your system Trash (recoverable).",
-                &format!("All {n} files will be moved to your system Trash (recoverable)."),
+            plural(n, "Move to Trash?", &format!("Move {n} files to Trash?")),
+            named_body(
+                t,
+                &st.filename,
+                &plural(
+                    n,
+                    " moves to your system Trash and leaves the list. You can put it back \
+                     from there.",
+                    " move to your system Trash and leave the list. You can put them back \
+                     from there.",
+                ),
             ),
             "Move to Trash",
-            "trash-2",
         ),
         RemoveKind::Permanent => (
             "triangle-alert",
-            color::rust::R300,
             plural(
                 n,
-                "The file will be permanently deleted from disk. This cannot be undone.",
-                &format!(
-                    "All {n} files will be permanently deleted from disk. This cannot be undone."
+                "Delete permanently?",
+                &format!("Delete {n} files permanently?"),
+            ),
+            named_body(
+                t,
+                &st.filename,
+                &plural(
+                    n,
+                    " is deleted from disk and leaves the list. This cannot be undone, and \
+                     it does not go to the Trash.",
+                    " are deleted from disk and leave the list. This cannot be undone, and \
+                     they do not go to the Trash.",
                 ),
             ),
             "Delete permanently",
-            "trash-2",
         ),
+        // Clean speaks in counts, not names: the title says how many
+        // and the body says what survives it.
         RemoveKind::Entry if st.clean => (
             "trash-2",
-            t.status_danger,
-            "Clears every completed entry from the list. Files stay on disk.".to_owned(),
-            "Clean",
+            plural(
+                n,
+                "Clear 1 finished download?",
+                &format!("Clear {n} finished downloads?"),
+            ),
+            text("This clears finished downloads from the list. The files stay on disk.")
+                .font(theme::BODY)
+                .size(12.0)
+                .line_height(1.5)
+                .color(t.fg_2)
+                .into(),
+            "Clear list",
+        ),
+        // The file is still there. Whether it stays is the checkbox
+        // below, so the sentence points at it rather than promising.
+        RemoveKind::Entry if st.has_files => (
             "trash-2",
+            plural(
+                n,
+                "Remove from list?",
+                &format!("Remove {n} downloads from the list?"),
+            ),
+            named_body(
+                t,
+                &st.filename,
+                &plural(
+                    n,
+                    " leaves the list. The file stays on disk unless you also delete it below.",
+                    " leave the list. The files stay on disk unless you also delete them below.",
+                ),
+            ),
+            "Remove",
         ),
         RemoveKind::Entry if st.finished() => (
-            "triangle-alert",
-            t.status_danger,
+            "trash-2",
             plural(
                 n,
-                "This only removes the entry from oxdm.",
-                &format!("This only removes the {n} entries from oxdm."),
+                "Remove from list?",
+                &format!("Remove {n} downloads from the list?"),
+            ),
+            named_body(
+                t,
+                &st.filename,
+                &plural(
+                    n,
+                    " leaves the list. Nothing on disk is touched.",
+                    " leave the list. Nothing on disk is touched.",
+                ),
             ),
             "Remove",
-            "trash-2",
         ),
         RemoveKind::Entry => (
-            "triangle-alert",
-            t.status_danger,
+            "trash-2",
             plural(
                 n,
-                "Partial (.part) files will be deleted from disk.",
-                &format!("Partial (.part) files for all {n} will be deleted from disk."),
+                "Remove from list?",
+                &format!("Remove {n} downloads from the list?"),
+            ),
+            named_body(
+                t,
+                &st.filename,
+                &plural(
+                    n,
+                    " leaves the list, and the partly downloaded data is discarded.",
+                    " leave the list, and the partly downloaded data is discarded.",
+                ),
             ),
             "Remove",
-            "trash-2",
         ),
     };
     let dont_label = if st.clean {
@@ -206,42 +295,21 @@ pub fn remove_confirm<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Ms
         "Don't ask again for incomplete downloads"
     };
 
-    let mut card = column![
-        container(
-            row![
-                icons::icon(hero_icon, 22.0, hero_color),
-                column![
-                    text(st.filename.clone())
-                        .font(theme::BODY_BOLD)
-                        .size(13.0)
-                        .color(t.fg_1),
-                    text(message).font(theme::BODY).size(12.0).color(t.fg_2),
-                ]
-                .spacing(2.0),
-            ]
-            .spacing(theme::space::S3)
-            .align_y(Alignment::Center),
-        )
-        .width(Length::Fill)
-        .padding(theme::space::S3)
-        .style(move |_| container::Style {
-            background: Some(t2.status_danger_bg.into()),
-            border: iced::Border {
-                color: t2.border_subtle,
-                width: 1.0,
-                radius: theme::surface::RADIUS.into(),
-            },
-            ..Default::default()
-        }),
+    let mut said = column![
+        text(title).font(theme::DISPLAY).size(14.0).color(t.fg_1),
+        body,
     ]
-    .spacing(theme::space::S3);
+    .spacing(5.0);
 
     // On-disk delete toggle: meaningful only when EVERY selected entry
     // has a finished file (a mixed selection has partials, and there is
     // nothing to offer for those) and they aren't going to Trash, which
     // moves the files itself.
+    let mut checks = column![].spacing(6.0);
+    let mut any_check = false;
     if st.has_files && !st.clean && st.kind != RemoveKind::Trash {
-        card = card.push(checkbox(
+        any_check = true;
+        checks = checks.push(checkbox(
             t,
             &plural(
                 n,
@@ -256,7 +324,8 @@ pub fn remove_confirm<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Ms
     // "Don't ask again" only applies to the safe entry-only removal —
     // irreversible kinds always confirm (B4), so don't offer to skip it.
     if st.kind == RemoveKind::Entry {
-        card = card.push(checkbox(
+        any_check = true;
+        checks = checks.push(checkbox(
             t,
             dont_label,
             st.dont_ask_again,
@@ -264,7 +333,17 @@ pub fn remove_confirm<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Ms
             Msg::RemoveDontAsk,
         ));
     }
-    card = card.push(
+    if any_check {
+        said = said.push(container(checks).padding(iced::Padding {
+            top: 10.0,
+            ..iced::Padding::ZERO
+        }));
+    }
+
+    let card = column![
+        row![confirm_disc(t, icon_name), said]
+            .spacing(14.0)
+            .align_y(Alignment::Start),
         row![
             iced::widget::Space::new().width(Length::Fill),
             Btn::new("Cancel")
@@ -273,16 +352,17 @@ pub fn remove_confirm<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Ms
                 .on_press(Msg::CloseOverlay)
                 .view(t),
             Btn::new(cta_label)
-                .danger_filled()
-                .icon(cta_icon)
+                .danger()
+                .icon("trash-2")
                 .on_press(Msg::RemoveConfirm)
                 .view(t),
         ]
         .spacing(theme::space::S2)
         .align_y(Alignment::Center),
-    );
+    ]
+    .spacing(14.0);
 
-    modal(t, base, card.into(), 440.0, Some(Msg::CloseOverlay))
+    modal(t, base, card.into(), 420.0, Some(Msg::CloseOverlay))
 }
 
 // ---------------------------------------------------------------- conflict
