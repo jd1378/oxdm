@@ -603,8 +603,8 @@ fn updates(st: &State) -> Element<'_, Msg> {
             "circle-check",
             t.status_success,
             format!("Version {v} is ready to install"),
-            "Downloaded and checked against the release checksum. oxdm restarts to \
-             finish, and your downloads pause first."
+            "Downloaded and checked against the release checksum. oxdm has to close to \
+             replace itself, so your downloads pause and it reopens when it is done."
                 .into(),
         ),
         UpdateUi::Error(e) => (
@@ -639,7 +639,7 @@ fn updates(st: &State) -> Element<'_, Msg> {
             .on_press(Msg::ReleaseNotes)
             .view(t),
         UpdateUi::Staged(_) => row![
-            Btn::new("Restart and install")
+            Btn::new("Restart to install")
                 .primary()
                 .size(BtnSize::Md)
                 .icon("refresh-cw")
