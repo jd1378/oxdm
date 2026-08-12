@@ -551,12 +551,17 @@ impl Client {
         }
     }
 
-    /// What the last check found, if anything — no network.
-    pub async fn update_found(&self) -> Option<UpdateInfo> {
-        match self.request(Request::UpdateFound).await {
-            Ok(Reply::UpdateInfo(v)) => v,
-            _ => None,
+    /// Where the update flow stands right now — no network.
+    pub async fn update_state(&self) -> crate::ipc_local::protocol::UpdateState {
+        match self.request(Request::UpdateState).await {
+            Ok(Reply::UpdateState(s)) => s,
+            _ => crate::ipc_local::protocol::UpdateState::Idle,
         }
+    }
+
+    /// Stop the update in flight and discard what it fetched.
+    pub async fn cancel_update(&self) -> Result<(), String> {
+        self.expect_ok(Request::CancelUpdate).await
     }
 
     /// Outer `Err` = transport failure; inner `Err` = structured probe

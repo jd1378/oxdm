@@ -29,6 +29,18 @@ const WIN_W: f32 = 468.0;
 /// exactly that much; the 5 is that shortfall.
 const WIN_H: f32 = 517.0;
 
+/// The page to open for this version, when the feed named one.
+///
+/// The feed's `notes` field is either prose to show on the card or a
+/// link to the release — the workflow writes a link. A value that
+/// parses as http(s) is treated as the latter and never printed as the
+/// card's description, since a bare URL is not a description.
+fn notes_url(info: &crate::data::UpdateInfo) -> Option<String> {
+    let notes = info.notes.as_deref()?.trim();
+    let url = url::Url::parse(notes).ok()?;
+    matches!(url.scheme(), "http" | "https").then(|| notes.to_owned())
+}
+
 /// Facts cargo does not expose to the crate itself; `build.rs` resolves
 /// them (each degrades to "unknown", never to a build failure).
 const ODL_VERSION: &str = env!("OXDM_ODL_VERSION");
@@ -77,7 +89,7 @@ pub enum UpdateUi {
 pub type Connection = (
     Arc<Client>,
     crate::domain::Settings,
-    Option<crate::data::UpdateInfo>,
+    crate::ipc_local::protocol::UpdateState,
 );
 
 #[derive(Clone)]
@@ -92,6 +104,8 @@ pub enum Msg {
     /// Ask the daemon how far the update download has got.
     ProgressTick,
     Progress(Option<(u64, Option<u64>)>),
+    /// Stop the download and throw away what it fetched.
+    CancelUpdate,
     /// Restart into the new version.
     InstallNow,
     Installed(Result<(), String>),
@@ -99,6 +113,8 @@ pub enum Msg {
     Repository,
     Donate,
     CopyBuildInfo,
+    /// Whatever the daemon says the update flow is doing now.
+    Resumed(Box<crate::ipc_local::protocol::UpdateState>),
     /// Flips "Copied" back to "Copy build info" once the confirmation
     /// has been readable for a moment.
     CopyExpired,
@@ -157,12 +173,12 @@ pub fn boot() -> (App, Task<Msg>) {
                     .map_err(|e| e.to_string())?;
                 client.hello(GuiKind::About).await?;
                 let snap = client.snapshot().await?;
-                // What the daemon already knows, so a window opened by
-                // an update alert — or by the user, minutes later —
-                // opens on the version rather than on a button that
-                // asks the feed the same question again.
-                let found = client.update_found().await;
-                Ok(Box::new((client, snap.settings, found)))
+                // Where the daemon has got to, not merely what it
+                // found. This window can be closed and reopened
+                // mid-download; without asking, it would offer to
+                // start an update that is already running.
+                let state = client.update_state().await;
+                Ok(Box::new((client, snap.settings, state)))
             },
             Msg::Connected,
         ),
@@ -172,19 +188,33 @@ pub fn boot() -> (App, Task<Msg>) {
 pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
     match msg {
         Msg::Connected(Ok(boxed)) => {
-            let (client, settings, found) = *boxed;
+            let (client, settings, state) = *boxed;
+            use crate::ipc_local::protocol::UpdateState;
+            let resumed = matches!(state, UpdateState::Downloading { .. });
             *app = App::Ready(Box::new(State {
                 tokens: Tokens::from_settings(&settings),
                 auto_check: settings.auto_check_updates,
                 client,
-                update: match found {
-                    Some(info) => UpdateUi::Available(info),
-                    None => UpdateUi::Idle,
+                update: match state {
+                    UpdateState::Idle => UpdateUi::Idle,
+                    UpdateState::Found { info } => UpdateUi::Available(info),
+                    UpdateState::Downloading { info, job } => UpdateUi::Downloading {
+                        version: info.version,
+                        job,
+                        done: 0,
+                        total: None,
+                    },
+                    UpdateState::Staged { version } => UpdateUi::Staged(version),
                 },
                 copied: false,
                 shot: Shot::from_env(),
             }));
-            Task::none()
+            // The figures come from the job itself; ask at once rather
+            // than showing 0% until the first tick.
+            match resumed {
+                true => Task::done(Msg::ProgressTick),
+                false => Task::none(),
+            }
         }
         Msg::Connected(Err(e)) => {
             *app = App::Failed(e);
@@ -310,6 +340,34 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             Task::none()
         }
         Msg::Progress(None) => Task::none(),
+        // The offer stands afterwards: the daemon keeps what the check
+        // found, so the card goes back to "Install update" rather than
+        // pretending there is no new version.
+        Msg::CancelUpdate => {
+            let client = st.client.clone();
+            Task::perform(
+                async move {
+                    let _ = client.cancel_update().await;
+                    client.update_state().await
+                },
+                |s| Msg::Resumed(Box::new(s)),
+            )
+        }
+        Msg::Resumed(state) => {
+            use crate::ipc_local::protocol::UpdateState;
+            st.update = match *state {
+                UpdateState::Idle => UpdateUi::Idle,
+                UpdateState::Found { info } => UpdateUi::Available(info),
+                UpdateState::Downloading { info, job } => UpdateUi::Downloading {
+                    version: info.version,
+                    job,
+                    done: 0,
+                    total: None,
+                },
+                UpdateState::Staged { version } => UpdateUi::Staged(version),
+            };
+            Task::none()
+        }
         Msg::InstallNow => {
             let client = st.client.clone();
             Task::perform(async move { client.install_update().await }, Msg::Installed)
@@ -324,8 +382,15 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             };
             Task::none()
         }
+        // The feed carries a link for the version in hand; the general
+        // listing is the fallback for a check that has not run or a
+        // feed that gave prose instead.
         Msg::ReleaseNotes => {
-            crate::platform::open_url(RELEASES_URL);
+            let notes = match &st.update {
+                UpdateUi::Available(info) => notes_url(info),
+                _ => None,
+            };
+            crate::platform::open_url(notes.as_deref().unwrap_or(RELEASES_URL));
             Task::none()
         }
         Msg::Repository => {
@@ -640,6 +705,8 @@ fn updates(st: &State) -> Element<'_, Msg> {
             info.notes
                 .clone()
                 .filter(|n| !n.trim().is_empty())
+                // A link belongs on the button, not in the sentence.
+                .filter(|_| notes_url(info).is_none())
                 .unwrap_or_else(|| "A newer release is available to install.".into()),
         ),
         UpdateUi::Downloading {
@@ -699,12 +766,22 @@ fn updates(st: &State) -> Element<'_, Msg> {
         ]
         .spacing(theme::space::S2)
         .into(),
-        UpdateUi::Downloading { .. } => Btn::new("Release notes")
-            .ghost()
-            .size(BtnSize::Md)
-            .icon("file-text")
-            .on_press(Msg::ReleaseNotes)
-            .view(t),
+        UpdateUi::Downloading { .. } => row![
+            Btn::new("Cancel")
+                .ghost()
+                .size(BtnSize::Md)
+                .icon("circle-x")
+                .on_press(Msg::CancelUpdate)
+                .view(t),
+            Btn::new("Release notes")
+                .ghost()
+                .size(BtnSize::Md)
+                .icon("file-text")
+                .on_press(Msg::ReleaseNotes)
+                .view(t),
+        ]
+        .spacing(theme::space::S2)
+        .into(),
         UpdateUi::Staged(_) => row![
             Btn::new("Restart to install")
                 .primary()

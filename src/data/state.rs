@@ -637,6 +637,38 @@ impl AppState {
                 Vec::new()
             }
         };
+        // An update artifact left behind by a daemon that did not
+        // finish installing it. The flow that owned it is gone — the
+        // installer process, the pending record and the flag that kept
+        // it out of the list all lived in memory — so what would
+        // survive is a mystery download named after a version, sitting
+        // in the user's list. Forget it and take its bytes with it; the
+        // next check downloads it again.
+        let staging = update_staging_dir().ok();
+        let (stored_jobs, orphans): (Vec<_>, Vec<_>) = stored_jobs
+            .into_iter()
+            .partition(|j| staging.as_deref().is_none_or(|dir| j.save_dir != dir));
+        for j in &orphans {
+            tracing::info!(job = %j.id, "dropping an update artifact left by an earlier run");
+            let _ = store.delete_job(j.id).await;
+            // Its parts and metadata, wherever the run was writing
+            // them. A forgotten job's working directory is never read
+            // again by anything.
+            let work_root = j
+                .work_root
+                .clone()
+                .unwrap_or_else(|| settings.work_dir.clone());
+            let _ = std::fs::remove_dir_all(per_job_dir(&work_root, j.id));
+        }
+        if let Some(dir) = &staging
+            && !orphans.is_empty()
+        {
+            // Everything in here belongs to that abandoned attempt:
+            // the artifact, whatever was unpacked from it, and the
+            // copy of oxdm that was going to install it.
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
         let mut jobs = IndexMap::new();
         let completion = seeded_completion(&settings);
         for j in stored_jobs {
@@ -4382,6 +4414,89 @@ impl AppState {
         }
         *self.found_update.write().await = found.clone();
         Ok(found)
+    }
+
+    /// Wait for a job's run task to actually finish.
+    ///
+    /// `pause` asks; the run ends when it ends. Anything that has to
+    /// act on the *stopped* job — removing it, in the one caller here —
+    /// has to wait for that, and bounded, because a run that will not
+    /// end must not hang the caller forever.
+    async fn await_run_end(&self, id: JobId) {
+        const GIVE_UP_AFTER: std::time::Duration = std::time::Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + GIVE_UP_AFTER;
+        while std::time::Instant::now() < deadline {
+            let running = self
+                .job_entry(id)
+                .await
+                .is_some_and(|e| e.running.load(Ordering::Acquire));
+            if !running {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        tracing::warn!(job = %id, "gave up waiting for the run to stop");
+    }
+
+    /// Where the update flow stands, for a window that has just opened.
+    ///
+    /// The daemon is the only thing that knows: About is a separate
+    /// process that can be closed and reopened mid-download, and
+    /// without this it would offer to start an update that is already
+    /// running — a second download of the same artifact, with the first
+    /// one orphaned.
+    pub async fn update_state(&self) -> crate::ipc_local::protocol::UpdateState {
+        use crate::ipc_local::protocol::UpdateState;
+        // Innermost first: a staged update has a download behind it and
+        // a found version behind that, and the furthest along is the
+        // one worth reporting.
+        if let Some(pending) = self.pending_update().await {
+            if self.updater.lock().await.is_some() {
+                return UpdateState::Staged {
+                    version: pending.info.version,
+                };
+            }
+            return UpdateState::Downloading {
+                info: pending.info,
+                job: pending.job,
+            };
+        }
+        match self.found_update().await {
+            Some(info) => UpdateState::Found { info },
+            None => UpdateState::Idle,
+        }
+    }
+
+    /// Stop the update in flight: kill the installer if one is waiting,
+    /// drop the download and everything it fetched.
+    ///
+    /// What the check found is deliberately kept, so the window goes
+    /// back to offering the update rather than pretending there is
+    /// none. Idempotent — cancelling nothing is not an error.
+    pub async fn cancel_update(self: &Arc<Self>) {
+        if let Some(mut child) = self.updater.lock().await.take() {
+            let _ = child.kill().await;
+        }
+        let Some(pending) = self.pending_update.write().await.take() else {
+            return;
+        };
+        // Stopped first: a job cannot be removed while its run is in
+        // flight, and this one is downloading by definition.
+        let _ = self.pause(pending.job).await;
+        self.await_run_end(pending.job).await;
+        // Purged, not merely stopped: half an artifact is worth nothing
+        // to anyone, and the next attempt fetches it again.
+        let _ = self
+            .remove(
+                pending.job,
+                RemoveOpts {
+                    purge_partial: true,
+                    delete_final_file: true,
+                },
+            )
+            .await;
+        self.hidden_jobs.write().await.remove(&pending.job);
+        tracing::info!(version = %pending.info.version, "update cancelled");
     }
 
     /// The newest version a check has turned up, if any.

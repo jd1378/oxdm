@@ -927,7 +927,11 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
             Ok(info) => Reply::UpdateInfo(info),
             Err(e) => Reply::Err(e),
         },
-        Request::UpdateFound => Reply::UpdateInfo(state.found_update().await),
+        Request::UpdateState => Reply::UpdateState(state.update_state().await),
+        Request::CancelUpdate => {
+            state.cancel_update().await;
+            Reply::Ok
+        }
         Request::CancelPendingShutdown => {
             state.cancel_pending_shutdown();
             Reply::Ok

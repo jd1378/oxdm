@@ -246,10 +246,15 @@ pub enum Request {
 
     // ── update channel ─────────────────────────────────────────────
     UpdateCheck,
-    /// What the last check found, without running one. Lets a window
-    /// opened after the fact — or spawned by an update alert — show the
-    /// version already known instead of asking the feed again.
-    UpdateFound,
+    /// Where the update flow currently stands, without touching the
+    /// network. A window opened after the fact — by an update alert, or
+    /// by the user a minute later — picks the flow up where it is
+    /// instead of offering to start it again.
+    UpdateState,
+    /// Abandon the update in flight: stop the download, throw away what
+    /// it fetched, and forget the installer waiting on it. What the
+    /// check found is kept, so the offer stands.
+    CancelUpdate,
 
     // ── one-shot helpers ───────────────────────────────────────────
     Probe(Url),
@@ -418,6 +423,7 @@ pub enum Reply {
     /// instead of a flattened string.
     ProbeResult(Result<ProbeResult, JobError>),
     UpdateInfo(Option<UpdateInfo>),
+    UpdateState(UpdateState),
     ConflictHead(Option<(JobId, ConflictKind, u64)>),
     ConflictLen(usize),
     SecretsStatus {
@@ -526,6 +532,20 @@ pub enum Event {
     /// daemon prefers to spawn a fresh subprocess over surfacing the
     /// existing one (per-download window re-open from main).
     Close,
+}
+
+/// How far along an update is, as the daemon sees it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum UpdateState {
+    /// Nothing found, or nothing looked for yet.
+    Idle,
+    /// A newer version exists and nothing has been fetched.
+    Found { info: UpdateInfo },
+    /// Its artifact is downloading, as this job.
+    Downloading { info: UpdateInfo, job: JobId },
+    /// Fetched, checked, and waiting on the user to say install.
+    Staged { version: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
