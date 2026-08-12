@@ -88,6 +88,10 @@ impl Store {
                      key   TEXT PRIMARY KEY,
                      value TEXT NOT NULL
                  );
+                 CREATE TABLE IF NOT EXISTS app_meta (
+                     key   TEXT PRIMARY KEY,
+                     value TEXT NOT NULL
+                 );
                  CREATE TABLE IF NOT EXISTS queues (
                      id              TEXT PRIMARY KEY,
                      name            TEXT NOT NULL,
@@ -467,6 +471,42 @@ impl Store {
             .map_err(|e| StoreError::Other(e.to_string()))?;
         migrate_download_dir(&mut s, legacy_base);
         Ok(s)
+    }
+
+    /// Read one row of daemon bookkeeping — things the app remembers
+    /// about itself rather than settings the user chose.
+    ///
+    /// A table of its own because `save_settings` rewrites the whole
+    /// `settings` table from the `Settings` struct: any key not in that
+    /// struct is deleted the next time the user presses Apply.
+    pub async fn meta(&self, key: &str) -> Option<String> {
+        let key = key.to_owned();
+        self.with_conn(move |conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT value FROM app_meta WHERE key = ?1",
+                    params![key],
+                    |r| r.get::<_, String>(0),
+                )
+                .ok())
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    pub async fn set_meta(&self, key: &str, value: &str) -> Result<(), StoreError> {
+        let (key, value) = (key.to_owned(), value.to_owned());
+        self.with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO app_meta (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![key, value],
+            )
+            .map(|_| ())
+        })
+        .await
+        .map_err(StoreError::Sql)
     }
 
     pub async fn save_settings(&self, s: &Settings) -> Result<(), StoreError> {
@@ -1232,6 +1272,33 @@ mod tests {
         assert_eq!(
             loaded.category_folder(crate::domain::Category::Other),
             PathBuf::from("/mnt/big"),
+        );
+    }
+
+    /// Daemon bookkeeping lives apart from settings precisely because
+    /// `save_settings` rewrites that whole table: pressing Apply must
+    /// not forget when the last update check ran.
+    #[tokio::test]
+    async fn meta_survives_a_settings_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("oxdm.db")).await.unwrap();
+
+        assert_eq!(store.meta("last_update_check").await, None);
+        store
+            .set_meta("last_update_check", "2026-08-12T00:00:00Z")
+            .await
+            .unwrap();
+        store.save_settings(&Settings::default()).await.unwrap();
+        assert_eq!(
+            store.meta("last_update_check").await.as_deref(),
+            Some("2026-08-12T00:00:00Z"),
+        );
+
+        // Same key twice is an update, not a second row.
+        store.set_meta("last_update_check", "later").await.unwrap();
+        assert_eq!(
+            store.meta("last_update_check").await.as_deref(),
+            Some("later")
         );
     }
 

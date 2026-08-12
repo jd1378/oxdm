@@ -20,6 +20,7 @@ pub mod completion_actions;
 pub mod environment_guard;
 pub mod notifications;
 pub mod tray;
+pub mod update_alerts;
 
 pub fn run() {
     run_inner(None, false);
@@ -90,7 +91,22 @@ fn spawn_workers(
     spawn_power_prompt(state.clone());
     completion_actions::spawn(state.clone());
     crate::data::spawn_hook_executor(state.clone());
-    crate::data::spawn_queue_scheduler(state.clone());
+    // One idle reading for the whole daemon: the queue scheduler and
+    // the update checker both act on whether the user is here, and two
+    // probes could answer differently in the same second.
+    // Awaited: whether this host can report idleness at all decides
+    // whether the queue builder offers the condition, and the first
+    // window can open before a background probe would have answered.
+    let idle = rt.block_on(crate::data::idle::spawn());
+    state.attach_idle_watch(idle.clone());
+    // One capability probe for the whole daemon: what the scheduler
+    // decides on and what the queue builder offers have to be the same
+    // list, or the UI offers a condition nothing can evaluate.
+    let support = rt.block_on(crate::data::conditions::detect_support(idle.supported()));
+    state.attach_cond_support(support);
+    crate::data::spawn_queue_scheduler(state.clone(), idle.clone());
+    crate::data::spawn_update_watch(state.clone(), idle);
+    update_alerts::spawn(state.clone());
     crate::data::spawn_file_watch(state.clone());
     tray::install(rt.handle().clone(), state.clone());
 

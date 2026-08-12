@@ -152,10 +152,19 @@ pub struct Settings {
     /// notification nobody needed.
     #[serde(default = "yes_default")]
     pub notify_conflict: bool,
-    /// Update-available surfaces. Both are inert for now: the updater
-    /// only checks on demand from the About dialog, so nothing raises
-    /// these events and the settings rows stay disabled.
-    #[serde(default)]
+    /// Look for a new release without being asked: once at startup,
+    /// then at most weekly and only while the machine is idle. On by
+    /// default — a download manager that silently stays on an old
+    /// version is the worse failure, and the check is one small JSON
+    /// document.
+    #[serde(default = "yes_default")]
+    pub auto_check_updates: bool,
+    /// How an automatic check announces what it found. Exclusive by
+    /// construction — see [`Settings::update_surface`]: the dialog is
+    /// the whole report, so a notification alongside it would be the
+    /// same news twice. A manual check from About answers in About and
+    /// raises neither.
+    #[serde(default = "yes_default")]
     pub show_update_dialog: bool,
     #[serde(default)]
     pub notify_update: bool,
@@ -270,6 +279,18 @@ fn default_skip_mime_prefixes() -> Vec<String> {
         .collect()
 }
 
+/// How a newly found version is announced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateSurface {
+    /// Nothing is raised: automatic checks are off, or the user turned
+    /// both surfaces off and will find out from About.
+    Silent,
+    /// Open About on the update, where the install lives.
+    Dialog,
+    /// A desktop notification that opens that same window when pressed.
+    Notification,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Theme {
@@ -326,6 +347,26 @@ impl Settings {
             .filter(|p| !p.as_os_str().is_empty())
             .cloned()
             .unwrap_or_else(|| default_category_folder(&detected_download_dir(), cat))
+    }
+
+    /// What an automatic update check does with a version it found.
+    ///
+    /// The two toggles are mutually locked in Settings, so only one can
+    /// be on; a settings row hand-edited to set both resolves to the
+    /// dialog, which is the surface that can actually install it.
+    /// Nothing is raised when automatic checks are off — the only
+    /// checks left are the ones the user ran from About, and About is
+    /// already in front of them.
+    pub fn update_surface(&self) -> UpdateSurface {
+        if !self.auto_check_updates {
+            UpdateSurface::Silent
+        } else if self.show_update_dialog {
+            UpdateSurface::Dialog
+        } else if self.notify_update {
+            UpdateSurface::Notification
+        } else {
+            UpdateSurface::Silent
+        }
     }
 
     /// Save folder for anything with no category yet — an empty Add
@@ -463,7 +504,8 @@ impl Default for Settings {
             notify_failed: false,
             show_conflict_dialog: true,
             notify_conflict: true,
-            show_update_dialog: false,
+            auto_check_updates: true,
+            show_update_dialog: true,
             notify_update: false,
             update_feed_url: String::new(),
             theme: Theme::System,
@@ -503,6 +545,45 @@ mod tests {
             default_category_folder(base, Category::Videos),
             PathBuf::from("/home/u/Downloads/Videos")
         );
+    }
+
+    #[test]
+    fn one_update_surface_at_a_time() {
+        let s = Settings::default();
+        assert_eq!(s.update_surface(), UpdateSurface::Dialog);
+
+        let notify = Settings {
+            show_update_dialog: false,
+            notify_update: true,
+            ..Settings::default()
+        };
+        assert_eq!(notify.update_surface(), UpdateSurface::Notification);
+
+        // Both on is not reachable from Settings, but a hand-edited row
+        // resolves to the surface that can install what it announces.
+        let both = Settings {
+            notify_update: true,
+            ..Settings::default()
+        };
+        assert_eq!(both.update_surface(), UpdateSurface::Dialog);
+
+        let neither = Settings {
+            show_update_dialog: false,
+            ..Settings::default()
+        };
+        assert_eq!(neither.update_surface(), UpdateSurface::Silent);
+    }
+
+    /// With automatic checks off the only checks left are the ones run
+    /// from About, which reports in its own window.
+    #[test]
+    fn no_automatic_checks_means_no_announcement() {
+        let s = Settings {
+            auto_check_updates: false,
+            notify_update: true,
+            ..Settings::default()
+        };
+        assert_eq!(s.update_surface(), UpdateSurface::Silent);
     }
 
     #[test]

@@ -161,8 +161,9 @@ pub struct CondSet {
     /// On mains power, or no discharging battery is present.
     #[serde(default)]
     pub ac_power: bool,
-    /// `Some(minutes)` = enabled: no input activity for that long
-    /// (as reported by the session manager's idle hint).
+    /// `Some(minutes)` = enabled: no input activity for that long, as
+    /// the platform reports it (logind's idle hint, Quartz's
+    /// seconds-since-last-event, `GetLastInputInfo`).
     #[serde(default)]
     pub idle_minutes: Option<u16>,
     /// `Some` = enabled: poll a shell command, run while it exits 0.
@@ -205,11 +206,29 @@ pub enum CondKind {
 impl CondKind {
     /// Conditions this build can honestly evaluate — the UI hides the
     /// rest (per-platform gating, matching the mock's
-    /// `platformSupportsMetered` comment). Probes are Linux-only today
-    /// (NetworkManager D-Bus, sysfs power_supply, logind idle hint);
-    /// the command poll works anywhere with a POSIX shell. A saved
-    /// condition from another platform still deserializes — its
-    /// unsupported probes fail open.
+    /// `platformSupportsMetered` comment). What each platform can
+    /// answer, and why the gaps are gaps:
+    ///
+    /// - **Idle** — everywhere: logind's idle hint, Quartz's
+    ///   seconds-since-last-event, `GetLastInputInfo`. Still runtime-
+    ///   gated on top of this: a Linux session with no logind is a
+    ///   build that supports idle running on a host that cannot report
+    ///   it, and `conditions::available_conditions` drops it there.
+    /// - **AC power** — Linux (sysfs) and Windows
+    ///   (`GetSystemPowerStatus`). macOS can answer "on mains"
+    ///   (`IOPSGetTimeRemainingEstimate`) but not "has a battery", and
+    ///   without the second question the condition is trivially true on
+    ///   every desktop, so it stays hidden.
+    /// - **Unmetered** — Linux only. NetworkManager exposes it as a
+    ///   property; the Windows answer lives behind WinRT
+    ///   (`NetworkInformation.GetConnectionCost`) and the macOS one
+    ///   behind `NWPathMonitor.isExpensive`, neither of which is
+    ///   reachable from here without a new dependency.
+    /// - **Command** — anywhere there is a shell, which now includes
+    ///   Windows via `cmd /C`.
+    ///
+    /// A saved condition from another platform still deserializes; its
+    /// unsupported kinds simply do not participate.
     pub const SUPPORTED: &'static [CondKind] = {
         #[cfg(target_os = "linux")]
         {
@@ -220,11 +239,19 @@ impl CondKind {
                 CondKind::Command,
             ]
         }
-        #[cfg(all(unix, not(target_os = "linux")))]
+        #[cfg(target_os = "windows")]
+        {
+            &[CondKind::Idle, CondKind::AcPower, CondKind::Command]
+        }
+        #[cfg(target_os = "macos")]
+        {
+            &[CondKind::Idle, CondKind::Command]
+        }
+        #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
         {
             &[CondKind::Command]
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, target_os = "windows")))]
         {
             &[]
         }

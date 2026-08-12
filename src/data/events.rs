@@ -119,6 +119,11 @@ pub enum DomainEvent {
     /// limit. Carries nothing: the UI asks for the detail, so a state
     /// that changes twice in a row cannot leave a stale copy behind.
     WatchLimitChanged,
+    /// An automatic check found a newer release, and the user is at the
+    /// machine to be told about it. Nothing is downloaded yet.
+    UpdateAvailable {
+        info: crate::data::UpdateInfo,
+    },
     /// An update artifact has been fetched and its SHA-256 checked
     /// against the feed. Nothing is replaced until the user says so.
     UpdateStaged {

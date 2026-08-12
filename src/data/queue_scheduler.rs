@@ -6,10 +6,17 @@
 //! called once; one that should be stopped gets `stop_queue`. Hooks fire
 //! from `data::hooks` off `QueueStarted` / `QueueFinished` events.
 //!
-//! Condition schedules: shared probes (metered / AC / idle) run once
-//! per tick via `conditions::probe`; command conditions are polled
-//! per-queue at their configured interval (floored to the tick) with
-//! the last verdict cached in [`CmdPoll`].
+//! Condition schedules: shared probes (metered / AC) run once per tick
+//! via `conditions::probe` and idleness comes from the daemon-wide
+//! [`crate::data::idle`] watch; command conditions are polled per-queue
+//! at their configured interval (floored to the tick) with the last
+//! verdict cached in [`CmdPoll`].
+//!
+//! Every condition is symmetric: the tick that sees the user come back
+//! sees `idle` fall to zero, the verdict flips, and the edge calls
+//! `stop_queue` — an idle-only queue does not keep running over the
+//! session it was waiting to stay out of. The same holds for a link
+//! that turns metered or a laptop unplugged mid-run.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -37,7 +44,7 @@ struct CmdPoll {
     ok: bool,
 }
 
-pub fn spawn(state: Arc<AppState>) {
+pub fn spawn(state: Arc<AppState>, idle: crate::data::idle::IdleWatch) {
     tokio::spawn(async move {
         // last_active[q] = previous tick's "should be running" verdict.
         // Edge transitions drive start/stop; same-state ticks are no-ops.
@@ -51,11 +58,14 @@ pub fn spawn(state: Arc<AppState>) {
             }
             let queues = state.queues_snapshot().await;
             // Runtime capability set (e.g. AcPower only with a battery
-            // present); unavailable conditions are neither probed nor
-            // evaluated — they simply don't participate.
-            let available = conditions::available_conditions();
-            // Probe only the conditions some queue actually uses; the
-            // snapshot fails open for everything else.
+            // present and a probe that answers); unavailable conditions
+            // are neither probed nor evaluated — they simply don't
+            // participate. Same source the queue builder is shown, so a
+            // condition on offer is one the scheduler can decide.
+            let available = conditions::available_conditions(state.cond_support());
+            // Probe only the conditions some queue actually uses;
+            // anything else is left unread, which reads as "does not
+            // hold" — and cannot bind, since it is not enabled.
             let needed: HashSet<CondKind> = queues
                 .iter()
                 .filter_map(|q| match &q.schedule {
@@ -65,7 +75,16 @@ pub fn spawn(state: Arc<AppState>) {
                 .flatten()
                 .filter(|k| available.contains(k))
                 .collect();
-            let conds = conditions::probe(&needed).await;
+            // Sampling costs a bus round trip, so it only runs while
+            // some queue is actually waiting on it. Withdrawing the
+            // need parks the poller and drops the last reading, so the
+            // first tick after a queue re-enables the condition sees no
+            // answer and holds — one tick, and it fails closed.
+            idle.want(
+                crate::data::idle::Want::Queues,
+                needed.contains(&CondKind::Idle),
+            );
+            let conds = conditions::probe(&needed, idle.current()).await;
             if available.contains(&CondKind::Command) {
                 poll_due_commands(&queues, &mut cmd_polls).await;
             }
@@ -130,9 +149,8 @@ async fn poll_due_commands(queues: &[Queue], polls: &mut HashMap<QueueId, CmdPol
 }
 
 /// `cmd_ok`: cached verdict of this queue's condition command, if it
-/// has one (`None` before the first poll completes ⇒ not met yet —
-/// commands are explicit user configuration, so unlike the passive
-/// probes they do not fail open).
+/// has one (`None` before the first poll completes ⇒ not met yet, like
+/// every other unread condition).
 fn should_run(
     q: &Queue,
     now: chrono::DateTime<Local>,
@@ -339,6 +357,20 @@ mod tests {
         assert!(!should_run(&q, now, ALL, &snap(true, true, 599), None));
     }
 
+    /// The verdict has to fall as well as rise: the tick after the user
+    /// touches the keyboard reads zero idle time, and the scheduler's
+    /// edge from true to false is what pauses the queue's downloads.
+    #[test]
+    fn a_queue_waiting_for_idle_stops_when_the_user_comes_back() {
+        let now = Local::now();
+        let q = queue_with(QueueSchedule::Condition(CondSet {
+            idle_minutes: Some(10),
+            ..CondSet::default()
+        }));
+        assert!(should_run(&q, now, ALL, &snap(true, true, 900), None));
+        assert!(!should_run(&q, now, ALL, &snap(true, true, 0), None));
+    }
+
     #[test]
     fn command_uses_cached_verdict_and_defaults_to_not_met() {
         let now = Local::now();
@@ -374,20 +406,59 @@ mod tests {
         ));
     }
 
+    /// A tick where the probes came back empty starts nothing. Not one
+    /// of these conditions means "run unless told otherwise": each
+    /// names a moment that is cheap for the user, and no reading is not
+    /// that moment. A host that can *never* read one does not offer it
+    /// (see below), so this only covers the transient case.
     #[test]
-    fn unprobed_passive_conditions_fail_open() {
-        let q = queue_with(QueueSchedule::Condition(CondSet {
-            unmetered: true,
-            ac_power: true,
-            idle_minutes: Some(480),
-            combine: CondCombine::All,
+    fn an_unread_condition_does_not_run() {
+        let blank = CondSnapshot::default();
+        for set in [
+            CondSet {
+                unmetered: true,
+                ..CondSet::default()
+            },
+            CondSet {
+                ac_power: true,
+                ..CondSet::default()
+            },
+            CondSet {
+                idle_minutes: Some(480),
+                ..CondSet::default()
+            },
+            CondSet {
+                unmetered: true,
+                ac_power: true,
+                idle_minutes: Some(480),
+                combine: CondCombine::Any,
+                ..CondSet::default()
+            },
+        ] {
+            let q = queue_with(QueueSchedule::Condition(set));
+            assert!(!should_run(&q, Local::now(), ALL, &blank, None));
+        }
+    }
+
+    /// With no way to read a condition it is not on the menu, so a
+    /// queue configured for it on another machine simply never runs
+    /// here — rather than running on a guess.
+    #[test]
+    fn a_host_that_cannot_read_a_condition_does_not_offer_it() {
+        let available = conditions::available_conditions(conditions::CondSupport::default());
+        assert!(!available.contains(&CondKind::Idle));
+        assert!(!available.contains(&CondKind::Unmetered));
+        assert!(!available.contains(&CondKind::AcPower));
+
+        let idle_only = queue_with(QueueSchedule::Condition(CondSet {
+            idle_minutes: Some(10),
             ..CondSet::default()
         }));
-        assert!(should_run(
-            &q,
+        assert!(!should_run(
+            &idle_only,
             Local::now(),
-            ALL,
-            &CondSnapshot::default(),
+            &available,
+            &snap(true, true, 9999),
             None
         ));
     }

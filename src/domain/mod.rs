@@ -31,7 +31,8 @@ pub use queue::{
 };
 pub use save_path::{Destination, Resolver as SavePathResolver};
 pub use settings::{
-    Settings, Theme, default_category_folder, default_category_folders, detected_download_dir,
+    Settings, Theme, UpdateSurface, default_category_folder, default_category_folders,
+    detected_download_dir,
 };
 pub use user_agent::{default_user_agent, effective_user_agent};
 pub use watch_limit::{WatchLimit, WatchLimitKind};

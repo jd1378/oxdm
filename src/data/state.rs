@@ -415,6 +415,23 @@ pub struct AppState {
     /// The update being fetched, and the digest its artifact must
     /// have. Cleared when it installs or fails.
     pending_update: RwLock<Option<PendingUpdate>>,
+    /// The daemon's one idle sampler, attached once the runtime is up.
+    /// Held here so the IPC layer can answer "can this host report
+    /// idleness at all" with the same source the scheduler runs on —
+    /// the queue builder must not offer a condition this machine can
+    /// never satisfy.
+    idle: std::sync::OnceLock<crate::data::IdleWatch>,
+    /// Which queue conditions this host can answer, probed once at
+    /// start. Held here so the scheduler and the IPC snapshot the queue
+    /// builder reads cannot disagree about what to offer.
+    cond_support: std::sync::OnceLock<crate::data::conditions::CondSupport>,
+    /// The newest version a check has found and the user has not
+    /// installed. Kept so a window opening later — the About window an
+    /// alert just spawned, or one the user opens themselves — shows
+    /// what was found instead of making them check again. In memory
+    /// only: it is a fact about the release feed, and asking again
+    /// costs one small document.
+    found_update: RwLock<Option<crate::data::UpdateInfo>>,
     /// The `oxdm-updater` helper, once it holds a verified artifact and
     /// is waiting to be told to go ahead.
     updater: tokio::sync::Mutex<Option<tokio::process::Child>>,
@@ -492,6 +509,11 @@ enum ProbeSlot {
 /// re-added later in the session is asked about again — sizes and
 /// signed URLs both go stale.
 const PROBE_FRESH_FOR: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// `app_meta` key holding the RFC3339 time of the last completed
+/// update check. Persisted so a daily restart does not turn "weekly"
+/// into "every launch plus a check whenever the machine goes quiet".
+const LAST_UPDATE_CHECK: &str = "last_update_check";
 
 impl AppState {
     /// Boot oxdm: open the DB, load settings, hydrate the queue, build
@@ -644,6 +666,9 @@ impl AppState {
             run_finished: tokio::sync::Notify::new(),
             admission: tokio::sync::Mutex::new(()),
             pending_update: RwLock::new(None),
+            found_update: RwLock::new(None),
+            idle: std::sync::OnceLock::new(),
+            cond_support: std::sync::OnceLock::new(),
             updater: tokio::sync::Mutex::new(None),
             exiting: AtomicBool::new(false),
             main_queue_id,
@@ -1916,6 +1941,13 @@ impl AppState {
 
     pub fn subscribe(&self) -> broadcast::Receiver<DomainEvent> {
         self.events.subscribe()
+    }
+
+    /// Broadcast an event raised by a service that owns no state of its
+    /// own. Dropped when nothing is listening, like every other send
+    /// here — an event with no subscribers is not an error.
+    pub fn publish(&self, ev: DomainEvent) {
+        let _ = self.events.send(ev);
     }
 
     // ── destructive power actions (shutdown grace) ──────────────────
@@ -4220,6 +4252,71 @@ impl AppState {
         for id in ids {
             self.mark_run_intent(id, false).await;
             let _ = self.resume(id).await;
+        }
+    }
+
+    /// Ask the release feed whether something newer exists.
+    ///
+    /// The one path every check goes through — the About button and the
+    /// automatic checker both — so the "when did we last look" stamp
+    /// covers all of them: a manual check pushes the next automatic one
+    /// out by a week, which is what a user who just checked means.
+    ///
+    /// A failed check does not move the stamp: a week of no network
+    /// should not read as a week of "we looked and there was nothing".
+    pub async fn check_for_update(&self) -> Result<Option<crate::data::UpdateInfo>, String> {
+        let found = self.update_channel().await.check().await?;
+        if let Err(e) = self
+            .store
+            .set_meta(LAST_UPDATE_CHECK, &chrono::Utc::now().to_rfc3339())
+            .await
+        {
+            // Losing the stamp costs an extra check, not correctness.
+            tracing::debug!(error = %e, "could not record the update-check time");
+        }
+        *self.found_update.write().await = found.clone();
+        Ok(found)
+    }
+
+    /// The newest version a check has turned up, if any.
+    pub async fn found_update(&self) -> Option<crate::data::UpdateInfo> {
+        self.found_update.read().await.clone()
+    }
+
+    /// When a check last completed. `None` = never (or the stamp was
+    /// lost), which reads as "due now".
+    pub async fn last_update_check(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        let raw = self.store.meta(LAST_UPDATE_CHECK).await?;
+        chrono::DateTime::parse_from_rfc3339(&raw)
+            .ok()
+            .map(|t| t.with_timezone(&chrono::Utc))
+    }
+
+    /// Hand the state the idle watch, once, at daemon start.
+    pub fn attach_idle_watch(&self, watch: crate::data::IdleWatch) {
+        let _ = self.idle.set(watch);
+    }
+
+    /// Can this host report session idleness? False before the watch is
+    /// attached or its first probe answers, which is the honest answer
+    /// at that moment: nothing has told us it can.
+    pub fn idle_supported(&self) -> bool {
+        self.idle.get().is_some_and(|w| w.supported())
+    }
+
+    /// Record what the boot-time capability probe found.
+    pub fn attach_cond_support(&self, support: crate::data::conditions::CondSupport) {
+        let _ = self.cond_support.set(support);
+    }
+
+    /// Which queue conditions this host can evaluate. Idleness is taken
+    /// live from the watch rather than from the stored probe: it is the
+    /// one capability that can start answering later, when a session
+    /// bus that was not up at boot comes back.
+    pub fn cond_support(&self) -> crate::data::conditions::CondSupport {
+        crate::data::conditions::CondSupport {
+            idle: self.idle_supported(),
+            ..self.cond_support.get().copied().unwrap_or_default()
         }
     }
 

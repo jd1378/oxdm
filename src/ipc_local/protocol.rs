@@ -246,6 +246,10 @@ pub enum Request {
 
     // ── update channel ─────────────────────────────────────────────
     UpdateCheck,
+    /// What the last check found, without running one. Lets a window
+    /// opened after the fact — or spawned by an update alert — show the
+    /// version already known instead of asking the feed again.
+    UpdateFound,
 
     // ── one-shot helpers ───────────────────────────────────────────
     Probe(Url),
@@ -483,6 +487,12 @@ pub enum Event {
         server_requested: bool,
     },
     Updater(UpdaterEvent),
+    /// A newer release exists. Raised by the automatic checker once the
+    /// user is at the machine; a window that is already open switches
+    /// to it, and About shows the same thing when the alert spawns it.
+    UpdateAvailable {
+        info: UpdateInfo,
+    },
     /// An update artifact has been fetched and verified against the
     /// digest the feed published. Installing it is the user's call.
     UpdateStaged {

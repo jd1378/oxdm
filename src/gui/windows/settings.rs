@@ -9,7 +9,9 @@ use std::time::Duration;
 use iced::widget::{column, container, mouse_area, row, text};
 use iced::{Alignment, Element, Length, Subscription, Task};
 
-use crate::domain::{Category, ProxyAdv, ProxyMode, Queue, QueueId, Settings, Theme as AppTheme};
+use crate::domain::{
+    Category, ProxyAdv, ProxyMode, Queue, QueueId, Settings, Theme as AppTheme, UpdateSurface,
+};
 use crate::gui::chrome::{self, WindowControl, titlebar};
 use crate::gui::color;
 use crate::gui::icons;
@@ -52,7 +54,7 @@ impl Section {
     /// (design `.s-pane-head`).
     fn desc(self) -> &'static str {
         match self {
-            Section::General => "Startup, appearance, and what leaves the list.",
+            Section::General => "Updates, startup, appearance, and what leaves the list.",
             Section::Downloads => {
                 "Cache location, retry behavior, and when to hold downloads back."
             }
@@ -191,6 +193,8 @@ pub enum Msg {
     ExtTokenSaved(Result<String, String>),
     /// The copy confirmation on the pairing code has run its course.
     PairCopyDone,
+    /// General → Updates.
+    AutoCheckUpdates(bool),
     // Notifications
     ShowCompleteDialog(bool),
     NotifyComplete(bool),
@@ -198,6 +202,8 @@ pub enum Msg {
     NotifyFailed(bool),
     ShowConflictDialog(bool),
     NotifyConflict(bool),
+    ShowUpdateDialog(bool),
+    NotifyUpdate(bool),
     // Advanced
     ResetDbAsk,
     ResetDbCancel,
@@ -394,6 +400,7 @@ fn copy_section(dst: &mut Settings, src: &Settings, section: Section) {
             dst.remove_confirm_completed = src.remove_confirm_completed;
             dst.remove_confirm_clean = src.remove_confirm_clean;
             dst.forget_moved_files = src.forget_moved_files;
+            dst.auto_check_updates = src.auto_check_updates;
         }
         Section::Downloads => {
             dst.work_dir = src.work_dir.clone();
@@ -999,6 +1006,28 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
         }
         Msg::NotifyConflict(v) => {
             st.s.notify_conflict = v;
+            Task::none()
+        }
+        Msg::AutoCheckUpdates(v) => {
+            st.s.auto_check_updates = v;
+            Task::none()
+        }
+        // The pair is exclusive: the dialog *is* the report, so a
+        // notification beside it would be the same news twice. Turning
+        // one on turns the other off rather than locking the user out
+        // of the row they just pressed.
+        Msg::ShowUpdateDialog(v) => {
+            st.s.show_update_dialog = v;
+            if v {
+                st.s.notify_update = false;
+            }
+            Task::none()
+        }
+        Msg::NotifyUpdate(v) => {
+            st.s.notify_update = v;
+            if v {
+                st.s.show_update_dialog = false;
+            }
             Task::none()
         }
         Msg::ResetDbAsk => {
@@ -1694,6 +1723,20 @@ fn general_section(st: &State) -> Element<'_, Msg> {
         t,
         Section::General,
         column![
+            set_section(
+                t,
+                "Updates",
+                vec![toggle_row(
+                    t,
+                    "Check for updates automatically",
+                    Some(
+                        "Once when oxdm starts, then about weekly while the computer \
+                         is idle. What it finds is announced when you are back."
+                    ),
+                    st.s.auto_check_updates,
+                    Msg::AutoCheckUpdates
+                )]
+            ),
             set_section(
                 t,
                 "Startup",
@@ -2412,37 +2455,47 @@ fn notifications_section(st: &State) -> Element<'_, Msg> {
                     ),
                 ],
             ),
-            set_section(
-                t,
-                "New version available",
-                vec![
-                    toggle_row_enabled(
-                        t,
-                        "Show dialog",
-                        None,
-                        st.s.show_update_dialog,
-                        false,
-                        |_| Msg::Noop,
-                    ),
-                    toggle_row_enabled(
-                        t,
-                        "System notification",
-                        None,
-                        st.s.notify_update,
-                        false,
-                        |_| Msg::Noop,
-                    ),
-                    set_note(
-                        t,
-                        "Unavailable: oxdm only checks for updates when you ask it to, from \
-                         About. Nothing raises this event yet.",
-                    ),
-                ],
-            ),
+            set_section(t, "New version available", update_rows(st)),
         ]
         .spacing(SECTION_GAP)
         .into(),
     )
+}
+
+/// The update pair, mutually locked: one surface answers this event, so
+/// the row that is not in use is the one you can press. Which is in use
+/// comes from `update_surface`, so a settings row with both set somehow
+/// still leaves a way out instead of locking both rows.
+fn update_rows(st: &State) -> Vec<Element<'_, Msg>> {
+    let t = &st.tokens;
+    let surface = st.s.update_surface();
+    let auto = st.s.auto_check_updates;
+    let mut rows = vec![
+        toggle_row_enabled(
+            t,
+            "Show dialog",
+            Some("Opens About on the new version, where you can install it."),
+            st.s.show_update_dialog,
+            auto && surface != UpdateSurface::Notification,
+            Msg::ShowUpdateDialog,
+        ),
+        toggle_row_enabled(
+            t,
+            "System notification",
+            Some("Reports the new version without taking focus. Press it to open About."),
+            st.s.notify_update,
+            auto && surface != UpdateSurface::Dialog,
+            Msg::NotifyUpdate,
+        ),
+    ];
+    if !auto {
+        rows.push(set_note(
+            t,
+            "Off while automatic update checks are off — a check you run yourself \
+             answers in About.",
+        ));
+    }
+    rows
 }
 
 fn advanced_section(st: &State) -> Element<'_, Msg> {

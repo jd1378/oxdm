@@ -63,9 +63,18 @@ pub enum UpdateUi {
     Error(String),
 }
 
+/// What one successful connect hands the window: the client to talk
+/// on, the settings to paint with, and whatever the daemon already
+/// found so the update card opens on it.
+pub type Connection = (
+    Arc<Client>,
+    crate::domain::Settings,
+    Option<crate::data::UpdateInfo>,
+);
+
 #[derive(Clone)]
 pub enum Msg {
-    Connected(Result<Box<(Arc<Client>, crate::domain::Settings)>, String>),
+    Connected(Result<Box<Connection>, String>),
     Daemon(DaemonSignal),
     Window(WindowControl),
     CheckUpdate,
@@ -102,6 +111,10 @@ pub struct State {
     client: Arc<Client>,
     tokens: Tokens,
     update: UpdateUi,
+    /// Whether the daemon looks for releases by itself. Only the copy
+    /// on the idle card depends on it, and that card is the one a user
+    /// reads to find out whether anything is watching for them.
+    auto_check: bool,
     copied: bool,
     shot: Option<Shot>,
 }
@@ -136,7 +149,12 @@ pub fn boot() -> (App, Task<Msg>) {
                     .map_err(|e| e.to_string())?;
                 client.hello(GuiKind::About).await?;
                 let snap = client.snapshot().await?;
-                Ok(Box::new((client, snap.settings)))
+                // What the daemon already knows, so a window opened by
+                // an update alert — or by the user, minutes later —
+                // opens on the version rather than on a button that
+                // asks the feed the same question again.
+                let found = client.update_found().await;
+                Ok(Box::new((client, snap.settings, found)))
             },
             Msg::Connected,
         ),
@@ -146,11 +164,15 @@ pub fn boot() -> (App, Task<Msg>) {
 pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
     match msg {
         Msg::Connected(Ok(boxed)) => {
-            let (client, settings) = *boxed;
+            let (client, settings, found) = *boxed;
             *app = App::Ready(Box::new(State {
                 tokens: Tokens::from_settings(&settings),
+                auto_check: settings.auto_check_updates,
                 client,
-                update: UpdateUi::Idle,
+                update: match found {
+                    Some(info) => UpdateUi::Available(info),
+                    None => UpdateUi::Idle,
+                },
                 copied: false,
                 shot: Shot::from_env(),
             }));
@@ -179,6 +201,18 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                 |t| Msg::Themed(Box::new(t)),
                 Msg::Noop,
             ),
+            // Found while this window was already open: switch to it,
+            // unless the user has moved further along than the news
+            // (downloading it, or holding a staged build).
+            Event::UpdateAvailable { info } => {
+                if matches!(
+                    st.update,
+                    UpdateUi::Idle | UpdateUi::Checking | UpdateUi::UpToDate | UpdateUi::Error(_)
+                ) {
+                    st.update = UpdateUi::Available(info);
+                }
+                Task::none()
+            }
             Event::UpdateStaged { version } => {
                 st.update = UpdateUi::Staged(version);
                 Task::none()
@@ -548,6 +582,16 @@ fn updates(st: &State) -> Element<'_, Msg> {
     let t2 = *t;
     let version = env!("CARGO_PKG_VERSION");
     let (mark, mark_fg, headline, detail): (&str, iced::Color, String, String) = match &st.update {
+        // Nothing found *yet*: either no check has run, or the last
+        // one came back with nothing and the daemon kept no record of
+        // it. The copy has to say which, because "not checked yet" on
+        // an app that checks weekly by itself reads as broken.
+        UpdateUi::Idle if st.auto_check => (
+            "refresh-cw",
+            t.fg_2,
+            "No new version".into(),
+            "oxdm checks on its own, weekly. You can also check now.".into(),
+        ),
         UpdateUi::Idle => (
             "refresh-cw",
             t.fg_2,

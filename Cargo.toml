@@ -82,6 +82,10 @@ windows-sys = { version = "0.59", features = [
     "Win32_Graphics_Gdi",
     "Win32_System_Console",
     "Win32_System_Threading",
+    # Queue conditions: idle time (GetTickCount64) and mains/battery
+    # state (GetSystemPowerStatus).
+    "Win32_System_SystemInformation",
+    "Win32_System_Power",
 ] }
 raw-window-handle = "0.6"
 keyring = { version = "3", features = ["windows-native"] }

@@ -476,6 +476,7 @@ fn map_domain_event(filter: SubFilter, ev: DomainEvent) -> Option<Event> {
         DomainEvent::JobFailed { .. } => None,
         DomainEvent::SettingsChanged => Some(Event::SettingsChanged),
         DomainEvent::WatchLimitChanged => Some(Event::WatchLimitChanged),
+        DomainEvent::UpdateAvailable { info } => Some(Event::UpdateAvailable { info }),
         DomainEvent::UpdateStaged { version } => Some(Event::UpdateStaged { version }),
         DomainEvent::UpdateFailed { message } => Some(Event::UpdateFailed { message }),
         // Daemon-internal: the watcher listens for it, no client does.
@@ -592,7 +593,7 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
                 conflict_len: state.conflict_len().await,
                 counters,
                 pending_shutdown: state.pending_shutdown(),
-                cond_available: crate::data::available_conditions(),
+                cond_available: crate::data::available_conditions(state.cond_support()),
             };
             Reply::Snapshot(snap)
         }
@@ -922,13 +923,11 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
             state.resolve_final_file(id, token, r).await;
             Reply::Ok
         }
-        Request::UpdateCheck => {
-            let ch = state.update_channel().await;
-            match ch.check().await {
-                Ok(info) => Reply::UpdateInfo(info),
-                Err(e) => Reply::Err(e),
-            }
-        }
+        Request::UpdateCheck => match state.check_for_update().await {
+            Ok(info) => Reply::UpdateInfo(info),
+            Err(e) => Reply::Err(e),
+        },
+        Request::UpdateFound => Reply::UpdateInfo(state.found_update().await),
         Request::CancelPendingShutdown => {
             state.cancel_pending_shutdown();
             Reply::Ok

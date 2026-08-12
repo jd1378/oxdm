@@ -2,10 +2,20 @@
 //!
 //! The scheduler (`queue_scheduler.rs`) probes once per tick — and only
 //! the conditions some queue actually uses — then evaluates every queue
-//! against the resulting [`CondSnapshot`]. Probes fail open (condition
-//! treated as holding) so a missing NetworkManager, an exotic sysfs
-//! layout, or a session manager that never reports idle degrades to
-//! "runs anyway" rather than a queue that silently never starts.
+//! against the resulting [`CondSnapshot`]. Every condition fails
+//! *closed*: no reading means the condition does not hold, so a queue
+//! waiting for one stays put. All three describe a moment that is
+//! cheap for the user to spend — an unmetered link, mains power, an
+//! empty chair — and a probe that cannot answer is not evidence that
+//! the moment has arrived. Guessing "yes" spends their data allowance
+//! or their battery, which is the exact thing the condition exists to
+//! avoid.
+//!
+//! A condition this host can never answer is not offered at all
+//! ([`available_conditions`]), so failing closed cannot turn into a
+//! queue that mysteriously never runs: either the option is absent, or
+//! it works.
+//!
 //! Command polling is per-queue state, so it lives in the scheduler;
 //! only the one-shot runner is here.
 
@@ -15,15 +25,66 @@ use std::time::Duration;
 use crate::domain::CondKind;
 
 /// Conditions this host can evaluate *right now*: the compile-time
-/// [`CondKind::SUPPORTED`] set, minus `AcPower` when no battery is
-/// present — on a desktop the condition would be trivially true, so it
-/// is hidden in the UI and excluded from evaluation entirely.
-pub fn available_conditions() -> Vec<CondKind> {
+/// [`CondKind::SUPPORTED`] set, minus the ones this machine cannot
+/// answer. An unavailable condition is hidden in the queue builder and
+/// excluded from evaluation entirely, so it can never read as a
+/// condition that quietly holds — or quietly does not.
+///
+/// - `Unmetered` needs something that reports link cost — on Linux,
+///   NetworkManager. A host running systemd-networkd has no answer.
+/// - `AcPower` needs both a battery (on a desktop the condition would
+///   be trivially true, which is worth nothing) and a probe that
+///   answers.
+/// - `Idle` needs a session manager that reports it.
+///
+/// `Command` is always available where a shell is: it answers by
+/// definition, since the user wrote it.
+pub fn available_conditions(support: CondSupport) -> Vec<CondKind> {
     CondKind::SUPPORTED
         .iter()
         .copied()
-        .filter(|k| *k != CondKind::AcPower || has_battery())
+        .filter(|k| match k {
+            CondKind::Unmetered => support.unmetered,
+            CondKind::AcPower => support.ac_power,
+            CondKind::Idle => support.idle,
+            CondKind::Command => true,
+        })
         .collect()
+}
+
+/// Which conditions this machine can actually answer.
+///
+/// Probed once at daemon start rather than per tick: the answer is a
+/// property of the host (is there a battery, is NetworkManager on this
+/// system bus), not of the moment. Since every condition now fails
+/// closed, this is what keeps "cannot answer" from reading as "never
+/// runs" — an unanswerable condition is never offered in the first
+/// place.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CondSupport {
+    pub unmetered: bool,
+    pub ac_power: bool,
+    pub idle: bool,
+}
+
+/// Ask each probe once whether it can answer at all. `idle` comes from
+/// the shared watch, which has already taken its first sample.
+pub async fn detect_support(idle: bool) -> CondSupport {
+    let support = CondSupport {
+        unmetered: network_unmetered().await.is_some(),
+        // Both halves matter: a laptop whose probe fails and a desktop
+        // whose probe works are equally unable to make this condition
+        // mean anything.
+        ac_power: has_battery() && on_ac_power().is_some(),
+        idle,
+    };
+    tracing::debug!(
+        unmetered = support.unmetered,
+        ac_power = support.ac_power,
+        idle = support.idle,
+        "queue conditions this host can evaluate"
+    );
+    support
 }
 
 #[cfg(target_os = "linux")]
@@ -43,13 +104,29 @@ fn has_battery_in(dir: &std::path::Path) -> bool {
     })
 }
 
-#[cfg(not(target_os = "linux"))]
+/// `BATTERY_FLAG_NO_BATTERY` (128) is the one flag that answers this
+/// directly; 255 means the status is unknown, which is not a battery.
+#[cfg(target_os = "windows")]
+fn has_battery() -> bool {
+    const NO_BATTERY: u8 = 128;
+    const UNKNOWN: u8 = 255;
+    match power_status() {
+        Some(s) => s.BatteryFlag != UNKNOWN && s.BatteryFlag & NO_BATTERY == 0,
+        None => false,
+    }
+}
+
+/// Not detected on macOS: the AC probe above answers "on mains" without
+/// ever saying whether a battery exists, and the dictionary walk that
+/// would say so is a dependency for one boolean. The condition stays
+/// hidden here rather than offered on desktops where it means nothing.
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 fn has_battery() -> bool {
     false
 }
 
 /// One tick's shared probe results. `None` = probe failed or was not
-/// requested — both fail open at evaluation time.
+/// requested, and every reader treats it as "condition does not hold".
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CondSnapshot {
     unmetered: Option<bool>,
@@ -72,25 +149,30 @@ impl CondSnapshot {
         }
     }
 
+    /// No reading means the link is not known to be unmetered, which
+    /// is not the same as free to use — see the module note.
     pub fn unmetered(&self) -> bool {
-        self.unmetered.unwrap_or(true)
+        self.unmetered == Some(true)
     }
 
+    /// No reading means not known to be on mains, so the queue waits
+    /// rather than spending a battery that might be discharging.
     pub fn on_ac(&self) -> bool {
-        self.on_ac.unwrap_or(true)
+        self.on_ac == Some(true)
     }
 
     pub fn idle_at_least(&self, minutes: u16) -> bool {
-        match self.idle {
-            Some(d) => d >= Duration::from_secs(u64::from(minutes) * 60),
-            None => true, // probe unavailable → fail open
-        }
+        matches!(self.idle, Some(d) if d >= Duration::from_secs(u64::from(minutes) * 60))
     }
 }
 
 /// Probe exactly the conditions in `needed` (Command is per-queue and
 /// not probed here).
-pub async fn probe(needed: &HashSet<CondKind>) -> CondSnapshot {
+///
+/// Idleness is not probed: it is sampled once for the whole daemon by
+/// [`crate::data::idle`] and passed in, so the scheduler and the update
+/// checker cannot disagree about whether the user is at the keyboard.
+pub async fn probe(needed: &HashSet<CondKind>, idle: Option<Duration>) -> CondSnapshot {
     CondSnapshot {
         unmetered: if needed.contains(&CondKind::Unmetered) {
             network_unmetered().await
@@ -103,26 +185,34 @@ pub async fn probe(needed: &HashSet<CondKind>) -> CondSnapshot {
             None
         },
         idle: if needed.contains(&CondKind::Idle) {
-            session_idle().await
+            idle
         } else {
             None
         },
     }
 }
 
-/// Run one condition-command check: `sh -c <cmd>`, true while it exits
-/// 0 (the builder card's contract). Bounded so a hung script cannot
-/// stall the scheduler; timeout or spawn failure count as false —
-/// unlike the passive probes this one is explicit user configuration,
+/// The platform's shell and its "run this string" flag: `sh -c`
+/// everywhere but Windows, where there is no `sh` and `cmd /C` is what
+/// a user writing a condition command would expect to be running.
+#[cfg(not(target_os = "windows"))]
+const SHELL: (&str, &str) = ("sh", "-c");
+#[cfg(target_os = "windows")]
+const SHELL: (&str, &str) = ("cmd", "/C");
+
+/// Run one condition-command check through [`SHELL`], true while it
+/// exits 0 (the builder card's contract). Bounded so a hung script
+/// cannot stall the scheduler; timeout or spawn failure count as false
+/// — unlike the passive probes this one is explicit user configuration,
 /// so a broken command should read as "condition not met", not "met".
 pub async fn check_command(cmd: &str) -> bool {
     const CMD_TIMEOUT: Duration = Duration::from_secs(20);
     if cmd.trim().is_empty() {
-        return false; // `sh -c ""` exits 0; an empty command is "off", not "always on"
+        return false; // an empty command exits 0; that is "off", not "always on"
     }
     let run = async {
-        tokio::process::Command::new("sh")
-            .arg("-c")
+        tokio::process::Command::new(SHELL.0)
+            .arg(SHELL.1)
             .arg(cmd)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -145,8 +235,9 @@ pub async fn check_command(cmd: &str) -> bool {
 
 /// NetworkManager `Metered` property (NM_METERED_*): 0 unknown, 1 yes,
 /// 2 no, 3 guess-yes, 4 guess-no. Only explicit yes / guess-yes count
-/// as metered — NM's own guidance treats unknown as unmetered — and a
-/// missing NM (systemd-networkd hosts) fails open.
+/// as metered — NM's own guidance treats unknown as unmetered. A
+/// missing NM (systemd-networkd hosts) answers `None`, which takes the
+/// condition off the menu rather than guessing either way.
 #[cfg(target_os = "linux")]
 async fn network_unmetered() -> Option<bool> {
     async fn metered() -> zbus::Result<u32> {
@@ -199,7 +290,58 @@ fn on_ac_power() -> Option<bool> {
     Some(!discharging)
 }
 
-#[cfg(not(target_os = "linux"))]
+/// Windows answers mains, battery presence and charge in one call.
+/// `ACLineStatus`: 0 offline, 1 online, 255 unknown — and unknown is
+/// `None`, the same "no answer" the Linux probe returns.
+#[cfg(target_os = "windows")]
+fn power_status() -> Option<windows_sys::Win32::System::Power::SYSTEM_POWER_STATUS> {
+    let mut status = unsafe { std::mem::zeroed() };
+    // SAFETY: the call fills a caller-owned SYSTEM_POWER_STATUS.
+    if unsafe { windows_sys::Win32::System::Power::GetSystemPowerStatus(&mut status) } == 0 {
+        tracing::debug!("GetSystemPowerStatus failed");
+        return None;
+    }
+    Some(status)
+}
+
+#[cfg(target_os = "windows")]
+fn on_ac_power() -> Option<bool> {
+    match power_status()?.ACLineStatus {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    }
+}
+
+/// macOS: `IOPSGetTimeRemainingEstimate` answers the AC question
+/// without touching a CoreFoundation dictionary — "unlimited" is the
+/// documented value for a machine running off mains, whether or not it
+/// has a battery at all.
+#[cfg(target_os = "macos")]
+fn on_ac_power() -> Option<bool> {
+    /// `kIOPSTimeRemainingUnknown`: a battery still settling after a
+    /// state change, so neither answer is safe yet.
+    const UNKNOWN: f64 = -1.0;
+    /// `kIOPSTimeRemainingUnlimited`: drawing from mains.
+    const UNLIMITED: f64 = -2.0;
+
+    #[link(name = "IOKit", kind = "framework")]
+    unsafe extern "C" {
+        fn IOPSGetTimeRemainingEstimate() -> f64;
+    }
+    // SAFETY: no arguments, no out-parameters, returns a plain double.
+    let estimate = unsafe { IOPSGetTimeRemainingEstimate() };
+    if estimate == UNLIMITED {
+        return Some(true);
+    }
+    if estimate == UNKNOWN {
+        return None;
+    }
+    // Any finite estimate is time left on a battery being drained.
+    Some(false)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn on_ac_power() -> Option<bool> {
     None
 }
@@ -226,7 +368,17 @@ pub fn battery_percent() -> Option<u8> {
     None
 }
 
-#[cfg(not(target_os = "linux"))]
+/// `BatteryLifePercent` is 0–100, or 255 for "unknown" — which is what
+/// a desktop with no battery reports, and is not a charge level.
+#[cfg(target_os = "windows")]
+pub fn battery_percent() -> Option<u8> {
+    match power_status()?.BatteryLifePercent {
+        pct @ 0..=100 => Some(pct),
+        _ => None,
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub fn battery_percent() -> Option<u8> {
     None
 }
@@ -241,55 +393,38 @@ pub async fn unmetered() -> Option<bool> {
     network_unmetered().await
 }
 
-/// Session idle time via logind's caller-session object
-/// (`/org/freedesktop/login1/session/auto`): `IdleHint` false ⇒ ZERO,
-/// true ⇒ now − `IdleSinceHint` (µs, CLOCK_REALTIME). Sessions whose
-/// desktop never sets the hint read as never idle — the builder card
-/// says "as reported by the session manager", and fail-open only
-/// covers probe *errors*, not an honest "not idle".
-#[cfg(target_os = "linux")]
-async fn session_idle() -> Option<Duration> {
-    async fn idle() -> zbus::Result<Duration> {
-        let conn = zbus::Connection::system().await?;
-        let proxy = zbus::Proxy::new(
-            &conn,
-            "org.freedesktop.login1",
-            "/org/freedesktop/login1/session/auto",
-            "org.freedesktop.login1.Session",
-        )
-        .await?;
-        let hint: bool = proxy.get_property("IdleHint").await?;
-        if !hint {
-            return Ok(Duration::ZERO);
-        }
-        let since_us: u64 = proxy.get_property("IdleSinceHint").await?;
-        let now_us = u64::try_from(chrono::Utc::now().timestamp_micros()).unwrap_or(0);
-        Ok(Duration::from_micros(now_us.saturating_sub(since_us)))
-    }
-    match idle().await {
-        Ok(d) => Some(d),
-        Err(e) => {
-            tracing::debug!(error = %e, "logind idle probe failed; failing open");
-            None
-        }
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-async fn session_idle() -> Option<Duration> {
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Every condition describes a moment that is cheap for the user to
+    /// spend. No reading is not that moment.
     #[test]
-    fn unprobed_conditions_fail_open() {
+    fn unprobed_conditions_never_hold() {
         let snap = CondSnapshot::default();
-        assert!(snap.unmetered());
-        assert!(snap.on_ac());
-        assert!(snap.idle_at_least(480));
+        assert!(!snap.unmetered());
+        assert!(!snap.on_ac());
+        assert!(!snap.idle_at_least(480));
+    }
+
+    /// A condition this host cannot answer must not be offered: hidden
+    /// beats offered-but-never-true, which is what failing closed would
+    /// otherwise look like to the user.
+    #[test]
+    fn only_answerable_conditions_are_offered() {
+        let none = available_conditions(CondSupport::default());
+        assert!(!none.contains(&CondKind::Unmetered));
+        assert!(!none.contains(&CondKind::AcPower));
+        assert!(!none.contains(&CondKind::Idle));
+
+        let all = available_conditions(CondSupport {
+            unmetered: true,
+            ac_power: true,
+            idle: true,
+        });
+        for kind in CondKind::SUPPORTED {
+            assert!(all.contains(kind), "{kind:?} is supported by this build");
+        }
     }
 
     #[test]

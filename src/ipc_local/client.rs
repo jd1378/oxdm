@@ -551,6 +551,14 @@ impl Client {
         }
     }
 
+    /// What the last check found, if anything — no network.
+    pub async fn update_found(&self) -> Option<UpdateInfo> {
+        match self.request(Request::UpdateFound).await {
+            Ok(Reply::UpdateInfo(v)) => v,
+            _ => None,
+        }
+    }
+
     /// Outer `Err` = transport failure; inner `Err` = structured probe
     /// error from the daemon (`JobError`).
     pub async fn probe(&self, url: url::Url) -> Result<Result<ProbeResult, JobError>, String> {

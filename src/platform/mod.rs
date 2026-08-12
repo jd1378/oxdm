@@ -371,6 +371,54 @@ pub fn show_notification(summary: String, body: String) {
     });
 }
 
+/// A notification the user can press, running `on_press` when they do.
+///
+/// Freedesktop notifications carry named actions and report which one
+/// was chosen, so `label` becomes a button and the body itself is
+/// clickable. Elsewhere this degrades to a plain notification: the
+/// action is a shortcut to something the user can still reach from the
+/// tray, so an unclickable report is a smaller loss than no report.
+///
+/// The waiting thread lives until the notification is dismissed or
+/// pressed, which is why this is a thread and not a task.
+#[cfg(target_os = "linux")]
+pub fn show_notification_with_action(
+    summary: String,
+    body: String,
+    label: String,
+    on_press: impl FnOnce() + Send + 'static,
+) {
+    std::thread::spawn(move || {
+        let mut n = notify_rust::Notification::new();
+        n.summary(&summary)
+            .body(&body)
+            .appname("oxdm")
+            // "default" is the action a press on the notification body
+            // itself invokes; the named one draws a button for desktops
+            // that show them.
+            .action("default", &label)
+            .action("show", &label);
+        match n.show() {
+            Ok(handle) => handle.wait_for_action(|action| {
+                if action == "default" || action == "show" {
+                    on_press();
+                }
+            }),
+            Err(e) => tracing::debug!(error = %e, "notification failed (no daemon?)"),
+        }
+    });
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn show_notification_with_action(
+    summary: String,
+    body: String,
+    _label: String,
+    _on_press: impl FnOnce() + Send + 'static,
+) {
+    show_notification(summary, body);
+}
+
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
