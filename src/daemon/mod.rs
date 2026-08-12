@@ -60,6 +60,11 @@ fn spawn_workers(
     // Cookies a previous run staged for a batch dialog that never
     // consumed them. Before anything can stage a new one.
     crate::ipc::batch::sweep_stale();
+    // Programs an update had to rename aside because they were running
+    // at the time. Nothing holds them now.
+    if let Ok(exe) = crate::platform::current_exe() {
+        crate::data::update_bundle::sweep_displaced(&exe);
+    }
     {
         // A hash check the last run did not finish. Nothing waits on
         // it, and there is normally none — the marker only survives a

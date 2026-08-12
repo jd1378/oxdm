@@ -22,6 +22,7 @@ mod runner;
 pub mod space;
 pub mod state;
 pub mod store;
+pub mod update_bundle;
 pub mod update_channel;
 mod update_watch;
 

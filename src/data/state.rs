@@ -1304,12 +1304,15 @@ impl AppState {
         self.pending_update.read().await.clone()
     }
 
-    /// Hand the finished artifact to `oxdm-updater`, which verifies it
-    /// and reports back.
+    /// Hand the finished artifact to `oxdm-updater` and wait.
     ///
     /// Nothing is replaced here: the helper stops at `ready` and waits
-    /// for [`Self::install_update`]. The daemon only learns whether the
-    /// bytes it fetched are the bytes the feed promised.
+    /// for [`Self::install_update`].
+    ///
+    /// An installed build's artifact is an archive of all three
+    /// programs, unpacked here so the helper only has to move files. A
+    /// bundle is one file and is handed over as it is — replacing the
+    /// AppImage replaces everything inside it.
     pub async fn stage_update(self: &Arc<Self>, artifact: std::path::PathBuf) {
         let Some(pending) = self.pending_update().await else {
             return;
@@ -1327,7 +1330,8 @@ impl AppState {
         // replacing it would update nothing. The bundle is the file the
         // user launched and the file the feed's artifact is a new
         // version of.
-        let exe = crate::data::update_channel::running_as_appimage().unwrap_or(running.clone());
+        let bundle = crate::data::update_channel::running_as_appimage();
+        let exe = bundle.clone().unwrap_or_else(|| running.clone());
         // The helper, on the other hand, is found beside the *running*
         // binary: inside the bundle when that is where we came from.
         let updater = running.with_file_name(if cfg!(windows) {
@@ -1344,13 +1348,51 @@ impl AppState {
             return;
         }
 
+        // One file for a bundle; for an installed build, the programs
+        // unpacked out of the archive that was just verified.
+        let source = match &bundle {
+            Some(_) => ("--artifact", artifact.clone()),
+            None => {
+                // Appended, not `with_extension`: the artifact is
+                // named after a version, and replacing the last dotted
+                // segment of "oxdm-update-9.9.9" would land two
+                // releases in the same directory.
+                let dest = artifact.with_file_name(format!(
+                    "{}.payload",
+                    artifact.file_name().unwrap_or_default().to_string_lossy()
+                ));
+                // Whatever an interrupted attempt left there is not
+                // part of this update.
+                let _ = std::fs::remove_dir_all(&dest);
+                let from = artifact.clone();
+                let to = dest.clone();
+                match tokio::task::spawn_blocking(move || {
+                    crate::data::update_bundle::extract(&from, &to)
+                })
+                .await
+                {
+                    Ok(Ok(_)) => ("--payload", dest),
+                    Ok(Err(e)) => {
+                        self.fail_update(format!("the update could not be unpacked: {e}"))
+                            .await;
+                        return;
+                    }
+                    Err(e) => {
+                        self.fail_update(format!("unpacking the update panicked: {e}"))
+                            .await;
+                        return;
+                    }
+                }
+            }
+        };
+
         let mut child = match tokio::process::Command::new(&updater)
             .arg("--exe")
             .arg(&exe)
             .arg("--pid")
             .arg(std::process::id().to_string())
-            .arg("--artifact")
-            .arg(&artifact)
+            .arg(source.0)
+            .arg(&source.1)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())

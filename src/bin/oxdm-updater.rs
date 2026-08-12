@@ -3,7 +3,23 @@
 //! Spawned by the running oxdm GUI **after** it has already fetched the
 //! update artifact through the regular download pipeline. The helper's
 //! sole job is the dangerous half: wait for the parent to exit,
-//! atomically replace the running executable, and relaunch it.
+//! atomically replace the installed programs, and relaunch the app.
+//!
+//! An installed build is three programs, not one. `oxdm-native-host` is
+//! what the browser launches, and this helper is what will perform the
+//! *next* update — leaving either behind means a machine running one
+//! version of the app and older copies of the two programs it depends
+//! on. `--payload` names a directory of replacements; each is placed
+//! beside the app, and the one matching the app itself takes the path
+//! given by `--exe`, whatever the user has named it. An AppImage is
+//! one file and updates through `--artifact` instead.
+//!
+//! Replacing a program that is *running* — this helper, or a native
+//! host the browser still has open — cannot be done by writing over it
+//! on Windows. It can be done by renaming it out of the way first,
+//! which is what happens when the direct swap is refused. The
+//! displaced file is deleted if the OS allows it and swept up at the
+//! next launch if it does not.
 //!
 //! It does not hash the artifact. The digest the feed published is
 //! attached to the download as an ordinary checksum, so the download
@@ -26,11 +42,12 @@
 //! ## CLI
 //!
 //! ```text
-//! oxdm-updater --exe <PATH> --pid <PID> --artifact <PATH>
+//! oxdm-updater --exe <PATH> --pid <PID> --payload <DIR>
+//! oxdm-updater --exe <PATH> --pid <PID> --artifact <PATH>   # AppImage
 //! ```
 
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[tokio::main(flavor = "current_thread")]
@@ -51,7 +68,14 @@ async fn main() {
 struct Args {
     exe: PathBuf,
     pid: u32,
-    artifact: PathBuf,
+    /// What to install: a directory of programs, or the single file an
+    /// AppImage build replaces itself with.
+    source: Source,
+}
+
+enum Source {
+    Payload(PathBuf),
+    Artifact(PathBuf),
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -59,6 +83,7 @@ fn parse_args() -> Result<Args, String> {
     let mut exe: Option<PathBuf> = None;
     let mut pid: Option<u32> = None;
     let mut artifact: Option<PathBuf> = None;
+    let mut payload: Option<PathBuf> = None;
     while let Some(flag) = argv.next() {
         let val = argv
             .next()
@@ -67,13 +92,24 @@ fn parse_args() -> Result<Args, String> {
             "--exe" => exe = Some(PathBuf::from(val)),
             "--pid" => pid = Some(val.parse().map_err(|_| "invalid pid".to_string())?),
             "--artifact" => artifact = Some(PathBuf::from(val)),
+            "--payload" => payload = Some(PathBuf::from(val)),
+            // Tolerated rather than rejected: an older oxdm spawning a
+            // newer helper still passes the digest it used to verify,
+            // and refusing to start over a flag we no longer need would
+            // break the very update that delivered us.
+            "--sha256" => {}
             other => return Err(format!("unknown flag: {other}")),
         }
     }
+    let source = match (payload, artifact) {
+        (Some(dir), _) => Source::Payload(dir),
+        (None, Some(file)) => Source::Artifact(file),
+        (None, None) => return Err("missing --payload or --artifact".into()),
+    };
     Ok(Args {
         exe: exe.ok_or_else(|| "missing --exe".to_string())?,
         pid: pid.ok_or_else(|| "missing --pid".to_string())?,
-        artifact: artifact.ok_or_else(|| "missing --artifact".to_string())?,
+        source,
     })
 }
 
@@ -89,9 +125,12 @@ async fn run(args: Args) -> Result<(), String> {
     emit(&Event::Installing);
     wait_for_pid_exit(args.pid).await;
 
-    // 2. Swap. Move the artifact into place atomically. On Windows
+    // 2. Swap. Each program is moved into place atomically; on Windows
     // a brief retry tides over handle release.
-    swap_executable(&args.artifact, &args.exe)?;
+    match &args.source {
+        Source::Artifact(file) => swap_executable(file, &args.exe)?,
+        Source::Payload(dir) => install_payload(dir, &args.exe)?,
+    }
 
     // 3. Relaunch from the same path. Detach so this updater can exit.
     spawn_detached(&args.exe).map_err(|e| format!("relaunch: {e}"))?;
@@ -148,6 +187,44 @@ fn pid_alive(_pid: u32) -> bool {
     false
 }
 
+/// Put every program in `dir` beside the app.
+///
+/// The entry named like the app itself goes to `exe` — a user who
+/// renamed the binary keeps their name — and the rest go to their own
+/// names in the same directory. A failure on any one of them stops the
+/// install: a half-updated set is the state this whole exercise exists
+/// to avoid.
+fn install_payload(dir: &PathBuf, exe: &Path) -> Result<(), String> {
+    let home = exe
+        .parent()
+        .ok_or_else(|| format!("{} has no directory to install into", exe.display()))?;
+    let entries = std::fs::read_dir(dir).map_err(|e| format!("update payload: {e}"))?;
+    let mut installed = 0usize;
+    for entry in entries.flatten() {
+        let from = entry.path();
+        if !from.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let stem = std::path::Path::new(&name)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        // The app is identified by being the app, not by its filename.
+        let target = if stem.eq_ignore_ascii_case("oxdm") {
+            exe.to_path_buf()
+        } else {
+            home.join(&name)
+        };
+        swap_executable(&from, &target)?;
+        installed += 1;
+    }
+    if installed == 0 {
+        return Err("the update payload is empty".into());
+    }
+    Ok(())
+}
+
 fn swap_executable(staged: &PathBuf, target: &PathBuf) -> Result<(), String> {
     // The staging folder is under the user's data dir and the install
     // may be on another filesystem, where rename fails with EXDEV. Copy
@@ -185,8 +262,30 @@ fn swap_executable(staged: &PathBuf, target: &PathBuf) -> Result<(), String> {
             }
         }
     }
+    // Still refused: on Windows a program that is running cannot be
+    // written over — this helper is one, and a native host the browser
+    // has open is another — but it *can* be renamed out of the way.
+    let displaced = target.with_extension("oxdm-old");
+    let _ = std::fs::remove_file(&displaced);
+    if std::fs::rename(target, &displaced).is_ok() {
+        match std::fs::rename(staged, target) {
+            Ok(()) => {
+                // Fails while the displaced copy is still running; the
+                // next launch sweeps it up.
+                let _ = std::fs::remove_file(&displaced);
+                return Ok(());
+            }
+            Err(e) => {
+                // Put back what was there rather than leave a hole
+                // where a program used to be.
+                let _ = std::fs::rename(&displaced, target);
+                last_err = Some(e.to_string());
+            }
+        }
+    }
     Err(format!(
-        "swap failed: {}",
+        "could not replace {}: {}",
+        target.display(),
         last_err.unwrap_or_else(|| "unknown".into())
     ))
 }

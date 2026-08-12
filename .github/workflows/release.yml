@@ -9,6 +9,8 @@ name: GitHub release
 #   - oxdm-<tag>-<arch>.AppImage on desktop Linux, for people who
 #     prefer a bundle; the installer script does not use it
 #   - <asset>.sha256 beside every one of them
+#   - oxdm-<tag>-<target>-update.tar.gz — the three programs alone,
+#     which is what an installed build replaces itself with.
 #   - update-<target>.json and, where there is a bundle,
 #     update-<target>-appimage.json — the feeds the in-app updater
 #     reads. Each names one artifact and carries its digest, which the
@@ -348,14 +350,27 @@ jobs:
         STAGING="_cicd-intermediates/publish"
         mkdir -p "$STAGING"
 
-        # What the updater downloads and replaces itself with: one
-        # file, the whole app. The bare executable for an installed
-        # build; the bundle for one launched as an AppImage. Both are
-        # published where both exist, because the same release serves
-        # users of either — and the app knows at run time which of the
-        # two it is.
-        SINGLE_NAME="${NAME}-${TAG}-${TARGET}${EXE}"
-        cp "${{ steps.bin.outputs.OUT_DIR }}/${NAME}${EXE}" "$STAGING/$SINGLE_NAME"
+        # What the updater downloads. An installed build is three
+        # programs — the app, the browser's native host, and the
+        # updater itself — so its artifact is a tar.gz of exactly those
+        # three and the update replaces the set. Leaving two of them
+        # behind would pair a new app with an old native host, and with
+        # an updater that has to understand the *next* update.
+        #
+        # A tarball on every platform, Windows included: the daemon
+        # unpacks it itself, so the format is ours to choose rather than
+        # whatever the OS can open. The user-facing package stays a .zip
+        # there.
+        #
+        # An AppImage needs none of this. One file holds all three, so
+        # the bundle is its own artifact.
+        SINGLE_NAME="${NAME}-${TAG}-${TARGET}-update.tar.gz"
+        UPDATE_DIR="_cicd-intermediates/update"
+        rm -rf "$UPDATE_DIR" && mkdir -p "$UPDATE_DIR"
+        for bin in oxdm oxdm-native-host oxdm-updater; do
+          cp "${{ steps.bin.outputs.OUT_DIR }}/${bin}${EXE}" "$UPDATE_DIR/"
+        done
+        tar -czf "$STAGING/$SINGLE_NAME" -C "$UPDATE_DIR" .
         APPIMAGE_NAME="${{ steps.appimage.outputs.APPIMAGE_NAME }}"
         if [ -n "$APPIMAGE_NAME" ]; then
           cp "${{ steps.appimage.outputs.APPIMAGE_PATH }}" "$STAGING/$APPIMAGE_NAME"

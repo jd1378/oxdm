@@ -58,6 +58,8 @@ iced = { version = "0.14", default-features = false, features = ["tiny-skia", "w
 # bumping. Transitive versions are pinned by Cargo.lock.
 iced_anim = { version = "=0.3.1", default-features = false, features = ["widgets"] }
 notify = { version = "8.2.0", default-features = false, features = ["macos_fsevent"] }
+tar = "0.4"
+flate2 = "1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ksni = "0.3.4"
