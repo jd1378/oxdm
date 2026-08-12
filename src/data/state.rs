@@ -3093,7 +3093,7 @@ impl AppState {
             filename: instr.filename().to_string(),
             size: instr.size(),
             is_resumable: instr.is_resumable(),
-            etag: instr.etag().clone(),
+            etag: instr.etag().map(str::to_owned),
             last_modified: instr.last_modified(),
             requires_auth: instr.requires_auth(),
         })
