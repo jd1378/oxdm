@@ -13,10 +13,19 @@ Extensions can talk to oxdm over either of two transports. They are equivalent a
 - The first frame from the extension **must** be the auth frame:
 
   ```json
-  { "token": "<base64url-256-bit>" }
+  { "token": "oxdm1.<base64url(port_be_u16 || 32_token_bytes)>" }
   ```
 
-  The token is generated on first launch, displayed in `Settings → Browser integration → Extension token`, and rotated by the **Regenerate** button. A mismatched token closes the socket immediately.
+  That string is the **pairing code**: `Settings → Browser integration
+  → Pairing code` shows it, the Copy button copies it, and it carries
+  the port as well as the token so the extension needs one field
+  rather than two. The token inside it is generated on first launch
+  and rotated by the **Regenerate** button (which stages a new code —
+  it pairs when the settings are applied).
+
+  The bare 256-bit base64url token is still accepted in this frame, so
+  an extension holding one from an earlier pairing, or a script, keeps
+  working. Anything else closes the socket immediately.
 
 - After auth, the extension sends one or more `CaptureRequest` JSON messages. oxdm replies with one `CaptureResponse` per request.
 

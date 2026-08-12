@@ -53,6 +53,21 @@ struct AuthFrame {
     token: String,
 }
 
+/// The token inside whatever the client pasted.
+///
+/// Settings hands out a pairing code — port and token in one string —
+/// so that is the usual shape. A bare token is still accepted: an
+/// extension holding one from an earlier pairing, or a script talking
+/// to the bridge directly, should not have to care which of the two it
+/// was given. Anything unrecognisable is returned as-is and fails the
+/// comparison below, which is the same answer as a wrong token.
+fn presented_token(raw: &str) -> String {
+    let raw = raw.trim();
+    crate::data::decode_pairing_code(raw)
+        .map(|(_, token)| token)
+        .unwrap_or_else(|| raw.to_owned())
+}
+
 /// Which `Origin`s may open the bridge.
 ///
 /// A browser sends `Origin` on every WebSocket handshake it makes on a
@@ -113,10 +128,16 @@ async fn handle(state: Arc<AppState>, stream: tokio::net::TcpStream) -> Result<(
     let auth: AuthFrame =
         serde_json::from_str(&first).map_err(|e| IpcError::Other(format!("bad auth json: {e}")))?;
     let expected = state.ext_token().await;
+    // What Settings hands out is a pairing code — the port and the
+    // token in one string — so that is what arrives here. The bare
+    // token is still accepted: an extension holding one from an
+    // earlier pairing, or a script, should not have to care which of
+    // the two it was given.
+    let presented = presented_token(&auth.token);
     // An empty stored token used to mean "accept anything", which is
     // exactly backwards: no token means nothing has been paired yet, so
     // there is nobody to let in.
-    if expected.is_empty() || !crate::ipc_local::auth::token_matches(&expected, &auth.token) {
+    if expected.is_empty() || !crate::ipc_local::auth::token_matches(&expected, &presented) {
         let _ = ws.close(None).await;
         return Err(IpcError::Other("auth rejected".into()));
     }
@@ -305,5 +326,29 @@ mod tests {
         assert!(!origin_allowed(Some("http://localhost:3000")));
         assert!(!origin_allowed(Some("null")));
         assert!(!origin_allowed(Some("")));
+    }
+
+    /// The extension pastes a pairing code; scripts and older pairings
+    /// present the bare token. Both have to name the same secret, or
+    /// the field the app calls a pairing code is one the bridge
+    /// refuses.
+    #[test]
+    fn a_pairing_code_and_a_bare_token_authenticate_the_same_secret() {
+        let token = "Lo5CGC4oXwjGpVmvle3DzLTHvyrWCL_tqSb6I7CeV38";
+        let code = crate::data::encode_pairing_code(27812, token);
+        assert!(code.starts_with("oxdm1."), "{code}");
+        assert_eq!(presented_token(&code), token);
+        assert_eq!(presented_token(token), token);
+        // Pasting picks up stray whitespace; a code that only differs
+        // by a trailing newline is the code.
+        assert_eq!(presented_token(&format!("  {code}\n")), token);
+    }
+
+    /// Anything else is passed through to the comparison, which is
+    /// where a wrong secret belongs — never treated as "close enough".
+    #[test]
+    fn an_unreadable_code_is_not_quietly_repaired() {
+        assert_eq!(presented_token("oxdm1.not-base64!!"), "oxdm1.not-base64!!");
+        assert_eq!(presented_token(""), "");
     }
 }

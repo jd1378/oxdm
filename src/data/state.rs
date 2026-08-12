@@ -5807,6 +5807,44 @@ mod tests {
         assert_eq!(job.advanced.auth.scheme, AuthScheme::Bearer);
     }
 
+    /// The extension is handed one string and has to get a working
+    /// port and token back out of it. Nothing covered this while the
+    /// codec sat unused and the window handed out a bare token.
+    #[test]
+    fn a_pairing_code_carries_the_port_and_the_token() {
+        let token = generate_token();
+        let code = encode_pairing_code(27812, &token);
+        assert_eq!(decode_pairing_code(&code), Some((27812, token.clone())));
+
+        // Ports at both ends of the range, since the two bytes are
+        // written by hand.
+        for port in [1u16, 8080, 65535] {
+            assert_eq!(
+                decode_pairing_code(&encode_pairing_code(port, &token)),
+                Some((port, token.clone()))
+            );
+        }
+    }
+
+    /// A token that is not the usual 32 bytes still round-trips: the
+    /// encoder keeps it verbatim rather than producing a code that
+    /// decodes to something else.
+    #[test]
+    fn an_unusual_token_still_survives_the_round_trip() {
+        let odd = "short";
+        assert_eq!(
+            decode_pairing_code(&encode_pairing_code(1234, odd)),
+            Some((1234, odd.to_owned()))
+        );
+    }
+
+    #[test]
+    fn anything_that_is_not_a_pairing_code_is_refused() {
+        assert_eq!(decode_pairing_code("Lo5CGC4oXwjGpVmvle3Dz"), None);
+        assert_eq!(decode_pairing_code("oxdm1.@@@"), None);
+        assert_eq!(decode_pairing_code(""), None);
+    }
+
     /// One name, one download — whatever folder each saves into and
     /// whatever state it is in.
     #[test]

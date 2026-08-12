@@ -303,6 +303,28 @@ pub struct State {
     dirty: usize,
 }
 
+/// The pairing code this form is offering: the extension's transport
+/// needs a port *and* a token, so it takes one string carrying both
+/// (`oxdm1.<base64url(port || token)>`) rather than two fields the
+/// user has to keep straight.
+///
+/// Built from the pending port, not the saved one: the port field and
+/// the code are applied together, so the code has to describe the
+/// settings the Apply button would write. Handing out a code that
+/// names the old port would pair the extension to a socket that is
+/// about to move.
+fn pairing_code(st: &State) -> String {
+    code_for(&st.ipc_port, st.s.ipc_port, &st.s.ext_token)
+}
+
+/// The port half is whatever the field currently reads, falling back
+/// to the saved one while it is empty or half-typed — a code carrying
+/// a stale port beats a code that vanishes mid-edit.
+fn code_for(port_text: &str, saved_port: u16, token: &str) -> String {
+    let port = port_text.trim().parse().unwrap_or(saved_port);
+    crate::data::encode_pairing_code(port, token)
+}
+
 /// The settings this form would save: `st.s` with every string mirror
 /// folded back in. Shared by Apply and the change count, so the button
 /// can never disagree with what applying would write.
@@ -943,7 +965,7 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
         Msg::CopyPairing => {
             st.pair_copied = true;
             Task::batch([
-                iced::clipboard::write(st.s.ext_token.clone()),
+                iced::clipboard::write(pairing_code(st)),
                 Task::perform(crate::gui::widget::copy::expire(), |()| Msg::PairCopyDone),
             ])
         }
@@ -2364,7 +2386,7 @@ fn browser_section(st: &State) -> Element<'_, Msg> {
                     Some("Paste this into the extension to authorize it."),
                     row![
                         container(
-                            text(st.s.ext_token.clone())
+                            text(pairing_code(st))
                                 .font(theme::MONO)
                                 .size(11.0)
                                 .color(t.fg_2)
@@ -2748,5 +2770,32 @@ pub fn launch_settings() {
     if let Err(e) = app.run() {
         eprintln!("gui error: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The code the window hands out has to describe the settings the
+    /// Apply button would write, port included: pairing against the
+    /// old port would point the extension at a socket about to move.
+    #[test]
+    fn the_pairing_code_follows_the_port_being_typed() {
+        let token = "Lo5CGC4oXwjGpVmvle3DzLTHvyrWCL_tqSb6I7CeV38";
+        let edited = code_for("27999", 27812, token);
+        assert_eq!(
+            crate::data::decode_pairing_code(&edited),
+            Some((27999, token.to_owned()))
+        );
+        // Mid-edit the field is not a port yet; the saved one stands in
+        // rather than the code disappearing.
+        for half_typed in ["", "  ", "279x"] {
+            assert_eq!(
+                crate::data::decode_pairing_code(&code_for(half_typed, 27812, token)),
+                Some((27812, token.to_owned())),
+                "{half_typed:?}"
+            );
+        }
     }
 }
