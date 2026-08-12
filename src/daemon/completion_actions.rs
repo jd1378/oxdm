@@ -15,7 +15,23 @@ use std::process::Command;
 use std::sync::Arc;
 
 use crate::data::{AppState, DomainEvent};
-use crate::domain::ShutdownAction;
+use crate::domain::{Settings, ShutdownAction};
+
+/// Does this stopped download get a window?
+///
+/// Only a run the user started by hand. A queue run is work they set
+/// going and walked away from: a window over whatever they are doing
+/// now is an interruption they did not ask for, and a batch that fails
+/// would be a stack of them. Conflicts included — the row says "needs
+/// your answer" and the queue's finish summary reports it.
+fn wants_window(manual: bool, conflict: bool, s: &Settings) -> bool {
+    manual
+        && if conflict {
+            s.show_conflict_dialog
+        } else {
+            s.show_failed_dialog
+        }
+}
 
 pub fn spawn(state: Arc<AppState>) {
     tokio::spawn(async move {
@@ -34,17 +50,15 @@ pub fn spawn(state: Arc<AppState>) {
                 let already_watching = crate::ipc_local::server::is_focused(
                     crate::ipc_local::protocol::GuiKind::Download(*id),
                 );
-                // A conflict raises its window whatever started the
-                // download: an unanswered question is the one stopped
-                // state that never resolves itself, and the queue item
-                // that hit it is exactly the one nobody is watching.
+                // Nothing a queue started raises a window, conflict
+                // included. A queue run is work the user set going and
+                // walked away from; a window in front of what they are
+                // doing now is an interruption they did not ask for,
+                // and a batch of failures would be a stack of them. The
+                // row still says what happened, and the queue's own
+                // finish summary reports it.
                 let settings = state.settings().await;
-                let wanted = if conflict {
-                    settings.show_conflict_dialog
-                } else {
-                    manual && settings.show_failed_dialog
-                };
-                if wanted && !already_watching {
+                if wants_window(manual, conflict, &settings) && !already_watching {
                     crate::daemon::tray::spawn_download_gui(*id);
                 }
                 continue;
@@ -66,12 +80,17 @@ pub fn spawn(state: Arc<AppState>) {
                     Ok(g) => g.clone(),
                     Err(_) => continue,
                 };
+                // Same rule as a failure: only a download the user
+                // started by hand gets a window. The rest of the
+                // completion actions below still run — a queue whose
+                // job asks for shutdown means it.
+                let manual = state.is_manual_run(id).await;
                 // The per-job toggle is the answer. It starts out as a
                 // copy of the global "Show download-complete dialog"
                 // setting, so leaving it alone follows the global; a
                 // user who changed it for this download meant it, and
                 // ANDing the global back in would silently ignore them.
-                if prefs.show_dialog {
+                if manual && prefs.show_dialog {
                     crate::daemon::tray::spawn_download_gui(id);
                     continue;
                 }
@@ -228,5 +247,36 @@ fn check(status: std::process::ExitStatus) -> std::io::Result<()> {
         Err(std::io::Error::other(format!(
             "disconnect command failed ({status})"
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn settings(failed: bool, conflict: bool) -> Settings {
+        Settings {
+            show_failed_dialog: failed,
+            show_conflict_dialog: conflict,
+            ..Settings::default()
+        }
+    }
+
+    #[test]
+    fn a_queue_run_never_raises_a_window() {
+        let loud = settings(true, true);
+        assert!(
+            !wants_window(false, false, &loud),
+            "a queued failure is silent"
+        );
+        assert!(!wants_window(false, true, &loud), "so is a queued conflict");
+    }
+
+    #[test]
+    fn a_hand_started_run_follows_the_settings() {
+        assert!(wants_window(true, false, &settings(true, true)));
+        assert!(wants_window(true, true, &settings(false, true)));
+        assert!(!wants_window(true, false, &settings(false, true)));
+        assert!(!wants_window(true, true, &settings(true, false)));
     }
 }

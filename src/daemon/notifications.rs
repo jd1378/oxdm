@@ -15,13 +15,37 @@
 use std::sync::Arc;
 
 use crate::data::{AppState, DomainEvent};
+use crate::domain::Settings;
+
+/// Does this stopped download get a desktop notification?
+///
+/// The per-download notification settings describe downloads the user
+/// started. A queue running twenty of them is one piece of work, and
+/// it reports itself through the queue's own finish hook rather than
+/// twenty notifications.
+fn wants_notification(manual: bool, conflict: bool, s: &Settings) -> bool {
+    manual
+        && if conflict {
+            s.notify_conflict
+        } else {
+            s.notify_failed
+        }
+}
 
 pub fn spawn(state: Arc<AppState>) {
     tokio::spawn(async move {
         let mut rx = state.subscribe();
         while let Some(ev) = crate::data::next_event(&mut rx, "notifications").await {
             match ev {
-                DomainEvent::JobCompleted { path, .. } => {
+                DomainEvent::JobCompleted { id, path, .. } => {
+                    // The per-download notification settings describe
+                    // downloads the user started. A queue running
+                    // twenty of them is one piece of work, and it
+                    // reports itself through the queue's own finish
+                    // hook rather than twenty desktop notifications.
+                    if !state.is_manual_run(id).await {
+                        continue;
+                    }
                     if !state.settings().await.notify_complete {
                         continue;
                     }
@@ -33,18 +57,13 @@ pub fn spawn(state: Arc<AppState>) {
                     );
                     notify("Download complete", &body);
                 }
-                DomainEvent::JobFailed { error, .. } => {
+                DomainEvent::JobFailed { id, error } => {
                     // A conflict has its own pair of toggles: it is not
                     // a failure, and it is the one stopped state that
                     // never resolves itself, so it defaults to loud.
                     let conflict = matches!(error, crate::domain::JobError::ConflictPending(_));
-                    let settings = state.settings().await;
-                    let wanted = if conflict {
-                        settings.notify_conflict
-                    } else {
-                        settings.notify_failed
-                    };
-                    if !wanted {
+                    let manual = state.is_manual_run(id).await;
+                    if !wants_notification(manual, conflict, &state.settings().await) {
                         continue;
                     }
                     // The body is the cause in its own words — the
@@ -71,4 +90,31 @@ fn notify(summary: &str, body: &str) {
     // "the desktop dropped it".
     tracing::debug!(summary, "notifying");
     crate::platform::show_notification(summary.to_owned(), body.to_owned());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn settings(failed: bool, conflict: bool) -> Settings {
+        Settings {
+            notify_failed: failed,
+            notify_conflict: conflict,
+            ..Settings::default()
+        }
+    }
+
+    #[test]
+    fn a_queue_run_notifies_about_itself_not_its_downloads() {
+        let loud = settings(true, true);
+        assert!(!wants_notification(false, false, &loud));
+        assert!(!wants_notification(false, true, &loud));
+    }
+
+    #[test]
+    fn a_hand_started_run_follows_the_settings() {
+        assert!(wants_notification(true, false, &settings(true, false)));
+        assert!(wants_notification(true, true, &settings(false, true)));
+        assert!(!wants_notification(true, false, &settings(false, true)));
+    }
 }
