@@ -110,7 +110,6 @@ impl ProxyForm {
             password: self.password.clone(),
             clear_password: self.password_edited && self.password.is_empty(),
             remote_dns: self.remote_dns,
-            bypass: String::new(),
         }
     }
 

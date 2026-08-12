@@ -48,10 +48,6 @@ pub struct ProxyAdv {
     #[serde(default)]
     pub clear_password: bool,
     pub remote_dns: bool,
-    /// Unused: odl's `no_proxy` is all-or-nothing, and there is no
-    /// per-host bypass list behind it. Kept for serde compat with
-    /// persisted blobs; never surfaced in the UI.
-    pub bypass: String,
 }
 
 impl Default for ProxyAdv {
@@ -65,7 +61,6 @@ impl Default for ProxyAdv {
             password: String::new(),
             clear_password: false,
             remote_dns: true,
-            bypass: String::new(),
         }
     }
 }
@@ -169,5 +164,39 @@ impl Default for Advanced {
             proxy: ProxyAdv::default(),
             auth: AuthAdv::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Blobs written by earlier builds carry keys this one no longer
+    /// has — `bypass` was a per-host exception list nothing ever read.
+    /// Serde ignores unknown fields unless told otherwise, and no type
+    /// here asks for `deny_unknown_fields`, so an old row still loads.
+    #[test]
+    fn a_blob_with_retired_keys_still_loads() {
+        let old = r#"{
+            "mode": "socks5", "host": "h", "port": "1080",
+            "auth_enabled": true, "username": "u", "password": "",
+            "remote_dns": false, "bypass": "localhost,*.internal"
+        }"#;
+        let p: ProxyAdv = serde_json::from_str(old).unwrap();
+        assert_eq!(p.mode, ProxyMode::Socks5);
+        assert_eq!(p.host, "h");
+        assert!(!p.remote_dns);
+    }
+
+    /// The other direction: a key added since a blob was written falls
+    /// back to its default rather than failing the whole load.
+    #[test]
+    fn a_blob_missing_new_keys_takes_the_defaults() {
+        let p: ProxyAdv = serde_json::from_str(
+            r#"{"mode":"http","host":"h","port":"8080","auth_enabled":false,
+                "username":"","password":"","remote_dns":true}"#,
+        )
+        .unwrap();
+        assert!(!p.clear_password);
     }
 }

@@ -1605,13 +1605,28 @@ fn concurrent_picker<'a>(t: &Tokens, value: &str) -> Element<'a, Msg> {
 
 /// Global proxy modes and the `ProxyMode` each selects. "Inherit" is
 /// absent by design: this *is* what a job inherits. "System" means no
-/// explicit proxy, so reqwest reads the proxy environment variables.
+/// explicit proxy, so reqwest reads the proxy environment variables;
+/// "None" means not even those.
+///
+/// System stays first because `mode_index` falls back to index 0 for a
+/// mode this list does not offer, and defaulting a proxy setting to
+/// "connect directly" would quietly cut off anyone who reaches the
+/// internet only through their environment's proxy.
 const PROXY_MODES: &[(&str, ProxyMode)] = &[
     ("System", ProxyMode::System),
+    ("None", ProxyMode::None),
     ("HTTP", ProxyMode::Http),
     ("HTTPS", ProxyMode::Https),
     ("SOCKS5", ProxyMode::Socks5),
 ];
+
+/// The mode the form is showing.
+fn selected_mode(st: &State) -> ProxyMode {
+    PROXY_MODES
+        .get(st.proxy_mode)
+        .map(|(_, m)| *m)
+        .unwrap_or(ProxyMode::System)
+}
 /// Width of the port field (matches the per-job `.prop-proxy-port`).
 const PROXY_PORT_W: f32 = 90.0;
 
@@ -1630,8 +1645,9 @@ fn proxy_rows(st: &State) -> Vec<Element<'_, Msg>> {
         t,
         "Use proxy",
         Some(
-            "Routes every download. System reads your proxy environment variables; \
-             a job can still override this from its Properties.",
+            "Routes every download. System reads your proxy environment variables, \
+             None ignores them and connects directly; a job can still override this \
+             from its Properties.",
         ),
         segmented(
             t,
@@ -1644,7 +1660,12 @@ fn proxy_rows(st: &State) -> Vec<Element<'_, Msg>> {
             Msg::ProxyMode,
         ),
     )];
-    if st.proxy_mode > 0 {
+    // Only the modes that name a server ask for one. "None" and
+    // "System" are answers in themselves.
+    if matches!(
+        selected_mode(st),
+        ProxyMode::Http | ProxyMode::Https | ProxyMode::Socks5
+    ) {
         rows.push(set_row_stack(
             t,
             "Server",

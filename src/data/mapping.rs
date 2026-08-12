@@ -57,6 +57,10 @@ pub fn settings_to_download_options(
         // Assembled here and nowhere else: the settings hold the parts,
         // and the password comes straight from the secret store.
         .proxy(global_proxy_url(s, proxy_password)?)
+        // "None": no proxy for anything, including the environment's
+        // and the platform's. A job that inherits gets it too, since
+        // the per-job overlay is built on top of these options.
+        .no_proxy(s.proxy.mode == ProxyMode::None)
         .use_server_time(s.use_server_time)
         .dynamic_split(s.dynamic_split)
         .accept_invalid_certs(s.accept_invalid_certs)
@@ -132,7 +136,8 @@ pub fn job_overlay_options(
 ///   `Job.proxy` string, which wins under Inherit for backward compat.
 /// - `System`: clear any configured proxy for this job
 ///   (`builder.proxy(None)` overrides a global `Some`); reqwest then
-///   falls back to its standard environment-variable pickup.
+///   falls back to its standard environment-variable pickup, even if
+///   the global setting is "None".
 /// - `Http` / `Https` / `Socks5`: synthesize
 ///   `scheme://[user[:pw]@]host:port` (socks5h when remote-DNS is on).
 /// - `None`: connect directly. odl's `no_proxy` turns off the
@@ -145,6 +150,11 @@ fn apply_job_proxy(
     proxy_password: Option<&str>,
 ) -> Result<(), String> {
     let adv = &job.advanced.proxy;
+    // Every mode but Inherit states `no_proxy` outright. The overlay is
+    // built on the global options, so a global "None" would otherwise
+    // survive into a job that names a proxy — and odl's `no_proxy`
+    // wins over `proxy`, so the job would silently connect directly
+    // through the very server it was told to use.
     match adv.mode {
         ProxyMode::None => {
             b.no_proxy(true);
@@ -152,13 +162,16 @@ fn apply_job_proxy(
         ProxyMode::Inherit => {
             if let Some(p) = job.proxy.clone() {
                 let merged = merge_proxy_password(&p, proxy_password)?;
+                b.no_proxy(false);
                 b.proxy(Some(merged));
             }
         }
         ProxyMode::System => {
+            b.no_proxy(false);
             b.proxy(None);
         }
         mode @ (ProxyMode::Http | ProxyMode::Https | ProxyMode::Socks5) => {
+            b.no_proxy(false);
             b.proxy(Some(synth_proxy_url(mode, adv, proxy_password)?));
         }
     }
@@ -169,6 +182,8 @@ fn apply_job_proxy(
 /// The `url` crate percent-encodes credentials for us.
 /// The global proxy as a URL, or `None` for System / an unconfigured
 /// one — reqwest then falls back to the proxy environment variables.
+/// "None" also comes back `None` here; what turns the environment off
+/// is `no_proxy` beside it.
 fn global_proxy_url(s: &Settings, password: Option<&str>) -> Result<Option<String>, String> {
     if !matches!(
         s.proxy.mode,
@@ -701,6 +716,51 @@ mod tests {
             None,
             "odl collapses the pair, so nothing reads back a proxy it will not use"
         );
+    }
+
+    /// A global "None" is inherited, but it is not a veto: a job that
+    /// names its own proxy uses it, and one set to System goes back to
+    /// the environment. odl's `no_proxy` wins over `proxy`, so leaving
+    /// the inherited flag on would route those jobs straight past the
+    /// server they were told to use.
+    #[test]
+    fn a_job_can_overrule_a_global_direct_connection() {
+        let s = Settings {
+            proxy: ProxyAdv {
+                mode: ProxyMode::None,
+                ..Default::default()
+            },
+            ..Settings::default()
+        };
+        let base = settings_to_download_options(&s, None).unwrap();
+        assert!(base.no_proxy(), "the global setting reaches odl");
+
+        let mut job = sample_job();
+        // Inherit takes the global as it stands.
+        job.advanced.proxy.mode = ProxyMode::Inherit;
+        assert!(
+            job_overlay_options(&base, &job, None, None, None)
+                .unwrap()
+                .no_proxy()
+        );
+
+        // An explicit proxy is the job's own answer.
+        job.advanced.proxy = ProxyAdv {
+            mode: ProxyMode::Http,
+            host: "proxy.example.com".into(),
+            port: "8080".into(),
+            ..Default::default()
+        };
+        let opts = job_overlay_options(&base, &job, None, None, None).unwrap();
+        assert!(!opts.no_proxy(), "the job's proxy is not overruled");
+        // Trailing slash: `url::Url` normalises the empty path.
+        assert_eq!(opts.proxy(), Some("http://proxy.example.com:8080/"));
+
+        // System means "the environment decides", global or not.
+        job.advanced.proxy.mode = ProxyMode::System;
+        let opts = job_overlay_options(&base, &job, None, None, None).unwrap();
+        assert!(!opts.no_proxy());
+        assert_eq!(opts.proxy(), None);
     }
 
     #[test]
