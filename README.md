@@ -38,7 +38,7 @@ Installs to `%LOCALAPPDATA%\Programs\oxdm`, adds it to your user PATH, drops a S
 Desktop Linux releases also carry `oxdm-<tag>-<arch>.AppImage` for
 people who prefer a bundle. Download it from the
 [releases page](https://github.com/jd1378/oxdm/releases), `chmod +x`
-it, and run it — there is nothing to install and the installer script
+it, and run it. There is nothing to install and the installer script
 does not use it.
 
 Either way oxdm updates itself in place: it notices at run time whether
@@ -59,9 +59,9 @@ headers (`dbus-devel` on Fedora, `libdbus-1-dev` on Debian/Ubuntu).
 
 Outputs:
 
-- `target/release/oxdm` — main app
-- `target/release/oxdm-native-host` — browser native-messaging bridge
-- `target/release/oxdm-updater` — verifies and installs a self-update
+- `target/release/oxdm`: main app
+- `target/release/oxdm-native-host`: browser native-messaging bridge
+- `target/release/oxdm-updater`: verifies and installs a self-update
 
 For development there is also `cargo run -p oxdm-testserver`, a local
 server whose endpoints each misbehave in one specific way (no ranges,
@@ -89,9 +89,9 @@ $env:OXDM_PURGE = "1"; irm https://raw.githubusercontent.com/jd1378/oxdm/main/to
 
 ## Browser extension
 
-oxdm exposes a stable host-side contract — see [`docs/EXTENSION_API.md`](docs/EXTENSION_API.md) — but does not ship an extension itself. Both transports are supported:
+oxdm exposes a stable host-side contract (see [`docs/EXTENSION_API.md`](docs/EXTENSION_API.md)) but does not ship an extension itself. Both transports are supported:
 
-- **WebSocket** at `ws://127.0.0.1:<port>` — simplest for development.
+- **WebSocket** at `ws://127.0.0.1:<port>`, simplest for development.
 - **Native messaging** via the `oxdm-native-host` shim plus a per-OS manifest.
 
 The auth token lives in *Settings → Browser integration*, with a Regenerate button.
