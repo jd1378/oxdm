@@ -24,6 +24,42 @@ pub fn name_key(name: &str) -> String {
 /// name that works on one machine should work on the next.
 const FORBIDDEN: &[char] = &['/', '\\', ':', '<', '>', '"', '|', '?', '*'];
 
+/// Characters that change what a name *looks* like without changing
+/// what it *is*.
+///
+/// The attack is `invoice\u{202E}fdp.exe`: the right-to-left override
+/// makes the tail render as `…exe.pdf`, so the row, the folder and the
+/// confirmation dialog all show a PDF while the file on disk is an
+/// executable. Every bidi control does some version of this — override,
+/// embedding and isolate all reorder, and the marks alone are enough to
+/// flip a run of digits — and the invisible-but-not-directional ones
+/// (zero-width space, word joiner, BOM, the tag block) hide characters
+/// outright or make two different names look identical.
+///
+/// None of them belong in a filename. Two deliberate exceptions:
+/// U+200C ZWNJ and U+200D ZWJ, which are ordinary letters' business in
+/// Persian, Arabic and Indic scripts (and hold emoji sequences
+/// together). Neither reorders anything.
+///
+/// `char::is_control` does not cover these: they are Unicode `Cf`
+/// (format), not `Cc` (control).
+fn is_deceptive_format(c: char) -> bool {
+    matches!(c,
+        '\u{061C}'                      // arabic letter mark
+        | '\u{200B}'                    // zero-width space
+        | '\u{200E}' | '\u{200F}'       // LRM, RLM
+        | '\u{202A}'..='\u{202E}'       // LRE, RLE, PDF, LRO, RLO
+        | '\u{2060}'..='\u{2064}'       // word joiner, invisible operators
+        | '\u{2066}'..='\u{2069}'       // LRI, RLI, FSI, PDI
+        | '\u{206A}'..='\u{206F}'       // deprecated formatting
+        | '\u{FEFF}'                    // zero-width no-break space / BOM
+        | '\u{FFF9}'..='\u{FFFB}'       // interlinear annotation
+        | '\u{1D173}'..='\u{1D17A}'     // musical formatting
+        | '\u{E0001}'                   // language tag
+        | '\u{E0020}'..='\u{E007F}'     // tag characters
+    )
+}
+
 /// Names Windows will not let a file have, whatever the extension.
 const RESERVED: &[&str] = &[
     "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
@@ -57,10 +93,15 @@ pub fn sanitize(name: &str) -> Option<String> {
 
     let cleaned: String = leaf
         .chars()
-        .filter(|c| !c.is_control())
+        .filter(|c| !c.is_control() && !is_deceptive_format(*c))
         .map(|c| if FORBIDDEN.contains(&c) { '_' } else { c })
         .collect();
     let cleaned = cleaned.trim();
+
+    // Re-trimmed: a name may have ended in a bidi mark, and dropping
+    // it can expose the trailing dot or space that was hiding behind
+    // it.
+    let cleaned = cleaned.trim_end_matches(['.', ' ']);
 
     // `.` and `..` survive the filter above and are still traversal.
     if cleaned.is_empty() || cleaned.chars().all(|c| c == '.') {
@@ -231,6 +272,66 @@ mod tests {
             Some("a_b_c_d_e_f_g_h.bin")
         );
         assert_eq!(sanitize("nul\0byte.bin").as_deref(), Some("nulbyte.bin"));
+    }
+
+    /// The classic RTLO trick: the name renders as `invoice.pdf` and
+    /// runs as `invoice.exe`.
+    #[test]
+    fn a_right_to_left_override_cannot_disguise_an_extension() {
+        assert_eq!(
+            sanitize("invoice\u{202E}fdp.exe").as_deref(),
+            Some("invoicefdp.exe")
+        );
+        // Embedding and isolate do the same job as the override.
+        assert_eq!(
+            sanitize("photo\u{202B}gnp.scr\u{202C}").as_deref(),
+            Some("photognp.scr")
+        );
+        assert_eq!(
+            sanitize("report\u{2067}cod.bat\u{2069}").as_deref(),
+            Some("reportcod.bat")
+        );
+    }
+
+    #[test]
+    fn invisible_characters_do_not_travel_in_a_name() {
+        // Marks alone reorder digits and neighbouring runs.
+        assert_eq!(
+            sanitize("a\u{200E}b\u{200F}c\u{061C}.zip").as_deref(),
+            Some("abc.zip")
+        );
+        // Zero-width space, word joiner, BOM: two names that look the
+        // same must not be two different files.
+        assert_eq!(
+            sanitize("set\u{200B}up\u{2060}.exe\u{FEFF}").as_deref(),
+            Some("setup.exe")
+        );
+        // Tag characters can carry a whole hidden string.
+        assert_eq!(
+            sanitize("ok\u{E0001}\u{E0065}\u{E0078}.txt").as_deref(),
+            Some("ok.txt")
+        );
+    }
+
+    /// ZWNJ and ZWJ are letters' business in Persian, Arabic and Indic
+    /// scripts — and in emoji sequences. They reorder nothing.
+    #[test]
+    fn joiners_that_scripts_need_are_kept() {
+        let persian = "می\u{200C}خواهم.pdf";
+        assert_eq!(sanitize(persian).as_deref(), Some(persian));
+        let family = "👨\u{200D}👩\u{200D}👧.png";
+        assert_eq!(sanitize(family).as_deref(), Some(family));
+    }
+
+    /// A bidi mark at the end was hiding a trailing dot, which Windows
+    /// drops at create time.
+    #[test]
+    fn what_a_mark_was_hiding_is_trimmed_too() {
+        assert_eq!(
+            sanitize("payload.exe.\u{200E}").as_deref(),
+            Some("payload.exe")
+        );
+        assert_eq!(sanitize("\u{202E}\u{200B}").as_deref(), None);
     }
 
     #[test]
