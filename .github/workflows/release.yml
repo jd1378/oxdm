@@ -150,12 +150,19 @@ jobs:
           # Every target builds natively: this is a desktop app, and
           # each host here is the platform it is building for.
           #
-          # No musl — by choice now rather than by obstacle. The C
-          # libdbus that used to rule it out is gone (keyring 4 speaks
-          # Secret Service over zbus), so a Linux build links nothing
-          # but libc; a static target would work. It is not here
-          # because nobody has asked for one, and a desktop app with a
-          # tray icon is not what an Alpine container wants.
+          # No musl, and not for the reason it used to be. The C
+          # libdbus that once ruled it out is gone (keyring 4 speaks
+          # Secret Service over zbus), so a Linux build links libc and
+          # nothing else — but a *static* build still cannot run this
+          # app. winit reaches X11 through x11-dl and Wayland through
+          # wayland-backend's dlopen feature, and musl's static libc
+          # has no dynamic loader: the binary would build, ship, and
+          # then fail to open a window on either display server.
+          #
+          # A dynamically linked musl target would work on Alpine, at
+          # which point it is no longer the portable static binary
+          # people ask musl for. Old-glibc systems are what the
+          # AppImage is for.
           #
           # `appimage: true` marks the Linux targets that also get a
           # single-file bundle.
