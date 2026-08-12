@@ -28,19 +28,21 @@ pub struct Row {
     probe: Option<Result<Box<ProbeResult>, String>>,
 }
 
+/// Everything the window needs to open, in one named piece. It was a
+/// four-element tuple, which is why the rows had to be smuggled past
+/// it through a global.
+#[derive(Clone)]
+pub struct Boot {
+    pub client: Arc<Client>,
+    pub queues: Vec<(QueueId, String)>,
+    pub settings: crate::domain::Settings,
+    pub items: Vec<CaptureRequest>,
+    pub taken_names: Vec<String>,
+}
+
 #[derive(Clone)]
 pub enum Msg {
-    Connected(
-        Result<
-            Box<(
-                Arc<Client>,
-                Vec<(QueueId, String)>,
-                crate::domain::Settings,
-                Vec<String>,
-            )>,
-            String,
-        >,
-    ),
+    Connected(Result<Box<Boot>, String>),
     Window(WindowControl),
     Daemon(crate::gui::ipc::DaemonSignal),
     Probed(usize, Result<Box<ProbeResult>, String>),
@@ -107,61 +109,29 @@ pub fn boot() -> (App, Task<Msg>) {
                     .filter_map(|j| j.filename.as_deref())
                     .map(crate::domain::name_key)
                     .collect::<Vec<_>>();
-                Ok(Box::new((
+                Ok(Box::new(Boot {
                     client,
-                    snap.queues
-                        .iter()
-                        .map(|q| (q.id, q.name.clone()))
-                        .collect::<Vec<_>>(),
-                    snap.settings,
+                    queues: snap.queues.iter().map(|q| (q.id, q.name.clone())).collect(),
+                    settings: snap.settings,
                     items,
                     taken_names,
-                )))
+                }))
             },
-            |r: Result<
-                Box<(
-                    Arc<Client>,
-                    Vec<(QueueId, String)>,
-                    crate::domain::Settings,
-                    Vec<CaptureRequest>,
-                    Vec<String>,
-                )>,
-                String,
-            >| {
-                match r {
-                    Ok(b) => {
-                        let (client, queues, settings, items, taken_names) = *b;
-                        Msg::Connected(Ok(Box::new((
-                            client,
-                            queues,
-                            settings_with_items(settings, items),
-                            taken_names,
-                        ))))
-                    }
-                    Err(e) => Msg::Connected(Err(e)),
-                }
-            },
+            Msg::Connected,
         ),
     )
 }
 
-// Smuggle the items through Settings? No — keep a thread_local handoff.
-// Simpler: stash items in a global once cell set during boot.
-static ITEMS: std::sync::OnceLock<Vec<CaptureRequest>> = std::sync::OnceLock::new();
-
-fn settings_with_items(
-    settings: crate::domain::Settings,
-    items: Vec<CaptureRequest>,
-) -> crate::domain::Settings {
-    let _ = ITEMS.set(items);
-    settings
-}
-
 pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
     match msg {
-        Msg::Connected(Ok(boxed)) => {
-            let (client, queues, settings, taken_names) = *boxed;
-            let items = ITEMS.get().cloned().unwrap_or_default();
+        Msg::Connected(Ok(boot)) => {
+            let Boot {
+                client,
+                queues,
+                settings,
+                items,
+                taken_names,
+            } = *boot;
             let rows: Vec<Row> = items
                 .into_iter()
                 .map(|req| Row {

@@ -583,7 +583,7 @@ impl AppState {
         // can render Locked state immediately on first paint.
         let any_ct = store.any_job_has_ciphertext().await.unwrap_or(false);
         let master_key = match crate::data::crypto::MasterKey::bootstrap(any_ct) {
-            Ok(crate::data::crypto::BootOutcome::Ready(k)) => Some(k),
+            Ok(crate::data::crypto::BootOutcome::Ready(k)) => Some(*k),
             Ok(crate::data::crypto::BootOutcome::Locked) => {
                 tracing::warn!(
                     "master key missing from OS keyring but DB holds encrypted job \

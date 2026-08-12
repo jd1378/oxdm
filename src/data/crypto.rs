@@ -84,7 +84,9 @@ impl Field {
 #[derive(Debug)]
 pub enum BootOutcome {
     /// Key was loaded (either pre-existing or freshly generated).
-    Ready(MasterKey),
+    /// Boxed: the key material dwarfs the other variant, and this is
+    /// returned once at startup, so an allocation costs nothing.
+    Ready(Box<MasterKey>),
     /// Keyring has no key AND the DB already holds ciphertext. Caller
     /// must surface a dialog asking the user to acknowledge a wipe
     /// before the daemon can proceed.
@@ -99,11 +101,11 @@ impl MasterKey {
     /// - No key, DB has encrypted rows → `Locked` (UI must intervene).
     pub fn bootstrap(db_has_ciphertext: bool) -> Result<BootOutcome, CryptoError> {
         match crate::data::keyring::get_master_key().map_err(CryptoError::Keyring)? {
-            Some(b64) => Self::from_base64(&b64).map(BootOutcome::Ready),
+            Some(b64) => Self::from_base64(&b64).map(|k| BootOutcome::Ready(Box::new(k))),
             None if db_has_ciphertext => Ok(BootOutcome::Locked),
             None => {
                 let key = Self::generate()?;
-                Ok(BootOutcome::Ready(key))
+                Ok(BootOutcome::Ready(Box::new(key)))
             }
         }
     }

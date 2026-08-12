@@ -1746,10 +1746,10 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             }
         }
         Msg::ShotTick => {
-            if let Some(shot) = &mut m.shot {
-                if let Some(task) = shot.tick() {
-                    return task.map(Msg::Shot);
-                }
+            if let Some(shot) = &mut m.shot
+                && let Some(task) = shot.tick()
+            {
+                return task.map(Msg::Shot);
             }
             Task::none()
         }
@@ -2402,6 +2402,11 @@ fn toast_layer<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg> {
 
 // ---------------------------------------------------------------- sidebar
 
+// Nine parameters, each one a distinct thing the row draws. Bundling
+// them into a struct would name the same nine fields one call site
+// away from where they are read, which is longer to write and no
+// easier to follow.
+#[allow(clippy::too_many_arguments)]
 fn sidebar_row<'a>(
     t: &Tokens,
     leader: Element<'a, Msg>,

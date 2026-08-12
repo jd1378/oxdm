@@ -8,20 +8,15 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Algo {
     Md5,
     Sha1,
+    #[default]
     Sha256,
     Sha384,
     Sha512,
-}
-
-impl Default for Algo {
-    fn default() -> Self {
-        Self::Sha256
-    }
 }
 
 impl Algo {
@@ -55,32 +50,22 @@ impl Algo {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CsSource {
     Server,
     Computed,
+    #[default]
     User,
 }
 
-impl Default for CsSource {
-    fn default() -> Self {
-        Self::User
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CsStatus {
     Verified,
     Mismatch,
+    #[default]
     Unverified,
-}
-
-impl Default for CsStatus {
-    fn default() -> Self {
-        Self::Unverified
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]

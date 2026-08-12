@@ -328,7 +328,7 @@ pub fn remove_confirm<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Ms
         any_check = true;
         checks = checks.push(checkbox(
             t,
-            &plural(
+            plural(
                 n,
                 "Also delete file on disk",
                 &format!("Also delete all {n} files on disk"),

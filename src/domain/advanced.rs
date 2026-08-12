@@ -9,9 +9,11 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProxyMode {
+    /// No per-job override: the global setting decides.
+    #[default]
     Inherit,
     /// Connect directly: ignore the global proxy, the environment's
     /// (`HTTP_PROXY` and friends) and the platform's. Carried out by
@@ -21,12 +23,6 @@ pub enum ProxyMode {
     Http,
     Https,
     Socks5,
-}
-
-impl Default for ProxyMode {
-    fn default() -> Self {
-        Self::Inherit
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,19 +61,14 @@ impl Default for ProxyAdv {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthScheme {
+    #[default]
     None,
     Basic,
     Bearer,
     Digest,
-}
-
-impl Default for AuthScheme {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]

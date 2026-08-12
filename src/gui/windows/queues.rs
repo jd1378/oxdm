@@ -214,20 +214,20 @@ pub enum FinishKind {
     RunCommand,
 }
 
+/// Everything the window needs to open, named rather than positional.
+#[derive(Clone)]
+pub struct Boot {
+    pub client: Arc<Client>,
+    pub queues: Vec<Queue>,
+    pub settings: crate::domain::Settings,
+    /// Which conditions this host can actually report on.
+    pub cond_avail: Vec<CondKind>,
+    pub jobs: Vec<crate::domain::Job>,
+}
+
 #[derive(Clone)]
 pub enum Msg {
-    Connected(
-        Result<
-            Box<(
-                Arc<Client>,
-                Vec<Queue>,
-                crate::domain::Settings,
-                Vec<CondKind>,
-                Vec<crate::domain::Job>,
-            )>,
-            String,
-        >,
-    ),
+    Connected(Result<Box<Boot>, String>),
     Queues(Vec<Queue>),
     /// Everything the pending-order table lists, refreshed whenever the
     /// daemon says a job changed.
@@ -702,13 +702,13 @@ pub fn boot() -> (App, Task<Msg>) {
                     .hello(crate::ipc_local::protocol::GuiKind::Queues)
                     .await?;
                 let snap = client.snapshot().await?;
-                Ok(Box::new((
+                Ok(Box::new(Boot {
                     client,
-                    snap.queues,
-                    snap.settings,
-                    snap.cond_available,
-                    snap.jobs,
-                )))
+                    queues: snap.queues,
+                    settings: snap.settings,
+                    cond_avail: snap.cond_available,
+                    jobs: snap.jobs,
+                }))
             },
             Msg::Connected,
         ),
@@ -717,8 +717,14 @@ pub fn boot() -> (App, Task<Msg>) {
 
 pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
     match msg {
-        Msg::Connected(Ok(boxed)) => {
-            let (client, queues, settings, cond_avail, jobs) = *boxed;
+        Msg::Connected(Ok(boot)) => {
+            let Boot {
+                client,
+                queues,
+                settings,
+                cond_avail,
+                jobs,
+            } = *boot;
             let mut st = State {
                 tokens: Tokens::from_settings(&settings),
                 selected: queues.first().map(|q| q.id),

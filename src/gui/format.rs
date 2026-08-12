@@ -39,7 +39,7 @@ pub fn format_int_grouped(n: u64) -> String {
     // before guarding `i >= first`, which panicked for inputs like
     // `52_428_800` (len 8 → first 2 → underflow at i = 1).
     for (i, b) in s.bytes().enumerate() {
-        if i > 0 && (len - i) % 3 == 0 {
+        if i > 0 && (len - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(b as char);

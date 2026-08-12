@@ -22,9 +22,14 @@ use crate::domain::{
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Frame {
     /// Client → daemon. `req_id` echoed in the matching `Reply`.
-    Request(u64, Request),
-    /// Daemon → client.
-    Reply(u64, Reply),
+    /// Boxed for the same reason as the reply below: an `AddJob`
+    /// carries a whole form, and every ping would otherwise be as big
+    /// as the largest request anyone can send.
+    Request(u64, Box<Request>),
+    /// Daemon → client. Boxed: a reply carrying a full snapshot is
+    /// twice the size of anything else on the wire, and every frame —
+    /// including a one-word event — would otherwise be that big.
+    Reply(u64, Box<Reply>),
     /// Daemon → client. Pushed asynchronously after `Subscribe`.
     Event(Event),
 }

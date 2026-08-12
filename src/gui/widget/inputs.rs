@@ -133,7 +133,7 @@ impl<'a, M: Clone + 'a> TextInput<'a, M> {
             input = input.on_input(move |_| noop.clone());
         } else if self.enabled {
             if let Some(f) = self.on_input {
-                input = input.on_input(move |s| f(s));
+                input = input.on_input(f);
             }
             if let Some(m) = self.on_submit {
                 input = input.on_submit(m);
@@ -256,7 +256,7 @@ impl<'a, M: Clone + 'a> PasswordInput<'a, M> {
         if self.enabled
             && let Some(f) = self.on_input
         {
-            input = input.on_input(move |s| f(s));
+            input = input.on_input(f);
         }
 
         let mut parts = row![input].spacing(0.0).align_y(Alignment::Center);
@@ -349,7 +349,7 @@ impl<'a, M: Clone + 'a> FileInput<'a, M> {
         if self.enabled
             && let Some(f) = self.on_input
         {
-            input = input.on_input(move |s| f(s));
+            input = input.on_input(f);
         }
         let browse = Btn::new("")
             .secondary()

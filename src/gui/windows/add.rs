@@ -109,7 +109,10 @@ pub enum AdvTab {
 
 #[derive(Clone)]
 pub enum Msg {
-    Connected(Result<Boot, String>),
+    // Boxed: everything the window needs to open arrives in this one
+    // variant, and unboxed it would set the size of every message the
+    // dialog ever sends.
+    Connected(Result<Box<Boot>, String>),
     Window(WindowControl),
     Daemon(crate::gui::ipc::DaemonSignal),
     UrlChanged(String),
@@ -451,7 +454,7 @@ pub fn boot() -> (App, Task<Msg>) {
                     .filter_map(|j| j.filename.as_deref())
                     .map(crate::domain::name_key)
                     .collect::<Vec<_>>();
-                Ok(Boot {
+                Ok(Box::new(Boot {
                     client,
                     settings: snap.settings,
                     queues: snap.queues.iter().map(|q| (q.id, q.name.clone())).collect(),
@@ -459,7 +462,7 @@ pub fn boot() -> (App, Task<Msg>) {
                     edit,
                     prefill,
                     taken_names,
-                })
+                }))
             },
             Msg::Connected,
         ),

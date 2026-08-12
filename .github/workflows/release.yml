@@ -65,12 +65,17 @@ jobs:
         git checkout "tags/$TAG" -b "release-$TAG"
         echo "tag=$TAG" >> $GITHUB_OUTPUT
 
-        cargo metadata --no-deps --format-version 1 | jq -r '"name=" + .packages[0].name' | tee -a $GITHUB_OUTPUT
-        cargo metadata --no-deps --format-version 1 | jq -r '"version=" + .packages[0].version' | tee -a $GITHUB_OUTPUT
-        cargo metadata --no-deps --format-version 1 | jq -r '"maintainer=" + .packages[0].authors[0]' | tee -a $GITHUB_OUTPUT
-        cargo metadata --no-deps --format-version 1 | jq -r '"homepage=" + .packages[0].homepage' | tee -a $GITHUB_OUTPUT
+        # By name, not by position: this is a workspace, and
+        # `.packages[0]` is whichever member cargo lists first — the
+        # test server, whose version has nothing to do with a release.
+        META=$(cargo metadata --no-deps --format-version 1 \
+          | jq --exit-status '.packages[] | select(.name == "oxdm")')
+        jq -r '"name=" + .name' <<< "$META" | tee -a $GITHUB_OUTPUT
+        jq -r '"version=" + .version' <<< "$META" | tee -a $GITHUB_OUTPUT
+        jq -r '"maintainer=" + .authors[0]' <<< "$META" | tee -a $GITHUB_OUTPUT
+        jq -r '"homepage=" + .homepage' <<< "$META" | tee -a $GITHUB_OUTPUT
 
-        VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+        VERSION=$(jq -r '.version' <<< "$META")
         # The built binary reports CARGO_PKG_VERSION, and the in-app
         # updater compares the feed against it. A tag that disagrees
         # with the manifest ships an app that thinks it is a different

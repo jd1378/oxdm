@@ -271,6 +271,7 @@ async fn handle_conn(
         let Frame::Request(req_id, req) = frame else {
             continue;
         };
+        let req = *req;
 
         if let Request::Auth(got) = &req {
             authed = super::auth::token_matches(&token, got);
@@ -282,7 +283,7 @@ async fn handle_conn(
             };
             let _g = writer.lock().await;
             let mut w = &*stream;
-            write_frame(&mut w, &Frame::Reply(req_id, reply)).await?;
+            write_frame(&mut w, &Frame::Reply(req_id, Box::new(reply))).await?;
             if !authed {
                 return Ok(());
             }
@@ -313,7 +314,7 @@ async fn handle_conn(
             register_if_ready(&conn_state);
             let _g = writer.lock().await;
             let mut w = &*stream;
-            write_frame(&mut w, &Frame::Reply(req_id, Reply::Ok)).await?;
+            write_frame(&mut w, &Frame::Reply(req_id, Box::new(Reply::Ok))).await?;
             continue;
         }
 
@@ -325,7 +326,7 @@ async fn handle_conn(
             }
             let _g = writer.lock().await;
             let mut w = &*stream;
-            write_frame(&mut w, &Frame::Reply(req_id, Reply::Ok)).await?;
+            write_frame(&mut w, &Frame::Reply(req_id, Box::new(Reply::Ok))).await?;
             continue;
         }
 
@@ -339,7 +340,7 @@ async fn handle_conn(
             register_if_ready(&conn_state);
             let _g = writer.lock().await;
             let mut w = &*stream;
-            write_frame(&mut w, &Frame::Reply(req_id, Reply::Ok)).await?;
+            write_frame(&mut w, &Frame::Reply(req_id, Box::new(Reply::Ok))).await?;
             continue;
         }
 
@@ -352,7 +353,7 @@ async fn handle_conn(
             let reply = dispatch(&state, req).await;
             let _g = writer.lock().await;
             let mut w = &*stream;
-            let _ = write_frame(&mut w, &Frame::Reply(req_id, reply)).await;
+            let _ = write_frame(&mut w, &Frame::Reply(req_id, Box::new(reply))).await;
         });
     }
 }

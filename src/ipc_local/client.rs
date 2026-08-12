@@ -90,7 +90,7 @@ impl Client {
                 match frame {
                     Frame::Reply(id, r) => {
                         if let Some(tx) = pending_for_task.lock().await.remove(&id) {
-                            let _ = tx.send(r);
+                            let _ = tx.send(*r);
                         }
                     }
                     Frame::Event(ev) => {
@@ -164,7 +164,7 @@ impl Client {
         {
             let _g = self.write_lock.lock().await;
             let mut w = &*self.stream;
-            if let Err(e) = write_frame(&mut w, &Frame::Request(id, req)).await {
+            if let Err(e) = write_frame(&mut w, &Frame::Request(id, Box::new(req))).await {
                 self.pending.lock().await.remove(&id);
                 return Err(e);
             }
