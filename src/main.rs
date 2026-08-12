@@ -46,6 +46,7 @@ fn main() {
     //   oxdm gui main         → main GUI subprocess
     //   oxdm gui download ID  → per-job download window subprocess
     //   oxdm --quit           → tell the running daemon to terminate
+    //   oxdm --install-update → swap in a downloaded update (internal)
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         Some("gui") => match args.next().as_deref() {
@@ -109,6 +110,11 @@ fn main() {
                 std::process::exit(2);
             }
         },
+        // Hidden: oxdm re-runs itself from a copy elsewhere to replace
+        // the installed programs, because a running program cannot
+        // replace itself. Not in --help; the app spawns it, users do
+        // not.
+        Some("--install-update") => oxdm::update_install::main(args),
         Some("--quit") => quit_remote(),
         Some("--tray") => run_daemon_tray(),
         Some("--version" | "-V") => {

@@ -1,48 +1,15 @@
-//! oxdm self-update worker (artifact mode).
+//! Installing an update: the half that cannot run inside the app.
 //!
-//! Spawned by the running oxdm GUI **after** it has already fetched the
-//! update artifact through the regular download pipeline. The helper's
-//! sole job is the dangerous half: wait for the parent to exit,
-//! atomically replace the installed programs, and relaunch the app.
+//! Replacing a program means unlinking the file behind it, and Windows
+//! will not unlink a file backing a loaded image — so `oxdm.exe` cannot
+//! be the process that replaces `oxdm.exe`. Something else has to
+//! outlive it, do the swap, and start the new build.
 //!
-//! An installed build is three programs, not one. `oxdm-native-host` is
-//! what the browser launches, and this helper is what will perform the
-//! *next* update — leaving either behind means a machine running one
-//! version of the app and older copies of the two programs it depends
-//! on. `--payload` names a directory of replacements; each is placed
-//! beside the app, and the one matching the app itself takes the path
-//! given by `--exe`, whatever the user has named it. An AppImage is
-//! one file and updates through `--artifact` instead.
-//!
-//! Every update replaces this helper too, so the daemon and the helper
-//! are always the same build talking to each other: the flags below can
-//! change with the code that passes them, and nothing has to be kept
-//! around for an older caller.
-//!
-//! Replacing a program that is *running* — this helper, or a native
-//! host the browser still has open — cannot be done by writing over it
-//! on Windows: the target has to be unlinked, and a file backing a
-//! loaded image cannot be. It *can* be renamed. Windows draws the line
-//! between the two, allowing a running executable to move and refusing
-//! to let it disappear, which is what every self-updater on the
-//! platform is built on.
-//!
-//! So when the direct swap is refused, the old program is renamed
-//! aside and the new one takes the name. On Windows that is the normal
-//! path for this helper and for a native host in use, not an
-//! exception; the app itself is already gone by then and swaps
-//! directly. The displaced file cannot be deleted while it is still
-//! running, so it is left for the next launch to sweep up.
-//!
-//! It does not hash the artifact. The digest the feed published is
-//! attached to the download as an ordinary checksum, so the download
-//! manager verifies it the same way it verifies anything else — and a
-//! mismatch fails the download, which is reported as a failed update
-//! rather than reaching this helper at all. Re-hashing here would only
-//! re-answer a question already answered, and only for the sliver of
-//! time between the two checks: the artifact sits in a 0700 directory
-//! under the user's own data dir, so anything able to swap it there
-//! could replace the executable outright.
+//! That something is oxdm itself, copied elsewhere and re-run as
+//! `oxdm --install-update`. A copy running from a temp directory is
+//! not the installed file, so every installed program is free to be
+//! replaced, and there is no second executable to ship, install,
+//! uninstall, or keep in step with the app it updates.
 //!
 //! ## Protocol
 //!
@@ -55,26 +22,53 @@
 //! ## CLI
 //!
 //! ```text
-//! oxdm-updater --exe <PATH> --pid <PID> --payload <DIR>
-//! oxdm-updater --exe <PATH> --pid <PID> --artifact <PATH>   # AppImage
+//! oxdm --install-update --exe <PATH> --pid <PID> --payload <DIR>
+//! oxdm --install-update --exe <PATH> --pid <PID> --artifact <PATH>
 //! ```
+//!
+//! The artifact form is for an AppImage, which is one file holding
+//! everything; the payload form is a directory of programs.
+//!
+//! Nothing here hashes the artifact. The download manager checked it
+//! against the digest the feed published before any of this ran.
+//!
+//! Replacing a program that is *running* — a native host the browser
+//! still has open — is the case the rename dance covers: the old file
+//! is moved aside, the new one takes the name, and the displaced copy
+//! is swept up at the next launch because it cannot be deleted while
+//! it runs.
 
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() {
-    let args = match parse_args() {
+/// Entry point for `oxdm --install-update`. Never returns.
+pub fn main(argv: impl Iterator<Item = String>) -> ! {
+    let args = match parse_args(argv) {
         Ok(a) => a,
         Err(e) => {
             emit(&Event::Error { message: e });
             std::process::exit(2);
         }
     };
-    if let Err(e) = run(args).await {
-        emit(&Event::Error { message: e });
-        std::process::exit(1);
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            emit(&Event::Error {
+                message: format!("runtime: {e}"),
+            });
+            std::process::exit(1);
+        }
+    };
+    match rt.block_on(run(args)) {
+        Ok(()) => std::process::exit(0),
+        Err(e) => {
+            emit(&Event::Error { message: e });
+            std::process::exit(1);
+        }
     }
 }
 
@@ -91,8 +85,8 @@ enum Source {
     Artifact(PathBuf),
 }
 
-fn parse_args() -> Result<Args, String> {
-    let mut argv = std::env::args().skip(1);
+fn parse_args(argv: impl Iterator<Item = String>) -> Result<Args, String> {
+    let mut argv = argv;
     let mut exe: Option<PathBuf> = None;
     let mut pid: Option<u32> = None;
     let mut artifact: Option<PathBuf> = None;

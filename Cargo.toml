@@ -128,10 +128,6 @@ path = "src/main.rs"
 name = "oxdm-native-host"
 path = "src/bin/oxdm-native-host.rs"
 
-[[bin]]
-name = "oxdm-updater"
-path = "src/bin/oxdm-updater.rs"
-
 # iced 0.14.0's tiny-skia backend double-transforms canvas clip bounds
 # (draw_primitive_group pre-multiplies, the renderer multiplies again),
 # shifting/clipping all nested canvas geometry. Vendored with a 2-line fix.

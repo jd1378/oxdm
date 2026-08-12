@@ -14,3 +14,4 @@ pub mod ipc;
 pub mod ipc_local;
 pub mod platform;
 pub mod single_instance;
+pub mod update_install;

@@ -37,7 +37,7 @@ warn() { printf '\033[33m!\033[0m %s\n' "$*"; }
 OS="$(uname -s)"
 
 step "Removing binaries"
-for bin in oxdm oxdm-native-host oxdm-updater; do
+for bin in oxdm oxdm-native-host; do
   if [ -f "$INSTALL_DIR/$bin" ]; then
     rm -f "$INSTALL_DIR/$bin"
     ok "removed $INSTALL_DIR/$bin"

@@ -1,14 +1,13 @@
 //! Unpacking a self-update payload.
 //!
-//! An installed build updates as a set: `oxdm` is the app, but
-//! `oxdm-native-host` is what the browser launches and `oxdm-updater`
-//! is what performs the next update. Replacing only the first leaves a
-//! machine running one version of the app and older copies of the two
-//! programs it talks to — and the updater is the one that would have to
-//! understand any future change to how updates work.
+//! An installed build is two programs: `oxdm` is the app, and
+//! `oxdm-native-host` is what the browser launches to hand downloads
+//! over. Replacing only the app leaves a machine running one version
+//! beside a native host from another, talking a protocol that may have
+//! moved on.
 //!
 //! So the artifact for an installed build is a small tar.gz of exactly
-//! those three files, and this unpacks it.
+//! those two files, and this unpacks it.
 //!
 //! Nothing is trusted about the archive's own paths. Only entries whose
 //! *file name* is one of the binaries we ship are written, into a
@@ -22,7 +21,7 @@ use std::path::{Path, PathBuf};
 
 /// What an installed build consists of. An archive entry named
 /// anything else is ignored.
-const BINARIES: [&str; 3] = ["oxdm", "oxdm-native-host", "oxdm-updater"];
+const BINARIES: [&str; 2] = ["oxdm", "oxdm-native-host"];
 
 /// Is this the name of one of our binaries, with or without the
 /// Windows suffix? Compared case-insensitively because Windows file
@@ -161,7 +160,6 @@ mod tests {
             &[
                 ("oxdm", b"app"),
                 ("oxdm-native-host", b"host"),
-                ("oxdm-updater", b"updater"),
                 ("README.md", b"docs"),
                 ("oxdm.png", b"icon"),
             ],
@@ -169,7 +167,7 @@ mod tests {
         let dest = dir.path().join("out");
         let mut written = extract(&archive, &dest).unwrap();
         written.sort();
-        assert_eq!(written.len(), 3, "{written:?}");
+        assert_eq!(written.len(), 2, "{written:?}");
         assert!(dest.join("oxdm").exists());
         assert!(dest.join("oxdm-native-host").exists());
         assert!(!dest.join("README.md").exists(), "no passengers");
@@ -184,7 +182,7 @@ mod tests {
             dir.path(),
             &[
                 ("../../oxdm", b"escapee"),
-                ("nested/dir/oxdm-updater", b"updater"),
+                ("nested/dir/oxdm-native-host", b"host"),
             ],
         );
         let dest = dir.path().join("out");
@@ -194,7 +192,7 @@ mod tests {
             assert_eq!(path.parent(), Some(dest.as_path()), "{path:?} left the pen");
         }
         assert!(dest.join("oxdm").exists(), "written by its name alone");
-        assert!(dest.join("oxdm-updater").exists());
+        assert!(dest.join("oxdm-native-host").exists());
         assert!(!dir.path().join("../../oxdm").exists());
     }
 
@@ -213,25 +211,25 @@ mod tests {
         let exe = dir.path().join("oxdm");
         for name in [
             "oxdm.oxdm-old",
-            "oxdm-updater.oxdm-old",
+            "oxdm-native-host.oxdm-old",
             "notes.oxdm-old",
             "oxdm",
-            "oxdm-updater",
+            "oxdm-native-host",
         ] {
             std::fs::write(dir.path().join(name), b"x").unwrap();
         }
         sweep_displaced(&exe);
         assert!(!dir.path().join("oxdm.oxdm-old").exists());
-        assert!(!dir.path().join("oxdm-updater.oxdm-old").exists());
+        assert!(!dir.path().join("oxdm-native-host.oxdm-old").exists());
         assert!(dir.path().join("notes.oxdm-old").exists(), "not ours");
         assert!(dir.path().join("oxdm").exists(), "still the app");
-        assert!(dir.path().join("oxdm-updater").exists());
+        assert!(dir.path().join("oxdm-native-host").exists());
     }
 
     #[test]
     fn the_windows_suffix_is_recognised() {
         assert!(is_ours("oxdm.exe"));
-        assert!(is_ours("oxdm-updater.EXE"));
+        assert!(is_ours("oxdm-native-host.EXE"));
         assert!(is_ours("oxdm"));
         assert!(!is_ours("oxdm-testserver"));
         assert!(!is_ours("notoxdm"));

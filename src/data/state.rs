@@ -432,7 +432,7 @@ pub struct AppState {
     /// only: it is a fact about the release feed, and asking again
     /// costs one small document.
     found_update: RwLock<Option<crate::data::UpdateInfo>>,
-    /// The `oxdm-updater` helper, once it holds a verified artifact and
+    /// The installer process, once it holds a verified artifact and
     /// is waiting to be told to go ahead.
     updater: tokio::sync::Mutex<Option<tokio::process::Child>>,
     /// Set once the daemon has been asked to quit and never cleared:
@@ -1304,7 +1304,7 @@ impl AppState {
         self.pending_update.read().await.clone()
     }
 
-    /// Hand the finished artifact to `oxdm-updater` and wait.
+    /// Hand the finished artifact to the installer and wait.
     ///
     /// Nothing is replaced here: the helper stops at `ready` and waits
     /// for [`Self::install_update`].
@@ -1332,21 +1332,19 @@ impl AppState {
         // version of.
         let bundle = crate::data::update_channel::running_as_appimage();
         let exe = bundle.clone().unwrap_or_else(|| running.clone());
-        // The helper, on the other hand, is found beside the *running*
-        // binary: inside the bundle when that is where we came from.
-        let updater = running.with_file_name(if cfg!(windows) {
-            "oxdm-updater.exe"
-        } else {
-            "oxdm-updater"
-        });
-        if !updater.exists() {
-            self.fail_update(format!(
-                "the updater helper is missing from this install ({})",
-                updater.display()
-            ))
-            .await;
-            return;
-        }
+        // The program that performs the swap is oxdm, copied out of
+        // the install and run from there. It has to be a copy: the
+        // installed file is one of the files being replaced, and a
+        // running program cannot be replaced. Nothing is shipped for
+        // this — a second executable would be one more thing to
+        // install, uninstall, and keep in step with the app.
+        let updater = match self.stage_installer(&running).await {
+            Ok(p) => p,
+            Err(e) => {
+                self.fail_update(e).await;
+                return;
+            }
+        };
 
         // One file for a bundle; for an installed build, the programs
         // unpacked out of the archive that was just verified.
@@ -1387,6 +1385,7 @@ impl AppState {
         };
 
         let mut child = match tokio::process::Command::new(&updater)
+            .arg("--install-update")
             .arg("--exe")
             .arg(&exe)
             .arg("--pid")
@@ -1461,6 +1460,45 @@ impl AppState {
             .await
             .map_err(|e| format!("could not tell the updater to go ahead: {e}"))?;
         Ok(())
+    }
+
+    /// Copy the running oxdm somewhere it will not be replaced, and
+    /// return the copy to run as the installer.
+    ///
+    /// Kept in the update staging directory rather than the system temp
+    /// dir: it is already private to this user, it is already where the
+    /// artifact lives, and the next launch sweeps the whole thing —
+    /// which matters because on Windows a program cannot delete itself
+    /// on the way out.
+    async fn stage_installer(&self, running: &std::path::Path) -> Result<PathBuf, String> {
+        let running = running.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            let dir = update_staging_dir().map_err(|e| format!("update staging: {e}"))?;
+            let name = if cfg!(windows) {
+                "oxdm-installer.exe"
+            } else {
+                "oxdm-installer"
+            };
+            let dest = dir.join(name);
+            // A copy from an interrupted attempt is not this one, and
+            // on Windows it may still be running: a fresh name would
+            // pile up, so replace it and let a failure say so.
+            let _ = std::fs::remove_file(&dest);
+            std::fs::copy(&running, &dest)
+                .map_err(|e| format!("could not stage the installer: {e}"))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perm = std::fs::metadata(&dest)
+                    .map_err(|e| e.to_string())?
+                    .permissions();
+                perm.set_mode(0o755);
+                std::fs::set_permissions(&dest, perm).map_err(|e| e.to_string())?;
+            }
+            Ok(dest)
+        })
+        .await
+        .map_err(|e| format!("staging the installer panicked: {e}"))?
     }
 
     /// Abandon the update in flight and say why.

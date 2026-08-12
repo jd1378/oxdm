@@ -11,8 +11,8 @@ curl -fsSL https://raw.githubusercontent.com/jd1378/oxdm/main/tools/install.sh |
 ```
 
 Downloads the release archive for your platform, checks it against the
-published SHA-256, installs `oxdm`, `oxdm-native-host` and
-`oxdm-updater` into `~/.local/bin`, and adds a launcher entry.
+published SHA-256, installs `oxdm` and `oxdm-native-host` into
+`~/.local/bin`, and adds a launcher entry.
 
 Custom directory:
 
@@ -64,7 +64,6 @@ Outputs:
 
 - `target/release/oxdm`: main app
 - `target/release/oxdm-native-host`: browser native-messaging bridge
-- `target/release/oxdm-updater`: verifies and installs a self-update
 
 For development there is also `cargo run -p oxdm-testserver`, a local
 server whose endpoints each misbehave in one specific way (no ranges,

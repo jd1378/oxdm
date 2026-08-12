@@ -2,14 +2,14 @@ name: GitHub release
 
 #
 # What a release publishes, per target:
-#   - oxdm-<tag>-<target>.tar.gz / .zip — all three binaries, the icon,
+#   - oxdm-<tag>-<target>.tar.gz / .zip — both binaries, the icon,
 #     README, LICENSE
 #   - oxdm-<tag>-<target>[.exe] — the bare executable, which is what an
 #     installed build replaces itself with when it updates
 #   - oxdm-<tag>-<arch>.AppImage on desktop Linux, for people who
 #     prefer a bundle; the installer script does not use it
 #   - <asset>.sha256 beside every one of them
-#   - oxdm-<tag>-<target>-update.tar.gz — the three programs alone,
+#   - oxdm-<tag>-<target>-update.tar.gz — the two programs alone,
 #     which is what an installed build replaces itself with.
 #   - update-<target>.json and, where there is a bundle,
 #     update-<target>-appimage.json — the feeds the in-app updater
@@ -223,7 +223,7 @@ jobs:
         # All three ship together: without the native host there is no
         # browser integration, and without the updater oxdm cannot
         # install its own updates. Both used to be left out.
-        for bin in oxdm oxdm-native-host oxdm-updater; do
+        for bin in oxdm oxdm-native-host; do
           test -f "${OUT}/${bin}${EXE_suffix}" || { echo "::error::missing ${bin}${EXE_suffix}"; exit 1; }
         done
 
@@ -248,7 +248,7 @@ jobs:
         mkdir -p "${ARCHIVE_DIR}"
 
         EXE="${{ steps.bin.outputs.EXE_SUFFIX }}"
-        for bin in oxdm oxdm-native-host oxdm-updater; do
+        for bin in oxdm oxdm-native-host; do
           cp "${{ steps.bin.outputs.OUT_DIR }}/${bin}${EXE}" "$ARCHIVE_DIR"
         done
         cp README.md LICENSE "$ARCHIVE_DIR"
@@ -286,7 +286,7 @@ jobs:
         mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/applications" \
                  "$APPDIR/usr/share/icons/hicolor/512x512/apps"
 
-        for bin in oxdm oxdm-native-host oxdm-updater; do
+        for bin in oxdm oxdm-native-host; do
           install -Dm755 "${{ steps.bin.outputs.OUT_DIR }}/${bin}" "$APPDIR/usr/bin/${bin}"
         done
         install -Dm644 assets/oxdm_idle_dark.png \
@@ -350,12 +350,11 @@ jobs:
         STAGING="_cicd-intermediates/publish"
         mkdir -p "$STAGING"
 
-        # What the updater downloads. An installed build is three
-        # programs — the app, the browser's native host, and the
-        # updater itself — so its artifact is a tar.gz of exactly those
-        # three and the update replaces the set. Leaving two of them
-        # behind would pair a new app with an old native host, and with
-        # an updater that has to understand the *next* update.
+        # What the updater downloads. An installed build is the app and
+        # the browser's native host, so its artifact is a tar.gz of
+        # exactly those two and the update replaces both. Leaving the
+        # host behind would pair a new app with an older program
+        # speaking to it.
         #
         # A tarball on every platform, Windows included: the daemon
         # unpacks it itself, so the format is ours to choose rather than
@@ -367,7 +366,7 @@ jobs:
         SINGLE_NAME="${NAME}-${TAG}-${TARGET}-update.tar.gz"
         UPDATE_DIR="_cicd-intermediates/update"
         rm -rf "$UPDATE_DIR" && mkdir -p "$UPDATE_DIR"
-        for bin in oxdm oxdm-native-host oxdm-updater; do
+        for bin in oxdm oxdm-native-host; do
           cp "${{ steps.bin.outputs.OUT_DIR }}/${bin}${EXE}" "$UPDATE_DIR/"
         done
         tar -czf "$STAGING/$SINGLE_NAME" -C "$UPDATE_DIR" .

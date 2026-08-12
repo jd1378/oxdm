@@ -40,10 +40,10 @@ pub struct UpdateInfo {
     pub sha256: String,
 }
 
-/// Status messages emitted by `oxdm-updater` on stdout, one JSON per
-/// line. Artifact-mode helper — the GUI does the actual download via
-/// the regular `DownloadManager`, then hands the assembled file to
-/// the helper for verify + swap + relaunch.
+/// Status messages the installer prints on stdout, one JSON per line.
+/// The download runs through the regular `DownloadManager`, which
+/// checks the digest; oxdm then re-runs itself from a copy
+/// (`--install-update`) to swap the files and relaunch.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "stage", rename_all = "snake_case")]
 pub enum UpdaterEvent {

@@ -78,27 +78,19 @@ try {
 
   $oxdm = Get-ChildItem -Path $tmp -Recurse -File -Filter 'oxdm.exe' | Select-Object -First 1
   $host_ = Get-ChildItem -Path $tmp -Recurse -File -Filter 'oxdm-native-host.exe' | Select-Object -First 1
-  $updater = Get-ChildItem -Path $tmp -Recurse -File -Filter 'oxdm-updater.exe' | Select-Object -First 1
   if (-not $oxdm)  { Fail "oxdm.exe not found in archive" }
 
   Step "Installing to $Dir"
   if (-not (Test-Path $Dir)) { New-Item -ItemType Directory -Path $Dir | Out-Null }
   Copy-Item $oxdm.FullName (Join-Path $Dir 'oxdm.exe') -Force
   Ok "installed: $Dir\oxdm.exe"
-  # The extras are not fatal when an archive lacks them: oxdm runs
-  # without the browser bridge, and without the updater it just cannot
-  # install its own updates.
+  # Not fatal when an archive lacks it: oxdm runs without the browser
+  # bridge, minus that integration.
   if ($host_) {
     Copy-Item $host_.FullName (Join-Path $Dir 'oxdm-native-host.exe') -Force
     Ok "installed: $Dir\oxdm-native-host.exe"
   } else {
     Warn "'oxdm-native-host.exe' is not in this archive - browser integration will be unavailable."
-  }
-  if ($updater) {
-    Copy-Item $updater.FullName (Join-Path $Dir 'oxdm-updater.exe') -Force
-    Ok "installed: $Dir\oxdm-updater.exe"
-  } else {
-    Warn "'oxdm-updater.exe' is not in this archive - oxdm will not be able to update itself."
   }
 
   # Add to user PATH if missing.

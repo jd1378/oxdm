@@ -164,27 +164,19 @@ tar -xzf "$TMP/$ASSET" -C "$TMP"
 
 OXDM_BIN="$(find "$TMP" -type f -name oxdm | head -n1)"
 HOST_BIN="$(find "$TMP" -type f -name oxdm-native-host | head -n1)"
-UPDATER_BIN="$(find "$TMP" -type f -name oxdm-updater | head -n1)"
 [ -n "$OXDM_BIN" ] || err "binary 'oxdm' not found in archive"
 
 step "Installing to $INSTALL_DIR"
 mkdir -p "$INSTALL_DIR"
 install -m 0755 "$OXDM_BIN" "$INSTALL_DIR/oxdm"
 ok "installed: $INSTALL_DIR/oxdm"
-# The extras are not fatal when an archive lacks them: oxdm runs
-# without the browser bridge, and without the updater it just cannot
-# install its own updates.
+# Not fatal when an archive lacks it: oxdm runs without the browser
+# bridge, minus that integration.
 if [ -n "$HOST_BIN" ]; then
   install -m 0755 "$HOST_BIN" "$INSTALL_DIR/oxdm-native-host"
   ok "installed: $INSTALL_DIR/oxdm-native-host"
 else
   warn "'oxdm-native-host' is not in this archive — browser integration will be unavailable."
-fi
-if [ -n "$UPDATER_BIN" ]; then
-  install -m 0755 "$UPDATER_BIN" "$INSTALL_DIR/oxdm-updater"
-  ok "installed: $INSTALL_DIR/oxdm-updater"
-else
-  warn "'oxdm-updater' is not in this archive — oxdm will not be able to update itself."
 fi
 
 # Linux .desktop entry so the app appears in launchers.
