@@ -182,18 +182,6 @@ pub struct Settings {
     pub show_update_dialog: bool,
     #[serde(default = "yes_default")]
     pub notify_update: bool,
-    /// Auto-update feed URL. Feed is a JSON document of shape
-    /// `{ "version": "x.y.z", "url": "...", "notes": "...", "sha256": "..." }`.
-    ///
-    /// Empty means the built-in feed for this build, which is resolved
-    /// when a check runs rather than stored — see
-    /// `data::update_channel::built_in_feed_url`. It has to be decided
-    /// then, because it depends on how the app is *running*: an
-    /// AppImage updates itself with an AppImage, an installed build
-    /// with a plain executable, and a user can move between the two
-    /// without their settings knowing.
-    #[serde(default)]
-    pub update_feed_url: String,
     /// UI theme.
     pub theme: Theme,
     /// Honour reduce-motion. When `true`, animation sites bypass
@@ -521,7 +509,6 @@ impl Default for Settings {
             auto_check_updates: true,
             show_update_dialog: false,
             notify_update: true,
-            update_feed_url: String::new(),
             theme: Theme::System,
             reduce_motion: false,
             custom_window_chrome: false,

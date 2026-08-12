@@ -69,7 +69,7 @@ impl UpdateChannel for NoopUpdateChannel {
 }
 
 /// HTTP-feed implementation. Constructed with the feed URL from
-/// `Settings::update_feed_url`. Returns `Ok(None)` when the feed
+/// [`built_in_feed_url`]. Returns `Ok(None)` when the feed
 /// reports a version less-than-or-equal to ours.
 pub struct HttpFeedUpdateChannel {
     feed_url: url::Url,
@@ -154,25 +154,26 @@ fn feed_url_for(target: &str, appimage: bool) -> String {
     format!("https://github.com/jd1378/oxdm/releases/latest/download/update-{target}{flavour}.json")
 }
 
-/// Build the channel that matches the current settings. Called by
-/// `AppState::update_channel`.
+/// The channel this build updates through.
 ///
-/// An empty setting is not "no updates": it means the built-in feed
-/// for this build. Checks still only happen when the user asks.
-pub fn from_settings(s: &crate::domain::Settings) -> Arc<dyn UpdateChannel> {
-    let configured = s.update_feed_url.trim().to_owned();
-    let owned = if configured.is_empty() {
-        built_in_feed_url()
-    } else {
-        configured
-    };
-    let url = owned.as_str();
+/// There is one, and it is not configurable. A feed decides which
+/// binary oxdm replaces itself with, so pointing it elsewhere is
+/// pointing the app at a different program to become — a setting worth
+/// having only if someone would genuinely use it, and nothing in the
+/// UI ever offered it.
+pub fn built_in() -> Arc<dyn UpdateChannel> {
+    channel_for(&built_in_feed_url())
+}
+
+/// The one place a feed URL becomes a channel, so the https rule holds
+/// wherever the URL came from.
+fn channel_for(url: &str) -> Arc<dyn UpdateChannel> {
     match url::Url::parse(url) {
-        // https only: the feed decides which binary oxdm replaces
-        // itself with, so anyone able to rewrite it in flight chooses
-        // the next thing the user runs. The artifact's digest comes
-        // from the same document, which is exactly why the document
-        // itself has to be authenticated.
+        // https only. The feed names the next program the user runs
+        // and carries the digest that program is checked against, so
+        // anyone able to rewrite it in flight chooses both — which is
+        // exactly why the document itself has to be authenticated.
+        // Belt and braces over a URL this build assembles itself.
         Ok(u) if u.scheme() == "https" => Arc::new(HttpFeedUpdateChannel::new(
             u,
             env!("CARGO_PKG_VERSION").to_string(),
@@ -188,13 +189,24 @@ pub fn from_settings(s: &crate::domain::Settings) -> Arc<dyn UpdateChannel> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::Settings;
 
-    fn channel_for(url: &str) -> Arc<dyn UpdateChannel> {
-        from_settings(&Settings {
-            update_feed_url: url.to_owned(),
-            ..Settings::default()
-        })
+    /// The URL is assembled from a constant and this build's target,
+    /// so it is https by construction — but the rule is checked at the
+    /// point of use, not assumed from where the string came from.
+    #[test]
+    fn only_an_https_feed_becomes_a_channel() {
+        assert!(
+            channel_for("https://example.com/feed.json")
+                .feed_url()
+                .is_some()
+        );
+        assert!(
+            channel_for("http://example.com/feed.json")
+                .feed_url()
+                .is_none()
+        );
+        assert!(channel_for("file:///tmp/feed.json").feed_url().is_none());
+        assert!(channel_for("not a url").feed_url().is_none());
     }
 
     /// An installed build and a bundle are updated with different
@@ -215,31 +227,11 @@ mod tests {
         assert!(feed_url_for("aarch64-apple-darwin", false).contains("/releases/latest/download/"));
     }
 
-    /// An empty setting is the built-in feed, not "no updates".
+    /// There is one feed and this build knows it.
     #[test]
-    fn an_unset_feed_falls_back_to_the_built_in_one() {
-        let channel = from_settings(&Settings::default());
-        let url = channel.feed_url().expect("built-in feed");
+    fn the_channel_reads_the_built_in_feed() {
+        let url = built_in().feed_url().expect("built-in feed");
         assert_eq!(url.scheme(), "https");
         assert!(url.as_str().contains("/releases/latest/download/update-"));
-    }
-
-    #[test]
-    fn only_an_https_feed_is_used() {
-        assert!(
-            channel_for("https://example.com/feed.json")
-                .feed_url()
-                .is_some()
-        );
-        assert!(
-            channel_for("http://example.com/feed.json")
-                .feed_url()
-                .is_none()
-        );
-        assert!(channel_for("file:///tmp/feed.json").feed_url().is_none());
-        assert!(channel_for("not a url").feed_url().is_none());
-        // Blank is not a refusal, it is "no override" — see
-        // `an_unset_feed_falls_back_to_the_built_in_one`.
-        assert!(channel_for("  ").feed_url().is_some());
     }
 }

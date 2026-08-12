@@ -4542,11 +4542,11 @@ impl AppState {
     }
 
     pub async fn update_channel(&self) -> Arc<dyn UpdateChannel> {
-        // Re-derive on each call so a settings change reaches the next
-        // user-triggered "Check for updates". UpdateChannel itself is
-        // cheap to construct (no real I/O until called).
-        let s = self.settings.read().await.clone();
-        crate::data::update_channel::from_settings(&s)
+        // Built per call rather than held: which feed this build reads
+        // depends on how it is *running* — an AppImage updates itself
+        // with an AppImage — and constructing one costs nothing until
+        // it is asked a question.
+        crate::data::update_channel::built_in()
     }
 
     pub async fn ext_token(&self) -> String {
