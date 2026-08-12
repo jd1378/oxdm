@@ -60,7 +60,15 @@ pub enum UpdateUi {
     /// Fetched, and its SHA-256 matched what the feed published. The
     /// swap happens on the user's word, not before.
     Staged(String),
-    Error(String),
+    /// Something went wrong, and what was being attempted at the time.
+    /// The headline says which step failed — a check that could not
+    /// reach the server and an artifact that arrived corrupt are not
+    /// the same news, and "Update check failed" over a finished
+    /// download is simply wrong.
+    Error {
+        headline: &'static str,
+        detail: String,
+    },
 }
 
 /// What one successful connect hands the window: the client to talk
@@ -207,7 +215,10 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             Event::UpdateAvailable { info } => {
                 if matches!(
                     st.update,
-                    UpdateUi::Idle | UpdateUi::Checking | UpdateUi::UpToDate | UpdateUi::Error(_)
+                    UpdateUi::Idle
+                        | UpdateUi::Checking
+                        | UpdateUi::UpToDate
+                        | UpdateUi::Error { .. }
                 ) {
                     st.update = UpdateUi::Available(info);
                 }
@@ -218,7 +229,10 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                 Task::none()
             }
             Event::UpdateFailed { message } => {
-                st.update = UpdateUi::Error(message);
+                st.update = UpdateUi::Error {
+                    headline: "Update failed",
+                    detail: message,
+                };
                 Task::none()
             }
             Event::Close => iced::exit(),
@@ -234,7 +248,10 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             st.update = match res {
                 Ok(Some(info)) => UpdateUi::Available(info),
                 Ok(None) => UpdateUi::UpToDate,
-                Err(e) => UpdateUi::Error(e),
+                Err(e) => UpdateUi::Error {
+                    headline: "Update check failed",
+                    detail: e,
+                },
             };
             Task::none()
         }
@@ -262,7 +279,10 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             Task::none()
         }
         Msg::DownloadStarted(Err(e)) => {
-            st.update = UpdateUi::Error(e);
+            st.update = UpdateUi::Error {
+                headline: "Update could not start",
+                detail: e,
+            };
             Task::none()
         }
         Msg::ProgressTick => {
@@ -298,7 +318,10 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
         // here; the window closes with everything else.
         Msg::Installed(Ok(())) => Task::none(),
         Msg::Installed(Err(e)) => {
-            st.update = UpdateUi::Error(e);
+            st.update = UpdateUi::Error {
+                headline: "Update could not be installed",
+                detail: e,
+            };
             Task::none()
         }
         Msg::ReleaseNotes => {
@@ -651,11 +674,11 @@ fn updates(st: &State) -> Element<'_, Msg> {
              replace itself, so your downloads pause and it reopens when it is done."
                 .into(),
         ),
-        UpdateUi::Error(e) => (
+        UpdateUi::Error { headline, detail } => (
             "circle-alert",
             t.status_danger,
-            "Update check failed".into(),
-            e.clone(),
+            (*headline).to_owned(),
+            detail.clone(),
         ),
     };
 
@@ -698,7 +721,7 @@ fn updates(st: &State) -> Element<'_, Msg> {
         ]
         .spacing(theme::space::S2)
         .into(),
-        UpdateUi::UpToDate | UpdateUi::Error(_) => Btn::new("Check again")
+        UpdateUi::UpToDate | UpdateUi::Error { .. } => Btn::new("Check again")
             .ghost()
             .size(BtnSize::Md)
             .icon("refresh-cw")
@@ -741,8 +764,17 @@ fn updates(st: &State) -> Element<'_, Msg> {
                         .font(theme::BODY_MEDIUM)
                         .size(FACT_LABEL_SIZE)
                         .color(t.fg_1),
-                    text(detail).font(theme::BODY).size(11.0).color(t.fg_3),
+                    // Wrapped by glyph as well as by word: a checksum
+                    // mismatch reports two 64-character digests, and
+                    // nothing in them is a word boundary.
+                    text(detail)
+                        .font(theme::BODY)
+                        .size(11.0)
+                        .color(t.fg_3)
+                        .width(Length::Fill)
+                        .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
                 ]
+                .width(Length::Fill)
                 .spacing(3.0),
             ]
             .spacing(theme::space::S3)
