@@ -14,12 +14,25 @@
 //! given by `--exe`, whatever the user has named it. An AppImage is
 //! one file and updates through `--artifact` instead.
 //!
+//! Every update replaces this helper too, so the daemon and the helper
+//! are always the same build talking to each other: the flags below can
+//! change with the code that passes them, and nothing has to be kept
+//! around for an older caller.
+//!
 //! Replacing a program that is *running* — this helper, or a native
 //! host the browser still has open — cannot be done by writing over it
-//! on Windows. It can be done by renaming it out of the way first,
-//! which is what happens when the direct swap is refused. The
-//! displaced file is deleted if the OS allows it and swept up at the
-//! next launch if it does not.
+//! on Windows: the target has to be unlinked, and a file backing a
+//! loaded image cannot be. It *can* be renamed. Windows draws the line
+//! between the two, allowing a running executable to move and refusing
+//! to let it disappear, which is what every self-updater on the
+//! platform is built on.
+//!
+//! So when the direct swap is refused, the old program is renamed
+//! aside and the new one takes the name. On Windows that is the normal
+//! path for this helper and for a native host in use, not an
+//! exception; the app itself is already gone by then and swaps
+//! directly. The displaced file cannot be deleted while it is still
+//! running, so it is left for the next launch to sweep up.
 //!
 //! It does not hash the artifact. The digest the feed published is
 //! attached to the download as an ordinary checksum, so the download
@@ -93,11 +106,6 @@ fn parse_args() -> Result<Args, String> {
             "--pid" => pid = Some(val.parse().map_err(|_| "invalid pid".to_string())?),
             "--artifact" => artifact = Some(PathBuf::from(val)),
             "--payload" => payload = Some(PathBuf::from(val)),
-            // Tolerated rather than rejected: an older oxdm spawning a
-            // newer helper still passes the digest it used to verify,
-            // and refusing to start over a flag we no longer need would
-            // break the very update that delivered us.
-            "--sha256" => {}
             other => return Err(format!("unknown flag: {other}")),
         }
     }
@@ -262,9 +270,10 @@ fn swap_executable(staged: &PathBuf, target: &PathBuf) -> Result<(), String> {
             }
         }
     }
-    // Still refused: on Windows a program that is running cannot be
-    // written over — this helper is one, and a native host the browser
-    // has open is another — but it *can* be renamed out of the way.
+    // Still refused: on Windows a running program cannot be written
+    // over, because replacing it means unlinking it and a file backing
+    // a loaded image will not unlink. Renaming one is allowed, which
+    // is the whole trick.
     let displaced = target.with_extension("oxdm-old");
     let _ = std::fs::remove_file(&displaced);
     if std::fs::rename(target, &displaced).is_ok() {
