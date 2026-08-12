@@ -1266,7 +1266,7 @@ impl AppState {
         let Some(pending) = self.pending_update().await else {
             return;
         };
-        let exe = match crate::platform::current_exe() {
+        let running = match crate::platform::current_exe() {
             Ok(p) => p,
             Err(e) => {
                 self.fail_update(format!("cannot find the running oxdm: {e}"))
@@ -1274,7 +1274,15 @@ impl AppState {
                 return;
             }
         };
-        let updater = exe.with_file_name(if cfg!(windows) {
+        // What gets replaced. Inside an AppImage, `current_exe` is a
+        // path in a read-only mount that vanishes when the app exits —
+        // replacing it would update nothing. The bundle is the file the
+        // user launched and the file the feed's artifact is a new
+        // version of.
+        let exe = crate::data::update_channel::running_as_appimage().unwrap_or(running.clone());
+        // The helper, on the other hand, is found beside the *running*
+        // binary: inside the bundle when that is where we came from.
+        let updater = running.with_file_name(if cfg!(windows) {
             "oxdm-updater.exe"
         } else {
             "oxdm-updater"

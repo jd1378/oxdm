@@ -21,7 +21,7 @@ mod runner;
 pub mod space;
 pub mod state;
 pub mod store;
-mod update_channel;
+pub mod update_channel;
 
 pub use conditions::available_conditions;
 pub use events::{ConflictKind, DomainEvent, next_event};

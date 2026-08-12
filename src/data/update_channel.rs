@@ -123,13 +123,50 @@ impl UpdateChannel for HttpFeedUpdateChannel {
     }
 }
 
+/// Is this process running from an AppImage?
+///
+/// The AppImage runtime exports `APPIMAGE` with the path of the bundle
+/// itself. It matters twice over: the artifact to fetch is a whole
+/// AppImage rather than a bare executable, and the file to replace is
+/// the bundle, not `current_exe()` — which points inside a read-only
+/// mount that disappears when the app exits.
+pub fn running_as_appimage() -> Option<std::path::PathBuf> {
+    std::env::var_os("APPIMAGE")
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_absolute())
+}
+
+/// The feed for this build, as it is currently running.
+///
+/// Resolved per check rather than stored in settings: the same
+/// installed files can be launched as an AppImage or not, and each
+/// wants a different artifact. `releases/latest` keeps the URL stable
+/// across releases and resolves to the newest one not tagged as a
+/// pre-release.
+pub fn built_in_feed_url() -> String {
+    feed_url_for(env!("OXDM_TARGET"), running_as_appimage().is_some())
+}
+
+/// The feed naming the artifact this flavour of install replaces
+/// itself with.
+fn feed_url_for(target: &str, appimage: bool) -> String {
+    let flavour = if appimage { "-appimage" } else { "" };
+    format!("https://github.com/jd1378/oxdm/releases/latest/download/update-{target}{flavour}.json")
+}
+
 /// Build the channel that matches the current settings. Called by
 /// `AppState::update_channel`.
+///
+/// An empty setting is not "no updates": it means the built-in feed
+/// for this build. Checks still only happen when the user asks.
 pub fn from_settings(s: &crate::domain::Settings) -> Arc<dyn UpdateChannel> {
-    let url = s.update_feed_url.trim();
-    if url.is_empty() {
-        return Arc::new(NoopUpdateChannel);
-    }
+    let configured = s.update_feed_url.trim().to_owned();
+    let owned = if configured.is_empty() {
+        built_in_feed_url()
+    } else {
+        configured
+    };
+    let url = owned.as_str();
     match url::Url::parse(url) {
         // https only: the feed decides which binary oxdm replaces
         // itself with, so anyone able to rewrite it in flight chooses
@@ -160,6 +197,33 @@ mod tests {
         })
     }
 
+    /// An installed build and a bundle are updated with different
+    /// artifacts, so they read different feeds — and the same files
+    /// can be run either way, which is why this is decided per check
+    /// rather than stored.
+    #[test]
+    fn each_flavour_reads_its_own_feed() {
+        assert!(
+            feed_url_for("x86_64-unknown-linux-gnu", false)
+                .ends_with("/update-x86_64-unknown-linux-gnu.json")
+        );
+        assert!(
+            feed_url_for("x86_64-unknown-linux-gnu", true)
+                .ends_with("/update-x86_64-unknown-linux-gnu-appimage.json")
+        );
+        // Always the `latest` release, so the URL survives releases.
+        assert!(feed_url_for("aarch64-apple-darwin", false).contains("/releases/latest/download/"));
+    }
+
+    /// An empty setting is the built-in feed, not "no updates".
+    #[test]
+    fn an_unset_feed_falls_back_to_the_built_in_one() {
+        let channel = from_settings(&Settings::default());
+        let url = channel.feed_url().expect("built-in feed");
+        assert_eq!(url.scheme(), "https");
+        assert!(url.as_str().contains("/releases/latest/download/update-"));
+    }
+
     #[test]
     fn only_an_https_feed_is_used() {
         assert!(
@@ -173,7 +237,9 @@ mod tests {
                 .is_none()
         );
         assert!(channel_for("file:///tmp/feed.json").feed_url().is_none());
-        assert!(channel_for("  ").feed_url().is_none());
         assert!(channel_for("not a url").feed_url().is_none());
+        // Blank is not a refusal, it is "no override" — see
+        // `an_unset_feed_falls_back_to_the_built_in_one`.
+        assert!(channel_for("  ").feed_url().is_some());
     }
 }

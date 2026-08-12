@@ -159,8 +159,16 @@ pub struct Settings {
     pub show_update_dialog: bool,
     #[serde(default)]
     pub notify_update: bool,
-    /// Auto-update feed URL. Empty disables update checks. Feed is a
-    /// JSON document of shape `{ "version": "x.y.z", "url": "...", "notes": "..." }`.
+    /// Auto-update feed URL. Feed is a JSON document of shape
+    /// `{ "version": "x.y.z", "url": "...", "notes": "...", "sha256": "..." }`.
+    ///
+    /// Empty means the built-in feed for this build, which is resolved
+    /// when a check runs rather than stored — see
+    /// `data::update_channel::built_in_feed_url`. It has to be decided
+    /// then, because it depends on how the app is *running*: an
+    /// AppImage updates itself with an AppImage, an installed build
+    /// with a plain executable, and a user can move between the two
+    /// without their settings knowing.
     #[serde(default)]
     pub update_feed_url: String,
     /// UI theme.

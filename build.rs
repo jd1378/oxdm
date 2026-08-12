@@ -12,6 +12,10 @@ fn main() {
     println!("cargo:rerun-if-changed=Cargo.lock");
     println!("cargo:rerun-if-changed=.git/HEAD");
 
+    // The target triple this binary is being built for. The update
+    // feed is published per target, so the app has to know which one
+    // it is — and `TARGET` is only visible to build scripts.
+    emit("OXDM_TARGET", std::env::var("TARGET").ok());
     emit("OXDM_ODL_VERSION", locked_version("odl"));
     emit("OXDM_GIT_COMMIT", git_short_commit());
     emit("OXDM_RUSTC", rustc_version());
