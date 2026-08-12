@@ -775,6 +775,19 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
             Err(e) => Reply::Err(e),
         },
         Request::MintExtToken => Reply::ExtToken(state.mint_ext_token()),
+        // Writes a handful of small files; off the async threads so a
+        // slow home directory cannot stall the event loop.
+        Request::InstallNativeHost => {
+            match tokio::task::spawn_blocking(|| {
+                crate::data::native_host::install(&Default::default(), false)
+            })
+            .await
+            {
+                Ok(Ok(report)) => Reply::NativeHost(Box::new(report)),
+                Ok(Err(e)) => Reply::Err(e),
+                Err(e) => Reply::Err(format!("install task failed: {e}")),
+            }
+        }
         Request::SecretsStatus => Reply::SecretsStatus {
             locked: state.is_secrets_locked().await,
         },

@@ -14,6 +14,7 @@ mod hooks;
 pub mod idle;
 pub mod keyring;
 mod mapping;
+pub mod native_host;
 mod pause;
 mod power;
 mod queue_scheduler;

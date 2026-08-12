@@ -95,6 +95,10 @@ oxdm exposes a stable host-side contract (see [`docs/EXTENSION_API.md`](docs/EXT
 
 - **WebSocket** at `ws://127.0.0.1:<port>`, simplest for development.
 - **Native messaging** via the `oxdm-native-host` shim plus a per-OS manifest.
+  oxdm registers the manifest itself — on first run, again whenever it
+  finds one missing or stale, and on demand from *Settings → Browser
+  integration*. `oxdm --install-native-host [--chromium-id ID]` does
+  the same from a terminal.
 
 The pairing code the extension asks for lives in *Settings → Browser integration*, with Copy and Regenerate buttons. It bundles the port and the auth token in one string.
 

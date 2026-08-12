@@ -45,9 +45,7 @@ overrides exist for dev / portable installs:
 `--token` is visible in `/proc/<pid>/cmdline`; prefer `--token-fd <N>`
 which reads the secret from an inherited file descriptor instead, or
 omit both flags entirely and let the host pick up the token from
-`oxdm.db`. The bundled `tools/install-native-host.sh` supports a
-`--token-file <PATH>` option that drops a wrapper script for the
-`--token-fd` pattern automatically.
+`oxdm.db`, which is what the manifests oxdm writes rely on.
 
 If `oxdm` is not running when the host launches, `oxdm-native-host`
 exits with code `1` and the error is surfaced to the browser via
@@ -69,22 +67,30 @@ stderr.
 }
 ```
 
-Use the bundled installers (no wrapper script needed):
+oxdm writes these itself. It registers with every browser it finds on
+first run, re-checks on every start (repairing a manifest that has
+gone missing or that no longer points at oxdm), and offers the same
+thing on demand under *Settings → Browser integration*.
+
+To do it by hand — for a development build of the extension, or on a
+machine where the app has not been opened:
 
 ```sh
-# Linux / macOS
-oxdm/tools/install-native-host.sh \
-    --chromium-id <32-char-extension-id> \
-    --firefox-id  oxdm@jd1378.github.io
-
-# Windows (PowerShell)
-.\oxdm\tools\install-native-host.ps1 `
-    -ChromiumId <32-char-extension-id> `
-    -FirefoxId  oxdm@jd1378.github.io
+oxdm --install-native-host                       # published ids
+oxdm --install-native-host --chromium-id <ID>    # a build of your own
+oxdm --install-native-host --dry-run             # show, write nothing
 ```
 
-Both write manifests to the per-user manifest directory for every
-detected Chromium-family and Firefox-family browser.
+`tools/install-native-host.sh` and `.ps1` forward to exactly that, so
+there is one list of manifest locations rather than three.
+
+On Linux and macOS a manifest is written per browser directory; on
+Windows one manifest per family goes under `%LOCALAPPDATA%\oxdm` and
+is registered under `HKCU\Software\<vendor>\NativeMessagingHosts`.
+Flatpak browsers additionally get a small wrapper inside their own
+data directory, and need a `flatpak override --user --filesystem=…:ro`
+grant before they can reach it — oxdm prints the exact command rather
+than running it.
 
 #### Firefox manifest
 

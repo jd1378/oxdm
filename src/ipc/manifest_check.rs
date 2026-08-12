@@ -1,170 +1,240 @@
-//! Best-effort native-messaging manifest tamper detection.
+//! Keeping the browser bridge registered, and noticing when it is not.
 //!
-//! Threat: an attacker with arbitrary write to the user's home (but
-//! not full account compromise — e.g. a malicious package post-install
-//! script run as the user) can rewrite the per-user manifest's `path`
-//! field to a binary they control. The browser then launches *their*
-//! binary the next time the extension talks to `connectNative`. The
-//! manifest dir lives at known paths under `~/.config/<browser>/` (or
-//! `~/.mozilla/native-messaging-hosts/` etc), all writable by the user
-//! account; the OS gives us nothing automatic here.
+//! A native-messaging manifest names the binary a browser will launch.
+//! It goes stale for ordinary reasons — oxdm was moved, reinstalled
+//! somewhere else, or updated as an AppImage — and each time the
+//! extension silently stops being able to reach the app. It can also
+//! go wrong for a hostile reason: anything that can write to the
+//! user's home can point the manifest at a binary of its own, and the
+//! browser will launch that instead. The manifest directories live
+//! under `~/.config/<browser>/` and are writable by the user account;
+//! the OS gives us nothing automatic here.
 //!
-//! Mitigation: on daemon startup, scan the known manifest dirs for
-//! files named `<host>.json`. Parse each, compare its `path` field
-//! against the canonical `oxdm-native-host` adjacent to our own exe.
-//! Mismatch → log a `warn!` and surface a desktop notification so the
-//! user knows to re-run the install script.
+//! So on startup: read every manifest we would have written, and if
+//! one is missing or names something that is not our host, write ours
+//! back. A wrong path is also reported to the user, because "oxdm
+//! repaired this" and "something replaced this" look identical from
+//! here, and only the user knows which they expected.
 //!
-//! Limits:
-//!   - Linux + macOS only; Windows uses HKCU registry, not files.
-//!     The Windows installer writes the value with the user's ACLs,
-//!     which is the same trust boundary.
-//!   - Best-effort. We do not block startup or rewrite the manifest.
-//!     Auto-rewriting would re-introduce the same race the attacker
-//!     wins (last writer in `~/.config/<browser>/`). Detection +
-//!     notification is the practical defence inside this threat
-//!     model.
+//! Repairing does not win a race against an attacker who keeps
+//! rewriting the file — nothing available here would. What it does is
+//! make the common case self-healing and leave the uncommon one
+//! visible.
 
 use std::path::{Path, PathBuf};
 
-const HOST_NAME: &str = "io.github.jd1378.oxdm.host";
+use crate::data::native_host;
+use crate::domain::HOST_NAME;
 
-/// Run the scan in the background. Logs on its own. Never panics.
+/// Run the check in the background. Logs on its own. Never panics.
 pub fn spawn() {
+    // A secondary instance shares the machine's browsers but not its
+    // identity: `OXDM_INSTANCE_SUFFIX` exists so a sandboxed or
+    // development copy can run beside the real one, and pointing every
+    // browser at *that* copy is the one thing it must not do. Only the
+    // primary daemon registers itself.
+    if std::env::var_os("OXDM_INSTANCE_SUFFIX").is_some_and(|v| !v.is_empty()) {
+        tracing::debug!("secondary instance: leaving the browser manifests alone");
+        return;
+    }
     tokio::spawn(async move {
-        if let Err(e) = run().await {
-            tracing::debug!(error = %e, "manifest check skipped");
+        match tokio::task::spawn_blocking(run).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::debug!(error = %e, "manifest check skipped"),
+            Err(e) => tracing::warn!(error = %e, "manifest check task failed"),
         }
     });
 }
 
-async fn run() -> Result<(), String> {
-    let expected = canonical_host_binary()?;
-    let dirs = candidate_manifest_dirs();
-    for dir in dirs {
-        let path = dir.join(format!("{HOST_NAME}.json"));
-        if !path.is_file() {
+/// What a manifest we found is doing.
+#[derive(Debug, PartialEq, Eq)]
+enum State {
+    /// Points at our host. Nothing to do.
+    Ours,
+    /// Not there yet: the browser has never been told about oxdm.
+    Missing,
+    /// Points somewhere else. Either oxdm moved, or something moved it.
+    Wrong(String),
+}
+
+fn run() -> Result<(), String> {
+    let expected = native_host::host_binary()?;
+    let home = dirs::home_dir().ok_or_else(|| "no home directory".to_string())?;
+    let mut missing = 0usize;
+    let mut wrong: Vec<(PathBuf, String)> = Vec::new();
+
+    for target in native_host::targets(&home) {
+        // Parent absent = browser not installed. Nothing to register.
+        if !target.dir.parent().is_some_and(|p| p.is_dir()) {
             continue;
         }
-        match inspect(&path, &expected).await {
-            Ok(()) => tracing::debug!(?path, "manifest check ok"),
-            Err(reason) => {
-                tracing::warn!(?path, %reason, "manifest mismatch");
-                notify_user(&path, &reason);
-            }
+        let path = target.dir.join(format!("{HOST_NAME}.json"));
+        match inspect(&path, &expected) {
+            State::Ours => {}
+            State::Missing => missing += 1,
+            State::Wrong(reason) => wrong.push((path, reason)),
         }
+    }
+    if missing == 0 && wrong.is_empty() {
+        tracing::debug!("browser manifests are current");
+        return Ok(());
+    }
+
+    // One install pass fixes both cases: it rewrites exactly the
+    // manifests that differ and leaves the rest untouched.
+    let report = native_host::install(&native_host::Ids::default(), false)?;
+    tracing::info!(
+        missing,
+        wrong = wrong.len(),
+        installed = report.installed(),
+        failed = report.failures(),
+        "browser manifests refreshed"
+    );
+    for (path, reason) in &wrong {
+        tracing::warn!(?path, %reason, "manifest did not point at oxdm; rewritten");
+    }
+    // Only a wrong path is worth interrupting for. A missing one is
+    // the normal state of a fresh install, and the first thing this
+    // function does about it is fix it.
+    if !wrong.is_empty() {
+        notify_repaired(&wrong);
     }
     Ok(())
 }
 
-async fn inspect(manifest: &Path, expected: &Path) -> Result<(), String> {
-    let bytes = tokio::fs::read(manifest)
-        .await
-        .map_err(|e| format!("read: {e}"))?;
-    let value: serde_json::Value =
-        serde_json::from_slice(&bytes).map_err(|e| format!("parse: {e}"))?;
-    let raw = value
-        .get("path")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "missing path field".to_string())?;
+fn inspect(manifest: &Path, expected: &Path) -> State {
+    let Ok(bytes) = std::fs::read(manifest) else {
+        return State::Missing;
+    };
+    let value: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(e) => return State::Wrong(format!("unreadable manifest: {e}")),
+    };
+    let Some(raw) = value.get("path").and_then(|v| v.as_str()) else {
+        return State::Wrong("no path field".to_owned());
+    };
     let claimed = PathBuf::from(raw);
     // Canonicalize both sides so symlinks / `..` / trailing slashes
-    // can't make a real mismatch look identical or vice-versa.
-    let claimed_real = match std::fs::canonicalize(&claimed) {
-        Ok(p) => p,
-        Err(e) => {
-            return Err(format!(
-                "path '{}' does not resolve: {e}",
-                claimed.display()
-            ));
-        }
+    // cannot make a real mismatch look identical or vice-versa.
+    let Ok(claimed_real) = std::fs::canonicalize(&claimed) else {
+        // A path that does not resolve cannot be launched, so this is
+        // a broken registration rather than a hostile one — but it is
+        // still not ours, and the user is told either way.
+        return State::Wrong(format!("path '{}' does not exist", claimed.display()));
     };
-    if claimed_real != *expected {
-        return Err(format!(
-            "manifest points at {} but oxdm-native-host is at {}",
-            claimed_real.display(),
-            expected.display()
-        ));
+    if claimed_real == expected {
+        return State::Ours;
     }
-    Ok(())
+    // A Flatpak browser is pointed at our wrapper inside its sandbox,
+    // not at the host itself. The wrapper is ours if it execs the
+    // binary we expect.
+    if wrapper_execs(&claimed_real, expected) {
+        return State::Ours;
+    }
+    State::Wrong(format!(
+        "points at {} instead of {}",
+        claimed_real.display(),
+        expected.display()
+    ))
 }
 
-fn canonical_host_binary() -> Result<PathBuf, String> {
-    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
-    let dir = exe
-        .parent()
-        .ok_or_else(|| "exe has no parent dir".to_string())?;
-    let suffix = if cfg!(windows) { ".exe" } else { "" };
-    let candidate = dir.join(format!("oxdm-native-host{suffix}"));
-    std::fs::canonicalize(&candidate).map_err(|e| {
-        format!(
-            "expected oxdm-native-host next to oxdm at {}: {e}",
-            candidate.display()
-        )
+/// Is this one of our Flatpak shims, pointing at the host we expect?
+fn wrapper_execs(script: &Path, expected: &Path) -> bool {
+    std::fs::read_to_string(script).is_ok_and(|body| {
+        body.starts_with("#!/bin/sh") && body.contains(&expected.display().to_string())
     })
 }
 
-fn candidate_manifest_dirs() -> Vec<PathBuf> {
-    // `mut` only on the platforms whose branches push to it; Windows
-    // returns the bare list.
-    #[allow(unused_mut)]
-    let mut out = Vec::new();
-    let Some(home) = dirs::home_dir() else {
-        return out;
+fn notify_repaired(wrong: &[(PathBuf, String)]) {
+    let summary = "oxdm restored its browser integration";
+    let first = wrong
+        .first()
+        .map(|(p, r)| format!("{}\n{r}", p.display()))
+        .unwrap_or_default();
+    let more = match wrong.len() {
+        0 | 1 => String::new(),
+        n => format!("\n…and {} more.", n - 1),
     };
-    #[cfg(target_os = "macos")]
-    {
-        let app_sup = home.join("Library").join("Application Support");
-        for sub in [
-            "Google/Chrome",
-            "Chromium",
-            "Microsoft Edge",
-            "BraveSoftware/Brave-Browser",
-            "Vivaldi",
-            "com.operasoftware.Opera",
-        ] {
-            out.push(app_sup.join(sub).join("NativeMessagingHosts"));
-        }
-        for sub in ["Mozilla", "zen", "LibreWolf"] {
-            out.push(app_sup.join(sub).join("NativeMessagingHosts"));
-        }
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        let config = home.join(".config");
-        for sub in [
-            "google-chrome",
-            "chromium",
-            "microsoft-edge",
-            "BraveSoftware/Brave-Browser",
-            "vivaldi",
-            "opera",
-        ] {
-            out.push(config.join(sub).join("NativeMessagingHosts"));
-        }
-        for sub in [
-            ".mozilla/native-messaging-hosts",
-            ".zen/native-messaging-hosts",
-            ".librewolf/native-messaging-hosts",
-        ] {
-            out.push(home.join(sub));
-        }
-    }
-    #[cfg(windows)]
-    {
-        let _ = home;
-        // Windows uses HKCU registry. A registry-key check would mean
-        // adding the winreg crate; deferred — that path is covered by
-        // the same-user ACL boundary.
-    }
-    out
-}
-
-fn notify_user(path: &Path, reason: &str) {
-    let summary = "oxdm: native-messaging manifest may be tampered";
     let body = format!(
-        "{}\nRe-run tools/install-native-host.sh to restore the canonical path.\n\nDetail: {reason}",
-        path.display()
+        "A browser was pointed at something other than oxdm's helper. \
+         oxdm has put its own back.\n\n{first}{more}\n\nIf you did not move or \
+         reinstall oxdm, check what changed."
     );
     crate::platform::show_notification(summary.to_owned(), body);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn manifest(dir: &Path, path_value: &str) -> PathBuf {
+        let file = dir.join(format!("{HOST_NAME}.json"));
+        let mut f = std::fs::File::create(&file).unwrap();
+        write!(f, r#"{{"name":"x","path":"{path_value}","type":"stdio"}}"#).unwrap();
+        file
+    }
+
+    #[test]
+    fn a_manifest_naming_our_host_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = dir.path().join("oxdm-native-host");
+        std::fs::write(&host, b"binary").unwrap();
+        let host = std::fs::canonicalize(&host).unwrap();
+        let file = manifest(dir.path(), &host.display().to_string());
+        assert_eq!(inspect(&file, &host), State::Ours);
+    }
+
+    #[test]
+    fn a_manifest_naming_something_else_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = dir.path().join("oxdm-native-host");
+        std::fs::write(&host, b"binary").unwrap();
+        let host = std::fs::canonicalize(&host).unwrap();
+        let impostor = dir.path().join("evil");
+        std::fs::write(&impostor, b"binary").unwrap();
+
+        let file = manifest(dir.path(), &impostor.display().to_string());
+        assert!(matches!(inspect(&file, &host), State::Wrong(_)));
+
+        // A path that no longer exists is broken, not ours.
+        let file = manifest(dir.path(), "/nowhere/oxdm-native-host");
+        assert!(matches!(inspect(&file, &host), State::Wrong(_)));
+    }
+
+    #[test]
+    fn nothing_written_yet_is_missing_rather_than_wrong() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            inspect(&dir.path().join("absent.json"), Path::new("/opt/host")),
+            State::Missing
+        );
+    }
+
+    /// A Flatpak browser is pointed at the shim, and the shim is ours
+    /// only if it runs the host we expect — otherwise every sandboxed
+    /// browser would report a mismatch on every startup.
+    #[test]
+    fn our_flatpak_wrapper_counts_as_ours() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = dir.path().join("oxdm-native-host");
+        std::fs::write(&host, b"binary").unwrap();
+        let host = std::fs::canonicalize(&host).unwrap();
+
+        let wrapper = dir.path().join("wrapper");
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\nexec '{}' --db-path '/db' \"$@\"\n",
+                host.display()
+            ),
+        )
+        .unwrap();
+        let file = manifest(dir.path(), &wrapper.display().to_string());
+        assert_eq!(inspect(&file, &host), State::Ours);
+
+        // A shim that runs something else is not ours.
+        std::fs::write(&wrapper, "#!/bin/sh\nexec /usr/bin/evil \"$@\"\n").unwrap();
+        assert!(matches!(inspect(&file, &host), State::Wrong(_)));
+    }
 }

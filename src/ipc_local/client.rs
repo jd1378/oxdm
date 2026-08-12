@@ -367,6 +367,18 @@ impl Client {
             other => Err(format!("unexpected reply: {other:?}")),
         }
     }
+    /// Ask the daemon to (re)register the browser bridge.
+    pub async fn install_native_host(&self) -> Result<crate::domain::HostReport, String> {
+        match self
+            .request(Request::InstallNativeHost)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            Reply::NativeHost(r) => Ok(*r),
+            Reply::Err(e) => Err(e),
+            other => Err(format!("unexpected reply: {other:?}")),
+        }
+    }
     pub async fn secrets_status(&self) -> Result<bool, String> {
         match self
             .request(Request::SecretsStatus)

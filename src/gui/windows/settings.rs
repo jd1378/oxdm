@@ -193,6 +193,9 @@ pub enum Msg {
     ExtTokenSaved(Result<String, String>),
     /// The copy confirmation on the pairing code has run its course.
     PairCopyDone,
+    /// Register the native-messaging host with every browser found.
+    InstallHost,
+    Installed(Result<Box<crate::domain::HostReport>, String>),
     /// General → Updates.
     AutoCheckUpdates(bool),
     // Notifications
@@ -298,6 +301,13 @@ pub struct State {
     /// The pairing code was just copied — the button says so with a
     /// check for a moment.
     pair_copied: bool,
+    /// The browser bridge is being (re)registered, and what the last
+    /// attempt found. Kept per-window: it describes an action, not a
+    /// setting, so it is never part of the change count and never
+    /// waits for Apply.
+    installing_host: bool,
+    host_report: Option<crate::domain::HostReport>,
+    host_error: Option<String>,
     /// How many settings differ from what is saved. Drives the footer's
     /// Discard button; recomputed in `update_ready`.
     dirty: usize,
@@ -619,6 +629,9 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 section: section_arg(),
                 original: settings.clone(),
                 pair_copied: false,
+                installing_host: false,
+                host_report: None,
+                host_error: None,
                 s: settings,
                 work_dir: String::new(),
                 save_error: None,
@@ -971,6 +984,23 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
         }
         Msg::PairCopyDone => {
             st.pair_copied = false;
+            Task::none()
+        }
+        Msg::InstallHost => {
+            st.installing_host = true;
+            st.host_error = None;
+            let client = st.client.clone();
+            Task::perform(
+                async move { client.install_native_host().await.map(Box::new) },
+                Msg::Installed,
+            )
+        }
+        Msg::Installed(res) => {
+            st.installing_host = false;
+            match res {
+                Ok(report) => st.host_report = Some(*report),
+                Err(e) => st.host_error = Some(e),
+            }
             Task::none()
         }
         Msg::ExtTokenSaved(Ok(saved)) => {
@@ -2361,6 +2391,101 @@ fn header_rows(st: &State) -> Vec<Element<'_, Msg>> {
     rows
 }
 
+/// The install button and whatever the last run reported.
+///
+/// Per-browser rows rather than a single "done": a machine with five
+/// browsers on it usually means one of them is a Flatpak that still
+/// needs a grant, and "installed" over the top of that would be a lie
+/// the user only discovers when a download does not arrive.
+fn host_install_block(st: &State) -> Element<'_, Msg> {
+    let t = &st.tokens;
+    let mut col = column![
+        Btn::new(if st.installing_host {
+            "Setting up…"
+        } else {
+            "Set up browser integration"
+        })
+        .secondary()
+        .icon("puzzle")
+        .enabled(!st.installing_host)
+        .on_press(Msg::InstallHost)
+        .view(t),
+    ]
+    .spacing(theme::space::S2);
+
+    if let Some(e) = &st.host_error {
+        col = col.push(
+            row![
+                icons::icon("triangle-alert", 11.0, t.status_danger),
+                text(e.clone())
+                    .font(theme::BODY)
+                    .size(11.0)
+                    .color(t.status_danger),
+            ]
+            .spacing(4.0)
+            .align_y(Alignment::Center),
+        );
+    }
+    let Some(report) = &st.host_report else {
+        return col.into();
+    };
+    if report.no_browsers {
+        col = col.push(
+            text("No supported browser found on this machine.")
+                .font(theme::BODY)
+                .size(11.0)
+                .color(t.fg_3),
+        );
+        return col.into();
+    }
+    for entry in &report.entries {
+        let (icon, tint, note) = match &entry.outcome {
+            crate::domain::HostOutcome::Written => ("check", t.status_success, String::new()),
+            crate::domain::HostOutcome::Unchanged => {
+                ("check", t.status_success, "already set up".to_owned())
+            }
+            crate::domain::HostOutcome::Failed(e) => ("triangle-alert", t.status_danger, e.clone()),
+        };
+        let mut line = row![
+            icons::icon(icon, 11.0, tint),
+            text(entry.browser.clone())
+                .font(theme::BODY_MEDIUM)
+                .size(11.0)
+                .color(t.fg_2),
+        ]
+        .spacing(4.0)
+        .align_y(Alignment::Center);
+        if !note.is_empty() {
+            line = line.push(text(note).font(theme::BODY).size(11.0).color(t.fg_3));
+        }
+        col = col.push(line);
+    }
+    // A Flatpak browser cannot be granted access from in here — the
+    // command is the user's to run, so it is shown rather than hidden
+    // behind a claim that everything is ready.
+    if !report.flatpak_grants.is_empty() {
+        col = col.push(
+            text(
+                "Flatpak browsers also need permission to reach oxdm. Run each of these \
+                 in a terminal:",
+            )
+            .font(theme::BODY)
+            .size(11.0)
+            .color(t.fg_3),
+        );
+        for cmd in &report.flatpak_grants {
+            col = col.push(
+                text(cmd.clone())
+                    .font(theme::MONO)
+                    .size(10.5)
+                    .color(t.fg_2)
+                    .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+            );
+        }
+    }
+    col.into()
+}
+
 fn browser_section(st: &State) -> Element<'_, Msg> {
     let t = &st.tokens;
     let t2 = *t;
@@ -2420,6 +2545,15 @@ fn browser_section(st: &State) -> Element<'_, Msg> {
                     .spacing(theme::space::S2)
                     .align_y(Alignment::Center)
                     .into(),
+                ),
+                set_row_stack(
+                    t,
+                    "Browser integration",
+                    Some(
+                        "Lets your browser hand downloads to oxdm. Run this again after \
+                         moving or reinstalling oxdm, or after installing a new browser.",
+                    ),
+                    host_install_block(st),
                 ),
             ],
         ),

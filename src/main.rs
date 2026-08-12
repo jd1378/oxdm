@@ -115,6 +115,7 @@ fn main() {
         // replace itself. Not in --help; the app spawns it, users do
         // not.
         Some("--install-update") => oxdm::update_install::main(args),
+        Some("--install-native-host") => install_native_host(args),
         Some("--quit") => quit_remote(),
         Some("--tray") => run_daemon_tray(),
         Some("--version" | "-V") => {
@@ -146,9 +147,78 @@ fn print_help() {
     println!("    oxdm gui batch <PATH>     Run the batch-capture triage dialog");
     println!("    oxdm gui about            Run the About window");
     println!("    oxdm --tray               Start daemon hidden (no main window)");
+    println!("    oxdm --install-native-host   Register oxdm with your browsers");
+    println!("        [--chromium-id ID] [--firefox-id ID] [--dry-run]");
     println!("    oxdm --quit               Tell the running daemon to exit");
     println!("    oxdm --version            Print version");
     println!("    oxdm --help               This text");
+}
+
+/// Register the native-messaging host with every browser on this
+/// machine. The app does this on first run and offers it again from
+/// Settings; this is the same code for people who would rather type,
+/// and for the install scripts, which call it rather than keeping
+/// their own copy of where a manifest goes.
+fn install_native_host(mut args: impl Iterator<Item = String>) -> ! {
+    let mut ids = oxdm::data::native_host::Ids::default();
+    let (mut chromium, mut firefox) = (Vec::new(), Vec::new());
+    let mut dry_run = false;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--chromium-id" => match args.next() {
+                Some(v) => chromium.extend(v.split(',').map(str::trim).map(str::to_owned)),
+                None => fail("--chromium-id needs a value"),
+            },
+            "--firefox-id" => match args.next() {
+                Some(v) => firefox.extend(v.split(',').map(str::trim).map(str::to_owned)),
+                None => fail("--firefox-id needs a value"),
+            },
+            "--dry-run" => dry_run = true,
+            other => fail(&format!("unknown flag: {other}")),
+        }
+    }
+    // Given ids replace the shipped ones for that family only: pairing
+    // a development build of the extension should not also stop the
+    // published one working in the other browser.
+    if !chromium.is_empty() {
+        ids.chromium = chromium;
+    }
+    if !firefox.is_empty() {
+        ids.firefox = firefox;
+    }
+
+    let report = match oxdm::data::native_host::install(&ids, dry_run) {
+        Ok(r) => r,
+        Err(e) => fail(&e),
+    };
+    for entry in &report.entries {
+        let verb = match &entry.outcome {
+            oxdm::domain::HostOutcome::Written if dry_run => "would write",
+            oxdm::domain::HostOutcome::Written => "wrote",
+            oxdm::domain::HostOutcome::Unchanged => "unchanged",
+            oxdm::domain::HostOutcome::Failed(e) => {
+                println!("{}: FAILED — {e}", entry.browser);
+                continue;
+            }
+        };
+        println!("{}: {verb} {}", entry.browser, entry.manifest);
+    }
+    if report.no_browsers {
+        println!("No supported browser found.");
+    }
+    if !report.flatpak_grants.is_empty() {
+        println!();
+        println!("Flatpak browsers cannot reach oxdm until you grant them the paths:");
+        for cmd in &report.flatpak_grants {
+            println!("    {cmd}");
+        }
+    }
+    std::process::exit(if report.failures() > 0 { 1 } else { 0 });
+}
+
+fn fail(message: &str) -> ! {
+    eprintln!("oxdm --install-native-host: {message}");
+    std::process::exit(2);
 }
 
 fn run_daemon() {

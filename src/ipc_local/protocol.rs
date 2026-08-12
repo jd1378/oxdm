@@ -176,6 +176,11 @@ pub enum Request {
     /// Mint a pairing code without storing it: the Settings window
     /// stages it and saves it with the rest of the page.
     MintExtToken,
+    /// Register oxdm as a native-messaging host with every browser on
+    /// this machine, and report what happened per browser. Runs in the
+    /// daemon because it writes to the user's home and the windows are
+    /// short-lived. Reply is `Reply::NativeHost`.
+    InstallNativeHost,
     /// Inspect the daemon's secrets-encryption state. Used by the GUI
     /// at boot to decide whether to surface the "master key missing"
     /// wipe-confirmation dialog. Reply is `Reply::SecretsStatus`.
@@ -450,6 +455,7 @@ pub enum Reply {
     WatchLimit(Option<crate::domain::WatchLimit>),
     /// A freshly minted pairing code, not yet saved anywhere.
     ExtToken(String),
+    NativeHost(Box<crate::domain::HostReport>),
 }
 
 /// Daemon → client async events.
