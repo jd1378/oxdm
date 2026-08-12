@@ -35,10 +35,9 @@ use tokio::sync::{Notify, watch};
 /// is what consumes it most often; idle is a state that changes on the
 /// scale of minutes, so nothing is gained by asking more.
 ///
-/// The sample itself is two property reads on a connection held open
-/// for the life of the daemon — microseconds. Reconnecting each time
-/// cost ~50× that, all of it in the bus handshake, which is why
-/// [`Prober`] exists.
+/// One sample is a bus round trip of roughly 270µs (see [`Prober`] for
+/// why it cannot be a cheap cache read), so this cadence costs about a
+/// second of CPU per year — and only while something is waiting on it.
 const POLL: Duration = Duration::from_secs(30);
 
 /// Who currently needs idle readings. One bit each, so a consumer can
@@ -181,6 +180,9 @@ pub async fn spawn() -> IdleWatch {
             if sample.is_some() {
                 seen.store(true, Ordering::Relaxed);
             }
+            if sample != *tx.borrow() {
+                tracing::debug!(?sample, "session idle time changed");
+            }
             // `send` fails only when every receiver is gone; the daemon
             // holds one for its lifetime, so this is the shutdown path.
             if tx.send(sample).is_err() {
@@ -199,11 +201,20 @@ pub async fn spawn() -> IdleWatch {
 
 /// Reads session idle time, holding the bus connection between polls.
 ///
-/// The connection is the expensive part by two orders of magnitude —
-/// socket, SASL handshake and `Hello` per poll, against two cached
-/// property reads once it is up. Kept in an `Option` so a bus that goes
-/// away (logind restart, session teardown) is reconnected on the next
-/// poll instead of wedging the watch for the life of the daemon.
+/// Reconnecting per poll costs about a third more than reading on a
+/// connection that is already up (~350µs against ~270µs), all of it in
+/// the socket, SASL handshake and `Hello`. Kept in an `Option` so a bus
+/// that goes away (logind restart, session teardown) is reconnected on
+/// the next poll instead of wedging the watch for the life of the
+/// daemon.
+///
+/// **Property caching is off, and must stay off.** zbus caches lazily
+/// by default and refreshes from `PropertiesChanged` — but logind never
+/// emits that signal for `IdleHint`, so a cached proxy answers with
+/// whatever was true when the daemon started, forever. Verified against
+/// a live logind by flipping the hint with `SetIdleHint`: the cached
+/// proxy did not move, the uncached one did. That is why this polls at
+/// all rather than subscribing.
 #[cfg(target_os = "linux")]
 #[derive(Default)]
 struct Prober {
@@ -242,13 +253,13 @@ impl Prober {
             None => {
                 let conn = zbus::Connection::system().await?;
                 self.proxy.insert(
-                    zbus::Proxy::new(
-                        &conn,
-                        "org.freedesktop.login1",
-                        "/org/freedesktop/login1/session/auto",
-                        "org.freedesktop.login1.Session",
-                    )
-                    .await?,
+                    zbus::proxy::Builder::new(&conn)
+                        .destination("org.freedesktop.login1")?
+                        .path("/org/freedesktop/login1/session/auto")?
+                        .interface("org.freedesktop.login1.Session")?
+                        .cache_properties(zbus::proxy::CacheProperties::No)
+                        .build()
+                        .await?,
                 )
             }
         };

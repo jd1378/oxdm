@@ -238,22 +238,46 @@ pub async fn check_command(cmd: &str) -> bool {
 /// as metered — NM's own guidance treats unknown as unmetered. A
 /// missing NM (systemd-networkd hosts) answers `None`, which takes the
 /// condition off the menu rather than guessing either way.
+/// The connection NetworkManager is asked over, held between probes:
+/// the handshake costs more than the read it precedes. Rebuilt on any
+/// failure, so an NM restart costs one probe rather than every future
+/// one.
+///
+/// Property caching stays off here for the same reason as the idle
+/// probe (see [`crate::data::idle`]): zbus refreshes a cached property
+/// from `PropertiesChanged`, and a daemon that does not emit it leaves
+/// the cache frozen at the value it had when oxdm started. NM is
+/// better-behaved than logind about this, but a metered link that reads
+/// as unmetered forever is a bill, not a glitch, and one bus round trip
+/// per probe is not worth that risk.
+#[cfg(target_os = "linux")]
+static NM: tokio::sync::Mutex<Option<zbus::Proxy<'static>>> = tokio::sync::Mutex::const_new(None);
+
 #[cfg(target_os = "linux")]
 async fn network_unmetered() -> Option<bool> {
-    async fn metered() -> zbus::Result<u32> {
-        let conn = zbus::Connection::system().await?;
-        let proxy = zbus::Proxy::new(
-            &conn,
-            "org.freedesktop.NetworkManager",
-            "/org/freedesktop/NetworkManager",
-            "org.freedesktop.NetworkManager",
-        )
-        .await?;
+    async fn metered(slot: &mut Option<zbus::Proxy<'static>>) -> zbus::Result<u32> {
+        let proxy = match slot {
+            Some(p) => p,
+            None => {
+                let conn = zbus::Connection::system().await?;
+                slot.insert(
+                    zbus::proxy::Builder::new(&conn)
+                        .destination("org.freedesktop.NetworkManager")?
+                        .path("/org/freedesktop/NetworkManager")?
+                        .interface("org.freedesktop.NetworkManager")?
+                        .cache_properties(zbus::proxy::CacheProperties::No)
+                        .build()
+                        .await?,
+                )
+            }
+        };
         proxy.get_property("Metered").await
     }
-    match metered().await {
+    let mut slot = NM.lock().await;
+    match metered(&mut slot).await {
         Ok(v) => Some(!matches!(v, 1 | 3)),
         Err(e) => {
+            *slot = None;
             tracing::debug!(error = %e, "NetworkManager metered probe failed");
             None
         }
