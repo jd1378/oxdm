@@ -37,26 +37,8 @@ notify-rust = "4"
 rand = "0.10"
 base64 = "0.23"
 aes-gcm = "0.11"
-reqwest = { version = "0.13", default-features = false, features = [
-    "http2",
-    "gzip",
-    "brotli",
-    "stream",
-    "json",
-    # rustls over native-tls: one TLS implementation for the whole
-    # binary rather than whichever the platform happens to ship, and
-    # no OpenSSL to find at build time. reqwest's `rustls` feature
-    # verifies through `rustls-platform-verifier`, so the OS trust
-    # store still decides — a corporate or user-added CA keeps
-    # working, as it did under native-tls.
-    "rustls",
-] }
+reqwest = { version = "0.13", default-features = false, features = ["http2", "gzip", "brotli", "rustls", "stream", "json"] }
 semver = "1"
-# One dependency for all three platforms: keyring 4's default `v1`
-# feature carries the macOS keychain, the Windows credential manager and
-# the freedesktop Secret Service, where 3 needed a per-target feature
-# each. The Linux store is zbus rather than libdbus, so nothing here
-# links a C D-Bus library any more.
 keyring = "4"
 sha2 = "0.11"
 sha1 = "0.11"
