@@ -341,7 +341,7 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
         }
         Msg::Progress(None) => Task::none(),
         // The offer stands afterwards: the daemon keeps what the check
-        // found, so the card goes back to "Install update" rather than
+        // found, so the card goes back to offering the download rather than
         // pretending there is no new version.
         Msg::CancelUpdate => {
             let client = st.client.clone();
@@ -701,13 +701,17 @@ fn updates(st: &State) -> Element<'_, Msg> {
         UpdateUi::Available(info) => (
             "download",
             t.action_primary,
-            format!("Version {} is ready", info.version),
+            format!("Version {} is available", info.version),
             info.notes
                 .clone()
                 .filter(|n| !n.trim().is_empty())
                 // A link belongs on the button, not in the sentence.
                 .filter(|_| notes_url(info).is_none())
-                .unwrap_or_else(|| "A newer release is available to install.".into()),
+                // Says what pressing the button does, since the card
+                // has already said a new version exists.
+                .unwrap_or_else(|| {
+                    "Downloads in the background; installing is a separate step.".into()
+                }),
         ),
         UpdateUi::Downloading {
             version,
@@ -751,7 +755,11 @@ fn updates(st: &State) -> Element<'_, Msg> {
 
     let actions: Element<'_, Msg> = match &st.update {
         UpdateUi::Available(_) => row![
-            Btn::new("Install update")
+            // "Download update", because that is all this does. The
+            // install is a second, deliberate press once the bytes are
+            // here and checked — a button that says Install and then
+            // only downloads is a promise the next screen has to break.
+            Btn::new("Download update")
                 .primary()
                 .size(BtnSize::Md)
                 .icon("download")
