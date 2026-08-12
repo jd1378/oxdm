@@ -254,13 +254,58 @@ async fn network_unmetered() -> Option<bool> {
     match metered().await {
         Ok(v) => Some(!matches!(v, 1 | 3)),
         Err(e) => {
-            tracing::debug!(error = %e, "NetworkManager metered probe failed; assuming unmetered");
+            tracing::debug!(error = %e, "NetworkManager metered probe failed");
             None
         }
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+/// Windows: WinRT's connection cost for the profile actually carrying
+/// internet traffic. `NetworkCostType` is Unknown / Unrestricted /
+/// Fixed / Variable — the last two are the ones that cost the user
+/// money — and roaming or a blown data cap count as metered whatever
+/// the plan says, which is how Windows' own "metered connection"
+/// switch behaves.
+///
+/// `None` when there is no internet profile at all (offline, or a
+/// machine whose only link is one Windows does not classify): with
+/// nothing connected there is nothing to be metered about, and
+/// answering "unmetered" would let a queue start on a dead link.
+#[cfg(target_os = "windows")]
+async fn network_unmetered() -> Option<bool> {
+    use windows::Networking::Connectivity::{NetworkCostType, NetworkInformation};
+
+    fn cost() -> windows::core::Result<bool> {
+        // WinRT needs an initialised apartment. The MTA reference is
+        // process-wide, never released, and safe to take repeatedly —
+        // the alternative, per-thread CoInitializeEx, would have to be
+        // undone on a thread pool that outlives this call.
+        // SAFETY: no arguments, no out-parameter we keep.
+        unsafe { windows::Win32::System::Com::CoIncrementMTAUsage() }?;
+        let profile = NetworkInformation::GetInternetConnectionProfile()?;
+        let cost = profile.GetConnectionCost()?;
+        let plan_is_metered = matches!(
+            cost.NetworkCostType()?,
+            NetworkCostType::Fixed | NetworkCostType::Variable
+        );
+        Ok(plan_is_metered || cost.Roaming()? || cost.OverDataLimit()?)
+    }
+    // Blocking COM/WinRT calls off the async worker: each is a local
+    // RPC to the network service, not a computation.
+    match tokio::task::spawn_blocking(cost).await {
+        Ok(Ok(metered)) => Some(!metered),
+        Ok(Err(e)) => {
+            tracing::debug!(error = %e, "connection cost probe failed");
+            None
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, "connection cost probe panicked");
+            None
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 async fn network_unmetered() -> Option<bool> {
     None
 }

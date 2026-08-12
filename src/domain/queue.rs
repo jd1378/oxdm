@@ -219,11 +219,11 @@ impl CondKind {
     ///   (`IOPSGetTimeRemainingEstimate`) but not "has a battery", and
     ///   without the second question the condition is trivially true on
     ///   every desktop, so it stays hidden.
-    /// - **Unmetered** — Linux only. NetworkManager exposes it as a
-    ///   property; the Windows answer lives behind WinRT
-    ///   (`NetworkInformation.GetConnectionCost`) and the macOS one
-    ///   behind `NWPathMonitor.isExpensive`, neither of which is
-    ///   reachable from here without a new dependency.
+    /// - **Unmetered** — Linux (NetworkManager's `Metered` property) and
+    ///   Windows (WinRT `NetworkInformation.GetConnectionCost`). The
+    ///   macOS answer lives behind `NWPathMonitor.isExpensive`, which
+    ///   is only reachable through an Objective-C block on a dispatch
+    ///   queue — two more dependencies for one boolean.
     /// - **Command** — anywhere there is a shell, which now includes
     ///   Windows via `cmd /C`.
     ///
@@ -241,7 +241,12 @@ impl CondKind {
         }
         #[cfg(target_os = "windows")]
         {
-            &[CondKind::Idle, CondKind::AcPower, CondKind::Command]
+            &[
+                CondKind::Unmetered,
+                CondKind::Idle,
+                CondKind::AcPower,
+                CondKind::Command,
+            ]
         }
         #[cfg(target_os = "macos")]
         {

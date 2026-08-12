@@ -89,6 +89,13 @@ windows-sys = { version = "0.59", features = [
 ] }
 raw-window-handle = "0.6"
 keyring = { version = "3", features = ["windows-native"] }
+# WinRT, for the one probe Win32 cannot answer: whether the active
+# connection is metered (`NetworkInformation.GetConnectionCost`). The
+# lighter `windows-sys` above exposes no WinRT surface.
+windows = { version = "0.62", features = [
+    "Networking_Connectivity",
+    "Win32_System_Com",
+] }
 
 [dev-dependencies]
 tempfile = "3"
