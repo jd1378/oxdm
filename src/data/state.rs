@@ -3189,10 +3189,18 @@ impl AppState {
         entry
     }
 
-    /// Is every slot the user allowed already in use?
-    async fn at_concurrency_cap(&self) -> bool {
-        let cap = self.settings().await.max_concurrent_downloads;
-        at_cap(&*self.jobs.read().await, cap)
+    /// Is there room for one more download in `queue`?
+    ///
+    /// Two caps, and both are real: the queue's own `max_concurrent`
+    /// and the global `max_concurrent_downloads` across every queue.
+    /// The global one is shared, so two queues allowing three each
+    /// still run five between them when five is the global limit —
+    /// otherwise a global cap would mean nothing as soon as a second
+    /// queue existed.
+    async fn slots_full_for(&self, queue: QueueId) -> bool {
+        let global = self.settings().await.max_concurrent_downloads;
+        let per_queue = self.queue(queue).await.and_then(|q| q.max_concurrent);
+        slots_full(&*self.jobs.read().await, global, queue, per_queue)
     }
 
     /// Start whatever the cap sent back to Queued, oldest first, until
@@ -3212,22 +3220,47 @@ impl AppState {
     }
 
     async fn fill_deferred_slots_inner(self: &Arc<Self>) {
+        // A job that will not start — its own queue is full, it is out
+        // of disk — must not be picked again on the next turn of this
+        // loop, or the loop never ends.
+        let mut tried: std::collections::HashSet<JobId> = std::collections::HashSet::new();
         loop {
-            if self.is_exiting() || self.at_concurrency_cap().await {
+            if self.is_exiting() {
                 return;
             }
-            let next = next_deferred(&*self.jobs.read().await);
-            let Some(id) = next else { return };
-            // Cleared up front: a start that refuses for its own reasons
-            // (out of disk, secrets locked) must not be retried on every
-            // pass forever.
-            if let Some(entry) = self.job_entry(id).await {
-                entry.deferred_by_cap.store(false, Ordering::Release);
+            let Some(id) = next_deferred(&*self.jobs.read().await, &tried) else {
+                return;
+            };
+            tried.insert(id);
+            // The queue this job belongs to may be at its own limit
+            // even while the global one has room; it keeps waiting.
+            if self.slots_full_for(self.queue_of(id).await).await {
+                continue;
             }
             self.mark_run_intent(id, false).await;
-            if let Err(e) = self.start_job(id).await {
-                tracing::info!(id = %id, error = %e, "a deferred download could not start");
+            match self.start_job(id).await {
+                Ok(()) => {}
+                // Still no room — the mark stays so the next slot to
+                // free comes back to it.
+                Err(JobError::Deferred) => {}
+                Err(e) => {
+                    // A refusal of its own (out of disk, secrets
+                    // locked). Stop calling it a cap problem, or every
+                    // freed slot would retry it forever.
+                    if let Some(entry) = self.job_entry(id).await {
+                        entry.deferred_by_cap.store(false, Ordering::Release);
+                    }
+                    tracing::info!(id = %id, error = %e, "a deferred download could not start");
+                }
             }
+        }
+    }
+
+    /// Which queue a job belongs to; the main queue if it has gone.
+    async fn queue_of(&self, id: JobId) -> QueueId {
+        match self.job_entry(id).await {
+            Some(entry) => entry.job.queue_id,
+            None => self.main_queue_id,
         }
     }
 
@@ -3259,7 +3292,7 @@ impl AppState {
         // means.
         let manual = entry.manual_run.load(Ordering::Acquire);
         let _admission = self.admission.lock().await;
-        if !manual && self.at_concurrency_cap().await {
+        if !manual && self.slots_full_for(entry.job.queue_id).await {
             entry.deferred_by_cap.store(true, Ordering::Release);
             if entry.phase() != Phase::Queued {
                 entry.set_phase(Phase::Queued);
@@ -4564,23 +4597,51 @@ fn validate_work_dir(dir: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Are all the slots the user allows in use?
+/// Is there room for one more download in `queue`?
+///
+/// `global` is shared across every queue and `per_queue` is this
+/// queue's own limit, so a queue that allows ten still runs one at a
+/// time under a global cap of one, and two queues allowing three each
+/// run five between them under a global cap of five. `None` for
+/// `per_queue` means the queue defers entirely to the global limit.
 ///
 /// Counted by phase rather than by the `running` flag: the phase is
 /// what every other surface calls "running", and the flag lags it at
 /// both ends of a run.
-fn at_cap(jobs: &IndexMap<JobId, Arc<JobEntry>>, cap: usize) -> bool {
-    let running = jobs.values().filter(|e| e.phase().is_running()).count();
-    running >= cap.max(1)
+fn slots_full(
+    jobs: &IndexMap<JobId, Arc<JobEntry>>,
+    global: usize,
+    queue: QueueId,
+    per_queue: Option<usize>,
+) -> bool {
+    let running_global = jobs.values().filter(|e| e.phase().is_running()).count();
+    if running_global >= global.max(1) {
+        return true;
+    }
+    match per_queue {
+        Some(cap) => {
+            let running_here = jobs
+                .values()
+                .filter(|e| e.job.queue_id == queue && e.phase().is_running())
+                .count();
+            running_here >= cap.max(1)
+        }
+        None => false,
+    }
 }
 
-/// The next download the cap sent back to the queue, in list order.
-fn next_deferred(jobs: &IndexMap<JobId, Arc<JobEntry>>) -> Option<JobId> {
+/// The next download the cap sent back to the queue, in list order,
+/// skipping any this pass has already picked up.
+fn next_deferred(
+    jobs: &IndexMap<JobId, Arc<JobEntry>>,
+    skip: &std::collections::HashSet<JobId>,
+) -> Option<JobId> {
     jobs.values()
         .find(|e| {
             e.deferred_by_cap.load(Ordering::Acquire)
                 && e.phase() == Phase::Queued
                 && !e.running.load(Ordering::Acquire)
+                && !skip.contains(&e.job.id)
         })
         .map(|e| e.job.id)
 }
@@ -5249,9 +5310,11 @@ mod tests {
 
     #[test]
     fn the_cap_counts_what_is_running_not_what_is_waiting() {
+        let queue = crate::domain::QueueId::new();
         let mut jobs: IndexMap<JobId, Arc<JobEntry>> = IndexMap::new();
         let mut add = |phase: Phase| {
-            let entry = entry_in(phase);
+            let mut entry = entry_in(phase);
+            entry.job.queue_id = queue;
             jobs.insert(entry.job.id, Arc::new(entry));
         };
         add(Phase::Downloading);
@@ -5260,11 +5323,58 @@ mod tests {
         add(Phase::Paused);
         add(Phase::Completed);
 
-        assert!(at_cap(&jobs, 2), "two running against a cap of two");
-        assert!(!at_cap(&jobs, 3), "a third slot is free");
+        assert!(slots_full(&jobs, 2, queue, None), "two running, global two");
+        assert!(!slots_full(&jobs, 3, queue, None), "a third slot is free");
         // A cap of zero would mean nothing may ever run.
-        assert!(at_cap(&jobs, 0));
-        assert!(!at_cap(&IndexMap::new(), 1));
+        assert!(slots_full(&jobs, 0, queue, None));
+        assert!(!slots_full(&IndexMap::new(), 1, queue, None));
+    }
+
+    /// The global limit is shared: a queue allowing ten still runs one
+    /// at a time when the global limit is one.
+    #[test]
+    fn the_global_limit_beats_a_roomier_queue() {
+        let queue = crate::domain::QueueId::new();
+        let mut jobs: IndexMap<JobId, Arc<JobEntry>> = IndexMap::new();
+        let mut entry = entry_in(Phase::Downloading);
+        entry.job.queue_id = queue;
+        jobs.insert(entry.job.id, Arc::new(entry));
+
+        assert!(slots_full(&jobs, 1, queue, Some(10)));
+        assert!(!slots_full(&jobs, 2, queue, Some(10)));
+    }
+
+    /// And it is shared *between* queues: two queues allowing three
+    /// each run five between them under a global five.
+    #[test]
+    fn two_queues_share_the_global_limit() {
+        let (a, b) = (crate::domain::QueueId::new(), crate::domain::QueueId::new());
+        let mut jobs: IndexMap<JobId, Arc<JobEntry>> = IndexMap::new();
+        let mut add = |queue: QueueId, phase: Phase| {
+            let mut entry = entry_in(phase);
+            entry.job.queue_id = queue;
+            jobs.insert(entry.job.id, Arc::new(entry));
+        };
+        for _ in 0..3 {
+            add(a, Phase::Downloading);
+        }
+        add(b, Phase::Downloading);
+        add(b, Phase::Downloading);
+
+        // Five running, global five: neither queue may add a sixth,
+        // even though queue B is one under its own limit of three.
+        assert!(
+            slots_full(&jobs, 5, b, Some(3)),
+            "the global limit is shared"
+        );
+        assert!(slots_full(&jobs, 5, a, Some(3)));
+        // Queue A is at its own limit whatever the global one allows.
+        assert!(
+            slots_full(&jobs, 99, a, Some(3)),
+            "the queue's own limit still holds"
+        );
+        // Queue B has room on both counts once the global one does.
+        assert!(!slots_full(&jobs, 6, b, Some(3)));
     }
 
     #[test]
@@ -5280,17 +5390,28 @@ mod tests {
         // Queued because a person left it there, not because of the cap.
         add(Phase::Queued, false);
         let first = add(Phase::Queued, true);
-        add(Phase::Queued, true);
+        let second = add(Phase::Queued, true);
         // Deferred once, but running now.
         add(Phase::Downloading, true);
 
-        assert_eq!(next_deferred(&jobs), Some(first));
+        let mut tried = std::collections::HashSet::new();
+        assert_eq!(next_deferred(&jobs, &tried), Some(first));
+        // One this pass has already picked up is not picked again —
+        // without that the filler would spin on a job whose own queue
+        // is full.
+        tried.insert(first);
+        assert_eq!(next_deferred(&jobs, &tried), Some(second));
+        tried.insert(second);
+        assert_eq!(next_deferred(&jobs, &tried), None);
     }
 
     #[test]
     fn nothing_is_waiting_on_a_slot_when_nothing_was_deferred() {
         let jobs = table(&[Some("a.zip"), Some("b.zip")]);
-        assert_eq!(next_deferred(&jobs), None);
+        assert_eq!(
+            next_deferred(&jobs, &std::collections::HashSet::new()),
+            None
+        );
     }
 
     #[test]
