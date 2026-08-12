@@ -22,7 +22,19 @@ pub fn spawn(state: Arc<AppState>) {
                     id,
                     completed,
                     failed,
-                } => run_hooks(&state, id, HookPhase::Finish { completed, failed }).await,
+                    needs_answer,
+                } => {
+                    run_hooks(
+                        &state,
+                        id,
+                        HookPhase::Finish {
+                            completed,
+                            failed,
+                            needs_answer,
+                        },
+                    )
+                    .await
+                }
                 _ => {}
             }
         }
@@ -37,6 +49,7 @@ enum HookPhase {
     Finish {
         completed: u32,
         failed: u32,
+        needs_answer: u32,
     },
 }
 
@@ -70,12 +83,21 @@ async fn execute(
             // names the queue because that is what a collapsed or
             // truncated notification keeps.
             let (title, body) = match when {
-                HookPhase::Finish { completed, failed } => (
+                HookPhase::Finish {
+                    completed,
+                    failed,
+                    needs_answer,
+                } => (
                     crate::domain::finish_title(&queue.name),
-                    crate::domain::finish_summary(completed, failed),
+                    crate::domain::finish_summary(completed, failed, needs_answer),
                 ),
                 HookPhase::Start => (title.clone(), body.clone()),
             };
+            // Logged like the per-download notifier's: delivery is
+            // fire-and-forget, and this is the only report a queue run
+            // gets, so "the desktop dropped it" has to be tellable
+            // from "it never said anything".
+            tracing::debug!(%title, %body, "queue notification");
             #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
             {
                 crate::platform::show_notification(title, body);

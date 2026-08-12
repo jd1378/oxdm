@@ -331,14 +331,39 @@ pub fn finish_title(queue: &str) -> String {
 /// Failures are named because a queue that "finished" with downloads
 /// still broken has not done what the user asked, and a bare total
 /// would hide that.
-pub fn finish_summary(completed: u32, failed: u32) -> String {
-    let files = |n: u32| if n == 1 { "file" } else { "files" };
-    match (completed, failed) {
-        (0, 0) => "Nothing was downloaded.".to_owned(),
-        (0, f) => format!("{f} {} failed.", files(f)),
-        (c, 0) => format!("{c} {} downloaded.", files(c)),
-        (c, f) => format!("{c} {} downloaded, {f} failed.", files(c)),
+///
+/// Downloads waiting on a question are named separately, and last,
+/// because they are the part with something to do about them: nothing
+/// went wrong, and each will run as soon as it is answered. This
+/// notification is the only word a queue run gets — its downloads
+/// raise no windows and no notifications of their own — so anything
+/// left undone has to be in this sentence.
+pub fn finish_summary(completed: u32, failed: u32, needs_answer: u32) -> String {
+    let files = |n: u32| if n == 1 { " file" } else { " files" };
+    let mut parts: Vec<String> = Vec::new();
+    // Only the first clause carries the noun — "3 files downloaded, 2
+    // files failed" says "files" twice about the same pile.
+    let noun = |n: u32, first: bool| if first { files(n) } else { "" };
+    if completed > 0 {
+        parts.push(format!(
+            "{completed}{} downloaded",
+            noun(completed, parts.is_empty())
+        ));
     }
+    if failed > 0 {
+        parts.push(format!("{failed}{} failed", noun(failed, parts.is_empty())));
+    }
+    if needs_answer > 0 {
+        let verb = if needs_answer == 1 { "needs" } else { "need" };
+        parts.push(format!(
+            "{needs_answer}{} {verb} your answer",
+            noun(needs_answer, parts.is_empty())
+        ));
+    }
+    if parts.is_empty() {
+        return "Nothing was downloaded.".to_owned();
+    }
+    format!("{}.", parts.join(", "))
 }
 
 #[cfg(test)]
@@ -352,12 +377,29 @@ mod finish_summary_tests {
 
     #[test]
     fn reports_both_counts_and_singularises() {
-        assert_eq!(finish_summary(4, 0), "4 files downloaded.");
-        assert_eq!(finish_summary(1, 0), "1 file downloaded.");
-        assert_eq!(finish_summary(3, 2), "3 files downloaded, 2 failed.");
-        assert_eq!(finish_summary(0, 1), "1 file failed.");
+        assert_eq!(finish_summary(4, 0, 0), "4 files downloaded.");
+        assert_eq!(finish_summary(1, 0, 0), "1 file downloaded.");
+        assert_eq!(finish_summary(3, 2, 0), "3 files downloaded, 2 failed.");
+        assert_eq!(finish_summary(0, 1, 0), "1 file failed.");
         // A queue stopped before anything finished says so rather than
         // claiming success.
-        assert_eq!(finish_summary(0, 0), "Nothing was downloaded.");
+        assert_eq!(finish_summary(0, 0, 0), "Nothing was downloaded.");
+    }
+
+    /// A queued download stopped on a question raises nothing of its
+    /// own, so this sentence is where the user hears about it — and
+    /// calling it a failure would be both wrong and unactionable.
+    #[test]
+    fn what_is_waiting_on_the_user_is_not_called_a_failure() {
+        assert_eq!(finish_summary(0, 0, 1), "1 file needs your answer.");
+        assert_eq!(finish_summary(0, 0, 2), "2 files need your answer.");
+        assert_eq!(
+            finish_summary(5, 1, 2),
+            "5 files downloaded, 1 failed, 2 need your answer."
+        );
+        assert_eq!(
+            finish_summary(3, 0, 1),
+            "3 files downloaded, 1 needs your answer."
+        );
     }
 }

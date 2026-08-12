@@ -1159,6 +1159,7 @@ impl AppState {
             id: queue_id,
             completed: tally.completed,
             failed: tally.failed,
+            needs_answer: tally.needs_answer,
         });
     }
 
@@ -1177,6 +1178,14 @@ impl AppState {
             }
             JobOutcome::Failed => {
                 tally.failed += 1;
+                tally.failed_now.insert(id);
+            }
+            // Counted apart from failures, and left out of
+            // `failed_now`: the queue does not retry it this run — the
+            // question is still unanswered — but it is not something
+            // that went wrong either.
+            JobOutcome::NeedsAnswer => {
+                tally.needs_answer += 1;
                 tally.failed_now.insert(id);
             }
             JobOutcome::Cancelled => {
@@ -3549,6 +3558,7 @@ impl AppState {
                     match &outcome {
                         Ok(_) => JobOutcome::Completed,
                         Err(JobError::Cancelled) => JobOutcome::Cancelled,
+                        Err(e) if is_conflict(e) => JobOutcome::NeedsAnswer,
                         Err(_) => JobOutcome::Failed,
                     },
                 )
@@ -3652,14 +3662,7 @@ impl AppState {
                     // it outright, and the only way forward is starting
                     // over. Calling that "needs your answer" would
                     // offer a decision that does not exist.
-                    let is_conflict = matches!(
-                        &err,
-                        JobError::ServerConflict(_)
-                            | JobError::NotResumable(_)
-                            | JobError::FileChanged(_)
-                            | JobError::SaveConflict(_)
-                    );
-                    if park_on_conflict && is_conflict {
+                    if park_on_conflict && is_conflict(&err) {
                         state.park_with_conflict(id, err).await;
                     } else {
                         let _ = state.events.send(DomainEvent::JobFailed { id, error: err });
@@ -4822,6 +4825,8 @@ fn build_manager(settings: &Settings, proxy_password: Option<&str>) -> DownloadM
 struct QueueRunTally {
     completed: u32,
     failed: u32,
+    /// Stopped waiting for the user to answer something.
+    needs_answer: u32,
     /// Jobs that failed *during this run*.
     ///
     /// A queue does not retry these when it comes back round — the
@@ -4837,12 +4842,33 @@ struct QueueRunTally {
     queue_run: bool,
 }
 
+/// Did the run stop on a question the user can settle, rather than on
+/// something that went wrong?
+///
+/// A checksum mismatch is deliberately not among these: nothing about
+/// it is answerable — the file on disk is not the promised one and the
+/// only way forward is starting over.
+fn is_conflict(e: &JobError) -> bool {
+    matches!(
+        e,
+        JobError::ServerConflict(_)
+            | JobError::NotResumable(_)
+            | JobError::FileChanged(_)
+            | JobError::SaveConflict(_)
+    )
+}
+
 /// A finished job's contribution to its queue's tally. Cancelled (the
 /// user paused or stopped it) is neither a success nor a failure.
 #[derive(Clone, Copy)]
 enum JobOutcome {
     Completed,
     Failed,
+    /// Stopped on a question — the file changed, the name is taken,
+    /// the server refused to resume. Not a failure: nothing is broken
+    /// and the user can settle it, but the download will not move
+    /// until they do.
+    NeedsAnswer,
     Cancelled,
 }
 
@@ -5296,6 +5322,26 @@ mod tests {
         assert!(!is_sha256_hex(&"a".repeat(63)));
         assert!(!is_sha256_hex(&"a".repeat(65)));
         assert!(!is_sha256_hex(&"z".repeat(64)));
+    }
+
+    /// What separates "this needs you" from "this broke": the first
+    /// is counted apart in the queue's summary, and the second is not
+    /// answerable.
+    #[test]
+    fn a_question_is_not_a_failure() {
+        assert!(is_conflict(&JobError::FileChanged("changed".into())));
+        assert!(is_conflict(&JobError::NotResumable("no ranges".into())));
+        assert!(is_conflict(&JobError::SaveConflict("name taken".into())));
+        assert!(is_conflict(&JobError::ServerConflict("mismatch".into())));
+
+        assert!(!is_conflict(&JobError::Network("reset".into())));
+        assert!(!is_conflict(&JobError::Cancelled));
+        // Nothing to answer: the file is not the promised one and the
+        // only way forward is starting over.
+        assert!(!is_conflict(&JobError::ChecksumMismatch {
+            expected: "a".into(),
+            actual: "b".into(),
+        }));
     }
 
     #[test]

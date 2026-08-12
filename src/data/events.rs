@@ -96,6 +96,10 @@ pub enum DomainEvent {
         id: QueueId,
         completed: u32,
         failed: u32,
+        /// Downloads left waiting on a question the user can settle.
+        /// Separate from `failed`: nothing went wrong with them, and
+        /// the queue will run them once they are answered.
+        needs_answer: u32,
     },
     /// Queue mutation (created / renamed / schedule edit / deleted).
     /// UI re-snapshots the queue list.
