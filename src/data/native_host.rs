@@ -205,16 +205,18 @@ pub fn install(opts: &Options) -> Result<HostReport, String> {
 
     if !flatpak_seen.is_empty() {
         let grants = flatpak_grant_args(&binary, opts);
+        let shell = shell_grants(&grants);
         for app in &flatpak_seen {
             report
                 .flatpak_grants
-                .push(format!("flatpak override --user {grants} {app}"));
+                .push(format!("flatpak override --user {shell} {app}"));
         }
         if opts.patch_desktop {
+            let desktop: Vec<String> = grants.iter().map(|a| desktop_quote(a)).collect();
             for app in &flatpak_seen {
                 report
                     .desktop_patched
-                    .push(patch_desktop(app, &grants, dry_run));
+                    .push(patch_desktop(app, &desktop, dry_run));
             }
         }
     }
@@ -435,7 +437,7 @@ fn db_path() -> Result<PathBuf, String> {
 /// The grants a Flatpak browser needs: the host binary, and the
 /// database's *directory* — SQLite in WAL mode reads `-wal` and `-shm`
 /// sidecars beside the file even when opening read-only.
-fn flatpak_grant_args(binary: &Path, opts: &Options) -> String {
+fn flatpak_grant_args(binary: &Path, opts: &Options) -> Vec<String> {
     let db = match &opts.db_path {
         Some(p) => Some(p.clone()),
         None => db_path().ok(),
@@ -443,15 +445,46 @@ fn flatpak_grant_args(binary: &Path, opts: &Options) -> String {
     let db_dir = db
         .and_then(|p| p.parent().map(Path::to_path_buf))
         .unwrap_or_default();
-    let mut args = format!(
-        "--filesystem={}:ro --filesystem={}:ro",
-        binary.display(),
-        db_dir.display()
-    );
+    let mut args = vec![
+        format!("--filesystem={}:ro", binary.display()),
+        format!("--filesystem={}:ro", db_dir.display()),
+    ];
     if let Some(token) = &opts.token_file {
-        args.push_str(&format!(" --filesystem={}:ro", token.display()));
+        args.push(format!("--filesystem={}:ro", token.display()));
     }
     args
+}
+
+/// The grants as a command the user can paste into a shell. A home
+/// directory with a space in it is ordinary, and an unquoted path is
+/// two arguments to `flatpak`.
+fn shell_grants(args: &[String]) -> String {
+    args.iter()
+        .map(|a| shell_quote(a))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The grants as they must appear inside an `Exec=` line.
+///
+/// Desktop entries have quoting rules of their own (spec §Exec):
+/// reserved characters mean an argument must be double-quoted, and
+/// inside those quotes a backslash escapes. Splicing a raw path with a
+/// space in it would silently turn one argument into two — the browser
+/// would launch with a nonsense mount and no obvious cause.
+fn desktop_quote(arg: &str) -> String {
+    const RESERVED: &[char] = &[
+        ' ', '\t', '"', '\'', '\\', '>', '<', '~', '|', '&', ';', '$', '*', '?', '#', '(', ')', '`',
+    ];
+    if !arg.contains(RESERVED) {
+        return arg.to_owned();
+    }
+    let escaped = arg
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('`', "\\`")
+        .replace('$', "\\$");
+    format!("\"{escaped}\"")
 }
 
 /// Splice the same filesystem grants into a Flatpak browser's user
@@ -465,7 +498,7 @@ fn flatpak_grant_args(binary: &Path, opts: &Options) -> String {
 /// launched from one of those would otherwise be the one that cannot
 /// reach oxdm. Each argument is checked independently, so re-running
 /// adds nothing twice.
-fn patch_desktop(app: &str, grants: &str, dry_run: bool) -> String {
+fn patch_desktop(app: &str, grants: &[String], dry_run: bool) -> String {
     let Some(home) = dirs::home_dir() else {
         return format!("{app}: no home directory");
     };
@@ -483,12 +516,22 @@ fn patch_desktop(app: &str, grants: &str, dry_run: bool) -> String {
     let Some(src) = candidates.iter().find(|p| p.is_file()) else {
         return format!("{app}: no .desktop file found");
     };
+    // Only text is patched. A desktop file that is not UTF-8 is not
+    // one this code understands, and a partial understanding is how
+    // you corrupt somebody's launcher.
     let Ok(body) = std::fs::read_to_string(src) else {
-        return format!("{app}: could not read {}", src.display());
+        return format!("{app}: {} is not readable text", src.display());
     };
     let patched = splice_exec(&body, grants);
     if patched == body {
         return format!("{app}: already granted in {}", dest.display());
+    }
+    // Belt and braces: prove the edit only inserted grants into Exec
+    // lines before writing it over a file the user owns. If this ever
+    // fires it is a bug in `splice_exec`, and the right response is to
+    // leave the file alone and say so.
+    if let Err(e) = only_exec_grants_changed(&body, &patched, grants) {
+        return format!("{app}: refusing to write {} — {e}", dest.display());
     }
     if dry_run {
         return format!("{app}: would patch {}", dest.display());
@@ -499,40 +542,161 @@ fn patch_desktop(app: &str, grants: &str, dry_run: bool) -> String {
     }
 }
 
+/// Compare before and after: same number of lines, every line either
+/// untouched or an `Exec=` line that gained nothing but grant tokens.
+fn only_exec_grants_changed(before: &str, after: &str, grants: &[String]) -> Result<(), String> {
+    let (old, new): (Vec<&str>, Vec<&str>) = (before.lines().collect(), after.lines().collect());
+    if old.len() != new.len() {
+        return Err(format!(
+            "line count changed ({} -> {})",
+            old.len(),
+            new.len()
+        ));
+    }
+    for (o, n) in old.iter().zip(&new) {
+        if o == n {
+            continue;
+        }
+        if !o.starts_with("Exec=") {
+            return Err(format!("a line that is not Exec= changed: {o}"));
+        }
+        // Strip only what was added. A line that already carried one
+        // of the grants keeps it: removing every occurrence would
+        // "restore" a line the user never had.
+        let mut stripped = (*n).to_owned();
+        for token in grants {
+            let added = n
+                .matches(token)
+                .count()
+                .saturating_sub(o.matches(token).count());
+            if added > 1 {
+                return Err(format!("a grant was added {added} times: {token}"));
+            }
+            for _ in 0..added {
+                stripped = stripped.replacen(&format!(" {token}"), "", 1);
+            }
+        }
+        if stripped != *o {
+            return Err(format!("Exec= line changed beyond the grants: {n}"));
+        }
+    }
+    Ok(())
+}
+
+/// Write the patched file, keeping a copy of what was there.
+///
+/// The destination is the user's own launcher entry, which they may
+/// have written by hand. So: never follow a symlink (that would edit
+/// whatever it points at, possibly a system file), keep one backup of
+/// the first version we replace, and land the new content with a
+/// rename so a crash or a full disk cannot leave a half-written file
+/// that no launcher can parse.
 fn write_desktop(dest: &Path, body: &str) -> Result<(), String> {
     if let Some(dir) = dest.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     }
-    std::fs::write(dest, body).map_err(|e| format!("write {}: {e}", dest.display()))
+    if std::fs::symlink_metadata(dest).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(format!(
+            "{} is a symlink; edit its target by hand instead",
+            dest.display()
+        ));
+    }
+    let backup = dest.with_extension("desktop.oxdm.bak");
+    if dest.is_file() && !backup.exists() {
+        std::fs::copy(dest, &backup).map_err(|e| format!("back up {}: {e}", dest.display()))?;
+    }
+    let tmp = dest.with_extension("desktop.oxdm.tmp");
+    std::fs::write(&tmp, body).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    // Launchers read this file; 0644 is what every other .desktop
+    // carries, and an existing file's own mode is preserved by leaving
+    // it to the rename.
+    #[cfg(unix)]
+    if !dest.exists() {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644));
+    }
+    std::fs::rename(&tmp, dest).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("install {}: {e}", dest.display())
+    })
 }
 
 /// Insert each grant after `flatpak run` on every `Exec=` line that
 /// does not already carry it.
-fn splice_exec(body: &str, grants: &str) -> String {
-    let tokens: Vec<&str> = grants.split_whitespace().collect();
-    body.lines()
-        .map(|line| {
-            if !line.starts_with("Exec=") {
-                return line.to_owned();
+///
+/// Line endings are preserved exactly — a file written with CRLF stays
+/// CRLF, and one without a trailing newline does not gain one. The
+/// point is that a user who diffs this afterwards sees the arguments
+/// we added and nothing else.
+fn splice_exec(body: &str, tokens: &[String]) -> String {
+    let mut out = String::with_capacity(body.len() + tokens.len() * 64);
+    for line in split_keeping_ends(body) {
+        let (text, ending) = split_ending(line);
+        if !text.starts_with("Exec=") {
+            out.push_str(line);
+            continue;
+        }
+        let mut patched = text.to_owned();
+        // Inserted in the order given, each after the last one placed,
+        // so the arguments read the way they were written rather than
+        // backwards.
+        let mut cut = after_flatpak_run(&patched);
+        for token in tokens {
+            if patched.contains(token.as_str()) {
+                continue;
             }
-            let mut out = line.to_owned();
-            for token in &tokens {
-                if out.contains(token) {
-                    continue;
-                }
-                // `flatpak run` is what takes these; a line that does
-                // not launch through it is left alone rather than
-                // guessed at.
-                if let Some(at) = out.find("flatpak run") {
-                    let cut = at + "flatpak run".len();
-                    out.insert_str(cut, &format!(" {token}"));
-                }
-            }
-            out
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-        + if body.ends_with('\n') { "\n" } else { "" }
+            // `flatpak run` is what takes these arguments. A line that
+            // does not launch through it is left alone rather than
+            // guessed at — there is nowhere to put them that would
+            // mean anything.
+            let Some(at) = cut else { break };
+            let addition = format!(" {token}");
+            patched.insert_str(at, &addition);
+            cut = Some(at + addition.len());
+        }
+        out.push_str(&patched);
+        out.push_str(ending);
+    }
+    out
+}
+
+/// Lines with their terminators still attached.
+fn split_keeping_ends(body: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut rest = body;
+    while let Some(at) = rest.find('\n') {
+        let (line, tail) = rest.split_at(at + 1);
+        out.push(line);
+        rest = tail;
+    }
+    if !rest.is_empty() {
+        out.push(rest);
+    }
+    out
+}
+
+fn split_ending(line: &str) -> (&str, &str) {
+    let text = line.trim_end_matches('\n').trim_end_matches('\r');
+    (text, &line[text.len()..])
+}
+
+/// Byte offset just past `flatpak` + whitespace + `run`, allowing the
+/// tabs and doubled spaces a hand-edited launcher can carry.
+fn after_flatpak_run(line: &str) -> Option<usize> {
+    let mut from = 0;
+    while let Some(rel) = line[from..].find("flatpak") {
+        let mut i = from + rel + "flatpak".len();
+        let bytes = line.as_bytes();
+        let gap = i;
+        while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+            i += 1;
+        }
+        if i > gap && line[i..].starts_with("run") {
+            return Some(i + "run".len());
+        }
+        from = from + rel + "flatpak".len();
+    }
+    None
 }
 
 /// Every place a manifest can go, for the browsers oxdm knows about.
@@ -935,6 +1099,44 @@ mod tests {
         }
     }
 
+    fn grants() -> Vec<String> {
+        vec![
+            "--filesystem=/opt/host:ro".to_owned(),
+            "--filesystem=/home/u/.config/oxdm:ro".to_owned(),
+        ]
+    }
+
+    /// Everything `splice_exec` is allowed to do to a file, and the
+    /// long list of things it is not. A launcher entry is the user's
+    /// file: the only acceptable diff is the arguments we added.
+    fn check(before: &str, after: &str) {
+        assert!(
+            only_exec_grants_changed(before, after, &grants()).is_ok(),
+            "the guard rejected our own edit:\n{before}\n--- became ---\n{after}"
+        );
+        // Byte-level invariants the guard does not cover.
+        assert_eq!(
+            before.ends_with('\n'),
+            after.ends_with('\n'),
+            "trailing newline changed"
+        );
+        assert_eq!(
+            before.matches("\r\n").count(),
+            after.matches("\r\n").count(),
+            "CRLF endings changed"
+        );
+        assert_eq!(
+            before.lines().count(),
+            after.lines().count(),
+            "line count changed"
+        );
+        for (o, n) in before.lines().zip(after.lines()) {
+            if !o.starts_with("Exec=") {
+                assert_eq!(o, n, "a non-Exec line was touched");
+            }
+        }
+    }
+
     /// Every `Exec=` line gets the grants, not just the first: a
     /// browser launched from a desktop *action* (a private window,
     /// say) is the same browser and needs the same access.
@@ -946,8 +1148,7 @@ mod tests {
              \n\
              [Desktop Action new-private-window]\n\
              Exec=/usr/bin/flatpak run --branch=stable org.mozilla.firefox --private-window\n";
-        let grants = "--filesystem=/opt/host:ro --filesystem=/home/u/.config/oxdm:ro";
-        let once = splice_exec(desktop, grants);
+        let once = splice_exec(desktop, &grants());
         assert_eq!(once.matches("--filesystem=/opt/host:ro").count(), 2);
         assert_eq!(
             once.matches("--filesystem=/home/u/.config/oxdm:ro").count(),
@@ -957,7 +1158,7 @@ mod tests {
             assert!(line.contains("flatpak run --filesystem="), "{line}");
         }
         // Rerunning adds nothing: each grant is checked on its own.
-        assert_eq!(splice_exec(&once, grants), once);
+        assert_eq!(splice_exec(&once, &grants()), once);
     }
 
     /// A line that does not launch through `flatpak run` is left
@@ -966,7 +1167,333 @@ mod tests {
     #[test]
     fn a_non_flatpak_exec_line_is_not_guessed_at() {
         let desktop = "[Desktop Entry]\nExec=/usr/bin/firefox %U\n";
-        assert_eq!(splice_exec(desktop, "--filesystem=/opt/host:ro"), desktop);
+        assert_eq!(
+            splice_exec(desktop, &["--filesystem=/opt/host:ro".to_owned()]),
+            desktop
+        );
+    }
+
+    /// The real file oxdm would patch on this machine, verbatim: four
+    /// Exec lines, a field-forwarding `@@u %u @@` tail, and several
+    /// hundred localized keys that must come through untouched.
+    #[test]
+    fn a_real_flatpak_launcher_survives_intact() {
+        let body = include_str!("../../tests/fixtures/org.mozilla.firefox.desktop");
+        let out = splice_exec(body, &grants());
+        check(body, &out);
+        assert_eq!(
+            out.matches("--filesystem=/opt/host:ro").count(),
+            4,
+            "one per Exec line"
+        );
+        assert!(out.contains("@@u %u @@"), "field codes are left alone");
+        assert!(
+            out.contains("--command=firefox --file-forwarding org.mozilla.firefox"),
+            "the launch itself is unchanged"
+        );
+        // Localized names are the bulk of the file and must be exact.
+        assert_eq!(body.matches("Name[").count(), out.matches("Name[").count());
+        assert_eq!(splice_exec(&out, &grants()), out, "rerunning is a no-op");
+    }
+
+    #[test]
+    fn a_real_chromium_launcher_survives_intact() {
+        let body = include_str!(
+            "../../tests/fixtures/io.github.ungoogled_software.ungoogled_chromium.desktop"
+        );
+        let out = splice_exec(body, &grants());
+        check(body, &out);
+        assert_eq!(out.matches("--filesystem=/opt/host:ro").count(), 3);
+        assert!(out.contains("--incognito"), "the action's own flag stays");
+    }
+
+    /// A hand-edited launcher can space its arguments however it
+    /// likes. The old shell installer matched `flatpak[[:space:]]+run`
+    /// and this has to as well, or those users get a file that looks
+    /// patched and grants nothing.
+    #[test]
+    fn odd_spacing_around_flatpak_run_is_still_found() {
+        for line in [
+            "Exec=flatpak run org.x",
+            "Exec=flatpak  run org.x",
+            "Exec=flatpak\trun org.x",
+            "Exec=/usr/bin/flatpak   run --branch=stable org.x",
+            "Exec=env GDK_BACKEND=x11 flatpak run org.x",
+        ] {
+            let body = format!("[Desktop Entry]\n{line}\n");
+            let out = splice_exec(&body, &grants());
+            check(&body, &out);
+            assert!(
+                out.contains("run --filesystem=/opt/host:ro"),
+                "not spliced: {line}"
+            );
+        }
+    }
+
+    /// Words that merely contain "flatpak" or "run" are not a launch.
+    #[test]
+    fn lookalikes_are_not_mistaken_for_a_launch() {
+        for line in [
+            "Exec=/usr/bin/firefox %u",
+            "Exec=flatpakrun org.x",
+            "Exec=/opt/flatpak-helper --run org.x",
+            "Exec=myrunner flatpak",
+        ] {
+            let body = format!("[Desktop Entry]\n{line}\n");
+            let out = splice_exec(&body, &grants());
+            assert_eq!(out, body, "touched a line it should not have: {line}");
+        }
+    }
+
+    /// Only lines that *start* with `Exec=` are launches. A comment or
+    /// a value that happens to mention one is prose.
+    #[test]
+    fn only_real_exec_keys_are_patched() {
+        let body = "[Desktop Entry]\n\
+             # Exec=flatpak run org.x is what this used to be\n\
+             Comment=Exec=flatpak run org.x\n\
+             TryExec=/usr/bin/flatpak\n\
+             X-Exec=flatpak run org.x\n\
+             Exec=flatpak run org.x\n";
+        let out = splice_exec(body, &grants());
+        check(body, &out);
+        assert_eq!(out.matches("--filesystem=/opt/host:ro").count(), 1);
+    }
+
+    /// Line endings and the final newline are the user's, not ours.
+    #[test]
+    fn the_shape_of_the_file_is_preserved() {
+        // CRLF throughout.
+        let crlf = "[Desktop Entry]\r\nExec=flatpak run org.x\r\nName=X\r\n";
+        let out = splice_exec(crlf, &grants());
+        check(crlf, &out);
+        assert_eq!(out.matches("\r\n").count(), 3);
+        assert!(!out.contains("\n\n"));
+
+        // No trailing newline.
+        let bare = "[Desktop Entry]\nExec=flatpak run org.x";
+        let out = splice_exec(bare, &grants());
+        check(bare, &out);
+        assert!(!out.ends_with('\n'));
+
+        // Blank lines between sections, and a doubled final newline.
+        let spaced = "[Desktop Entry]\nExec=flatpak run org.x\n\n[Desktop Action a]\nExec=flatpak run org.x\n\n";
+        let out = splice_exec(spaced, &grants());
+        check(spaced, &out);
+        assert!(out.ends_with("\n\n"));
+    }
+
+    /// Half-granted files happen: a user runs the installer, then adds
+    /// a grant by hand, or an old run used a different path. Each
+    /// token is decided on its own.
+    #[test]
+    fn a_partly_granted_line_gains_only_what_it_lacks() {
+        let body = "[Desktop Entry]\nExec=flatpak run --filesystem=/opt/host:ro org.x\n";
+        let out = splice_exec(body, &grants());
+        check(body, &out);
+        assert_eq!(out.matches("--filesystem=/opt/host:ro").count(), 1);
+        assert_eq!(
+            out.matches("--filesystem=/home/u/.config/oxdm:ro").count(),
+            1
+        );
+        assert_eq!(splice_exec(&out, &grants()), out);
+    }
+
+    /// Non-ASCII is everywhere in launcher entries (localized names,
+    /// and home directories with accents in them). Inserting by byte
+    /// offset must not land inside a character.
+    #[test]
+    fn unicode_lines_are_not_cut_in_half() {
+        let body = "[Desktop Entry]\n\
+             Name[ru]=Ողջույն Привет 你好\n\
+             Comment=émoji 🦊 in a comment\n\
+             Exec=flatpak run --command=/app/bin/naïve org.x 🦊\n";
+        let accented = vec!["--filesystem=/home/josé/.config/oxdm:ro".to_owned()];
+        let out = splice_exec(body, &accented);
+        assert!(only_exec_grants_changed(body, &out, &accented).is_ok());
+        assert!(out.contains("Ողջույն Привет 你好"));
+        assert!(out.contains("🦊 in a comment"));
+        assert!(out.contains("run --filesystem=/home/josé/.config/oxdm:ro --command"));
+    }
+
+    /// An empty or header-only file is nothing to patch, not something
+    /// to mangle.
+    #[test]
+    fn files_with_nothing_to_patch_come_back_identical() {
+        for body in ["", "\n", "[Desktop Entry]\n", "not a desktop file at all\n"] {
+            assert_eq!(splice_exec(body, &grants()), body, "{body:?}");
+        }
+    }
+
+    /// The guard is the last thing standing between a bug in the
+    /// splice and a user's launcher. It has to actually catch things.
+    #[test]
+    fn the_guard_rejects_edits_it_should_never_see() {
+        let before = "[Desktop Entry]\nName=X\nExec=flatpak run org.x\n";
+        // A dropped line.
+        assert!(
+            only_exec_grants_changed(
+                before,
+                "[Desktop Entry]\nExec=flatpak run org.x\n",
+                &grants()
+            )
+            .is_err()
+        );
+        // A changed name.
+        assert!(
+            only_exec_grants_changed(
+                before,
+                "[Desktop Entry]\nName=Y\nExec=flatpak run org.x\n",
+                &grants()
+            )
+            .is_err()
+        );
+        // An Exec line that lost its own arguments.
+        assert!(
+            only_exec_grants_changed(
+                before,
+                "[Desktop Entry]\nName=X\nExec=flatpak run --filesystem=/opt/host:ro\n",
+                &grants()
+            )
+            .is_err()
+        );
+        // The edit we do make.
+        let ours = splice_exec(before, &grants());
+        assert!(only_exec_grants_changed(before, &ours, &grants()).is_ok());
+    }
+
+    /// Writing must not follow a symlink: the user's entry may point
+    /// at a system file, and editing that is not what "patch my
+    /// launcher" asked for.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_launcher_is_refused_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("system.desktop");
+        std::fs::write(&target, "[Desktop Entry]\nExec=flatpak run org.x\n").unwrap();
+        let link = dir.path().join("org.x.desktop");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let err = write_desktop(&link, "patched").unwrap_err();
+        assert!(err.contains("symlink"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "[Desktop Entry]\nExec=flatpak run org.x\n",
+            "the target was written through"
+        );
+    }
+
+    /// What was there first is kept, once. A second patch does not
+    /// overwrite the backup with our own earlier output.
+    #[test]
+    fn the_first_version_is_kept_and_not_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("org.x.desktop");
+        std::fs::write(&dest, "original\n").unwrap();
+
+        write_desktop(&dest, "first patch\n").unwrap();
+        let backup = dest.with_extension("desktop.oxdm.bak");
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), "original\n");
+
+        write_desktop(&dest, "second patch\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&backup).unwrap(),
+            "original\n",
+            "the backup still holds what the user had"
+        );
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "second patch\n");
+        // Nothing left behind.
+        assert!(!dest.with_extension("desktop.oxdm.tmp").exists());
+    }
+
+    /// A home directory with a space in it is ordinary. Spliced raw,
+    /// `--filesystem=/home/my apps/host:ro` is two arguments and the
+    /// browser launches with a mount nobody asked for.
+    #[test]
+    fn a_path_with_a_space_is_quoted_for_the_launcher() {
+        let spaced = ["--filesystem=/home/my apps/oxdm:ro".to_owned()];
+        let quoted: Vec<String> = spaced.iter().map(|a| desktop_quote(a)).collect();
+        assert_eq!(quoted[0], "\"--filesystem=/home/my apps/oxdm:ro\"");
+
+        let body = "[Desktop Entry]\nExec=flatpak run org.x\n";
+        let out = splice_exec(body, &quoted);
+        assert!(only_exec_grants_changed(body, &out, &quoted).is_ok());
+        assert!(
+            out.contains("run \"--filesystem=/home/my apps/oxdm:ro\" org.x"),
+            "{out}"
+        );
+        assert_eq!(
+            splice_exec(&out, &quoted),
+            out,
+            "still idempotent when quoted"
+        );
+    }
+
+    /// The same path in the copy-paste command needs shell quoting,
+    /// which is a different set of rules from the launcher's.
+    #[test]
+    fn the_override_command_survives_a_path_with_a_space() {
+        let args = vec![
+            "--filesystem=/home/my apps/oxdm-native-host:ro".to_owned(),
+            "--filesystem=/home/u/.config/oxdm:ro".to_owned(),
+        ];
+        let cmd = shell_grants(&args);
+        assert_eq!(
+            cmd,
+            "'--filesystem=/home/my apps/oxdm-native-host:ro' '--filesystem=/home/u/.config/oxdm:ro'"
+        );
+    }
+
+    /// Desktop-entry quoting escapes what the spec says it must, and
+    /// leaves an ordinary path alone rather than wrapping everything.
+    #[test]
+    fn only_arguments_that_need_quoting_get_it() {
+        assert_eq!(
+            desktop_quote("--filesystem=/opt/host:ro"),
+            "--filesystem=/opt/host:ro"
+        );
+        assert_eq!(desktop_quote("a b"), "\"a b\"");
+        assert_eq!(desktop_quote("a$b"), "\"a\\$b\"");
+        assert_eq!(desktop_quote("a`b"), "\"a\\`b\"");
+        assert_eq!(desktop_quote(r"a\b"), "\"a\\\\b\"");
+        assert_eq!(desktop_quote("a\"b"), "\"a\\\"b\"");
+    }
+
+    /// The file cannot be written: report it, change nothing. A
+    /// launcher the user cannot start is worse than one without our
+    /// grants in it.
+    #[cfg(unix)]
+    #[test]
+    fn an_unwritable_launcher_is_left_as_it_was() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("org.x.desktop");
+        std::fs::write(&dest, "original\n").unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        let err = write_desktop(&dest, "patched\n").unwrap_err();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(err.contains("org.x.desktop"), "{err}");
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "original\n");
+    }
+
+    /// The `.desktop` we write is one a launcher will read; it starts
+    /// world-readable like every other, and a rename leaves nothing
+    /// half-written behind.
+    #[cfg(unix)]
+    #[test]
+    fn a_new_launcher_lands_readable_and_whole() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("sub").join("org.x.desktop");
+        write_desktop(&dest, "[Desktop Entry]\n").unwrap();
+        let mode = std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644, "{mode:o}");
+        assert!(!dest.with_extension("desktop.oxdm.tmp").exists());
+        assert!(
+            !dest.with_extension("desktop.oxdm.bak").exists(),
+            "nothing was replaced, so nothing was backed up"
+        );
     }
 
     #[test]
