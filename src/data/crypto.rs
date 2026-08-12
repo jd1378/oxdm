@@ -146,7 +146,7 @@ impl MasterKey {
         rand::rngs::SysRng
             .try_fill_bytes(&mut nonce_bytes)
             .map_err(|e| CryptoError::KeyMaterial(e.to_string()))?;
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce = &Nonce::from(nonce_bytes);
         let aad = aad(id, field);
         let ct = self
             .0
@@ -189,7 +189,11 @@ impl MasterKey {
                 raw[0]
             )));
         }
-        let nonce = Nonce::from_slice(&raw[1..1 + NONCE_LEN]);
+        // Length is guaranteed by the check above, so the slice is
+        // exactly a nonce; `from_slice` said the same thing and is
+        // deprecated in aes-gcm 0.11.
+        let nonce = &Nonce::try_from(&raw[1..1 + NONCE_LEN])
+            .map_err(|_| CryptoError::Format("bad nonce".into()))?;
         let ct = &raw[1 + NONCE_LEN..];
         let aad = aad(id, field);
         let pt = self
@@ -217,6 +221,26 @@ mod tests {
 
     fn test_key() -> MasterKey {
         MasterKey::from_bytes(&[0x42u8; KEY_LEN]).unwrap()
+    }
+
+    /// A blob written by an older build must still open.
+    ///
+    /// Produced by aes-gcm 0.10 under the same key, id and field, and
+    /// pinned here because the wire format is user data: every stored
+    /// password and cookie jar in every existing install is one of
+    /// these. An upgrade that changes how the nonce, tag or AAD are
+    /// laid out would lock people out of their own secrets, and the
+    /// round-trip test alone would not notice — it re-encrypts before
+    /// it decrypts.
+    #[test]
+    fn a_blob_from_the_previous_library_still_decrypts() {
+        const FIXTURE: &str = "AU43j7h4ke6aL4cUhm0priRtxgOy6daw8yJEGQeilSY71UduxiURvA==";
+        let key = test_key();
+        let id = JobId(uuid::Uuid::from_u128(
+            0x0123_4567_89ab_cdef_0123_4567_89ab_cdef,
+        ));
+        let out = key.decrypt(id, Field::Cookies, FIXTURE).unwrap();
+        assert_eq!(out.as_deref(), Some("session=abc"));
     }
 
     #[test]
