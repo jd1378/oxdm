@@ -4,7 +4,7 @@ members = ["testserver"]
 [package]
 name = "oxdm"
 description = "a download manager using odl"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2024"
 repository = "https://github.com/jd1378/oxdm"
 homepage = "https://github.com/jd1378/oxdm"
@@ -12,7 +12,7 @@ license = "AGPL-3.0"
 authors = ["jd1378 <javad.mnjd@hotmail.com>"]
 
 [dependencies]
-odl = { version = "2.2.0", default-features = false }
+odl = { version = "2.3.1", default-features = false }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "io-util", "net", "time", "fs", "process", "io-std", "signal"] }
 tokio-util = "0.7"
 futures = "0.3"
@@ -89,6 +89,17 @@ keyring = { version = "3", features = ["windows-native"] }
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
+
+# What ships. `lto`/`codegen-units` are worth the longer link on a
+# binary this size, and `strip` takes ~25% off what the user
+# downloads — a self-update fetches the whole executable every time,
+# so the size is not only an install-time cost. `panic` stays at
+# unwind: the daemon catches panics in download tasks so one bad run
+# cannot take the process (and every other download) with it.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
 
 # Keep our crate unoptimised (fast incremental + debugger), but build
 # dependencies at -O3 so iced/tiny-skia rasterisation isn't the
