@@ -4854,7 +4854,7 @@ async fn dialog_open_for(state: &Arc<AppState>, id: JobId) -> bool {
 
 /// Cryptographically-random URL-safe token. 256 bits, base64url.
 fn generate_token() -> String {
-    use rand::RngCore;
+    use rand::Rng;
     let mut buf = [0u8; 32];
     rand::rng().fill_bytes(&mut buf);
     use base64::Engine;

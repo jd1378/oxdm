@@ -34,8 +34,8 @@ arboard = "3"
 tokio-tungstenite = "0.24"
 dark-light = "2"
 notify-rust = "4"
-rand = "0.9"
-base64 = "0.22"
+rand = "0.10"
+base64 = "0.23"
 aes-gcm = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["http2", "gzip", "brotli", "native-tls", "stream", "json"] }
 semver = "1"
@@ -44,11 +44,11 @@ sha1 = "0.10"
 md-5 = "0.10"
 trash = "5"
 libc = "0.2"
-fs4 = "0.13"
+fs4 = "1.1"
 interprocess = { version = "2", features = ["tokio"] }
 single-instance = "0.3"
 image = { version = "0.25", default-features = false, features = ["png"] }
-rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 # `crisp` (an iced default we lost by opting out of default-features)
 # makes every quad snap to the pixel grid, so 1px borders and hairlines
 # stay 1px instead of being anti-aliased into a soft 2px band. Honoured
@@ -71,8 +71,8 @@ zbus = { version = "5", default-features = false, features = ["tokio"] }
 keyring = { version = "3", features = ["apple-native"] }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
-tray-icon = "0.19"
-muda = "0.15"
+tray-icon = "0.24"
+muda = "0.19"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = [

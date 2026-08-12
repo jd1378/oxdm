@@ -98,7 +98,7 @@ impl Queue {
 
 /// Pick a vivid, saturated sRGB triple suitable for queue accents.
 pub fn random_vivid_color() -> [u8; 3] {
-    use rand::Rng;
+    use rand::RngExt;
     let mut rng = rand::rng();
     let hue: f32 = rng.random_range(0.0..360.0);
     let sat: f32 = rng.random_range(0.65..0.85);

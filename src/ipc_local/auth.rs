@@ -134,7 +134,7 @@ pub fn install_token() -> io::Result<String> {
 }
 
 fn install_token_at(path: &std::path::Path) -> io::Result<String> {
-    use rand::RngCore;
+    use rand::Rng;
     let mut raw = [0u8; 32];
     rand::rng().fill_bytes(&mut raw);
     let token = raw.iter().map(|b| format!("{b:02x}")).collect::<String>();

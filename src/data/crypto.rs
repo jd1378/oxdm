@@ -27,7 +27,7 @@ use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use rand::TryRngCore;
+use rand::TryRng;
 
 use crate::domain::JobId;
 
@@ -112,7 +112,7 @@ impl MasterKey {
     /// return the in-memory cipher.
     pub fn generate() -> Result<Self, CryptoError> {
         let mut bytes = [0u8; KEY_LEN];
-        rand::rngs::OsRng
+        rand::rngs::SysRng
             .try_fill_bytes(&mut bytes)
             .map_err(|e| CryptoError::KeyMaterial(e.to_string()))?;
         let b64 = STANDARD.encode(bytes);
@@ -143,7 +143,7 @@ impl MasterKey {
     /// job. Returns the base64 blob to drop into the DB column.
     pub fn encrypt(&self, id: JobId, field: Field, plaintext: &str) -> Result<String, CryptoError> {
         let mut nonce_bytes = [0u8; NONCE_LEN];
-        rand::rngs::OsRng
+        rand::rngs::SysRng
             .try_fill_bytes(&mut nonce_bytes)
             .map_err(|e| CryptoError::KeyMaterial(e.to_string()))?;
         let nonce = Nonce::from_slice(&nonce_bytes);

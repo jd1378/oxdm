@@ -18,6 +18,41 @@ use super::{label_for, quit_daemon, spawn_download_gui, spawn_main_gui, spawn_se
 use crate::data::AppState;
 use crate::domain::{Job, JobId, Phase};
 
+/// What the menu would say, if it were rebuilt right now.
+///
+/// Compared against the last one applied so a rebuild only happens when
+/// the result would differ. The watcher wakes on every domain event —
+/// which during a download means several a second — and each rebuild
+/// drops the live `Menu` and attaches a new one. That is the path muda
+/// 0.18 fixed a Windows subclass leak in and 0.19.3 a dangling-pointer
+/// crash in; doing it only when the text actually changes is both
+/// cheaper and less exposed.
+#[derive(PartialEq, Eq, Default)]
+struct MenuShape {
+    entries: Vec<(JobId, String)>,
+    exiting: bool,
+}
+
+impl MenuShape {
+    fn of(jobs: &[Job], exiting: bool) -> Self {
+        Self {
+            entries: jobs
+                .iter()
+                .filter(|j| j.status.phase.is_running() || j.status.phase == Phase::Paused)
+                .map(|j| (j.id, label_for(j)))
+                .collect(),
+            exiting,
+        }
+    }
+}
+
+/// Which of the two tray icons is showing, and in which theme.
+#[derive(PartialEq, Eq, Clone, Copy)]
+struct IconState {
+    downloading: bool,
+    theme: crate::gui::theme::ResolvedTheme,
+}
+
 #[derive(Default, Clone)]
 struct ActionIds {
     open: Option<MenuId>,
@@ -85,15 +120,13 @@ fn run_owner(rt: Handle, state: Arc<AppState>, jobs_rx: mpsc::Receiver<Vec<Job>>
     let mut dyn_map: HashMap<MenuId, JobId> = HashMap::new();
 
     let mut last_jobs: Vec<Job> = Vec::new();
-    let mut last_theme = crate::gui::theme::system_theme();
-    rebuild_now(
-        &tray,
-        &mut actions,
-        &mut dyn_map,
-        &last_jobs,
-        last_theme,
-        state.is_exiting(),
-    );
+    let mut shape = MenuShape::of(&last_jobs, state.is_exiting());
+    rebuild_menu(&tray, &mut actions, &mut dyn_map, &shape);
+    let mut icon_state = IconState {
+        downloading: false,
+        theme: crate::gui::theme::system_theme(),
+    };
+    apply_icon(&tray, icon_state);
 
     let menu_chan = muda::MenuEvent::receiver();
     let tray_chan = TrayIconEvent::receiver();
@@ -109,26 +142,25 @@ fn run_owner(rt: Handle, state: Arc<AppState>, jobs_rx: mpsc::Receiver<Vec<Job>>
         }
         if let Some(jobs) = latest {
             last_jobs = jobs;
-            rebuild_now(
-                &tray,
-                &mut actions,
-                &mut dyn_map,
-                &last_jobs,
-                last_theme,
-                state.is_exiting(),
-            );
         }
-        let cur_theme = crate::gui::theme::system_theme();
-        if cur_theme != last_theme {
-            last_theme = cur_theme;
-            rebuild_now(
-                &tray,
-                &mut actions,
-                &mut dyn_map,
-                &last_jobs,
-                last_theme,
-                state.is_exiting(),
-            );
+        // Both are gated on their own state: a job that ticked forward
+        // by a few kilobytes changes neither the menu text nor which
+        // icon is showing, and re-applying either would be churn the
+        // shell has to redraw.
+        let next_shape = MenuShape::of(&last_jobs, state.is_exiting());
+        if next_shape != shape {
+            shape = next_shape;
+            rebuild_menu(&tray, &mut actions, &mut dyn_map, &shape);
+        }
+        let next_icon = IconState {
+            downloading: last_jobs
+                .iter()
+                .any(|j| j.status.phase == Phase::Downloading),
+            theme: crate::gui::theme::system_theme(),
+        };
+        if next_icon != icon_state {
+            icon_state = next_icon;
+            apply_icon(&tray, icon_state);
         }
 
         while let Ok(ev) = menu_chan.try_recv() {
@@ -191,14 +223,13 @@ fn pump_win32_messages() {
     }
 }
 
-fn rebuild_now(
+fn rebuild_menu(
     tray: &TrayIcon,
     actions: &mut ActionIds,
     dyn_map: &mut HashMap<MenuId, JobId>,
-    jobs: &[Job],
-    theme: crate::gui::theme::ResolvedTheme,
-    exiting: bool,
+    shape: &MenuShape,
 ) {
+    let exiting = shape.exiting;
     let menu = Menu::new();
     let open = MenuItem::new("Open", true, None);
     let settings = MenuItem::new("Settings", true, None);
@@ -221,34 +252,33 @@ fn rebuild_now(
     };
     let _ = menu.append_items(&[&open, &settings, &pause_all, &resume_all]);
 
-    let active: Vec<&Job> = jobs
-        .iter()
-        .filter(|j| j.status.phase.is_running() || j.status.phase == Phase::Paused)
-        .collect();
-    if !active.is_empty() {
+    if !shape.entries.is_empty() {
         let _ = menu.append_items(&[&PredefinedMenuItem::separator()]);
     }
     let mut new_map: HashMap<MenuId, JobId> = HashMap::new();
-    let dyn_items: Vec<MenuItem> = active
+    let dyn_items: Vec<MenuItem> = shape
+        .entries
         .iter()
-        .map(|j| MenuItem::new(label_for(j), true, None))
+        .map(|(_, label)| MenuItem::new(label, true, None))
         .collect();
-    for (item, job) in dyn_items.iter().zip(active.iter()) {
-        new_map.insert(item.id().clone(), job.id);
+    for (item, (id, _)) in dyn_items.iter().zip(shape.entries.iter()) {
+        new_map.insert(item.id().clone(), *id);
         let _ = menu.append_items(&[item]);
     }
     let _ = menu.append_items(&[&PredefinedMenuItem::separator(), &quit]);
 
     let _ = tray.set_menu(Some(Box::new(menu)));
-    let any_downloading = jobs.iter().any(|j| j.status.phase == Phase::Downloading);
-    let icon = if any_downloading {
-        crate::gui::app_icon::tray_icon_downloading(theme)
+    *actions = new_actions;
+    *dyn_map = new_map;
+}
+
+fn apply_icon(tray: &TrayIcon, state: IconState) {
+    let icon = if state.downloading {
+        crate::gui::app_icon::tray_icon_downloading(state.theme)
     } else {
-        crate::gui::app_icon::tray_icon_normal(theme)
+        crate::gui::app_icon::tray_icon_normal(state.theme)
     };
     if let Some(i) = icon {
         let _ = tray.set_icon(Some(i));
     }
-    *actions = new_actions;
-    *dyn_map = new_map;
 }
