@@ -268,6 +268,7 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                     for (req, probed) in reqs {
                         let add = AddJobReq {
                             url: req.url.clone(),
+                            queue,
                             save_dir: save_dir.clone(),
                             filename: req
                                 .filename
@@ -286,9 +287,6 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                             checksums: probed.map(|p| p.checksums.clone()).unwrap_or_default(),
                         };
                         let id = client.add_job(add).await?;
-                        if let Some(q) = queue {
-                            client.set_job_queue(id, q).await?;
-                        }
                         if start_now {
                             // Bulk: the triage list can start dozens at
                             // once, so failures belong in the list, not

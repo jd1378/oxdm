@@ -336,6 +336,11 @@ pub struct JobEdit {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddJobReq {
     pub url: Url,
+    /// Which queue the job belongs to. `None` is Main. Part of the add
+    /// rather than a move afterwards, so the job is never briefly in a
+    /// queue it was not meant for.
+    #[serde(default)]
+    pub queue: Option<QueueId>,
     pub save_dir: PathBuf,
     pub filename: Option<String>,
     pub referrer: Option<Url>,

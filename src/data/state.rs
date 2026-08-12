@@ -900,6 +900,8 @@ impl AppState {
             id,
             phase: old.phase(),
         });
+        // Arriving by being moved is still arriving.
+        self.queue_took_a_job(queue_id).await;
         Ok(())
     }
 
@@ -1307,6 +1309,7 @@ impl AppState {
                 None,
                 None,
                 None,
+                None,
                 // Not a probe result, but the same shape and the same
                 // purpose: the digest the feed published, attached so
                 // the download manager checks the artifact the way it
@@ -1329,6 +1332,66 @@ impl AppState {
         self.mark_run_intent(id, true).await;
         self.start_job(id).await?;
         Ok(id)
+    }
+
+    /// A job has just landed in `queue_id`.
+    ///
+    /// Two things can follow, and only one of them is new. A queue that
+    /// is already running takes the job like any other: it goes to the
+    /// back, and if the caps leave a slot free it starts now rather
+    /// than when something else finishes. A queue that is *not* running
+    /// starts here if its schedule says to — the `JobAdded` condition,
+    /// which is true at this instant and at no other, gated by whatever
+    /// else the user combined it with.
+    async fn queue_took_a_job(self: &Arc<Self>, queue_id: QueueId) {
+        if self.is_exiting() {
+            return;
+        }
+        if self.active_queues.read().await.contains_key(&queue_id) {
+            self.fill_queue_slots(queue_id, None).await;
+            return;
+        }
+        let Some(queue) = self.queue(queue_id).await else {
+            return;
+        };
+        let crate::domain::QueueSchedule::Condition(set) = &queue.schedule else {
+            return;
+        };
+        if !set.on_job_added {
+            return;
+        }
+        let available = crate::data::conditions::available_conditions(self.cond_support());
+        // The other conditions are the gate, evaluated now rather than
+        // read off the scheduler's last tick: "when a job is added, if
+        // on AC" has to mean the power state at the moment the job
+        // arrived.
+        let needed: std::collections::HashSet<crate::domain::CondKind> = set
+            .enabled()
+            .into_iter()
+            .filter(|k| available.contains(k))
+            .collect();
+        let idle = self.idle.get().and_then(|w| w.current());
+        let conds = crate::data::conditions::probe(&needed, idle).await;
+        let cmd_ok = match &set.command {
+            Some(cc) => crate::data::conditions::check_command(&cc.cmd).await,
+            None => false,
+        };
+        let holds = set.holds(&available, |kind| match kind {
+            crate::domain::CondKind::JobAdded => true,
+            crate::domain::CondKind::Unmetered => conds.unmetered(),
+            crate::domain::CondKind::AcPower => conds.on_ac(),
+            crate::domain::CondKind::Idle => {
+                conds.idle_at_least(set.idle_minutes.unwrap_or(u16::MAX))
+            }
+            crate::domain::CondKind::Command => cmd_ok,
+        });
+        if !holds {
+            return;
+        }
+        tracing::info!(queue = %queue.name, "starting the queue: a job was added to it");
+        if let Err(e) = self.start_queue(queue_id).await {
+            tracing::warn!(queue = %queue.name, error = %e, "could not start the queue");
+        }
     }
 
     /// The update download in flight, if there is one.
@@ -2715,6 +2778,12 @@ impl AppState {
         proxy_password: Option<String>,
         cookies: Option<String>,
         category: Option<Category>,
+        // Where the job belongs. `None` is the Main queue. Decided here
+        // rather than by a move afterwards: a job that lands in Main
+        // and is relocated a moment later is briefly startable in the
+        // wrong queue, and a queue watching for arrivals would see one
+        // that was never meant for it.
+        queue: Option<QueueId>,
         // What the caller's probe found. Recorded now so the job knows
         // its size and its expected digests while it is still queued,
         // instead of the first run teaching the UI things the Add
@@ -2722,6 +2791,12 @@ impl AppState {
         probe: ProbeFacts,
     ) -> Result<JobId, JobError> {
         let id = JobId::new();
+        // An id for a queue deleted since the caller read the list
+        // would orphan the job; Main is where anything homeless lives.
+        let queue_id = match queue {
+            Some(q) if self.queues.read().await.contains_key(&q) => q,
+            _ => self.main_queue_id,
+        };
         // Nobody downstream re-checks this: `save_dir.join(filename)` is
         // where the bytes land and what "delete file" removes. Most
         // names here were written by the server (`Content-Disposition`,
@@ -2773,7 +2848,7 @@ impl AppState {
             enc_proxy_password,
             enc_cookies,
             speed_limit_override: None,
-            queue_id: self.main_queue_id,
+            queue_id,
             // Recorded when the first run actually creates the folder,
             // not now: a job that never runs should not pin a cache
             // folder the user is still free to change.
@@ -2819,6 +2894,7 @@ impl AppState {
         jobs.insert(id, Arc::new(JobEntry::with_completion(job, completion)));
         drop(jobs);
         let _ = self.events.send(DomainEvent::JobAdded { id });
+        self.queue_took_a_job(queue_id).await;
         if probe_worth_it {
             self.probe_in_background(id, url);
         }
@@ -3151,19 +3227,16 @@ impl AppState {
                 None,
                 cookies,
                 Some(category),
+                // The category's queue, chosen before the job exists
+                // rather than by moving it afterwards. A stale id (the
+                // queue was deleted since the mapping was saved) falls
+                // back to Main inside `add_job`.
+                settings.category_queues.get(&category).copied(),
                 // A capture carries no probe of its own; the run
                 // reports the size.
                 ProbeFacts::default(),
             )
             .await?;
-        if let Some(qid) = settings.category_queues.get(&category).copied()
-            && qid != self.main_queue_id
-            && let Err(e) = self.set_job_queue(id, qid).await
-        {
-            // Stale id (queue deleted since the mapping was saved) —
-            // the job stays in Main rather than failing the capture.
-            tracing::warn!(job = %id, queue = %qid, error = %e, "category default queue not applied");
-        }
         Ok(id)
     }
 
@@ -3479,17 +3552,27 @@ impl AppState {
         // means.
         let manual = entry.manual_run.load(Ordering::Acquire);
         let _admission = self.admission.lock().await;
-        if !manual && self.slots_full_for(entry.job.queue_id).await {
-            entry.deferred_by_cap.store(true, Ordering::Release);
-            if entry.phase() != Phase::Queued {
-                entry.set_phase(Phase::Queued);
-                let _ = self.events.send(DomainEvent::JobUpdated {
-                    id,
-                    phase: Phase::Queued,
-                });
+        match admit(
+            entry.running.load(Ordering::Acquire),
+            manual,
+            self.slots_full_for(entry.job.queue_id).await,
+        ) {
+            Admission::AlreadyRunning => return Ok(()),
+            Admission::Defer => {
+                entry.deferred_by_cap.store(true, Ordering::Release);
+                if entry.phase() != Phase::Queued {
+                    entry.set_phase(Phase::Queued);
+                    let _ = self.events.send(DomainEvent::JobUpdated {
+                        id,
+                        phase: Phase::Queued,
+                    });
+                }
+                return Err(JobError::Deferred);
             }
-            return Err(JobError::Deferred);
+            Admission::Start => {}
         }
+        // The claim itself, under the same lock the decision was made
+        // with: two starts landing together must not both take it.
         if entry.running.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
@@ -4937,6 +5020,36 @@ fn validate_work_dir(dir: &std::path::Path) -> Result<(), String> {
 /// Counted by phase rather than by the `running` flag: the phase is
 /// what every other surface calls "running", and the flag lags it at
 /// both ends of a run.
+/// What a start request should do with a job in the state it is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Admission {
+    /// Its run is already under way; the request is a no-op.
+    AlreadyRunning,
+    /// The caps are full and nobody pressed play; back to the queue.
+    Defer,
+    Start,
+}
+
+/// Decide in one place, because the order of these three questions is
+/// the whole of it. Asking about the caps before asking whether the job
+/// is already running told a running download it was over its queue's
+/// limit — it is, it is one of the runs filling that limit — and put
+/// its *phase* back to Queued while its bytes kept arriving, so the
+/// list read "Queued · 14%" and the queue believed it had a slot free
+/// that it did not.
+fn admit(running: bool, manual: bool, slots_full: bool) -> Admission {
+    if running {
+        return Admission::AlreadyRunning;
+    }
+    // A start the user aimed at this one download runs regardless:
+    // being told "no" by a number they set for background work is not
+    // what pressing play means.
+    if !manual && slots_full {
+        return Admission::Defer;
+    }
+    Admission::Start
+}
+
 fn slots_full(
     jobs: &IndexMap<JobId, Arc<JobEntry>>,
     global: usize,
@@ -5700,6 +5813,25 @@ mod tests {
         // A cap of zero would mean nothing may ever run.
         assert!(slots_full(&jobs, 0, queue, None));
         assert!(!slots_full(&IndexMap::new(), 1, queue, None));
+    }
+
+    /// A job that is already downloading is not a candidate for
+    /// admission, whatever the caps say. Asked the other way round, a
+    /// redundant start — the queue filling a slot for a job a moment
+    /// after something else started it — sent a running download's
+    /// phase back to Queued while it carried on transferring.
+    #[test]
+    fn a_running_job_is_never_deferred_by_the_caps() {
+        assert_eq!(admit(true, false, true), Admission::AlreadyRunning);
+        assert_eq!(admit(true, false, false), Admission::AlreadyRunning);
+        assert_eq!(admit(true, true, true), Admission::AlreadyRunning);
+    }
+
+    #[test]
+    fn the_caps_only_hold_back_automatic_starts() {
+        assert_eq!(admit(false, false, true), Admission::Defer);
+        assert_eq!(admit(false, true, true), Admission::Start, "pressing play");
+        assert_eq!(admit(false, false, false), Admission::Start);
     }
 
     /// The global limit is shared: a queue allowing ten still runs one

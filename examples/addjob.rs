@@ -57,6 +57,7 @@ async fn main() {
         .expect("no daemon");
     let id = client
         .add_job(oxdm::ipc_local::protocol::AddJobReq {
+            queue: None,
             url: url.parse().expect("url"),
             save_dir: dir.into(),
             // The point of the exercise: no name, no size, no digests.

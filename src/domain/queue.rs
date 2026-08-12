@@ -169,6 +169,17 @@ pub struct CondSet {
     /// `Some` = enabled: poll a shell command, run while it exits 0.
     #[serde(default)]
     pub command: Option<CondCommand>,
+    /// Start the queue when a job is added to it.
+    ///
+    /// A trigger rather than a state: it is true at the instant a job
+    /// lands in the queue and false at every other moment, which is
+    /// what makes it compose with the rest. Combined with `All` it
+    /// gates the trigger — "when a job is added, if on AC" — and the
+    /// scheduler's own tick can never start the queue on it, because
+    /// on a tick nothing was just added. A queue started this way runs
+    /// until it is out of work, like one started by hand.
+    #[serde(default)]
+    pub on_job_added: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -197,6 +208,8 @@ pub enum CondCombine {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CondKind {
+    /// A job was just added to the queue. See `CondSet::on_job_added`.
+    JobAdded,
     Unmetered,
     Idle,
     AcPower,
@@ -226,6 +239,8 @@ impl CondKind {
     ///   queue — two more dependencies for one boolean.
     /// - **Command** — anywhere there is a shell, which now includes
     ///   Windows via `cmd /C`.
+    /// - **Job added** — everywhere. It is oxdm's own event, so there
+    ///   is nothing for a platform to be unable to answer.
     ///
     /// A saved condition from another platform still deserializes; its
     /// unsupported kinds simply do not participate.
@@ -233,6 +248,7 @@ impl CondKind {
         #[cfg(target_os = "linux")]
         {
             &[
+                CondKind::JobAdded,
                 CondKind::Unmetered,
                 CondKind::Idle,
                 CondKind::AcPower,
@@ -242,6 +258,7 @@ impl CondKind {
         #[cfg(target_os = "windows")]
         {
             &[
+                CondKind::JobAdded,
                 CondKind::Unmetered,
                 CondKind::Idle,
                 CondKind::AcPower,
@@ -250,15 +267,15 @@ impl CondKind {
         }
         #[cfg(target_os = "macos")]
         {
-            &[CondKind::Idle, CondKind::Command]
+            &[CondKind::JobAdded, CondKind::Idle, CondKind::Command]
         }
         #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
         {
-            &[CondKind::Command]
+            &[CondKind::JobAdded, CondKind::Command]
         }
         #[cfg(not(any(unix, target_os = "windows")))]
         {
-            &[]
+            &[CondKind::JobAdded]
         }
     };
 }
@@ -267,6 +284,9 @@ impl CondSet {
     /// Enabled conditions, in the builder's display order.
     pub fn enabled(&self) -> Vec<CondKind> {
         let mut v = Vec::new();
+        if self.on_job_added {
+            v.push(CondKind::JobAdded);
+        }
         if self.unmetered {
             v.push(CondKind::Unmetered);
         }

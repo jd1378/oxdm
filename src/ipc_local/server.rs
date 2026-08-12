@@ -629,6 +629,7 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
             proxy_password,
             cookies,
             category,
+            queue,
             size,
             checksums,
         }) => match state
@@ -645,6 +646,7 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
                 proxy_password,
                 cookies,
                 category,
+                queue,
                 crate::data::state::ProbeFacts { size, checksums },
             )
             .await

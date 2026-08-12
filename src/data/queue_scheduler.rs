@@ -193,6 +193,12 @@ fn should_run(
             }
         }
         QueueSchedule::Condition(set) => set.holds(available, |kind| match kind {
+            // Never on a tick: nothing was added a moment ago, or this
+            // would not be a tick. The queue starts from the event
+            // itself — see `AppState::start_queue_on_job_added` — and
+            // with `All` this is what stops the tick from starting a
+            // queue whose trigger has not fired.
+            CondKind::JobAdded => false,
             CondKind::Unmetered => conds.unmetered(),
             CondKind::AcPower => conds.on_ac(),
             CondKind::Idle => conds.idle_at_least(set.idle_minutes.unwrap_or(u16::MAX)),
@@ -217,6 +223,7 @@ mod tests {
     }
 
     const ALL: &[CondKind] = &[
+        CondKind::JobAdded,
         CondKind::Unmetered,
         CondKind::Idle,
         CondKind::AcPower,
@@ -369,6 +376,42 @@ mod tests {
         }));
         assert!(should_run(&q, now, ALL, &snap(true, true, 900), None));
         assert!(!should_run(&q, now, ALL, &snap(true, true, 0), None));
+    }
+
+    /// The trigger is an instant, and a tick is never that instant.
+    /// With `All` it holds the whole set back until the event fires;
+    /// with `Any` it simply contributes nothing, leaving the other
+    /// conditions to decide.
+    #[test]
+    fn a_job_added_trigger_never_starts_a_queue_on_a_tick() {
+        let now = Local::now();
+        let idle_now = snap(true, true, 9999);
+
+        let alone = queue_with(QueueSchedule::Condition(CondSet {
+            on_job_added: true,
+            ..CondSet::default()
+        }));
+        assert!(!should_run(&alone, now, ALL, &idle_now, None));
+
+        // `All`: the queue waits for the event even though the other
+        // half of the pair is true right now.
+        let gated = queue_with(QueueSchedule::Condition(CondSet {
+            on_job_added: true,
+            idle_minutes: Some(10),
+            combine: CondCombine::All,
+            ..CondSet::default()
+        }));
+        assert!(!should_run(&gated, now, ALL, &idle_now, None));
+
+        // `Any`: idle still starts it, as it would without the trigger.
+        let either = queue_with(QueueSchedule::Condition(CondSet {
+            on_job_added: true,
+            idle_minutes: Some(10),
+            combine: CondCombine::Any,
+            ..CondSet::default()
+        }));
+        assert!(should_run(&either, now, ALL, &idle_now, None));
+        assert!(!should_run(&either, now, ALL, &snap(true, true, 0), None));
     }
 
     #[test]

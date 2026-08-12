@@ -37,13 +37,16 @@ use crate::domain::CondKind;
 ///   answers.
 /// - `Idle` needs a session manager that reports it.
 ///
-/// `Command` is always available where a shell is: it answers by
-/// definition, since the user wrote it.
+/// `Command` and `JobAdded` are always available: one answers by
+/// definition because the user wrote it, and the other is oxdm's own
+/// event.
 pub fn available_conditions(support: CondSupport) -> Vec<CondKind> {
     CondKind::SUPPORTED
         .iter()
         .copied()
         .filter(|k| match k {
+            // Not a probe of anything: oxdm raises it itself.
+            CondKind::JobAdded => true,
             CondKind::Unmetered => support.unmetered,
             CondKind::AcPower => support.ac_power,
             CondKind::Idle => support.idle,
@@ -485,6 +488,10 @@ mod tests {
         assert!(!none.contains(&CondKind::Unmetered));
         assert!(!none.contains(&CondKind::AcPower));
         assert!(!none.contains(&CondKind::Idle));
+        // Never dropped, whatever the host can probe. A combination
+        // that lost it would fall back to starting on the conditions
+        // it was meant to gate — `holds` ignores what is unavailable.
+        assert!(none.contains(&CondKind::JobAdded));
 
         let all = available_conditions(CondSupport {
             unmetered: true,

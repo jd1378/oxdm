@@ -152,7 +152,13 @@ fn parse_once_time(s: &str) -> Option<chrono::NaiveTime> {
 /// already carries; the mock gates `unmetered` per platform
 /// (`platformSupportsMetered`) — here `CondKind::SUPPORTED` gates
 /// every card by what this build can honestly probe.
-const COND_CARDS: [(CondKind, &str, &str, &str); 4] = [
+const COND_CARDS: [(CondKind, &str, &str, &str); 5] = [
+    (
+        CondKind::JobAdded,
+        "download",
+        "A download is added to this queue",
+        "Start the queue as soon as something lands in it. Anything added while it is already running joins the end of the queue, and starts straight away if a slot is free.",
+    ),
     (
         CondKind::Unmetered,
         "wifi",
@@ -328,6 +334,7 @@ pub struct State {
     sched_start: String,
     sched_days: WeekDayMask,
     cond_combine: CondCombine,
+    cond_job_added: bool,
     cond_unmetered: bool,
     cond_ac: bool,
     cond_idle: bool,
@@ -554,6 +561,7 @@ impl State {
             _ => CondSet::default(),
         };
         self.cond_combine = conds.combine;
+        self.cond_job_added = conds.on_job_added;
         self.cond_unmetered = conds.unmetered;
         self.cond_ac = conds.ac_power;
         self.cond_idle = conds.idle_minutes.is_some();
@@ -603,6 +611,7 @@ impl State {
             SchedKind::Manual => QueueSchedule::Manual,
             SchedKind::Condition => QueueSchedule::Condition(CondSet {
                 combine: self.cond_combine,
+                on_job_added: self.cond_job_added,
                 unmetered: self.cond_unmetered,
                 ac_power: self.cond_ac,
                 idle_minutes: self.cond_idle.then(|| {
@@ -722,6 +731,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 sched_start: String::new(),
                 sched_days: WeekDayMask(0x7F),
                 cond_combine: CondCombine::default(),
+                cond_job_added: false,
                 cond_unmetered: false,
                 cond_ac: false,
                 cond_idle: false,
@@ -1070,6 +1080,7 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
         }
         Msg::CondToggle(kind) => {
             match kind {
+                CondKind::JobAdded => st.cond_job_added = !st.cond_job_added,
                 CondKind::Unmetered => st.cond_unmetered = !st.cond_unmetered,
                 CondKind::AcPower => st.cond_ac = !st.cond_ac,
                 CondKind::Idle => st.cond_idle = !st.cond_idle,
@@ -1435,6 +1446,7 @@ fn day_square<'a>(t: &Tokens, label: &str, on: bool, msg: Msg) -> Element<'a, Ms
 impl State {
     fn cond_on(&self, kind: CondKind) -> bool {
         match kind {
+            CondKind::JobAdded => self.cond_job_added,
             CondKind::Unmetered => self.cond_unmetered,
             CondKind::Idle => self.cond_idle,
             CondKind::AcPower => self.cond_ac,

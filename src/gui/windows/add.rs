@@ -311,6 +311,7 @@ impl AddState {
         };
         Some(AddJobReq {
             url,
+            queue: Some(self.queue),
             save_dir,
             filename,
             referrer: None,
@@ -872,7 +873,6 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
                 return Task::none();
             };
             let client = st.client.clone();
-            let queue = st.queue;
             let edit_id = st.edit_id;
             Task::perform(
                 async move {
@@ -899,7 +899,6 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
                         }
                         None => {
                             let id = client.add_job(req).await?;
-                            client.set_job_queue(id, queue).await?;
                             if start_now {
                                 client.start_job(id).await?;
                                 client.open_download_window(id).await?;
