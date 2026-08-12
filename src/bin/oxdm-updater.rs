@@ -2,29 +2,36 @@
 //!
 //! Spawned by the running oxdm GUI **after** it has already fetched the
 //! update artifact through the regular download pipeline. The helper's
-//! sole job is the dangerous half: verify the SHA-256, wait for the
-//! parent to exit, atomically replace the running executable, and
-//! relaunch it.
+//! sole job is the dangerous half: wait for the parent to exit,
+//! atomically replace the running executable, and relaunch it.
+//!
+//! It does not hash the artifact. The digest the feed published is
+//! attached to the download as an ordinary checksum, so the download
+//! manager verifies it the same way it verifies anything else — and a
+//! mismatch fails the download, which is reported as a failed update
+//! rather than reaching this helper at all. Re-hashing here would only
+//! re-answer a question already answered, and only for the sliver of
+//! time between the two checks: the artifact sits in a 0700 directory
+//! under the user's own data dir, so anything able to swap it there
+//! could replace the executable outright.
 //!
 //! ## Protocol
 //!
 //! Stdout: one JSON message per line, matching `UpdaterEvent` in the
-//! data layer. Stages: `started → verified → ready → (await stdin
-//! "go") → installing → done` (or `error`).
+//! data layer. Stages: `started → ready → (await stdin "go") →
+//! installing → done` (or `error`).
 //!
 //! Stdin: a single `go\n` from the parent greenlights the swap.
 //!
 //! ## CLI
 //!
 //! ```text
-//! oxdm-updater --exe <PATH> --pid <PID> --artifact <PATH> --sha256 <HEX>
+//! oxdm-updater --exe <PATH> --pid <PID> --artifact <PATH>
 //! ```
 
-use std::io::{self, BufRead, Read, Write};
+use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::time::Duration;
-
-use sha2::{Digest, Sha256};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -45,7 +52,6 @@ struct Args {
     exe: PathBuf,
     pid: u32,
     artifact: PathBuf,
-    sha256: String,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -53,7 +59,6 @@ fn parse_args() -> Result<Args, String> {
     let mut exe: Option<PathBuf> = None;
     let mut pid: Option<u32> = None;
     let mut artifact: Option<PathBuf> = None;
-    let mut sha256: Option<String> = None;
     while let Some(flag) = argv.next() {
         let val = argv
             .next()
@@ -62,7 +67,6 @@ fn parse_args() -> Result<Args, String> {
             "--exe" => exe = Some(PathBuf::from(val)),
             "--pid" => pid = Some(val.parse().map_err(|_| "invalid pid".to_string())?),
             "--artifact" => artifact = Some(PathBuf::from(val)),
-            "--sha256" => sha256 = Some(val),
             other => return Err(format!("unknown flag: {other}")),
         }
     }
@@ -70,58 +74,30 @@ fn parse_args() -> Result<Args, String> {
         exe: exe.ok_or_else(|| "missing --exe".to_string())?,
         pid: pid.ok_or_else(|| "missing --pid".to_string())?,
         artifact: artifact.ok_or_else(|| "missing --artifact".to_string())?,
-        sha256: sha256.ok_or_else(|| "missing --sha256".to_string())?,
     })
 }
 
 async fn run(args: Args) -> Result<(), String> {
     emit(&Event::Started);
 
-    // 1. Verify. The artifact lives on disk already; stream-hash it on
-    // a blocking thread so the tokio runtime can keep handling stdin.
-    let path = args.artifact.clone();
-    let actual = tokio::task::spawn_blocking(move || hash_file(&path))
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| format!("hash: {e}"))?;
-    if !ct_eq(&actual, &args.sha256.to_lowercase()) {
-        return Err(format!(
-            "checksum mismatch: expected {}, got {}",
-            args.sha256, actual
-        ));
-    }
-    emit(&Event::Verified);
-
-    // 2. Ready — wait for the parent to confirm + exit.
+    // 1. Ready — wait for the parent to confirm + exit. The artifact
+    // arrived through the download manager, which checked it against
+    // the digest the feed published before it ever got here.
     emit(&Event::Ready);
     wait_for_go().await?;
 
     emit(&Event::Installing);
     wait_for_pid_exit(args.pid).await;
 
-    // 3. Swap. Move the artifact into place atomically. On Windows
+    // 2. Swap. Move the artifact into place atomically. On Windows
     // a brief retry tides over handle release.
     swap_executable(&args.artifact, &args.exe)?;
 
-    // 4. Relaunch from the same path. Detach so this updater can exit.
+    // 3. Relaunch from the same path. Detach so this updater can exit.
     spawn_detached(&args.exe).map_err(|e| format!("relaunch: {e}"))?;
 
     emit(&Event::Done);
     Ok(())
-}
-
-fn hash_file(path: &PathBuf) -> io::Result<String> {
-    let mut f = std::fs::File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        let n = f.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(hex(&hasher.finalize()))
 }
 
 async fn wait_for_go() -> Result<(), String> {
@@ -238,7 +214,6 @@ fn spawn_detached(exe: &PathBuf) -> io::Result<()> {
 #[serde(tag = "stage", rename_all = "snake_case")]
 enum Event {
     Started,
-    Verified,
     Ready,
     Installing,
     Done,
@@ -250,24 +225,4 @@ fn emit(ev: &Event) {
     let mut out = io::stdout().lock();
     let _ = writeln!(out, "{line}");
     let _ = out.flush();
-}
-
-fn hex(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        use std::fmt::Write;
-        let _ = write!(&mut s, "{b:02x}");
-    }
-    s
-}
-
-fn ct_eq(a: &str, b: &str) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.as_bytes().iter().zip(b.as_bytes().iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
 }

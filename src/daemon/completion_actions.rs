@@ -38,6 +38,18 @@ pub fn spawn(state: Arc<AppState>) {
         let mut rx = state.subscribe();
         while let Some(ev) = crate::data::next_event(&mut rx, "completion actions").await {
             if let DomainEvent::JobFailed { id, error } = &ev {
+                // The self-update artifact carries the feed's digest as
+                // a checksum, so a substituted or truncated file fails
+                // the download like any other. Nobody is watching this
+                // job — it is hidden — so the failure has to be said in
+                // the update flow's own words, or About sits on
+                // "Downloading" forever.
+                if state.pending_update().await.is_some_and(|p| p.job == *id) {
+                    state
+                        .fail_update(format!("the update could not be downloaded: {error}"))
+                        .await;
+                    continue;
+                }
                 let conflict = matches!(error, crate::domain::JobError::ConflictPending(_));
                 // Only a hand-started run gets a window; automation
                 // reports its failures elsewhere.

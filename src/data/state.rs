@@ -510,6 +510,21 @@ enum ProbeSlot {
 /// signed URLs both go stale.
 const PROBE_FRESH_FOR: std::time::Duration = std::time::Duration::from_secs(120);
 
+/// The feed's digest as a checksum row on the update download.
+///
+/// `Server` rather than `User`: it came from the release feed over
+/// https, not from someone typing it in, and the distinction is what
+/// the download window shows beside the value.
+fn feed_checksum(sha256: &str) -> crate::domain::Checksum {
+    crate::domain::Checksum {
+        algo: crate::domain::Algo::Sha256,
+        hash: sha256.trim().to_ascii_lowercase(),
+        source: crate::domain::CsSource::Server,
+        status: crate::domain::CsStatus::Unverified,
+        expected: None,
+    }
+}
+
 /// `app_meta` key holding the RFC3339 time of the last completed
 /// update check. Persisted so a daily restart does not turn "weekly"
 /// into "every launch plus a check whenever the machine goes quiet".
@@ -1260,8 +1275,16 @@ impl AppState {
                 None,
                 None,
                 None,
-                // The updater probes nothing up front.
-                ProbeFacts::default(),
+                // Not a probe result, but the same shape and the same
+                // purpose: the digest the feed published, attached so
+                // the download manager checks the artifact the way it
+                // checks any other download. A mismatch fails the job,
+                // which is reported as a failed update — the updater
+                // helper never sees a file that did not match.
+                ProbeFacts {
+                    size: None,
+                    checksums: vec![feed_checksum(&info.sha256)],
+                },
             )
             .await?;
         self.hidden_jobs.write().await.insert(id);
@@ -1328,8 +1351,6 @@ impl AppState {
             .arg(std::process::id().to_string())
             .arg("--artifact")
             .arg(&artifact)
-            .arg("--sha256")
-            .arg(&pending.info.sha256)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
@@ -1400,7 +1421,12 @@ impl AppState {
         Ok(())
     }
 
-    async fn fail_update(&self, message: String) {
+    /// Abandon the update in flight and say why.
+    ///
+    /// Reached from the helper's own error output and from the download
+    /// failing — including the checksum mismatch that a substituted
+    /// artifact produces.
+    pub async fn fail_update(&self, message: String) {
         tracing::warn!(%message, "update did not install");
         *self.pending_update.write().await = None;
         let _ = self.events.send(DomainEvent::UpdateFailed { message });
@@ -5591,6 +5617,21 @@ mod tests {
     /// The completion page divides bytes by this, so it has to be the
     /// time the transfer was running and nothing else: a job that was
     /// paused for an hour did not average a byte a second.
+    /// The feed hands over a digest and nothing else; this is where it
+    /// becomes something the download manager can check.
+    #[test]
+    fn the_feed_digest_becomes_a_server_checksum_row() {
+        let row =
+            feed_checksum("  ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789  ");
+        assert_eq!(row.algo, crate::domain::Algo::Sha256);
+        assert_eq!(row.source, crate::domain::CsSource::Server);
+        assert_eq!(row.status, crate::domain::CsStatus::Unverified);
+        assert_eq!(
+            row.hash, "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+            "compared against a computed digest, so it has to be bare lowercase hex",
+        );
+    }
+
     #[test]
     fn time_is_banked_only_while_downloading() {
         let entry = entry_in(Phase::Queued);

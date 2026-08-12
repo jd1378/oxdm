@@ -36,6 +36,15 @@ pub fn spawn(state: Arc<AppState>) {
     tokio::spawn(async move {
         let mut rx = state.subscribe();
         while let Some(ev) = crate::data::next_event(&mut rx, "notifications").await {
+            // A hidden job is machinery, not a download the user
+            // started: the self-update artifact is the only one today,
+            // and "Download complete — oxdm-update-0.2.0" is not news
+            // anybody asked for. The update flow reports itself.
+            if let DomainEvent::JobCompleted { id, .. } | DomainEvent::JobFailed { id, .. } = ev
+                && state.is_hidden(id).await
+            {
+                continue;
+            }
             match ev {
                 DomainEvent::JobCompleted { id, path, .. } => {
                     // The per-download notification settings describe
