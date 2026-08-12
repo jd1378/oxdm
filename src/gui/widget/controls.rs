@@ -382,6 +382,36 @@ pub fn segmented<'a, M: Clone + 'a>(
     r.into()
 }
 
+/// A settings row inside a `labeled_section`: title, description, and
+/// a switch on the right, in the padding the Properties tabs use.
+pub fn toggle_row<'a, M: Clone + 'a>(
+    t: &Tokens,
+    title: &'a str,
+    desc: &'a str,
+    on: bool,
+    enabled: bool,
+    msg: impl Fn(bool) -> M + 'a,
+) -> Element<'a, M> {
+    container(
+        row![
+            iced::widget::column![
+                text(title)
+                    .font(theme::BODY_MEDIUM)
+                    .size(12.0)
+                    .color(t.fg_1),
+                text(desc).font(theme::BODY).size(11.0).color(t.fg_3),
+            ]
+            .spacing(2.0)
+            .width(Length::Fill),
+            toggle(t, on, enabled, msg),
+        ]
+        .spacing(theme::space::S2)
+        .align_y(Alignment::Center),
+    )
+    .padding([10.0, theme::space::S3])
+    .into()
+}
+
 /// `[-] value [+]` stepper, 88px default, mono value.
 /// Stepper value: mono 11px in a 12px line box, nudged down a pixel so
 /// the digits sit dead centre in the field.

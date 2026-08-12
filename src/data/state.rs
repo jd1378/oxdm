@@ -1303,10 +1303,10 @@ impl AppState {
                 None,
                 indexmap::IndexMap::new(),
                 None,
-                None,
-                None,
-                None,
-                None,
+                // Nothing to sign in to and nothing to route around:
+                // the update feed is fetched over the machine's own
+                // network settings.
+                crate::domain::Creds::default(),
                 None,
                 None,
                 None,
@@ -1715,47 +1715,24 @@ impl AppState {
         id: JobId,
         mut advanced: crate::domain::Advanced,
     ) -> Result<(), JobError> {
-        use crate::domain::AuthScheme;
-        let proxy_password = std::mem::take(&mut advanced.proxy.password);
-        // Consumed here: a persisted `true` would re-clear the secret on
-        // every later Apply that never touched the field.
-        let clear_proxy_password = std::mem::take(&mut advanced.proxy.clear_password);
-        let auth_username = std::mem::take(&mut advanced.auth.username);
-        let auth_password = std::mem::take(&mut advanced.auth.password);
-        let auth_token = std::mem::take(&mut advanced.auth.token);
-        let clear_auth_secret = std::mem::take(&mut advanced.auth.clear_secret);
+        // The credential half is the same bundle the Add dialog sends,
+        // so it is sealed and applied by the same code — the two
+        // dialogs cannot drift into different rules about what an
+        // empty password box means.
+        let creds = crate::domain::Creds {
+            proxy: std::mem::take(&mut advanced.proxy),
+            auth: std::mem::take(&mut advanced.auth),
+        };
         // Cookie text is a secret too — never persisted in the blob;
-        // routed onto `enc_cookies` like the passwords above.
+        // routed onto `enc_cookies` like the passwords.
         let cookie_jar = std::mem::take(&mut advanced.cookie_jar);
+        // Consumed here: a persisted `true` would re-clear the jar on
+        // every later Apply that never touched the editor.
         let clear_cookie_jar = std::mem::take(&mut advanced.clear_cookie_jar);
 
         // Encrypt before taking the jobs lock — `encrypt_field` awaits
         // on the master key and must not run under the registry lock.
-        let enc_proxy_password = if proxy_password.is_empty() {
-            None
-        } else {
-            self.encrypt_field(
-                id,
-                crate::data::crypto::Field::ProxyPassword,
-                Some(&proxy_password),
-            )
-            .await?
-        };
-        let auth_secret = match advanced.auth.scheme {
-            AuthScheme::Basic => auth_password,
-            AuthScheme::Bearer => auth_token,
-            AuthScheme::None | AuthScheme::Digest => String::new(),
-        };
-        let enc_auth_secret = if auth_secret.is_empty() {
-            None
-        } else {
-            self.encrypt_field(
-                id,
-                crate::data::crypto::Field::AuthPassword,
-                Some(&auth_secret),
-            )
-            .await?
-        };
+        let sealed = self.seal_creds(id, creds).await?;
         let enc_cookie_jar = if cookie_jar.trim().is_empty() {
             None
         } else {
@@ -1769,36 +1746,11 @@ impl AppState {
         };
         let mut new_job = old.job.clone();
         new_job.advanced = advanced;
-        if let Some(enc) = enc_proxy_password {
-            new_job.enc_proxy_password = Some(enc);
-        } else if clear_proxy_password {
-            new_job.enc_proxy_password = None;
-        }
-        if let Some(enc) = enc_auth_secret {
-            new_job.enc_auth_password = Some(enc);
-        } else if clear_auth_secret {
-            new_job.enc_auth_password = None;
-        }
+        apply_sealed_creds(&mut new_job, sealed);
         if let Some(enc) = enc_cookie_jar {
             new_job.enc_cookies = Some(enc);
         } else if clear_cookie_jar {
             new_job.enc_cookies = None;
-        }
-        match new_job.advanced.auth.scheme {
-            AuthScheme::Basic if !auth_username.is_empty() => {
-                new_job.auth_user = Some(auth_username);
-            }
-            // Scheme "None" must actually stop Basic credentials from
-            // being sent: the runner builds them off `auth_user`, so
-            // clearing it is what makes the selection honest (F2/F4).
-            // The stored secret goes with it — without `auth_user` it
-            // could never be used again, and keeping the ciphertext
-            // leaves a secret at rest with no UI left to remove it.
-            AuthScheme::None => {
-                new_job.auth_user = None;
-                new_job.enc_auth_password = None;
-            }
-            _ => {}
         }
         let new_entry = clone_entry_with_job(&old, new_job.clone()).await;
         jobs.insert(id, new_entry);
@@ -1808,6 +1760,61 @@ impl AppState {
             .await
             .map_err(|e| JobError::Io(e.to_string()))?;
         Ok(())
+    }
+
+    /// Encrypt a credential bundle's secrets so it can be placed on a
+    /// job. Split from `apply_sealed_creds` because encryption awaits
+    /// the master key and so must happen before the registry lock is
+    /// taken, while placing the result must happen under it.
+    async fn seal_creds(
+        &self,
+        id: JobId,
+        creds: crate::domain::Creds,
+    ) -> Result<SealedCreds, JobError> {
+        use crate::domain::AuthScheme;
+        let auth_secret = match creds.auth.scheme {
+            AuthScheme::Basic => creds.auth.password,
+            AuthScheme::Bearer => creds.auth.token,
+            AuthScheme::None | AuthScheme::Digest => String::new(),
+        };
+        let enc_proxy_password = self
+            .encrypt_field(
+                id,
+                crate::data::crypto::Field::ProxyPassword,
+                Some(creds.proxy.password.as_str()),
+            )
+            .await?;
+        let enc_auth_secret = self
+            .encrypt_field(
+                id,
+                crate::data::crypto::Field::AuthPassword,
+                Some(auth_secret.as_str()),
+            )
+            .await?;
+        Ok(SealedCreds {
+            // The blob keeps the selection and the address; the
+            // secrets and the "delete it" flags are consumed here and
+            // never persisted (guardian F1).
+            proxy: crate::domain::ProxyAdv {
+                password: String::new(),
+                clear_password: false,
+                ..creds.proxy
+            },
+            auth: crate::domain::AuthAdv {
+                // The Basic username rides `Job::auth_user`, the single
+                // field the runner builds credentials from (F2).
+                username: String::new(),
+                password: String::new(),
+                token: String::new(),
+                clear_secret: false,
+                ..creds.auth
+            },
+            username: creds.auth.username,
+            enc_proxy_password,
+            clear_proxy_password: creds.proxy.clear_password,
+            enc_auth_secret,
+            clear_auth_secret: creds.auth.clear_secret,
+        })
     }
 
     /// Persist the per-job checksum list (Properties dialog →
@@ -2772,10 +2779,9 @@ impl AppState {
         referrer: Option<url::Url>,
         headers: indexmap::IndexMap<String, String>,
         max_connections: Option<u64>,
-        proxy: Option<String>,
-        auth_user: Option<String>,
-        auth_password: Option<String>,
-        proxy_password: Option<String>,
+        // How this job reaches its server. One bundle rather than four
+        // loose strings, applied by the same code that applies an edit.
+        creds: crate::domain::Creds,
         cookies: Option<String>,
         category: Option<Category>,
         // Where the job belongs. `None` is the Main queue. Decided here
@@ -2817,20 +2823,7 @@ impl AppState {
                 classify(filename.as_deref().unwrap_or(""), &overrides)
             }
         };
-        let enc_auth_password = self
-            .encrypt_field(
-                id,
-                crate::data::crypto::Field::AuthPassword,
-                auth_password.as_deref(),
-            )
-            .await?;
-        let enc_proxy_password = self
-            .encrypt_field(
-                id,
-                crate::data::crypto::Field::ProxyPassword,
-                proxy_password.as_deref(),
-            )
-            .await?;
+        let sealed = self.seal_creds(id, creds).await?;
         let enc_cookies = self
             .encrypt_field(id, crate::data::crypto::Field::Cookies, cookies.as_deref())
             .await?;
@@ -2842,10 +2835,13 @@ impl AppState {
             referrer,
             headers,
             max_connections,
-            proxy,
-            auth_user,
-            enc_auth_password,
-            enc_proxy_password,
+            // The legacy per-job proxy URL is not something any client
+            // can set any more: `advanced.proxy` says it in full, and
+            // two ways to say it would need a precedence rule.
+            proxy: None,
+            auth_user: None,
+            enc_auth_password: None,
+            enc_proxy_password: None,
             enc_cookies,
             speed_limit_override: None,
             queue_id,
@@ -2869,6 +2865,7 @@ impl AppState {
             category,
             captured_response: None,
         };
+        apply_sealed_creds(&mut job, sealed);
         let completion = seeded_completion(&self.settings().await);
         let url = job.url.clone();
         // A job with credentials is not one a bare probe can describe:
@@ -2939,22 +2936,13 @@ impl AppState {
         new_job.referrer = edit.referrer;
         new_job.headers = edit.headers;
         new_job.max_connections = edit.max_connections;
-        new_job.proxy = edit.proxy;
-        new_job.auth_user = edit.auth_user;
-        // Absent/empty secrets keep the stored ciphertext (same rule as
-        // `set_job_advanced`): a header/cookie-only Apply from a client
-        // that never round-trips secrets must not wipe them. Explicit
-        // clearing is not expressible through this path (documented in
-        // features-impl-plan F1/F2).
-        if let Some(pw) = edit.auth_password.as_deref().filter(|s| !s.is_empty()) {
-            new_job.enc_auth_password = self
-                .encrypt_field(id, crate::data::crypto::Field::AuthPassword, Some(pw))
-                .await?;
-        }
-        if let Some(pw) = edit.proxy_password.as_deref().filter(|s| !s.is_empty()) {
-            new_job.enc_proxy_password = self
-                .encrypt_field(id, crate::data::crypto::Field::ProxyPassword, Some(pw))
-                .await?;
+        // Only when the caller edited them. Same rules as everywhere
+        // else: a new secret replaces, an empty field keeps, a clear
+        // flag deletes — a client that never showed the credentials
+        // sends `None` and leaves them alone entirely.
+        if let Some(creds) = edit.creds {
+            let sealed = self.seal_creds(id, creds).await?;
+            apply_sealed_creds(&mut new_job, sealed);
         }
         if let Some(ck) = edit.cookies.as_deref().filter(|s| !s.is_empty()) {
             new_job.enc_cookies = self
@@ -3221,10 +3209,10 @@ impl AppState {
                 req.referrer,
                 headers,
                 None,
-                None,
-                None,
-                None,
-                None,
+                // A capture carries no credentials of its own; an
+                // Authorization header it did capture is already in
+                // `headers` above.
+                crate::domain::Creds::default(),
                 cookies,
                 Some(category),
                 // The category's queue, chosen before the job exists
@@ -4834,6 +4822,60 @@ pub fn per_job_dir(work_dir: &std::path::Path, id: JobId) -> std::path::PathBuf 
     work_dir.join(per_job_dir_name(id))
 }
 
+/// A credential bundle with its secrets already encrypted, waiting to
+/// be placed on a job.
+struct SealedCreds {
+    /// The blob halves, secrets stripped.
+    proxy: crate::domain::ProxyAdv,
+    auth: crate::domain::AuthAdv,
+    /// The Basic username, headed for `Job::auth_user`.
+    username: String,
+    enc_proxy_password: Option<String>,
+    clear_proxy_password: bool,
+    enc_auth_secret: Option<String>,
+    clear_auth_secret: bool,
+}
+
+/// Place a sealed bundle on a job.
+///
+/// The rule every caller needs and none should re-derive: a new secret
+/// replaces the stored one, an empty field keeps it, and only an
+/// explicit clear flag deletes it — a stored secret never round-trips
+/// into a form, so "the box is blank" cannot mean "delete it" on its
+/// own. Adding a job, editing one, and applying the Properties dialog
+/// all come through here.
+fn apply_sealed_creds(job: &mut Job, sealed: SealedCreds) {
+    use crate::domain::AuthScheme;
+    job.advanced.proxy = sealed.proxy;
+    job.advanced.auth = sealed.auth;
+    if let Some(enc) = sealed.enc_proxy_password {
+        job.enc_proxy_password = Some(enc);
+    } else if sealed.clear_proxy_password {
+        job.enc_proxy_password = None;
+    }
+    if let Some(enc) = sealed.enc_auth_secret {
+        job.enc_auth_password = Some(enc);
+    } else if sealed.clear_auth_secret {
+        job.enc_auth_password = None;
+    }
+    match job.advanced.auth.scheme {
+        AuthScheme::Basic if !sealed.username.is_empty() => {
+            job.auth_user = Some(sealed.username);
+        }
+        // Scheme "None" must actually stop Basic credentials from
+        // being sent: the runner builds them off `auth_user`, so
+        // clearing it is what makes the selection honest (F2/F4). The
+        // stored secret goes with it — without `auth_user` it could
+        // never be used again, and keeping the ciphertext leaves a
+        // secret at rest with no UI left to remove it.
+        AuthScheme::None => {
+            job.auth_user = None;
+            job.enc_auth_password = None;
+        }
+        _ => {}
+    }
+}
+
 /// Per-job completion prefs for a newly-tracked job: defaults, with the
 /// dialog opt-in taking the global setting as its starting point. The
 /// per-job toggle then overrides the global for that download.
@@ -5674,6 +5716,95 @@ mod tests {
                 (entry.job.id, Arc::new(entry))
             })
             .collect()
+    }
+
+    fn sealed(
+        scheme: crate::domain::AuthScheme,
+        username: &str,
+        enc_auth: Option<&str>,
+        clear_auth: bool,
+    ) -> SealedCreds {
+        SealedCreds {
+            proxy: crate::domain::ProxyAdv::default(),
+            auth: crate::domain::AuthAdv {
+                scheme,
+                ..Default::default()
+            },
+            username: username.to_owned(),
+            enc_proxy_password: None,
+            clear_proxy_password: false,
+            enc_auth_secret: enc_auth.map(|s| s.to_owned()),
+            clear_auth_secret: clear_auth,
+        }
+    }
+
+    /// The rule the whole credential path rests on: a stored secret
+    /// never round-trips into a form, so a blank field cannot mean
+    /// "delete it". Only an explicit clear does.
+    #[test]
+    fn a_blank_secret_keeps_the_stored_one_and_a_clear_deletes_it() {
+        use crate::domain::AuthScheme;
+        let mut job = entry_in(Phase::Queued).job;
+        job.enc_auth_password = Some("stored".into());
+        job.enc_proxy_password = Some("stored-proxy".into());
+        job.auth_user = Some("someone".into());
+
+        // Nothing typed, nothing cleared: both survive.
+        apply_sealed_creds(&mut job, sealed(AuthScheme::Basic, "someone", None, false));
+        assert_eq!(job.enc_auth_password.as_deref(), Some("stored"));
+        assert_eq!(job.enc_proxy_password.as_deref(), Some("stored-proxy"));
+
+        // A new one replaces it.
+        apply_sealed_creds(
+            &mut job,
+            sealed(AuthScheme::Basic, "someone", Some("fresh"), false),
+        );
+        assert_eq!(job.enc_auth_password.as_deref(), Some("fresh"));
+
+        // Emptied on purpose.
+        apply_sealed_creds(&mut job, sealed(AuthScheme::Basic, "someone", None, true));
+        assert_eq!(job.enc_auth_password, None);
+        assert_eq!(job.enc_proxy_password.as_deref(), Some("stored-proxy"));
+    }
+
+    /// Turning auth off has to actually stop the credentials being
+    /// sent: the runner builds Basic from `auth_user`, so the selection
+    /// is only honest if that goes too — and the orphaned secret with
+    /// it, since no UI would be left to remove it.
+    #[test]
+    fn choosing_no_auth_removes_the_credentials() {
+        use crate::domain::AuthScheme;
+        let mut job = entry_in(Phase::Queued).job;
+        job.auth_user = Some("someone".into());
+        job.enc_auth_password = Some("stored".into());
+
+        apply_sealed_creds(&mut job, sealed(AuthScheme::None, "", None, false));
+        assert_eq!(job.auth_user, None);
+        assert_eq!(job.enc_auth_password, None);
+    }
+
+    /// Bearer keeps no username: the token is the whole credential,
+    /// and leaving `auth_user` set would have the runner send Basic
+    /// alongside it.
+    #[test]
+    fn bearer_leaves_no_basic_username_behind() {
+        use crate::domain::AuthScheme;
+        let mut job = entry_in(Phase::Queued).job;
+        job.auth_user = Some("someone".into());
+
+        apply_sealed_creds(
+            &mut job,
+            sealed(AuthScheme::Bearer, "", Some("token"), false),
+        );
+        assert_eq!(job.enc_auth_password.as_deref(), Some("token"));
+        assert_eq!(
+            job.auth_user.as_deref(),
+            Some("someone"),
+            "an untouched username is not what Bearer sends; the scheme decides"
+        );
+        // ...and the scheme is what `bearer_header`/`build_credentials`
+        // read, so the stale username cannot reach the wire.
+        assert_eq!(job.advanced.auth.scheme, AuthScheme::Bearer);
     }
 
     /// One name, one download — whatever folder each saves into and

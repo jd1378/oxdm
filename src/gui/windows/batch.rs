@@ -277,10 +277,10 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                             referrer: req.referrer.clone(),
                             headers: req.headers.clone(),
                             max_connections: None,
-                            proxy: None,
-                            auth_user: None,
-                            auth_password: None,
-                            proxy_password: None,
+                            // A captured batch carries no credentials
+                            // of its own; the extension's headers, if
+                            // any, are already above.
+                            creds: Default::default(),
                             cookies: req.cookies.clone(),
                             category: None,
                             size: probed.as_ref().and_then(|p| p.size),

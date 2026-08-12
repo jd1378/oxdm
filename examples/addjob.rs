@@ -8,6 +8,7 @@
 //!
 //!     cargo run --example addjob -- http://127.0.0.1:8088/f.bin /tmp --start
 //!             [--referer https://example.com/page] [--ua "curl/8"]
+//!             [--auth] [--proxy socks5://proxy.example.com:1080]
 
 #[tokio::main]
 async fn main() {
@@ -30,7 +31,41 @@ async fn main() {
     // A job with credentials is never probed in the background, which
     // is the only way to reach the run's own name-resolution path
     // without racing a probe that answers first.
-    let user = rest.iter().any(|a| a == "--auth").then(|| "u".to_owned());
+    let mut creds = oxdm::domain::Creds::default();
+    if rest.iter().any(|a| a == "--auth") {
+        creds.auth = oxdm::domain::AuthAdv {
+            scheme: oxdm::domain::AuthScheme::Basic,
+            username: "u".to_owned(),
+            password: "p".to_owned(),
+            ..Default::default()
+        };
+    }
+    // `--proxy socks5://host:port`, the Add dialog's Proxy tab without
+    // the clicking: the same `Creds` bundle reaches the daemon either
+    // way, so this exercises the storage path end to end.
+    if let Some(spec) = rest
+        .iter()
+        .position(|a| a == "--proxy")
+        .and_then(|i| rest.get(i + 1))
+    {
+        let (scheme, addr) = spec.split_once("://").expect("scheme://host:port");
+        let (host, port) = addr.split_once(':').expect("host:port");
+        creds.proxy = oxdm::domain::ProxyAdv {
+            mode: match scheme {
+                "http" => oxdm::domain::ProxyMode::Http,
+                "https" => oxdm::domain::ProxyMode::Https,
+                "socks5" => oxdm::domain::ProxyMode::Socks5,
+                "none" => oxdm::domain::ProxyMode::None,
+                other => panic!("unknown proxy scheme {other}"),
+            },
+            host: host.to_owned(),
+            port: port.to_owned(),
+            auth_enabled: true,
+            username: "pu".to_owned(),
+            password: "pp".to_owned(),
+            ..Default::default()
+        };
+    }
     // A size the caller claims to have probed, for exercising decisions
     // that turn on how big the file is.
     let size: Option<u64> = rest
@@ -65,10 +100,7 @@ async fn main() {
             referrer,
             headers,
             max_connections: None,
-            proxy: None,
-            auth_user: user,
-            auth_password: None,
-            proxy_password: None,
+            creds,
             cookies: None,
             category: None,
             size,

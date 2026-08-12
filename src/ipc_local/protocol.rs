@@ -318,17 +318,16 @@ pub struct JobEdit {
     pub referrer: Option<Url>,
     pub headers: IndexMap<String, String>,
     pub max_connections: Option<u64>,
-    /// Per-job proxy URL. Format: `scheme://[user@]host:port` — no
-    /// password embedded; that comes from `proxy_password`. `None`
-    /// inherits the global proxy.
+    /// Credential changes to apply along with the edit, or `None` to
+    /// leave the job's proxy and site auth exactly as they are.
+    ///
+    /// Properties sends `None` from its Headers/Cookies Apply — that
+    /// tab is not where credentials are edited, and rewriting them
+    /// from a form it never showed would be a way to lose a stored
+    /// secret. The Add window in edit mode does show them, and sends
+    /// what it showed.
     #[serde(default)]
-    pub proxy: Option<String>,
-    #[serde(default)]
-    pub auth_user: Option<String>,
-    #[serde(default)]
-    pub auth_password: Option<String>,
-    #[serde(default)]
-    pub proxy_password: Option<String>,
+    pub creds: Option<crate::domain::Creds>,
     #[serde(default)]
     pub cookies: Option<String>,
 }
@@ -346,20 +345,12 @@ pub struct AddJobReq {
     pub referrer: Option<Url>,
     pub headers: IndexMap<String, String>,
     pub max_connections: Option<u64>,
-    /// Per-job proxy URL. Format: `scheme://[user@]host:port` — no
-    /// password embedded; that comes from `proxy_password`. `None`
-    /// inherits the global `Settings::proxy`.
+    /// Proxy and site-authentication choices, exactly as the Add
+    /// dialog's Advanced pane and Properties → Connection both express
+    /// them. Secrets travel in plaintext over the local socket and the
+    /// daemon encrypts them before they reach the database.
     #[serde(default)]
-    pub proxy: Option<String>,
-    #[serde(default)]
-    pub auth_user: Option<String>,
-    /// HTTP Basic password (plaintext). Daemon encrypts with the
-    /// master key before storing. `None` / empty ⇒ no password stored.
-    #[serde(default)]
-    pub auth_password: Option<String>,
-    /// Proxy password (plaintext). Daemon encrypts before storing.
-    #[serde(default)]
-    pub proxy_password: Option<String>,
+    pub creds: crate::domain::Creds,
     /// Cookie jar (plaintext, raw `Cookie:` header value). Daemon
     /// encrypts before storing.
     #[serde(default)]

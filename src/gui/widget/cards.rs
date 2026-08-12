@@ -62,6 +62,32 @@ pub fn section_card<'a, M: 'a>(
     )
 }
 
+/// Eyebrow-labelled section: a small caps label, then a bordered
+/// surface holding rows. The Properties tabs are built out of these,
+/// and so is anything that wants to look like them.
+pub fn labeled_section<'a, M: 'a>(t: &Tokens, label: &str, body: Element<'a, M>) -> Element<'a, M> {
+    let t2 = *t;
+    column![
+        container(crate::gui::widget::eyebrow(t, label)).padding(iced::Padding {
+            left: 2.0,
+            ..Default::default()
+        }),
+        container(body)
+            .width(Length::Fill)
+            .style(move |_| container::Style {
+                background: Some(t2.bg_surface.into()),
+                border: iced::Border {
+                    color: t2.border_subtle,
+                    width: 1.0,
+                    radius: theme::surface::RADIUS.into(),
+                },
+                ..Default::default()
+            }),
+    ]
+    .spacing(theme::space::S1 + 2.0)
+    .into()
+}
+
 /// Opacity a dragged thing is drawn at while it follows the pointer.
 pub const GHOST_ALPHA: f32 = 0.5;
 

@@ -20,6 +20,21 @@ pub enum ProxyMode {
     Socks5,
 }
 
+/// Whether `ProxyMode::None` — "connect directly, ignore every proxy" —
+/// actually reaches the network.
+///
+/// It needs `reqwest::ClientBuilder::no_proxy()`, which clears the
+/// configured proxies *and* switches off the environment-variable
+/// pickup. odl takes a `proxy: Option<String>`, where `None` means "do
+/// not set one" and leaves that pickup on, so the mode is selectable in
+/// the UI but cannot yet be honoured: `mapping::apply_job_proxy` falls
+/// back to Inherit and logs it.
+///
+/// One constant so the UI's promise and the mapping's behaviour cannot
+/// disagree — the UI says so plainly while this is false. Flip it when
+/// odl exposes the knob, and swap the coercion arm in `mapping`.
+pub const FORCE_DIRECT_HONOURED: bool = false;
+
 impl Default for ProxyMode {
     fn default() -> Self {
         Self::Inherit
@@ -92,6 +107,23 @@ pub struct AuthAdv {
     /// current scheme uses — both land on `Job::enc_auth_password`.
     #[serde(default)]
     pub clear_secret: bool,
+}
+
+/// A job's proxy and site-authentication choices as a form holds them:
+/// plaintext secrets included, before the daemon has routed them onto
+/// the encrypted columns.
+///
+/// Both dialogs that can set credentials — the Add window's Advanced
+/// pane and Properties → Connection — hand over this one shape, and the
+/// daemon applies it in one place (`AppState::apply_creds`). Adding a
+/// job and editing one therefore cannot drift into meaning different
+/// things by the same fields.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Creds {
+    #[serde(default)]
+    pub proxy: ProxyAdv,
+    #[serde(default)]
+    pub auth: AuthAdv,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]

@@ -3,6 +3,7 @@
 pub mod app_mark;
 pub mod button;
 pub mod cards;
+pub mod conn_form;
 pub mod controls;
 pub mod copy;
 mod dashed;
@@ -19,12 +20,12 @@ pub mod wash;
 pub use app_mark::app_mark;
 pub use button::{Btn, BtnSize};
 pub use cards::{
-    GHOST_ALPHA, SCROLL_GUTTER, TabBtn, card, collapsible_card, drag_ghost, hairline, section_card,
-    section_card_count, sibling, surface, vdivider, vscroll,
+    GHOST_ALPHA, SCROLL_GUTTER, TabBtn, card, collapsible_card, drag_ghost, hairline,
+    labeled_section, section_card, section_card_count, sibling, surface, vdivider, vscroll,
 };
 pub use controls::{
     checkbox, col_header, col_header_sortable, combo, locked_combo, number_stepper, segmented,
-    toggle,
+    toggle, toggle_row,
 };
 pub use dashed::{dashed_frame, dashed_rule};
 pub use ellipsis::ellipsized;

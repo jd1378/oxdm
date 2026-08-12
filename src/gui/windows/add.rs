@@ -16,7 +16,10 @@ use crate::gui::chrome::{self, WindowControl, titlebar};
 use crate::gui::format::format_bytes;
 use crate::gui::shot::Shot;
 use crate::gui::theme::{self, Tokens};
-use crate::gui::widget::{Btn, FileInput, TabBtn, TextInput, combo, field_label, hairline};
+use crate::gui::widget::conn_form::{self, AuthForm, ProxyForm};
+use crate::gui::widget::{
+    Btn, FileInput, TabBtn, TextInput, combo, field_label, hairline, labeled_section,
+};
 use crate::gui::{color, icons};
 use crate::ipc_local::Client;
 use crate::ipc_local::protocol::AddJobReq;
@@ -41,10 +44,13 @@ const FORCED_SINGLE_SEGMENT: &str = "1 connection (forced)";
 const IDLE_H: f32 = 204.0;
 /// The detected-file card above the destination form.
 const PROBED_H: f32 = 348.0;
-/// With the Advanced pane open. Sized for its tallest tab — Proxy —
-/// rather than for the one showing, so switching tabs does not resize
-/// the window under the user's hands.
-const ADVANCED_H: f32 = 531.0;
+/// The scrolling area the Advanced tabs render into. Fixed, so the
+/// dialog is the same size on every tab and does not jump when a proxy
+/// mode unfolds its server rows.
+const ADV_BODY_H: f32 = 250.0;
+/// With the Advanced pane open: everything above it, the collapsible
+/// header, the tab strip and `ADV_BODY_H`.
+const ADVANCED_H: f32 = 600.0;
 /// The "cannot be resumed" line and the gap above it: one 12px line of
 /// bold text plus the body column's spacing.
 const NOT_RESUMABLE_H: f32 = 27.0;
@@ -79,23 +85,6 @@ pub enum AdvTab {
     Cookies,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProxyKind {
-    None,
-    Http,
-    Socks5,
-}
-
-impl std::fmt::Display for ProxyKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            ProxyKind::None => "None",
-            ProxyKind::Http => "HTTP",
-            ProxyKind::Socks5 => "SOCKS5",
-        })
-    }
-}
-
 #[derive(Clone)]
 pub enum Msg {
     Connected(Result<Boot, String>),
@@ -114,12 +103,19 @@ pub enum Msg {
     SetSegments(String),
     ToggleAdvanced,
     SetAdvTab(AdvTab),
-    SetProxyKind(ProxyKind),
+    ProxyModeSel(usize),
     ProxyHost(String),
+    ProxyPort(String),
+    ProxyAuth(bool),
     ProxyUser(String),
     ProxyPass(String),
+    ProxyPassClear,
+    RemoteDns(bool),
+    AuthSchemeSel(usize),
     AuthUser(String),
     AuthPass(String),
+    AuthToken(String),
+    AuthSecretClear,
     UserAgent(String),
     Cookies(text_editor::Action),
     HeaderName(usize, String),
@@ -197,12 +193,16 @@ pub struct AddState {
     /// when the dialog gets shorter.
     min_h: f32,
     adv_tab: AdvTab,
-    proxy_kind: ProxyKind,
-    proxy_host: String,
-    proxy_user: String,
-    proxy_pass: String,
-    auth_user: String,
-    auth_pass: String,
+    /// The same forms Properties → Connection edits, controls and
+    /// rules included: one download's proxy must not mean different
+    /// things depending on which window set it.
+    proxy: ProxyForm,
+    auth: AuthForm,
+    /// Editing a job that already has secrets stored. The forms show
+    /// "(unchanged)" and offer to remove them, exactly as Properties
+    /// does — a blank box must not read as "there is no password".
+    stored_proxy_secret: bool,
+    stored_auth_secret: bool,
     user_agent: String,
     cookies: text_editor::Content,
     headers: Vec<(String, String)>,
@@ -268,23 +268,6 @@ impl AddState {
         let url: url::Url = self.url.trim().parse().ok()?;
         let dest = self.destination();
         let (save_dir, filename) = (dest.dir, dest.filename);
-        let proxy = match self.proxy_kind {
-            ProxyKind::None => None,
-            kind if !self.proxy_host.trim().is_empty() => {
-                let scheme = if kind == ProxyKind::Http {
-                    "http"
-                } else {
-                    "socks5"
-                };
-                let user = if self.proxy_user.trim().is_empty() {
-                    String::new()
-                } else {
-                    format!("{}@", self.proxy_user.trim())
-                };
-                Some(format!("{scheme}://{user}{}", self.proxy_host.trim()))
-            }
-            _ => None,
-        };
         let mut headers = indexmap::IndexMap::new();
         for (k, v) in &self.headers {
             if !k.trim().is_empty() {
@@ -317,10 +300,7 @@ impl AddState {
             referrer: None,
             headers,
             max_connections: Some(segments),
-            proxy,
-            auth_user: opt(&self.auth_user),
-            auth_password: opt(&self.auth_pass),
-            proxy_password: opt(&self.proxy_pass),
+            creds: conn_form::creds(&self.proxy, &self.auth),
             cookies: opt(&cookies_text),
             category: self.category,
             size: self.detected().and_then(|p| p.size),
@@ -497,12 +477,10 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 advanced_open: false,
                 min_h: IDLE_H + chrome::overhead_h(),
                 adv_tab: AdvTab::Proxy,
-                proxy_kind: ProxyKind::None,
-                proxy_host: String::new(),
-                proxy_user: String::new(),
-                proxy_pass: String::new(),
-                auth_user: String::new(),
-                auth_pass: String::new(),
+                proxy: ProxyForm::default(),
+                auth: AuthForm::default(),
+                stored_proxy_secret: false,
+                stored_auth_secret: false,
                 user_agent: String::new(),
                 cookies: text_editor::Content::new(),
                 headers: Vec::new(),
@@ -529,6 +507,14 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                     .display()
                     .to_string();
                 st.save_path = full;
+                // What the job already says about reaching its server,
+                // in the same form Properties shows it. Without this an
+                // edit would save the dialog's blank defaults over the
+                // job's real proxy and credentials.
+                st.proxy = ProxyForm::from_adv(&job.advanced.proxy);
+                st.auth = AuthForm::from_adv(&job.advanced.auth, job.auth_user.as_deref());
+                st.stored_proxy_secret = job.enc_proxy_password.is_some();
+                st.stored_auth_secret = job.enc_auth_password.is_some();
                 for (k, v) in &job.headers {
                     // Shown in the User-Agent field, not among the
                     // free-form rows — two editors for one header
@@ -789,28 +775,67 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
             st.adv_tab = tab;
             Task::none()
         }
-        Msg::SetProxyKind(k) => {
-            st.proxy_kind = k;
-            Task::none()
+        Msg::ProxyModeSel(i) => {
+            if let Some(mode) = conn_form::PROXY_MODE_VALUES.get(i) {
+                st.proxy.mode = *mode;
+            }
+            // An explicit mode unfolds the server rows under it.
+            fit_window(st)
         }
         Msg::ProxyHost(v) => {
-            st.proxy_host = v;
-            Task::none()
+            st.proxy.host = v;
+            fit_window(st)
+        }
+        Msg::ProxyPort(v) => {
+            st.proxy.port = v;
+            fit_window(st)
+        }
+        Msg::ProxyAuth(v) => {
+            st.proxy.auth_enabled = v;
+            fit_window(st)
         }
         Msg::ProxyUser(v) => {
-            st.proxy_user = v;
+            st.proxy.username = v;
             Task::none()
         }
         Msg::ProxyPass(v) => {
-            st.proxy_pass = v;
+            st.proxy.password = v;
+            st.proxy.password_edited = true;
             Task::none()
         }
+        Msg::ProxyPassClear => {
+            st.proxy.password.clear();
+            st.proxy.password_edited = true;
+            Task::none()
+        }
+        Msg::RemoteDns(v) => {
+            st.proxy.remote_dns = v;
+            Task::none()
+        }
+        Msg::AuthSchemeSel(i) => {
+            if let Some(scheme) = conn_form::AUTH_SCHEME_VALUES.get(i) {
+                st.auth.scheme = *scheme;
+            }
+            fit_window(st)
+        }
         Msg::AuthUser(v) => {
-            st.auth_user = v;
+            st.auth.username = v;
             Task::none()
         }
         Msg::AuthPass(v) => {
-            st.auth_pass = v;
+            st.auth.password = v;
+            st.auth.secret_edited = true;
+            Task::none()
+        }
+        Msg::AuthToken(v) => {
+            st.auth.token = v;
+            st.auth.secret_edited = true;
+            Task::none()
+        }
+        Msg::AuthSecretClear => {
+            st.auth.password.clear();
+            st.auth.token.clear();
+            st.auth.secret_edited = true;
             Task::none()
         }
         Msg::UserAgent(v) => {
@@ -868,6 +893,13 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
                 st.error = Some("Another download already has that name.".to_owned());
                 return Task::none();
             }
+            if st.proxy.invalid() {
+                st.error =
+                    Some("The proxy needs a host and a port between 1 and 65535.".to_owned());
+                st.adv_tab = AdvTab::Proxy;
+                st.advanced_open = true;
+                return fit_window(st);
+            }
             let Some(req) = st.build_req() else {
                 st.error = Some("Enter a valid http(s) URL.".to_owned());
                 return Task::none();
@@ -885,10 +917,10 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
                                 referrer: req.referrer.clone(),
                                 headers: req.headers.clone(),
                                 max_connections: req.max_connections,
-                                proxy: req.proxy.clone(),
-                                auth_user: req.auth_user.clone(),
-                                auth_password: req.auth_password.clone(),
-                                proxy_password: req.proxy_password.clone(),
+                                // Shown on this window's Proxy and Auth
+                                // tabs, so what it shows is what it
+                                // sends.
+                                creds: Some(req.creds.clone()),
                                 cookies: req.cookies.clone(),
                             };
                             client.update_job_location(id, edit).await?;
@@ -1075,7 +1107,10 @@ fn ready_view(st: &AddState) -> Element<'_, Msg> {
     // them. The dialog opens on a free name, so reaching this takes
     // typing a taken one, and answering that by renaming what was just
     // typed would be deciding it for them.
-    let submittable = st.valid_url() && !name_clash(st);
+    // A proxy mode that names a server needs one: the job would be
+    // accepted and then fail the moment it started, with the dialog
+    // that could have said so already closed.
+    let submittable = st.valid_url() && !name_clash(st) && !st.proxy.invalid();
     let queue_name = st
         .queues
         .iter()
@@ -1496,64 +1531,55 @@ fn advanced_section(st: &AddState) -> Element<'_, Msg> {
         adv_tab(t, "Cookies", AdvTab::Cookies, st.adv_tab),
     ];
 
+    // The same sectioned rows the Properties tabs are built from, so a
+    // setting looks and behaves the same wherever it is edited. Proxy
+    // and Auth are literally the same widgets; the rest match their
+    // chrome.
+    let ctx = |stored_secret| conn_form::FormCtx {
+        editable: true,
+        stored_secret,
+        // Only a job created before this dialog could set a proxy
+        // properly carries one, and this window does not edit it.
+        legacy_url: None,
+    };
     let tab_body: Element<'_, Msg> = match st.adv_tab {
-        AdvTab::Proxy => {
-            let enabled = st.proxy_kind != ProxyKind::None;
-            column![
-                row![
-                    labeled(
-                        t,
-                        "type",
-                        combo(
-                            t,
-                            vec![ProxyKind::None, ProxyKind::Http, ProxyKind::Socks5],
-                            Some(st.proxy_kind),
-                            Msg::SetProxyKind,
-                            Length::Fill,
-                        )
-                    ),
-                    labeled(
-                        t,
-                        "host:port",
-                        TextInput::new(&st.proxy_host)
-                            .hint("127.0.0.1:1080")
-                            .mono()
-                            .enabled(enabled)
-                            .on_input(Msg::ProxyHost)
-                            .view(t)
-                    ),
-                ]
-                .spacing(theme::space::S3),
-                row![
-                    labeled(
-                        t,
-                        "username",
-                        TextInput::new(&st.proxy_user)
-                            .hint("optional")
-                            .enabled(enabled)
-                            .on_input(Msg::ProxyUser)
-                            .view(t)
-                    ),
-                    labeled(
-                        t,
-                        "password",
-                        TextInput::new(&st.proxy_pass)
-                            .hint("optional")
-                            .secure(true)
-                            .enabled(enabled)
-                            .on_input(Msg::ProxyPass)
-                            .view(t)
-                    ),
-                ]
-                .spacing(theme::space::S3),
-            ]
-            .spacing(theme::space::S3)
-            .into()
-        }
+        AdvTab::Proxy => conn_form::proxy_section(
+            t,
+            &st.proxy,
+            ctx(st.stored_proxy_secret),
+            conn_form::ProxyMsgs {
+                mode: Msg::ProxyModeSel,
+                host: Msg::ProxyHost,
+                port: Msg::ProxyPort,
+                auth_enabled: Msg::ProxyAuth,
+                username: Msg::ProxyUser,
+                password: Msg::ProxyPass,
+                password_clear: Msg::ProxyPassClear,
+                remote_dns: Msg::RemoteDns,
+            },
+        ),
+        AdvTab::Auth => conn_form::auth_section(
+            t,
+            &st.auth,
+            ctx(st.stored_auth_secret),
+            conn_form::AuthMsgs {
+                scheme: Msg::AuthSchemeSel,
+                username: Msg::AuthUser,
+                password: Msg::AuthPass,
+                token: Msg::AuthToken,
+                secret_clear: Msg::AuthSecretClear,
+            },
+        ),
         AdvTab::Headers => {
-            let mut col = column![].spacing(theme::space::S3);
+            let mut rows = column![
+                text("Sent with every request for this download.")
+                    .font(theme::BODY)
+                    .size(11.0)
+                    .color(t.fg_3),
+            ]
+            .spacing(theme::space::S2);
             for (i, (name, value)) in st.headers.iter().enumerate() {
-                col = col.push(
+                rows = rows.push(
                     row![
                         TextInput::new(name)
                             .hint("Name")
@@ -1573,7 +1599,7 @@ fn advanced_section(st: &AddState) -> Element<'_, Msg> {
                     .align_y(Alignment::Center),
                 );
             }
-            col = col.push(
+            rows = rows.push(
                 Btn::new("Add header")
                     .ghost()
                     .icon("plus")
@@ -1582,38 +1608,42 @@ fn advanced_section(st: &AddState) -> Element<'_, Msg> {
                     .on_press(Msg::HeaderAdd)
                     .view(t),
             );
-            col.into()
+            labeled_section(
+                t,
+                "custom request headers",
+                container(rows).padding([10.0, theme::space::S3]).into(),
+            )
         }
-        AdvTab::Auth => row![
-            labeled(
-                t,
-                "username",
-                TextInput::new(&st.auth_user)
-                    .on_input(Msg::AuthUser)
-                    .view(t)
-            ),
-            labeled(
-                t,
-                "password",
-                TextInput::new(&st.auth_pass)
-                    .secure(true)
-                    .on_input(Msg::AuthPass)
-                    .view(t)
-            ),
-        ]
-        .spacing(theme::space::S3)
-        .into(),
-        AdvTab::UserAgent => labeled(
+        AdvTab::UserAgent => labeled_section(
             t,
-            "user agent",
-            TextInput::new(&st.user_agent)
-                .hint(crate::domain::default_user_agent())
-                .on_input(Msg::UserAgent)
-                .view(t),
+            "identification",
+            container(
+                column![
+                    text("User agent")
+                        .font(theme::BODY_MEDIUM)
+                        .size(12.0)
+                        .color(t.fg_1),
+                    text(
+                        "How this download introduces itself. Empty uses the one from \
+                          Settings → Network."
+                    )
+                    .font(theme::BODY)
+                    .size(11.0)
+                    .color(t.fg_3),
+                    TextInput::new(&st.user_agent)
+                        .hint(crate::domain::default_user_agent())
+                        .mono()
+                        .on_input(Msg::UserAgent)
+                        .view(t),
+                ]
+                .spacing(6.0),
+            )
+            .padding([10.0, theme::space::S3])
+            .into(),
         ),
         AdvTab::Cookies => {
             let t3 = *t;
-            text_editor::TextEditor::new(&st.cookies)
+            let editor = text_editor::TextEditor::new(&st.cookies)
                 .placeholder("session_id=…; csrf=…")
                 .font(theme::MONO)
                 .size(12.0)
@@ -1635,10 +1665,39 @@ fn advanced_section(st: &AddState) -> Element<'_, Msg> {
                     placeholder: t3.fg_4,
                     value: t3.fg_1,
                     selection: t3.selection_bg(),
-                })
-                .into()
+                });
+            labeled_section(
+                t,
+                "cookies",
+                container(
+                    column![
+                        text("Cookie store")
+                            .font(theme::BODY_MEDIUM)
+                            .size(12.0)
+                            .color(t.fg_1),
+                        text(
+                            "A raw \"name=value; name2=value2\" string, sent as the Cookie \
+                              header."
+                        )
+                        .font(theme::BODY)
+                        .size(11.0)
+                        .color(t.fg_3),
+                        editor,
+                    ]
+                    .spacing(6.0),
+                )
+                .padding([10.0, theme::space::S3])
+                .into(),
+            )
         }
     };
+
+    // The pane keeps one height whatever tab is showing and whatever
+    // that tab has unfolded, and scrolls when its content is taller.
+    // The alternative — sizing the window to the tallest possible
+    // tab — makes a dialog that is mostly empty space, and resizing it
+    // per tab moves the footer buttons under the pointer.
+    let tab_body = crate::gui::widget::vscroll(tab_body).height(Length::Fixed(ADV_BODY_H));
 
     container(
         column![

@@ -13,7 +13,9 @@ pub mod settings;
 pub mod user_agent;
 pub mod watch_limit;
 
-pub use advanced::{Advanced, AuthAdv, AuthScheme, CustomHeader, ProxyAdv, ProxyMode};
+pub use advanced::{
+    Advanced, AuthAdv, AuthScheme, Creds, CustomHeader, FORCE_DIRECT_HONOURED, ProxyAdv, ProxyMode,
+};
 pub use capture::CaptureRequest;
 pub use category::{Category, classify};
 pub use checksum::{Algo, Checksum, CsSource, CsStatus};

@@ -11,15 +11,18 @@ use iced::widget::{column, container, row, text, text_editor};
 use iced::{Alignment, Element, Length, Subscription, Task};
 
 use crate::domain::checksum::{Algo, CsSource, CsStatus};
-use crate::domain::{AuthScheme, Checksum, JobId, Phase, ProxyMode};
+use crate::domain::{Checksum, JobId, Phase};
 use crate::gui::chrome::{self, WindowControl, titlebar};
 use crate::gui::format::{format_bytes_2, format_int_grouped};
 use crate::gui::ipc::DaemonSignal;
 use crate::gui::shot::Shot;
 use crate::gui::theme::{self, Tokens};
+use crate::gui::widget::conn_form::{
+    self, AUTH_SCHEME_VALUES, AuthForm, PROXY_MODE_VALUES, ProxyForm,
+};
 use crate::gui::widget::{
-    Btn, BtnSize, TabBtn, TextInput, checkbox, combo, eyebrow, hairline, pill_progress, set_row,
-    toggle,
+    Btn, BtnSize, TabBtn, TextInput, checkbox, combo, hairline, labeled_section, pill_progress,
+    set_row, toggle, toggle_row,
 };
 use crate::gui::windows::add::footer;
 // The same bounds and presets the download window's Speed tab uses:
@@ -30,38 +33,6 @@ use crate::gui::windows::download::{
 use crate::gui::{color, icons};
 use crate::ipc_local::Client;
 use crate::ipc_local::protocol::{Event, JobEntryView};
-
-// --- Connection tab (#6, honesty matrix) ------------------------------
-/// Proxy-mode segmented options. Values and labels stay index-aligned.
-/// odl can express: Inherit (no per-job override; a legacy `Job.proxy`
-/// URL still applies under Inherit), System (clear the global proxy so
-/// reqwest falls back to proxy environment variables) and explicit
-/// HTTP / HTTPS / SOCKS5. "None (force direct)" is inexpressible in
-/// odl and deliberately absent; a legacy persisted `ProxyMode::None`
-/// is displayed as Inherit (guardian F6 — the runner logs the WARN).
-const PROXY_MODE_VALUES: &[ProxyMode] = &[
-    ProxyMode::Inherit,
-    ProxyMode::System,
-    ProxyMode::Http,
-    ProxyMode::Https,
-    ProxyMode::Socks5,
-];
-const PROXY_MODE_LABELS: &[(&str, Option<&str>)] = &[
-    ("Inherit", None),
-    ("System", None),
-    ("HTTP", None),
-    ("HTTPS", None),
-    ("SOCKS5", None),
-];
-/// Site-auth schemes. Digest is deliberately absent (no odl/reqwest
-/// implementation); a legacy persisted `Digest` is displayed as None
-/// (guardian F6).
-const AUTH_SCHEME_VALUES: &[AuthScheme] =
-    &[AuthScheme::None, AuthScheme::Basic, AuthScheme::Bearer];
-const AUTH_SCHEME_LABELS: &[(&str, Option<&str>)] =
-    &[("None", None), ("HTTP Basic", None), ("Bearer token", None)];
-/// Width of the proxy port field (design `.prop-proxy-port` ≈ 90px).
-const PORT_INPUT_W: f32 = 90.0;
 
 // --- Checksums tab (#5) -----------------------------------------------
 /// Char-count meter under the hash input (design `.pac-meter` = 4px).
@@ -197,24 +168,11 @@ pub struct State {
     // Connection (#6). Secret inputs are scratch buffers: they start
     // empty, never mirror stored ciphertext, and an empty value on
     // Apply means "keep the stored secret" (guardian F1).
-    proxy_mode: ProxyMode,
-    proxy_host: String,
-    proxy_port: String,
-    proxy_auth: bool,
-    proxy_user: String,
-    proxy_pass: String,
-    /// The user edited the proxy password field this session. Empty +
-    /// edited means "delete the stored secret"; empty + untouched keeps
-    /// it (the ciphertext never round-trips into the form).
-    proxy_pass_edited: bool,
-    remote_dns: bool,
-    auth_scheme: AuthScheme,
-    auth_user: String,
-    auth_pass: String,
-    auth_token: String,
-    /// Same rule as `proxy_pass_edited`, for whichever secret field the
-    /// active scheme uses.
-    auth_secret_edited: bool,
+    /// Shared with the Add dialog's Advanced pane, controls and all —
+    /// two windows editing one download's proxy cannot be allowed to
+    /// mean different things by it.
+    proxy: ProxyForm,
+    auth: AuthForm,
     cookies_enabled: bool,
     cookies: text_editor::Content,
     /// Encrypted cookies exist on the job (shown as "(stored)" — the
@@ -287,31 +245,11 @@ impl State {
         format!("{name} - Properties")
     }
 
-    /// Mode that synthesizes its own `scheme://host:port` and therefore
-    /// needs both fields (`Inherit` / `System` carry no address).
-    fn proxy_explicit(&self) -> bool {
-        matches!(
-            self.proxy_mode,
-            ProxyMode::Http | ProxyMode::Https | ProxyMode::Socks5
-        )
-    }
-
-    /// Explicit mode with no host. `synth_proxy_url` rejects this, but
-    /// only at job start — catch it while the user is still looking at
-    /// the field.
-    fn host_invalid(&self) -> bool {
-        self.proxy_explicit() && self.proxy_host.trim().is_empty()
-    }
-
-    /// Explicit mode without a usable port (inline validation, design
-    /// §3.5: 1–65535). Empty counts: the data layer has no default to
-    /// fall back on. Blocks Apply.
-    fn port_invalid(&self) -> bool {
-        self.proxy_explicit() && !self.proxy_port.trim().parse::<u16>().is_ok_and(|p| p >= 1)
-    }
-
+    /// An explicit proxy mode missing the host or port it needs. The
+    /// job would only fail at start; this blocks Apply while the user
+    /// is still looking at the field.
     fn proxy_invalid(&self) -> bool {
-        self.host_invalid() || self.port_invalid()
+        self.proxy.invalid()
     }
 }
 
@@ -368,28 +306,13 @@ fn pending_advanced(st: &State) -> crate::domain::Advanced {
     // Basic username onto legacy `Job.auth_user` (F2). Empty
     // secret inputs mean "keep the stored secret".
     let mut adv = st.adv.clone();
-    adv.proxy.mode = st.proxy_mode;
-    adv.proxy.host = st.proxy_host.trim().to_owned();
-    adv.proxy.port = st.proxy_port.trim().to_owned();
-    adv.proxy.auth_enabled = st.proxy_auth;
-    adv.proxy.username = st.proxy_user.trim().to_owned();
-    adv.proxy.password = st.proxy_pass.clone();
-    // Emptying a field that held a stored secret is the only way
-    // to delete it; leaving it untouched still means "keep".
-    adv.proxy.clear_password = st.proxy_pass_edited && st.proxy_pass.is_empty();
-    adv.proxy.remote_dns = st.remote_dns;
-    // Emptying a secret field that held a stored value is the
-    // only way to delete it; untouched still means "keep".
-    adv.auth.clear_secret = st.auth_secret_edited
-        && match st.auth_scheme {
-            AuthScheme::Bearer => st.auth_token.is_empty(),
-            _ => st.auth_pass.is_empty(),
-        };
+    // Both halves come out of the shared form, including the
+    // "emptied on purpose" flags that mean "delete the stored
+    // secret" — the same rules the Add dialog fills in.
+    let creds = crate::gui::widget::conn_form::creds(&st.proxy, &st.auth);
+    adv.proxy = creds.proxy;
+    adv.auth = creds.auth;
     adv.clear_cookie_jar = st.cookies_edited && st.cookies.text().trim().is_empty();
-    adv.auth.scheme = st.auth_scheme;
-    adv.auth.username = st.auth_user.trim().to_owned();
-    adv.auth.password = st.auth_pass.clone();
-    adv.auth.token = st.auth_token.clone();
     adv.cookies_enabled = st.cookies_enabled;
     adv.cookie_jar = st.cookies.text();
     adv
@@ -625,35 +548,12 @@ fn hydrate(st: &mut State) {
         .join(job.filename.as_deref().unwrap_or(""))
         .display()
         .to_string();
-    let p = &job.advanced.proxy;
-    // Display-side legacy coercions (guardian F6); the runner logs the
-    // WARN when it applies the same coercion for real.
-    st.proxy_mode = match p.mode {
-        ProxyMode::None => ProxyMode::Inherit,
-        m => m,
-    };
-    st.proxy_host = p.host.clone();
-    st.proxy_port = p.port.clone();
-    st.proxy_auth = p.auth_enabled;
-    st.proxy_user = p.username.clone();
-    st.proxy_pass.clear();
-    st.proxy_pass_edited = false;
-    st.remote_dns = p.remote_dns;
-    st.auth_scheme = match job.advanced.auth.scheme {
-        AuthScheme::Digest => AuthScheme::None,
-        // Legacy Basic jobs (Add-dialog path) carry credentials on
-        // `auth_user`/`enc_auth_password` with the advanced scheme
-        // still at its None default — the runner sends Basic for
-        // them, so the tab must say Basic (guardian F4 coherence).
-        AuthScheme::None if job.auth_user.is_some() => AuthScheme::Basic,
-        s => s,
-    };
-    // Basic username lives on the legacy `Job.auth_user` field — the
-    // single source of truth the runner reads (guardian F2).
-    st.auth_user = job.auth_user.clone().unwrap_or_default();
-    st.auth_pass.clear();
-    st.auth_token.clear();
-    st.auth_secret_edited = false;
+    // Both forms, including the display-side coercions for modes and
+    // schemes this build cannot carry out (guardian F6) and for the
+    // legacy Basic shape. Secrets stay out: the ciphertext never
+    // round-trips into an input.
+    st.proxy = ProxyForm::from_adv(&job.advanced.proxy);
+    st.auth = AuthForm::from_adv(&job.advanced.auth, job.auth_user.as_deref());
     // Identification is lifted out of the bag and shown in its own
     // fields. A hand-written `Referer` header is folded into the
     // referrer field — it is the same thing said twice otherwise, and
@@ -733,19 +633,10 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 save_path: String::new(),
                 ua: String::new(),
                 referer: String::new(),
-                proxy_mode: ProxyMode::Inherit,
-                proxy_host: String::new(),
-                proxy_port: String::new(),
-                proxy_auth: false,
-                proxy_user: String::new(),
-                proxy_pass: String::new(),
-                proxy_pass_edited: false,
-                remote_dns: true,
-                auth_scheme: AuthScheme::None,
-                auth_user: String::new(),
-                auth_pass: String::new(),
-                auth_token: String::new(),
-                auth_secret_edited: false,
+                // Placeholders: `hydrate` fills both in from the job
+                // a few lines below.
+                proxy: ProxyForm::default(),
+                auth: AuthForm::default(),
                 cookies_enabled: false,
                 cookies: text_editor::Content::new(),
                 has_stored_cookies: false,
@@ -888,76 +779,76 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
         Msg::CopyUrl => confirm_copy(st, CopyTarget::Url, st.url.clone()),
         Msg::ProxyModeSel(i) => {
             if let Some(mode) = PROXY_MODE_VALUES.get(i) {
-                st.proxy_mode = *mode;
+                st.proxy.mode = *mode;
                 mark(st);
             }
             Task::none()
         }
         Msg::ProxyHost(v) => {
-            st.proxy_host = v;
+            st.proxy.host = v;
             mark(st);
             Task::none()
         }
         Msg::ProxyPort(v) => {
-            st.proxy_port = v;
+            st.proxy.port = v;
             mark(st);
             Task::none()
         }
         Msg::ProxyAuth(v) => {
-            st.proxy_auth = v;
+            st.proxy.auth_enabled = v;
             mark(st);
             Task::none()
         }
         Msg::ProxyUser(v) => {
-            st.proxy_user = v;
+            st.proxy.username = v;
             mark(st);
             Task::none()
         }
         Msg::ProxyPass(v) => {
-            st.proxy_pass = v;
-            st.proxy_pass_edited = true;
+            st.proxy.password = v;
+            st.proxy.password_edited = true;
             mark(st);
             Task::none()
         }
         Msg::RemoteDns(v) => {
-            st.remote_dns = v;
+            st.proxy.remote_dns = v;
             mark(st);
             Task::none()
         }
         Msg::AuthSchemeSel(i) => {
             if let Some(scheme) = AUTH_SCHEME_VALUES.get(i) {
-                st.auth_scheme = *scheme;
+                st.auth.scheme = *scheme;
                 mark(st);
             }
             Task::none()
         }
         Msg::AuthUser(v) => {
-            st.auth_user = v;
+            st.auth.username = v;
             mark(st);
             Task::none()
         }
         Msg::AuthPass(v) => {
-            st.auth_pass = v;
-            st.auth_secret_edited = true;
+            st.auth.password = v;
+            st.auth.secret_edited = true;
             mark(st);
             Task::none()
         }
         Msg::AuthToken(v) => {
-            st.auth_token = v;
-            st.auth_secret_edited = true;
+            st.auth.token = v;
+            st.auth.secret_edited = true;
             mark(st);
             Task::none()
         }
         Msg::AuthSecretClear => {
-            st.auth_pass.clear();
-            st.auth_token.clear();
-            st.auth_secret_edited = true;
+            st.auth.password.clear();
+            st.auth.token.clear();
+            st.auth.secret_edited = true;
             mark(st);
             Task::none()
         }
         Msg::ProxyPassClear => {
-            st.proxy_pass.clear();
-            st.proxy_pass_edited = true;
+            st.proxy.password.clear();
+            st.proxy.password_edited = true;
             mark(st);
             Task::none()
         }
@@ -1238,15 +1129,9 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
 
             let adv = pending_advanced(st);
             // Header/cookie edits need `UpdateJobLocation` — the only
-            // IPC that persists `Job.headers` + `enc_cookies`. It
-            // re-encrypts secrets from its payload, so it carries any
-            // freshly-typed ones too. Pure URL/save edits take the
-            // narrower `SetJobSource`, which cannot disturb stored
-            // secrets or headers.
-            let opt = |s: &str| {
-                let s = s.trim();
-                (!s.is_empty()).then(|| s.to_owned())
-            };
+            // IPC that persists `Job.headers` + `enc_cookies`. Pure
+            // URL/save edits take the narrower `SetJobSource`, which
+            // cannot disturb stored secrets or headers.
             let job = &st.entry.job;
             let edit = st.dirty_overlay.then(|| {
                 // Nameless rows are still being typed; case-duplicates
@@ -1259,16 +1144,11 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                     filename: filename.clone(),
                     referrer: referrer.clone(),
                     max_connections: job.max_connections,
-                    // Legacy per-job proxy URL: preserved as-is — the
-                    // Connection tab edits `advanced.proxy` instead.
-                    proxy: job.proxy.clone(),
-                    auth_user: job.auth_user.clone(),
-                    auth_password: opt(match st.auth_scheme {
-                        AuthScheme::Basic => &st.auth_pass,
-                        AuthScheme::Bearer => &st.auth_token,
-                        _ => "",
-                    }),
-                    proxy_password: opt(&st.proxy_pass),
+                    // Credentials are not this Apply's business: the
+                    // Connection tab writes them through
+                    // `SetJobAdvanced` a few lines down, and sending
+                    // them twice would be two chances to disagree.
+                    creds: None,
                     headers,
                     cookies: st.cookies_enabled.then(|| st.cookies.text()),
                 }
@@ -1315,8 +1195,8 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             st.dirty_overlay = false;
             // The daemon consumed the clears; a later Apply must not
             // re-send them off stale flags.
-            st.proxy_pass_edited = false;
-            st.auth_secret_edited = false;
+            st.proxy.password_edited = false;
+            st.auth.secret_edited = false;
             st.cookies_edited = false;
             Task::none()
         }
@@ -1494,29 +1374,6 @@ fn tabbtn_counted<'a>(
     b.view(t)
 }
 
-fn section<'a>(t: &Tokens, label: &str, body: Element<'a, Msg>) -> Element<'a, Msg> {
-    let t2 = *t;
-    column![
-        container(eyebrow(t, label)).padding(iced::Padding {
-            left: 2.0,
-            ..Default::default()
-        }),
-        container(body)
-            .width(Length::Fill)
-            .style(move |_| container::Style {
-                background: Some(t2.bg_surface.into()),
-                border: iced::Border {
-                    color: t2.border_subtle,
-                    width: 1.0,
-                    radius: theme::surface::RADIUS.into(),
-                },
-                ..Default::default()
-            }),
-    ]
-    .spacing(theme::space::S1 + 2.0)
-    .into()
-}
-
 /// Put `text` on the clipboard and let the button that asked say so.
 fn confirm_copy(st: &mut State, what: CopyTarget, text: String) -> Task<Msg> {
     st.copied = Some(what);
@@ -1648,7 +1505,7 @@ fn transfer_section(st: &State) -> Element<'_, Msg> {
     for r in rows {
         body = body.push(r);
     }
-    section(t, "transfer", body.into())
+    labeled_section(t, "transfer", body.into())
 }
 
 /// A failed row, laid out the way the download window's file-integrity
@@ -2079,7 +1936,7 @@ fn general_tab(st: &State) -> Element<'_, Msg> {
     };
     let editable = !st.locked();
 
-    let file_section = section(
+    let file_section = labeled_section(
         t,
         "file",
         column![
@@ -2135,7 +1992,7 @@ fn general_tab(st: &State) -> Element<'_, Msg> {
         .into(),
     );
 
-    let source_section = section(
+    let source_section = labeled_section(
         t,
         "source",
         column![
@@ -2190,7 +2047,7 @@ fn general_tab(st: &State) -> Element<'_, Msg> {
     // question is "did this go cleanly", not which of retry, reconnect
     // or resume fired.
     let n = job.interruptions;
-    let history = section(
+    let history = labeled_section(
         t,
         "history",
         container(
@@ -2399,7 +2256,7 @@ fn checksums_tab(st: &State) -> Element<'_, Msg> {
                 list = list.push(row_sep(t));
             }
         }
-        col = col.push(section(t, "checksums", list.into()));
+        col = col.push(labeled_section(t, "checksums", list.into()));
     }
 
     if let Some(e) = &st.cs_verify_error {
@@ -2813,382 +2670,46 @@ fn add_checksum_form(st: &State) -> Element<'_, Msg> {
     .into()
 }
 
-fn toggle_row<'a>(
-    t: &Tokens,
-    title: &'a str,
-    desc: &'a str,
-    on: bool,
-    enabled: bool,
-    msg: fn(bool) -> Msg,
-) -> Element<'a, Msg> {
-    container(
-        row![
-            column![
-                text(title)
-                    .font(theme::BODY_MEDIUM)
-                    .size(12.0)
-                    .color(t.fg_1),
-                text(desc).font(theme::BODY).size(11.0).color(t.fg_3),
-            ]
-            .spacing(2.0)
-            .width(Length::Fill),
-            toggle(t, on, enabled, msg),
-        ]
-        .spacing(theme::space::S2)
-        .align_y(Alignment::Center),
-    )
-    .padding([10.0, theme::space::S3])
-    .into()
-}
-
-/// Footer for a secret input whose stored value never round-trips into
-/// the form. Without it "delete the stored secret" would be an
-/// invisible gesture — type into an already-empty field, then erase it
-/// — so the state and the way out are both spelled out.
-fn stored_secret_row<'a>(
-    t: &Tokens,
-    editable: bool,
-    pending_clear: bool,
-    clear: Msg,
-) -> Element<'a, Msg> {
-    if pending_clear {
-        return row![
-            icons::icon("triangle-alert", 11.0, t.status_danger),
-            text("Stored secret will be removed on Apply.")
-                .font(theme::BODY)
-                .size(11.0)
-                .color(t.status_danger),
-        ]
-        .spacing(4.0)
-        .align_y(Alignment::Center)
-        .into();
-    }
-    row![
-        icons::icon("lock", 11.0, t.status_success),
-        text("Stored (encrypted). Leave blank to keep it.")
-            .font(theme::BODY)
-            .size(11.0)
-            .color(t.fg_3),
-        iced::widget::Space::new().width(Length::Fill),
-        Btn::new("Remove")
-            .toolbar()
-            .icon("trash-2")
-            .size(BtnSize::Sm)
-            .enabled(editable)
-            .on_press(clear)
-            .view(t),
-    ]
-    .spacing(4.0)
-    .align_y(Alignment::Center)
-    .into()
-}
-
 fn connection_tab(st: &State) -> Element<'_, Msg> {
     let t = &st.tokens;
-    let editable = !st.locked();
-    let explicit = matches!(
-        st.proxy_mode,
-        ProxyMode::Http | ProxyMode::Https | ProxyMode::Socks5
-    );
-
-    // --- Proxy section (feature #6 honesty matrix) --------------------
-    let mode_idx = PROXY_MODE_VALUES
-        .iter()
-        .position(|m| *m == st.proxy_mode)
-        .unwrap_or(0);
-    let mode_row = column![
-        text("Use proxy")
-            .font(theme::BODY_MEDIUM)
-            .size(12.0)
-            .color(t.fg_1),
-        text(
-            "Route this download's traffic through a proxy server. Overrides the \
-             global setting in Settings → Network."
-        )
-        .font(theme::BODY)
-        .size(11.0)
-        .color(t.fg_3),
-        if editable {
-            crate::gui::widget::segmented(
-                t,
-                PROXY_MODE_LABELS,
-                mode_idx,
-                BtnSize::Sm,
-                Msg::ProxyModeSel,
-            )
-        } else {
-            // Locked: render the selection read-only.
-            text(PROXY_MODE_LABELS[mode_idx].0)
-                .font(theme::BODY_MEDIUM)
-                .size(12.0)
-                .color(t.fg_2)
-                .into()
-        },
-    ]
-    .spacing(6.0);
-
-    // Honest per-mode explanation (guardian System-mode gate: odl CAN
-    // express "clear the global proxy" via `builder.proxy(None)`).
-    let mode_hint: Option<String> = match st.proxy_mode {
-        ProxyMode::Inherit => {
-            let mut hint = "Inherit (global / environment): uses the proxy from \
-                            Settings → Network, or your proxy environment variables."
-                .to_owned();
-            if let Some(legacy) = &st.entry.job.proxy {
-                // Legacy explicit Job.proxy URL wins under Inherit
-                // (mapping.rs precedence) — surface it, don't hide it.
-                hint.push_str(&format!("\nThis job carries a proxy URL: {legacy}"));
-            }
-            Some(hint)
-        }
-        ProxyMode::System => Some(
-            "System (environment variables): ignores the global oxdm proxy for this \
-             job; the standard proxy environment variables still apply."
-                .to_owned(),
-        ),
-        _ => None,
+    let job = &st.entry.job;
+    let ctx = |stored_secret| conn_form::FormCtx {
+        editable: !st.locked(),
+        stored_secret,
+        // The legacy per-job proxy URL still wins under Inherit
+        // (mapping.rs precedence) — the form says so rather than
+        // letting the job quietly use a proxy the tab denies.
+        legacy_url: job.proxy.as_deref(),
     };
-
-    let mut proxy_body = column![container(mode_row).padding([10.0, theme::space::S3])];
-    if let Some(hint) = mode_hint {
-        proxy_body = proxy_body.push(
-            container(
-                text(hint)
-                    .font(theme::BODY)
-                    .size(11.0)
-                    .color(t.fg_3)
-                    .line_height(iced::widget::text::LineHeight::Relative(1.5)),
-            )
-            .padding(iced::Padding {
-                left: theme::space::S3,
-                right: theme::space::S3,
-                bottom: 10.0,
-                ..Default::default()
-            }),
-        );
-    }
-    if explicit {
-        let socks5 = st.proxy_mode == ProxyMode::Socks5;
-        let mut server = column![
-            text("Server")
-                .font(theme::BODY_MEDIUM)
-                .size(12.0)
-                .color(t.fg_1),
-            row![
-                TextInput::new(&st.proxy_host)
-                    .hint("proxy.example.com")
-                    .mono()
-                    .enabled(editable)
-                    .on_input(Msg::ProxyHost)
-                    .view(t),
-                text(":").font(theme::MONO).size(12.0).color(t.fg_3),
-                TextInput::new(&st.proxy_port)
-                    .hint(if socks5 { "1080" } else { "8080" })
-                    .mono()
-                    .width(Length::Fixed(PORT_INPUT_W))
-                    .enabled(editable)
-                    .on_input(Msg::ProxyPort)
-                    .view(t),
-            ]
-            .spacing(6.0)
-            .align_y(Alignment::Center),
-        ]
-        .spacing(6.0);
-        // Inline validation (design §3.5: 1–65535). Both fields are
-        // required — the data layer has no fallback for either, so an
-        // explicit mode with a blank one only fails at job start.
-        let problem = if st.host_invalid() {
-            Some("Host is required for an explicit proxy.")
-        } else if st.proxy_port.trim().is_empty() {
-            Some("Port is required for an explicit proxy.")
-        } else if st.port_invalid() {
-            Some("Port must be between 1 and 65535.")
-        } else {
-            None
-        };
-        if let Some(problem) = problem {
-            server = server.push(
-                row![
-                    icons::icon("triangle-alert", 10.0, t.status_danger),
-                    text(problem)
-                        .font(theme::BODY_MEDIUM)
-                        .size(10.5)
-                        .color(t.status_danger),
-                ]
-                .spacing(4.0)
-                .align_y(Alignment::Center),
-            );
-        }
-        proxy_body = proxy_body
-            .push(row_sep(t))
-            .push(container(server).padding([10.0, theme::space::S3]))
-            .push(row_sep(t))
-            .push(toggle_row(
-                t,
-                "Proxy authentication",
-                "Username and password sent to the proxy itself (not the destination).",
-                st.proxy_auth,
-                editable,
-                Msg::ProxyAuth,
-            ));
-        if st.proxy_auth {
-            let mut creds = column![
-                row![
-                    TextInput::new(&st.proxy_user)
-                        .hint("username")
-                        .enabled(editable)
-                        .on_input(Msg::ProxyUser)
-                        .view(t),
-                    // Stored secret never round-trips into the form;
-                    // empty input on Apply keeps it (guardian F1).
-                    TextInput::new(&st.proxy_pass)
-                        .hint(if st.entry.job.enc_proxy_password.is_some() {
-                            "(unchanged)"
-                        } else {
-                            "password"
-                        })
-                        .secure(true)
-                        .enabled(editable)
-                        .on_input(Msg::ProxyPass)
-                        .view(t),
-                ]
-                .spacing(theme::space::S2)
-            ]
-            .spacing(6.0);
-            if st.entry.job.enc_proxy_password.is_some() {
-                creds = creds.push(stored_secret_row(
-                    t,
-                    editable,
-                    st.proxy_pass_edited && st.proxy_pass.is_empty(),
-                    Msg::ProxyPassClear,
-                ));
-            }
-            proxy_body = proxy_body.push(container(creds).padding([10.0, theme::space::S3]));
-        }
-        if socks5 {
-            proxy_body = proxy_body.push(row_sep(t)).push(toggle_row(
-                t,
-                "Resolve DNS through proxy",
-                "Send hostname lookups through the SOCKS5 server. Hides DNS queries \
-                 from your local resolver.",
-                st.remote_dns,
-                editable,
-                Msg::RemoteDns,
-            ));
-        }
-    }
-    let proxy = section(t, "proxy", proxy_body.into());
-
-    // --- Site authentication (None / Basic / Bearer — no Digest) ------
-    let scheme_idx = AUTH_SCHEME_VALUES
-        .iter()
-        .position(|s| *s == st.auth_scheme)
-        .unwrap_or(0);
-    let stored_secret = st.entry.job.enc_auth_password.is_some();
-    let mut auth_body = column![
-        container(
-            column![
-                text("Scheme")
-                    .font(theme::BODY_MEDIUM)
-                    .size(12.0)
-                    .color(t.fg_1),
-                text("Sent to the destination server, not the proxy.")
-                    .font(theme::BODY)
-                    .size(11.0)
-                    .color(t.fg_3),
-                if editable {
-                    crate::gui::widget::segmented(
-                        t,
-                        AUTH_SCHEME_LABELS,
-                        scheme_idx,
-                        BtnSize::Sm,
-                        Msg::AuthSchemeSel,
-                    )
-                } else {
-                    text(AUTH_SCHEME_LABELS[scheme_idx].0)
-                        .font(theme::BODY_MEDIUM)
-                        .size(12.0)
-                        .color(t.fg_2)
-                        .into()
-                },
-            ]
-            .spacing(6.0)
-        )
-        .padding([10.0, theme::space::S3]),
-    ];
-    match st.auth_scheme {
-        AuthScheme::Basic => {
-            let mut creds = column![
-                row![
-                    TextInput::new(&st.auth_user)
-                        .hint("username")
-                        .enabled(editable)
-                        .on_input(Msg::AuthUser)
-                        .view(t),
-                    TextInput::new(&st.auth_pass)
-                        .hint(if stored_secret {
-                            "(unchanged)"
-                        } else {
-                            "password"
-                        })
-                        .secure(true)
-                        .enabled(editable)
-                        .on_input(Msg::AuthPass)
-                        .view(t),
-                ]
-                .spacing(theme::space::S2)
-            ]
-            .spacing(6.0);
-            if stored_secret {
-                creds = creds.push(stored_secret_row(
-                    t,
-                    editable,
-                    st.auth_secret_edited && st.auth_pass.is_empty(),
-                    Msg::AuthSecretClear,
-                ));
-            }
-            auth_body = auth_body
-                .push(row_sep(t))
-                .push(container(creds).padding([10.0, theme::space::S3]));
-        }
-        AuthScheme::Bearer => {
-            let mut field = column![
-                text("Token")
-                    .font(theme::BODY_MEDIUM)
-                    .size(12.0)
-                    .color(t.fg_1),
-                TextInput::new(&st.auth_token)
-                    .hint(if stored_secret {
-                        "(unchanged)"
-                    } else {
-                        "eyJhbGciOi…"
-                    })
-                    .mono()
-                    .secure(true)
-                    .enabled(editable)
-                    .on_input(Msg::AuthToken)
-                    .view(t),
-            ]
-            .spacing(6.0);
-            if stored_secret {
-                field = field.push(stored_secret_row(
-                    t,
-                    editable,
-                    st.auth_secret_edited && st.auth_token.is_empty(),
-                    Msg::AuthSecretClear,
-                ));
-            }
-            auth_body = auth_body
-                .push(row_sep(t))
-                .push(container(field).padding([10.0, theme::space::S3]));
-        }
-        _ => {}
-    }
-
     column![
         transfer_section(st),
-        proxy,
-        section(t, "site authentication", auth_body.into())
+        conn_form::proxy_section(
+            t,
+            &st.proxy,
+            ctx(job.enc_proxy_password.is_some()),
+            conn_form::ProxyMsgs {
+                mode: Msg::ProxyModeSel,
+                host: Msg::ProxyHost,
+                port: Msg::ProxyPort,
+                auth_enabled: Msg::ProxyAuth,
+                username: Msg::ProxyUser,
+                password: Msg::ProxyPass,
+                password_clear: Msg::ProxyPassClear,
+                remote_dns: Msg::RemoteDns,
+            },
+        ),
+        conn_form::auth_section(
+            t,
+            &st.auth,
+            ctx(job.enc_auth_password.is_some()),
+            conn_form::AuthMsgs {
+                scheme: Msg::AuthSchemeSel,
+                username: Msg::AuthUser,
+                password: Msg::AuthPass,
+                token: Msg::AuthToken,
+                secret_clear: Msg::AuthSecretClear,
+            },
+        ),
     ]
     .spacing(theme::space::S3)
     .into()
@@ -3209,7 +2730,7 @@ fn cookies_tab(st: &State) -> Element<'_, Msg> {
     } else {
         format!("{parsed} cookie(s) parsed.")
     };
-    section(
+    labeled_section(
         t,
         "cookies",
         column![
@@ -3431,7 +2952,7 @@ fn headers_tab(st: &State) -> Element<'_, Msg> {
             .map(|h| (h.name, h.value, h.custom, h.masked)),
     );
     let will_send_section = column![
-        section(t, "request headers (will send)", will_send),
+        labeled_section(t, "request headers (will send)", will_send),
         hdr_note(
             t,
             "Merged from your global settings and this download's overrides: \
@@ -3480,7 +3001,7 @@ fn headers_tab(st: &State) -> Element<'_, Msg> {
                 )
             };
             column![
-                section(t, "captured response", body),
+                labeled_section(t, "captured response", body),
                 hdr_note(
                     t,
                     format!(
@@ -3491,7 +3012,7 @@ fn headers_tab(st: &State) -> Element<'_, Msg> {
                 ),
             ]
         }
-        None => column![section(
+        None => column![labeled_section(
             t,
             "captured response",
             container(
@@ -3576,8 +3097,8 @@ fn headers_tab(st: &State) -> Element<'_, Msg> {
     column![
         will_send_section,
         captured_section,
-        section(t, "identification", ident.into()),
-        section(t, "custom request headers", custom.into())
+        labeled_section(t, "identification", ident.into()),
+        labeled_section(t, "custom request headers", custom.into())
     ]
     .spacing(theme::space::S3)
     .into()

@@ -135,9 +135,11 @@ pub fn job_overlay_options(
 ///   falls back to its standard environment-variable pickup.
 /// - `Http` / `Https` / `Socks5`: synthesize
 ///   `scheme://[user[:pw]@]host:port` (socks5h when remote-DNS is on).
-/// - `None` (legacy persisted value): coerced to `Inherit` with a WARN
-///   — odl cannot disable reqwest's env-proxy pickup, so "force
-///   direct" is inexpressible and must never be silently faked (F6).
+/// - `None`: coerced to `Inherit` with a WARN while
+///   `FORCE_DIRECT_HONOURED` is false — odl cannot disable reqwest's
+///   env-proxy pickup, so "force direct" is inexpressible and must
+///   never be silently faked (F6). The dialog says the same thing off
+///   the same constant.
 fn apply_job_proxy(
     b: &mut DownloadOptionsBuilder,
     job: &Job,
@@ -145,18 +147,28 @@ fn apply_job_proxy(
 ) -> Result<(), String> {
     let adv = &job.advanced.proxy;
     let mode = match adv.mode {
-        ProxyMode::None => {
+        // The compile-time arm that replaces this one calls odl's
+        // no-proxy knob; until it exists, saying "direct" and routing
+        // through the environment's proxy anyway would be a lie about
+        // where the user's traffic went.
+        ProxyMode::None if !crate::domain::FORCE_DIRECT_HONOURED => {
             tracing::warn!(
                 job = %job.id,
-                "legacy ProxyMode::None cannot be honoured (odl/reqwest env-proxy \
-                 pickup cannot be disabled); treating as Inherit"
+                "ProxyMode::None cannot be honoured yet (odl exposes no way to disable \
+                 reqwest's env-proxy pickup); treating as Inherit"
             );
             ProxyMode::Inherit
         }
         m => m,
     };
     match mode {
-        ProxyMode::None => unreachable!("coerced above"),
+        // Unreachable while the constant is false (coerced above).
+        // Flipping it without wiring odl's knob lands here, and a job
+        // that refuses to start is the honest failure: the alternative
+        // is traffic going through a proxy the user asked to bypass.
+        ProxyMode::None => {
+            return Err("direct-connection proxy mode is not wired to the downloader".into());
+        }
         ProxyMode::Inherit => {
             if let Some(p) = job.proxy.clone() {
                 let merged = merge_proxy_password(&p, proxy_password)?;
@@ -689,6 +701,30 @@ mod tests {
         job.proxy = Some("http://legacy:9999".to_owned());
         let opts = job_overlay_options(&base, &job, None, None, None).unwrap();
         assert_eq!(opts.proxy(), Some("http://legacy:9999"));
+    }
+
+    /// "None" is saved and selectable, and until odl can switch off
+    /// reqwest's env-proxy pickup it behaves exactly as Inherit — the
+    /// one thing it must never do is silently look like a direct
+    /// connection while the traffic goes through a proxy.
+    #[test]
+    fn force_direct_falls_back_to_inherit_until_odl_can_do_it() {
+        let base = DownloadOptionsBuilder::default()
+            .proxy(Some("http://global:3128".to_owned()))
+            .build()
+            .unwrap();
+        let mut job = sample_job();
+        job.advanced.proxy.mode = ProxyMode::None;
+        let opts = job_overlay_options(&base, &job, None, None, None).unwrap();
+        if crate::domain::FORCE_DIRECT_HONOURED {
+            assert_eq!(opts.proxy(), None, "direct means no proxy at all");
+        } else {
+            assert_eq!(
+                opts.proxy(),
+                Some("http://global:3128"),
+                "coerced to Inherit, which is what the dialog says it does"
+            );
+        }
     }
 
     #[test]
