@@ -39,6 +39,12 @@ base64 = "0.23"
 aes-gcm = "0.11"
 reqwest = { version = "0.12", default-features = false, features = ["http2", "gzip", "brotli", "native-tls", "stream", "json"] }
 semver = "1"
+# One dependency for all three platforms: keyring 4's default `v1`
+# feature carries the macOS keychain, the Windows credential manager and
+# the freedesktop Secret Service, where 3 needed a per-target feature
+# each. The Linux store is zbus rather than libdbus, so nothing here
+# links a C D-Bus library any more.
+keyring = "4"
 sha2 = "0.11"
 sha1 = "0.11"
 md-5 = "0.11"
@@ -63,12 +69,10 @@ notify = { version = "8.2.0", default-features = false, features = ["macos_fseve
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ksni = "0.3.4"
-keyring = { version = "3", features = ["linux-native-sync-persistent"] }
 # Already in-tree via notify-rust; direct use: NetworkManager Metered probe.
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-keyring = { version = "3", features = ["apple-native"] }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 tray-icon = "0.24"
@@ -88,7 +92,6 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Power",
 ] }
 raw-window-handle = "0.6"
-keyring = { version = "3", features = ["windows-native"] }
 # WinRT, for the one probe Win32 cannot answer: whether the active
 # connection is metered (`NetworkInformation.GetConnectionCost`). The
 # lighter `windows-sys` above exposes no WinRT surface.

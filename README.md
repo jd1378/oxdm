@@ -20,10 +20,11 @@ Custom directory:
 curl -fsSL https://raw.githubusercontent.com/jd1378/oxdm/main/tools/install.sh | sh -s -- --dir /usr/local/bin
 ```
 
-The UI is rendered in software and links no toolkit: on Linux the only
-runtime libraries beyond libc are D-Bus and systemd's, both of which a
-desktop session already has. The tray and desktop notifications use
-D-Bus; without it oxdm still runs, minus those two.
+The UI is rendered in software and links no toolkit: on Linux the
+binary needs nothing beyond libc. The tray, notifications, keyring,
+and the network and power checks all speak D-Bus directly, so there is
+no library to install — and without a session bus oxdm still runs,
+minus those features.
 
 ### Windows
 
@@ -54,8 +55,10 @@ cd oxdm
 cargo build --release --bins
 ```
 
-No system dev libraries are needed beyond a C toolchain and D-Bus
-headers (`dbus-devel` on Fedora, `libdbus-1-dev` on Debian/Ubuntu).
+No system dev libraries are needed beyond a C toolchain. Everything
+that talks to the desktop (tray, notifications, keyring, network and
+power state) goes over D-Bus in pure Rust, so there is nothing to
+install for it.
 
 Outputs:
 
