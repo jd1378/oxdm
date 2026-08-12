@@ -120,4 +120,13 @@ swapping either does not touch the UI.
 
 ## License
 
-AGPL-3.0
+Copyright (C) 2026 jd1378
+
+GNU Affero General Public License v3.0. See [LICENSE](LICENSE).
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of version 3 of the GNU Affero General Public License as
+published by the Free Software Foundation. Later versions of that
+license do not apply. It is distributed WITHOUT ANY WARRANTY; without
+even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
+PURPOSE. See the GNU Affero General Public License for more details.
