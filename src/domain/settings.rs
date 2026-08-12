@@ -103,7 +103,14 @@ pub struct Settings {
     pub warn_watch_limit: bool,
     /// Pause running downloads while the connection is metered (cellular
     /// or a phone hotspot), and resume them when it is not.
-    #[serde(default = "yes_default")]
+    ///
+    /// Off by default, like its low-battery counterpart. Someone who
+    /// starts a download on a hotspot has usually decided to spend the
+    /// data, and stopping it for them — mid-file, with a reason that
+    /// only shows up if they go looking — is a decision oxdm does not
+    /// get to make on their behalf. It is worth having, but as a choice
+    /// rather than a surprise.
+    #[serde(default)]
     pub pause_on_metered: bool,
     /// Pause running downloads while the battery is low and discharging.
     #[serde(default)]
@@ -501,7 +508,7 @@ impl Default for Settings {
             remove_confirm_clean: true,
             forget_moved_files: false,
             warn_watch_limit: true,
-            pause_on_metered: true,
+            pause_on_metered: false,
             pause_on_low_battery: false,
             start_at_login: false,
             start_to_tray: false,
