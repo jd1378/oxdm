@@ -136,6 +136,8 @@ pub enum Msg {
     ReduceMotion(bool),
     CustomWindowChrome(bool),
     WorkDir(String),
+    BrowseWorkDir,
+    BrowsedWorkDir(Option<std::path::PathBuf>),
     StartAtLogin(bool),
     StartToTray(bool),
     // Downloads
@@ -801,6 +803,20 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
             }
             Task::none()
         }
+        Msg::BrowseWorkDir => Task::perform(
+            async {
+                rfd::AsyncFileDialog::new()
+                    .pick_folder()
+                    .await
+                    .map(|h| h.path().to_path_buf())
+            },
+            Msg::BrowsedWorkDir,
+        ),
+        Msg::BrowsedWorkDir(Some(d)) => {
+            st.work_dir = d.display().to_string();
+            Task::none()
+        }
+        Msg::BrowsedWorkDir(None) => Task::none(),
         Msg::BrowseCategoryFolder(cat) => Task::perform(
             async {
                 rfd::AsyncFileDialog::new()
@@ -1808,7 +1824,10 @@ fn downloads_section(st: &State) -> Element<'_, Msg> {
                     t,
                     "In-flight cache folder",
                     Some("Holds per-job .part files and metadata until a download completes."),
-                    FileInput::new(&st.work_dir).on_input(Msg::WorkDir).view(t)
+                    FileInput::new(&st.work_dir)
+                        .on_input(Msg::WorkDir)
+                        .on_browse(Msg::BrowseWorkDir)
+                        .view(t)
                 ),]
             ),
             set_section(
