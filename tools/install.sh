@@ -137,6 +137,28 @@ step "Downloading $ASSET"
 info "$URL"
 download "$URL" "$TMP/$ASSET" || err "download failed: $URL"
 
+# Every asset is published with its digest beside it. Checking it costs
+# one small request and is the difference between "downloaded from
+# GitHub" and "downloaded what the release actually built".
+step "Verifying"
+if fetch "${URL}.sha256" > "$TMP/$ASSET.sha256" 2>/dev/null && [ -s "$TMP/$ASSET.sha256" ]; then
+  WANT="$(cut -d' ' -f1 < "$TMP/$ASSET.sha256")"
+  if command -v sha256sum >/dev/null 2>&1; then
+    GOT="$(sha256sum "$TMP/$ASSET" | cut -d' ' -f1)"
+  elif command -v shasum >/dev/null 2>&1; then
+    GOT="$(shasum -a 256 "$TMP/$ASSET" | cut -d' ' -f1)"
+  else
+    GOT=""
+    warn "no sha256 tool found — skipping verification"
+  fi
+  if [ -n "$GOT" ]; then
+    [ "$WANT" = "$GOT" ] || err "checksum mismatch: expected $WANT, got $GOT"
+    ok "sha256 matches"
+  fi
+else
+  warn "no published checksum for $ASSET — skipping verification"
+fi
+
 step "Extracting"
 tar -xzf "$TMP/$ASSET" -C "$TMP"
 
@@ -169,12 +191,27 @@ fi
 if [ "$OS" = "Linux" ] && [ -z "${OXDM_NO_DESKTOP:-}" ]; then
   APPS="$HOME/.local/share/applications"
   mkdir -p "$APPS"
+
+  # oxdm's own icon when the archive carries one; the generic
+  # download arrow from the theme when it does not.
+  ICON="folder-download"
+  ICON_SRC="$(find "$TMP" -type f -name 'oxdm.png' | head -n1)"
+  if [ -n "$ICON_SRC" ]; then
+    ICON_DIR="$HOME/.local/share/icons/hicolor/512x512/apps"
+    mkdir -p "$ICON_DIR"
+    install -m 0644 "$ICON_SRC" "$ICON_DIR/oxdm.png"
+    ICON="oxdm"
+    command -v gtk-update-icon-cache >/dev/null 2>&1 \
+      && gtk-update-icon-cache -q -t -f "$HOME/.local/share/icons/hicolor" >/dev/null 2>&1 || true
+    ok "icon: $ICON_DIR/oxdm.png"
+  fi
+
   cat > "$APPS/oxdm.desktop" <<EOF
 [Desktop Entry]
 Name=oxdm
 Comment=Cross-platform download manager
 Exec=$INSTALL_DIR/oxdm
-Icon=folder-download
+Icon=$ICON
 Terminal=false
 Type=Application
 Categories=Network;FileTransfer;

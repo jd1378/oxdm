@@ -1,7 +1,23 @@
 name: GitHub release
 
-# copied from https://github.com/sharkdp/bat/blob/70ec3fc24e46cae8f0054a03f92ecfd53c7b98d6/.github/workflows/CICD.yml
-# with edits
+#
+# What a release publishes, per target:
+#   - oxdm-<tag>-<target>.tar.gz / .zip — all three binaries, the icon,
+#     README, LICENSE
+#   - oxdm-<tag>-<target>[.exe] — the bare executable, which is what an
+#     installed build replaces itself with when it updates
+#   - oxdm-<tag>-<arch>.AppImage on desktop Linux, for people who
+#     prefer a bundle; the installer script does not use it
+#   - <asset>.sha256 beside every one of them
+#   - update-<target>.json and, where there is a bundle,
+#     update-<target>-appimage.json — the feeds the in-app updater
+#     reads. Each names one artifact and carries its digest, which the
+#     updater verifies before replacing anything. The app picks the
+#     flavour at run time by whether it was launched from a bundle.
+#
+# The feeds are fetched from the `latest` release, so their URLs are
+# stable across releases:
+#   https://github.com/<repo>/releases/latest/download/update-<target>.json
 
 on:
   release:
@@ -26,14 +42,18 @@ jobs:
       - build
     steps:
       - run: jq --exit-status 'all(.result == "success")' <<< '${{ toJson(needs) }}'
+
   crate_metadata:
     name: Extract crate metadata
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
     - name: Extract crate information
       id: crate_metadata
       run: |
+        set -euo pipefail
         TAG="${{ github.event.inputs.tag }}"
         if [ -z "$TAG" ]; then
           git fetch --tags
@@ -42,16 +62,38 @@ jobs:
         git fetch --tags --prune
         git checkout "tags/$TAG" -b "release-$TAG"
         echo "tag=$TAG" >> $GITHUB_OUTPUT
+
         cargo metadata --no-deps --format-version 1 | jq -r '"name=" + .packages[0].name' | tee -a $GITHUB_OUTPUT
         cargo metadata --no-deps --format-version 1 | jq -r '"version=" + .packages[0].version' | tee -a $GITHUB_OUTPUT
         cargo metadata --no-deps --format-version 1 | jq -r '"maintainer=" + .packages[0].authors[0]' | tee -a $GITHUB_OUTPUT
         cargo metadata --no-deps --format-version 1 | jq -r '"homepage=" + .packages[0].homepage' | tee -a $GITHUB_OUTPUT
+
+        VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+        # The built binary reports CARGO_PKG_VERSION, and the in-app
+        # updater compares the feed against it. A tag that disagrees
+        # with the manifest ships an app that thinks it is a different
+        # version than the release it came from — and, once the feed
+        # says otherwise, offers itself an update forever.
+        if [ "v$VERSION" != "$TAG" ]; then
+          echo "::error::tag $TAG does not match Cargo.toml version $VERSION (expected tag v$VERSION)"
+          exit 1
+        fi
+
+        # A tag like v1.2.3-rc1 is a pre-release; v1.2.3 is not. This
+        # decides how the release is marked, which decides whether
+        # `releases/latest` — what the installers and the update feed
+        # resolve — will point at it.
+        case "$TAG" in
+          *-*) echo "prerelease=true" >> $GITHUB_OUTPUT ;;
+          *)   echo "prerelease=false" >> $GITHUB_OUTPUT ;;
+        esac
     outputs:
       name: ${{ steps.crate_metadata.outputs.name }}
       version: ${{ steps.crate_metadata.outputs.version }}
       maintainer: ${{ steps.crate_metadata.outputs.maintainer }}
       homepage: ${{ steps.crate_metadata.outputs.homepage }}
       tag: ${{ steps.crate_metadata.outputs.tag }}
+      prerelease: ${{ steps.crate_metadata.outputs.prerelease }}
 
   lint:
     name: Ensure code quality
@@ -65,12 +107,6 @@ jobs:
       with:
         fetch-depth: 0
         ref: ${{ needs.crate_metadata.outputs.tag }}
-    - run: |
-        sudo apt-get -y update
-        sudo apt-get -y install protobuf-compiler
-        if command -v protoc >/dev/null 2>&1; then
-          echo "PROTOC=$(command -v protoc)" >> $GITHUB_ENV
-        fi
     - run: cargo fmt -- --check
     - run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
@@ -86,15 +122,7 @@ jobs:
         ref: ${{ needs.crate_metadata.outputs.tag }}
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
-    - name: Build and install
-      run: |
-        sudo apt-get -y update
-        sudo apt-get -y install protobuf-compiler
-        if command -v protoc >/dev/null 2>&1; then
-          echo "PROTOC=$(command -v protoc)" >> $GITHUB_ENV
-        fi
-        cargo install --locked --path .
-    - name: Run unit tests
+    - name: Run tests
       run: cargo test --locked
 
   cargo-audit:
@@ -108,6 +136,7 @@ jobs:
           fetch-depth: 0
           ref: ${{ needs.crate_metadata.outputs.tag }}
       - run: cargo audit
+
   build:
     permissions:
       contents: write
@@ -118,94 +147,44 @@ jobs:
       fail-fast: false
       matrix:
         job:
-          - { target: aarch64-unknown-linux-musl  , os: ubuntu-latest, dpkg_arch: arm64,            use-cross: true }
-          - { target: aarch64-unknown-linux-gnu   , os: ubuntu-latest, dpkg_arch: arm64,            use-cross: true }
-          - { target: arm-unknown-linux-gnueabihf , os: ubuntu-latest, dpkg_arch: armhf,            use-cross: true }
-          - { target: arm-unknown-linux-musleabihf, os: ubuntu-latest, dpkg_arch: musl-linux-armhf, use-cross: true }
-          - { target: i686-pc-windows-msvc        , os: windows-2025,                                              }
-          - { target: i686-unknown-linux-gnu      , os: ubuntu-latest, dpkg_arch: i686,             use-cross: true }
-          - { target: i686-unknown-linux-musl     , os: ubuntu-latest, dpkg_arch: musl-linux-i686,  use-cross: true }
-          - { target: x86_64-apple-darwin         , os: macos-15-intel,                                                  }
-          - { target: aarch64-apple-darwin        , os: macos-14,                                                  }
-          - { target: x86_64-pc-windows-msvc      , os: windows-2025,                                              }
-          - { target: aarch64-pc-windows-msvc     , os: windows-11-arm,                                            }
-          - { target: x86_64-unknown-linux-gnu    , os: ubuntu-latest, dpkg_arch: amd64,            use-cross: true }
-          - { target: x86_64-unknown-linux-musl   , os: ubuntu-latest, dpkg_arch: musl-linux-amd64, use-cross: true }
-    env:
-      BUILD_CMD: cargo
+          # Every target builds natively: this is a desktop app, and
+          # each host here is the platform it is building for.
+          #
+          # No musl. oxdm links C libdbus (through keyring's
+          # secret-service backend), which a static musl build has no
+          # sensible answer for — and a download manager with a tray
+          # icon is not what an Alpine container wants anyway.
+          #
+          # `appimage: true` marks the Linux targets that also get a
+          # single-file bundle.
+          - { target: x86_64-unknown-linux-gnu    , os: ubuntu-latest,    appimage: true }
+          - { target: aarch64-unknown-linux-gnu   , os: ubuntu-24.04-arm, appimage: true }
+          - { target: x86_64-apple-darwin         , os: macos-15-intel }
+          - { target: aarch64-apple-darwin        , os: macos-14 }
+          - { target: x86_64-pc-windows-msvc      , os: windows-2025 }
+          - { target: aarch64-pc-windows-msvc     , os: windows-11-arm }
     steps:
     - name: Checkout source code
       uses: actions/checkout@v5
-      # with:
-      #   fetch-depth: 0
-      #   ref: ${{ needs.crate_metadata.outputs.tag }}
+      with:
+        fetch-depth: 0
+        ref: ${{ needs.crate_metadata.outputs.tag }}
 
-    - name: Install prerequisites (linux / macos)
-      if: startsWith(matrix.job.os, 'ubuntu') || startsWith(matrix.job.os, 'macos')
+    # libdbus is the only system library oxdm links, for the tray and
+    # desktop notifications. Nothing needs protoc: odl compiles its
+    # metadata schema with protox, in-process.
+    - name: Install prerequisites (linux)
+      if: startsWith(matrix.job.os, 'ubuntu')
       shell: bash
       run: |
-        case ${{ matrix.job.os }} in
-          ubuntu*|linux*)
-            echo "installing linux prerequisites"
-            sudo apt-get -y update
-            case ${{ matrix.job.target }} in
-              arm-unknown-linux-*) sudo apt-get -y install gcc-arm-linux-gnueabihf ;;
-              aarch64-unknown-linux-gnu) sudo apt-get -y install gcc-aarch64-linux-gnu ;;
-            esac
-            ;;
-          macos*)
-            brew update
-            brew install protobuf
-            if ! command -v protoc >/dev/null 2>&1; then
-              echo "protoc not installed properly on macOS, exiting with error..."
-              exit 1
-            fi
-            PROTOC_PATH=$(command -v protoc)
-            chmod 755 "$PROTOC_PATH" || true
-            ;;
-        esac
-
-        if [ -n "$PROTOC_PATH" ]; then
-          echo "PROTOC found at: $PROTOC_PATH"
-          echo "PROTOC=$PROTOC_PATH" >> $GITHUB_ENV
-        else
-          echo "PROTOC not found"
-        fi
-
-    - name: Install prerequisites (windows)
-      if: startsWith(matrix.job.os, 'windows-')
-      shell: pwsh
-      run: |
-        choco install protoc -y --no-progress
-        # refresh environment so current session sees updated PATH
-        refreshenv
-        $proto = (Get-Command protoc -ErrorAction SilentlyContinue).Source
-        if (-not [string]::IsNullOrEmpty($proto)) {
-          Write-Host "PROTOC found at: $proto"
-          Add-Content -Path $env:GITHUB_ENV -Value "PROTOC=$proto"
-          # also ensure PATH contains Chocolatey bin for processes that just call "protoc"
-          Add-Content -Path $env:GITHUB_ENV -Value ("PATH=" + $env:Path + ";" + (Split-Path $proto))
-          protoc --version
-        } else {
-          Write-Host "PROTOC not found"
-          exit 1
-        }
+        set -euo pipefail
+        sudo apt-get -y update
+        sudo apt-get -y install libdbus-1-dev pkg-config
 
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
       with:
         targets: ${{ matrix.job.target }}
-
-    - name: Install cross
-      if: matrix.job.use-cross
-      uses: taiki-e/install-action@v2
-      with:
-        tool: cross
-
-    - name: Overwrite build command env variable
-      if: matrix.job.use-cross
-      shell: bash
-      run: echo "BUILD_CMD=cross" >> $GITHUB_ENV
 
     - name: Show version information (Rust, cargo, GCC)
       shell: bash
@@ -219,194 +198,210 @@ jobs:
 
     - name: Build
       shell: bash
-      run: |
-        if [ -n "$PROTOC" ]; then
-          echo "PROTOC env is set: $PROTOC"
-        fi
-
-        # Enable vendored-protoc when using cross builds (leave macOS/Windows alone)
-        BUILD_FEATURES=""
-        if [ "${{ matrix.job.use-cross }}" = "true" ]; then
-          echo "Enabling vendored-protoc feature for cross build"
-          BUILD_FEATURES="--features vendored-protoc"
-        fi
-
-        $BUILD_CMD build $BUILD_FEATURES --locked --release --target=${{ matrix.job.target }}
-
-    - name: Set binary name & path
-      id: bin
-      shell: bash
-      run: |
-        # Figure out suffix of binary
-        EXE_suffix=""
-        case ${{ matrix.job.target }} in
-          *-pc-windows-*) EXE_suffix=".exe" ;;
-        esac;
-
-        # Setup paths
-        BIN_NAME="${{ needs.crate_metadata.outputs.name }}${EXE_suffix}"
-        BIN_PATH="target/${{ matrix.job.target }}/release/${BIN_NAME}"
-
-        # Let subsequent steps know where to find the binary
-        echo "BIN_PATH=${BIN_PATH}" >> $GITHUB_OUTPUT
-        echo "BIN_NAME=${BIN_NAME}" >> $GITHUB_OUTPUT
-
-    - name: Set testing options
-      id: test-options
-      shell: bash
-      run: |
-        # test only library unit tests and binary for arm-type targets
-        unset CARGO_TEST_OPTIONS
-        unset CARGO_TEST_OPTIONS ; case ${{ matrix.job.target }} in arm-* | aarch64-*) CARGO_TEST_OPTIONS="--lib --bin ${{ needs.crate_metadata.outputs.name }}" ;; esac;
-        # If we're using cross, enable vendored-protoc for tests as well
-        CARGO_TEST_FEATURES=""
-        if [ "${{ matrix.job.use-cross }}" = "true" ]; then
-          CARGO_TEST_FEATURES="--features vendored-protoc"
-        fi
-
-        echo "CARGO_TEST_OPTIONS=${CARGO_TEST_OPTIONS}" >> $GITHUB_OUTPUT
-        echo "CARGO_TEST_FEATURES=${CARGO_TEST_FEATURES}" >> $GITHUB_OUTPUT
+      run: cargo build --locked --release --target=${{ matrix.job.target }} --bins
 
     - name: Run tests
       shell: bash
-      run: |
-        if [[ ${{ matrix.job.os }} = windows-* ]]
-        then
-          powershell.exe -command "$BUILD_CMD test --locked --target=${{ matrix.job.target }} ${{ steps.test-options.outputs.CARGO_TEST_OPTIONS}} ${{ steps.test-options.outputs.CARGO_TEST_FEATURES}}"
-        else
-          $BUILD_CMD test --locked --target=${{ matrix.job.target }} ${{ steps.test-options.outputs.CARGO_TEST_OPTIONS}} ${{ steps.test-options.outputs.CARGO_TEST_FEATURES}}
-        fi
+      # Library tests only: the binaries are GUI/daemon entry points
+      # with nothing to assert without a session bus and a display.
+      run: cargo test --locked --lib --target=${{ matrix.job.target }}
 
-    - name: Create tarball
+    - name: Stage binaries
+      id: bin
+      shell: bash
+      run: |
+        set -euo pipefail
+        EXE_suffix=""
+        case ${{ matrix.job.target }} in *-pc-windows-*) EXE_suffix=".exe" ;; esac
+
+        OUT="target/${{ matrix.job.target }}/release"
+        # All three ship together: without the native host there is no
+        # browser integration, and without the updater oxdm cannot
+        # install its own updates. Both used to be left out.
+        for bin in oxdm oxdm-native-host oxdm-updater; do
+          test -f "${OUT}/${bin}${EXE_suffix}" || { echo "::error::missing ${bin}${EXE_suffix}"; exit 1; }
+        done
+
+        echo "EXE_SUFFIX=${EXE_suffix}" >> $GITHUB_OUTPUT
+        echo "OUT_DIR=${OUT}" >> $GITHUB_OUTPUT
+
+    - name: Create archive
       id: package
       shell: bash
       run: |
-        PKG_suffix=".tar.gz" ; case ${{ matrix.job.target }} in *-pc-windows-*) PKG_suffix=".zip" ;; esac;
-        PKG_BASENAME=${{ needs.crate_metadata.outputs.name }}-v${{ needs.crate_metadata.outputs.version }}-${{ matrix.job.target }}
+        set -euo pipefail
+        PKG_suffix=".tar.gz" ; case ${{ matrix.job.target }} in *-pc-windows-*) PKG_suffix=".zip" ;; esac
+        # Named from the tag, not from Cargo.toml: the installers build
+        # this exact filename from the tag they resolved, and a release
+        # tagged differently from the manifest used to publish assets
+        # nothing could find.
+        PKG_BASENAME=${{ needs.crate_metadata.outputs.name }}-${{ needs.crate_metadata.outputs.tag }}-${{ matrix.job.target }}
         PKG_NAME=${PKG_BASENAME}${PKG_suffix}
-        echo "PKG_NAME=${PKG_NAME}" >> $GITHUB_OUTPUT
 
         PKG_STAGING="_cicd-intermediates/package"
         ARCHIVE_DIR="${PKG_STAGING}/${PKG_BASENAME}/"
         mkdir -p "${ARCHIVE_DIR}"
 
-        # Binary
-        cp "${{ steps.bin.outputs.BIN_PATH }}" "$ARCHIVE_DIR"
+        EXE="${{ steps.bin.outputs.EXE_SUFFIX }}"
+        for bin in oxdm oxdm-native-host oxdm-updater; do
+          cp "${{ steps.bin.outputs.OUT_DIR }}/${bin}${EXE}" "$ARCHIVE_DIR"
+        done
+        cp README.md LICENSE "$ARCHIVE_DIR"
+        cp tools/install-native-host.sh "$ARCHIVE_DIR" 2>/dev/null || true
+        # The launcher entry the installer writes points at this, so a
+        # tarball install looks like an application rather than a
+        # generic download arrow.
+        cp assets/oxdm_idle_dark.png "$ARCHIVE_DIR/oxdm.png"
 
-        # README, LICENSE and CHANGELOG files
-        cp "README.md" "LICENSE" "$ARCHIVE_DIR"
-
-        # base compressed package
         pushd "${PKG_STAGING}/" >/dev/null
         case ${{ matrix.job.target }} in
           *-pc-windows-*) 7z -y a "${PKG_NAME}" "${PKG_BASENAME}"/* | tail -2 ;;
           *) tar czf "${PKG_NAME}" "${PKG_BASENAME}"/* ;;
-        esac;
+        esac
         popd >/dev/null
 
-        # Let subsequent steps know where to find the compressed package
+        echo "PKG_NAME=${PKG_NAME}" >> $GITHUB_OUTPUT
         echo "PKG_PATH=${PKG_STAGING}/${PKG_NAME}" >> $GITHUB_OUTPUT
 
-    - name: Create Debian package
-      id: debian-package
+    - name: Build AppImage
+      id: appimage
+      if: matrix.job.appimage
       shell: bash
-      if: startsWith(matrix.job.os, 'ubuntu')
       run: |
-        COPYRIGHT_YEARS="2018 - "$(date "+%Y")
-        DPKG_STAGING="_cicd-intermediates/debian-package"
-        DPKG_DIR="${DPKG_STAGING}/dpkg"
-        mkdir -p "${DPKG_DIR}"
+        set -euo pipefail
+        TAG="${{ needs.crate_metadata.outputs.tag }}"
+        TARGET="${{ matrix.job.target }}"
+        case "$TARGET" in
+          x86_64-*)  ARCH=x86_64 ;;
+          aarch64-*) ARCH=aarch64 ;;
+          *) echo "::error::no AppImage runtime for $TARGET"; exit 1 ;;
+        esac
 
-        DPKG_BASENAME=${{ needs.crate_metadata.outputs.name }}
-        DPKG_CONFLICTS=${{ needs.crate_metadata.outputs.name }}-musl
-        case ${{ matrix.job.target }} in *-musl) DPKG_BASENAME=${{ needs.crate_metadata.outputs.name }}-musl ; DPKG_CONFLICTS=${{ needs.crate_metadata.outputs.name }} ;; esac;
-        DPKG_VERSION=${{ needs.crate_metadata.outputs.version }}
-        DPKG_ARCH="${{ matrix.job.dpkg_arch }}"
-        DPKG_NAME="${DPKG_BASENAME}_${DPKG_VERSION}_${DPKG_ARCH}.deb"
-        echo "DPKG_NAME=${DPKG_NAME}" >> $GITHUB_OUTPUT
+        APPDIR="_cicd-intermediates/AppDir"
+        mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/applications" \
+                 "$APPDIR/usr/share/icons/hicolor/512x512/apps"
 
-        # Binary
-        install -Dm755 "${{ steps.bin.outputs.BIN_PATH }}" "${DPKG_DIR}/usr/bin/${{ steps.bin.outputs.BIN_NAME }}"
+        for bin in oxdm oxdm-native-host oxdm-updater; do
+          install -Dm755 "${{ steps.bin.outputs.OUT_DIR }}/${bin}" "$APPDIR/usr/bin/${bin}"
+        done
+        install -Dm644 assets/oxdm_idle_dark.png \
+          "$APPDIR/usr/share/icons/hicolor/512x512/apps/oxdm.png"
+        cp "$APPDIR/usr/share/icons/hicolor/512x512/apps/oxdm.png" "$APPDIR/oxdm.png"
 
-        # README and LICENSE
-        install -Dm644 "README.md" "${DPKG_DIR}/usr/share/doc/${DPKG_BASENAME}/README.md"
-        install -Dm644 "LICENSE" "${DPKG_DIR}/usr/share/doc/${DPKG_BASENAME}/LICENSE"
-
-        cat > "${DPKG_DIR}/usr/share/doc/${DPKG_BASENAME}/copyright" <<EOF
-        Format: http://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
-        Upstream-Name: ${{ needs.crate_metadata.outputs.name }}
-        Source: ${{ needs.crate_metadata.outputs.homepage }}
-
-        Files: *
-        Copyright: ${{ needs.crate_metadata.outputs.maintainer }}
-        Copyright: $COPYRIGHT_YEARS ${{ needs.crate_metadata.outputs.maintainer }}
-        License: Apache-2.0 or MIT
-
-        License: Apache-2.0
-          On Debian systems, the complete text of the Apache-2.0 can be found in the
-          file /usr/share/common-licenses/Apache-2.0.
-
-        License: MIT
-          Permission is hereby granted, free of charge, to any
-          person obtaining a copy of this software and associated
-          documentation files (the "Software"), to deal in the
-          Software without restriction, including without
-          limitation the rights to use, copy, modify, merge,
-          publish, distribute, sublicense, and/or sell copies of
-          the Software, and to permit persons to whom the Software
-          is furnished to do so, subject to the following
-          conditions:
-          .
-          The above copyright notice and this permission notice
-          shall be included in all copies or substantial portions
-          of the Software.
-          .
-          THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-          ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-          TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-          PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-          SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-          CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-          OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-          IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-          DEALINGS IN THE SOFTWARE.
+        cat > "$APPDIR/oxdm.desktop" <<'EOF'
+        [Desktop Entry]
+        Type=Application
+        Name=oxdm
+        Comment=Cross-platform download manager
+        Exec=oxdm %U
+        Icon=oxdm
+        Terminal=false
+        Categories=Network;FileTransfer;
+        StartupNotify=true
+        StartupWMClass=oxdm
         EOF
-          chmod 644 "${DPKG_DIR}/usr/share/doc/${DPKG_BASENAME}/copyright"
+        cp "$APPDIR/oxdm.desktop" "$APPDIR/usr/share/applications/oxdm.desktop"
 
-          # control file
-          mkdir -p "${DPKG_DIR}/DEBIAN"
-          cat > "${DPKG_DIR}/DEBIAN/control" <<EOF
-        Package: ${DPKG_BASENAME}
-        Version: ${DPKG_VERSION}
-        Section: utils
-        Priority: optional
-        Maintainer: ${{ needs.crate_metadata.outputs.maintainer }}
-        Homepage: ${{ needs.crate_metadata.outputs.homepage }}
-        Architecture: ${DPKG_ARCH}
-        Provides: ${{ needs.crate_metadata.outputs.name }}
-        Conflicts: ${DPKG_CONFLICTS}
-        Description: cat(1) clone with wings.
-          A cat(1) clone with syntax highlighting and Git integration.
+        # The AppImage is one file that is also the executable, which
+        # is exactly what the in-app updater swaps itself with. AppRun
+        # keeps the bundled siblings reachable: oxdm spawns its own
+        # windows and the updater by path next to itself.
+        cat > "$APPDIR/AppRun" <<'EOF'
+        #!/bin/sh
+        HERE="$(dirname "$(readlink -f "$0")")"
+        export PATH="$HERE/usr/bin:$PATH"
+        exec "$HERE/usr/bin/oxdm" "$@"
         EOF
+        chmod +x "$APPDIR/AppRun"
 
-        DPKG_PATH="${DPKG_STAGING}/${DPKG_NAME}"
-        echo "DPKG_PATH=${DPKG_PATH}" >> $GITHUB_OUTPUT
+        # appimagetool itself is an x86_64 AppImage; `--runtime-file`
+        # is what lets it stamp an aarch64 runtime onto an aarch64
+        # payload without emulating anything.
+        TOOL_ARCH=$(uname -m)
+        curl -fsSL -o appimagetool \
+          "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${TOOL_ARCH}.AppImage"
+        chmod +x appimagetool
+        curl -fsSL -o runtime-${ARCH} \
+          "https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-${ARCH}"
 
-        # build dpkg
-        fakeroot dpkg-deb --build "${DPKG_DIR}" "${DPKG_PATH}"
+        APPIMAGE_NAME="${{ needs.crate_metadata.outputs.name }}-${TAG}-${ARCH}.AppImage"
+        ./appimagetool --appimage-extract-and-run \
+          --runtime-file "runtime-${ARCH}" \
+          "$APPDIR" "_cicd-intermediates/${APPIMAGE_NAME}"
 
-    - name: "Artifact upload: tarball"
-      uses: actions/upload-artifact@master
+        echo "APPIMAGE_NAME=${APPIMAGE_NAME}" >> $GITHUB_OUTPUT
+        echo "APPIMAGE_PATH=_cicd-intermediates/${APPIMAGE_NAME}" >> $GITHUB_OUTPUT
+
+    - name: Stage the updatable artifact, checksums and update feed
+      id: publish
+      shell: bash
+      run: |
+        set -euo pipefail
+        TAG="${{ needs.crate_metadata.outputs.tag }}"
+        TARGET="${{ matrix.job.target }}"
+        NAME="${{ needs.crate_metadata.outputs.name }}"
+        VERSION="${{ needs.crate_metadata.outputs.version }}"
+        EXE="${{ steps.bin.outputs.EXE_SUFFIX }}"
+        STAGING="_cicd-intermediates/publish"
+        mkdir -p "$STAGING"
+
+        # What the updater downloads and replaces itself with: one
+        # file, the whole app. The bare executable for an installed
+        # build; the bundle for one launched as an AppImage. Both are
+        # published where both exist, because the same release serves
+        # users of either — and the app knows at run time which of the
+        # two it is.
+        SINGLE_NAME="${NAME}-${TAG}-${TARGET}${EXE}"
+        cp "${{ steps.bin.outputs.OUT_DIR }}/${NAME}${EXE}" "$STAGING/$SINGLE_NAME"
+        APPIMAGE_NAME="${{ steps.appimage.outputs.APPIMAGE_NAME }}"
+        if [ -n "$APPIMAGE_NAME" ]; then
+          cp "${{ steps.appimage.outputs.APPIMAGE_PATH }}" "$STAGING/$APPIMAGE_NAME"
+        fi
+        cp "${{ steps.package.outputs.PKG_PATH }}" "$STAGING/"
+
+        # A digest beside every asset, and the same digest inside the
+        # feed: the updater refuses an artifact it cannot verify.
+        pushd "$STAGING" >/dev/null
+        for f in *; do
+          case "$f" in *.sha256) continue ;; esac
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$f" > "${f}.sha256"
+          else
+            shasum -a 256 "$f" > "${f}.sha256"
+          fi
+        done
+        SINGLE_SHA=$(cut -d' ' -f1 < "${SINGLE_NAME}.sha256")
+        if [ -n "$APPIMAGE_NAME" ]; then
+          APPIMAGE_SHA=$(cut -d' ' -f1 < "${APPIMAGE_NAME}.sha256")
+        fi
+        popd >/dev/null
+
+        # One feed per flavour. `update-<target>.json` is what an
+        # installed build reads; `update-<target>-appimage.json` is
+        # what the same build reads when it was launched from a bundle.
+        write_feed() {
+          cat > "$STAGING/$1" <<EOF
+        {
+          "version": "${VERSION}",
+          "url": "${{ needs.crate_metadata.outputs.homepage }}/releases/download/${TAG}/$2",
+          "notes": "${{ needs.crate_metadata.outputs.homepage }}/releases/tag/${TAG}",
+          "sha256": "$3"
+        }
+        EOF
+        }
+        write_feed "update-${TARGET}.json" "$SINGLE_NAME" "$SINGLE_SHA"
+        if [ -n "$APPIMAGE_NAME" ]; then
+          write_feed "update-${TARGET}-appimage.json" "$APPIMAGE_NAME" "$APPIMAGE_SHA"
+        fi
+
+        echo "ARTIFACTS=${STAGING}/*" >> $GITHUB_OUTPUT
+        echo "STAGING=${STAGING}" >> $GITHUB_OUTPUT
+
+    - name: "Artifact upload"
+      uses: actions/upload-artifact@v4
       with:
-        name: ${{ steps.package.outputs.PKG_NAME }}
-        path: ${{ steps.package.outputs.PKG_PATH }}
-
-    - name: "Artifact upload: Debian package"
-      uses: actions/upload-artifact@master
-      if: steps.debian-package.outputs.DPKG_NAME
-      with:
-        name: ${{ steps.debian-package.outputs.DPKG_NAME }}
-        path: ${{ steps.debian-package.outputs.DPKG_PATH }}
+        name: ${{ matrix.job.target }}
+        path: ${{ steps.publish.outputs.STAGING }}/*
 
     - name: Publish archives and packages
       uses: ncipollo/release-action@v1
@@ -416,7 +411,11 @@ jobs:
         omitBodyDuringUpdate: true
         omitName: true
         allowUpdates: true
-        prerelease: true
+        # Only a tag that says so is a pre-release. Marking every
+        # release one kept them out of `releases/latest`, which is
+        # where both installers and the update feed look.
+        prerelease: ${{ needs.crate_metadata.outputs.prerelease }}
+        omitPrereleaseDuringUpdate: true
         replacesArtifacts: true
         updateOnlyUnreleased: false
-        artifacts: ${{ steps.package.outputs.PKG_PATH }},${{ steps.debian-package.outputs.DPKG_PATH }}
+        artifacts: ${{ steps.publish.outputs.ARTIFACTS }}

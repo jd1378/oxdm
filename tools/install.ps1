@@ -59,20 +59,47 @@ try {
   Info $url
   Invoke-WebRequest -Uri $url -OutFile $pkg -UseBasicParsing
 
+  # Every asset is published with its digest beside it; checking it is
+  # the difference between "downloaded from GitHub" and "downloaded
+  # what the release actually built".
+  Step 'Verifying'
+  try {
+    $sums = (Invoke-WebRequest -Uri "$url.sha256" -UseBasicParsing).Content
+    $want = ($sums -split '\s+')[0]
+    $got = (Get-FileHash -Path $pkg -Algorithm SHA256).Hash.ToLower()
+    if ($want.ToLower() -ne $got) { Fail "checksum mismatch: expected $want, got $got" }
+    Ok 'sha256 matches'
+  } catch {
+    Warn "could not verify the download: $($_.Exception.Message)"
+  }
+
   Step 'Extracting'
   Expand-Archive -Path $pkg -DestinationPath $tmp -Force
 
   $oxdm = Get-ChildItem -Path $tmp -Recurse -File -Filter 'oxdm.exe' | Select-Object -First 1
   $host_ = Get-ChildItem -Path $tmp -Recurse -File -Filter 'oxdm-native-host.exe' | Select-Object -First 1
+  $updater = Get-ChildItem -Path $tmp -Recurse -File -Filter 'oxdm-updater.exe' | Select-Object -First 1
   if (-not $oxdm)  { Fail "oxdm.exe not found in archive" }
-  if (-not $host_) { Fail "oxdm-native-host.exe not found in archive" }
 
   Step "Installing to $Dir"
   if (-not (Test-Path $Dir)) { New-Item -ItemType Directory -Path $Dir | Out-Null }
-  Copy-Item $oxdm.FullName  (Join-Path $Dir 'oxdm.exe')             -Force
-  Copy-Item $host_.FullName (Join-Path $Dir 'oxdm-native-host.exe') -Force
+  Copy-Item $oxdm.FullName (Join-Path $Dir 'oxdm.exe') -Force
   Ok "installed: $Dir\oxdm.exe"
-  Ok "installed: $Dir\oxdm-native-host.exe"
+  # The extras are not fatal when an archive lacks them: oxdm runs
+  # without the browser bridge, and without the updater it just cannot
+  # install its own updates.
+  if ($host_) {
+    Copy-Item $host_.FullName (Join-Path $Dir 'oxdm-native-host.exe') -Force
+    Ok "installed: $Dir\oxdm-native-host.exe"
+  } else {
+    Warn "'oxdm-native-host.exe' is not in this archive - browser integration will be unavailable."
+  }
+  if ($updater) {
+    Copy-Item $updater.FullName (Join-Path $Dir 'oxdm-updater.exe') -Force
+    Ok "installed: $Dir\oxdm-updater.exe"
+  } else {
+    Warn "'oxdm-updater.exe' is not in this archive - oxdm will not be able to update itself."
+  }
 
   # Add to user PATH if missing.
   $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')

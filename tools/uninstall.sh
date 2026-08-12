@@ -37,7 +37,7 @@ warn() { printf '\033[33m!\033[0m %s\n' "$*"; }
 OS="$(uname -s)"
 
 step "Removing binaries"
-for bin in oxdm oxdm-native-host; do
+for bin in oxdm oxdm-native-host oxdm-updater; do
   if [ -f "$INSTALL_DIR/$bin" ]; then
     rm -f "$INSTALL_DIR/$bin"
     ok "removed $INSTALL_DIR/$bin"
@@ -46,7 +46,8 @@ done
 
 if [ "$OS" = "Linux" ]; then
   for f in "$HOME/.local/share/applications/oxdm.desktop" \
-           "$HOME/.config/autostart/oxdm.desktop"; do
+           "$HOME/.config/autostart/oxdm.desktop" \
+           "$HOME/.local/share/icons/hicolor/512x512/apps/oxdm.png"; do
     if [ -f "$f" ]; then rm -f "$f"; ok "removed $f"; fi
   done
 fi

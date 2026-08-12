@@ -10,6 +10,10 @@ Cross-platform download manager built on the [`odl`](https://crates.io/crates/od
 curl -fsSL https://raw.githubusercontent.com/jd1378/oxdm/main/tools/install.sh | sh
 ```
 
+Downloads the release archive for your platform, checks it against the
+published SHA-256, installs `oxdm`, `oxdm-native-host` and
+`oxdm-updater` into `~/.local/bin`, and adds a launcher entry.
+
 Custom directory:
 
 ```bash
@@ -28,6 +32,19 @@ irm https://raw.githubusercontent.com/jd1378/oxdm/main/tools/install.ps1 | iex
 ```
 
 Installs to `%LOCALAPPDATA%\Programs\oxdm`, adds it to your user PATH, drops a Start-menu shortcut.
+
+### AppImage (Linux)
+
+Desktop Linux releases also carry `oxdm-<tag>-<arch>.AppImage` for
+people who prefer a bundle. Download it from the
+[releases page](https://github.com/jd1378/oxdm/releases), `chmod +x`
+it, and run it — there is nothing to install and the installer script
+does not use it.
+
+Either way oxdm updates itself in place: it notices at run time whether
+it was launched from a bundle and fetches the matching artifact, so an
+AppImage stays an AppImage and an installed build stays installed
+binaries.
 
 ### Build from source
 
