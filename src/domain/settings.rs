@@ -164,9 +164,16 @@ pub struct Settings {
     /// the whole report, so a notification alongside it would be the
     /// same news twice. A manual check from About answers in About and
     /// raises neither.
-    #[serde(default = "yes_default")]
-    pub show_update_dialog: bool,
+    ///
+    /// The notification is the default of the two. A new version is
+    /// news, not a task: it can wait until the user is between things,
+    /// and a window that takes focus over whatever they are doing is
+    /// too much for something that will still be true tomorrow.
+    /// Pressing the notification opens the window for anyone who wants
+    /// it now.
     #[serde(default)]
+    pub show_update_dialog: bool,
+    #[serde(default = "yes_default")]
     pub notify_update: bool,
     /// Auto-update feed URL. Feed is a JSON document of shape
     /// `{ "version": "x.y.z", "url": "...", "notes": "...", "sha256": "..." }`.
@@ -505,8 +512,8 @@ impl Default for Settings {
             show_conflict_dialog: true,
             notify_conflict: true,
             auto_check_updates: true,
-            show_update_dialog: true,
-            notify_update: false,
+            show_update_dialog: false,
+            notify_update: true,
             update_feed_url: String::new(),
             theme: Theme::System,
             reduce_motion: false,
@@ -549,26 +556,28 @@ mod tests {
 
     #[test]
     fn one_update_surface_at_a_time() {
+        // A new version is news, not a task: it reports rather than
+        // taking focus, unless the user asks for the window.
         let s = Settings::default();
-        assert_eq!(s.update_surface(), UpdateSurface::Dialog);
+        assert_eq!(s.update_surface(), UpdateSurface::Notification);
 
-        let notify = Settings {
-            show_update_dialog: false,
-            notify_update: true,
+        let dialog = Settings {
+            show_update_dialog: true,
+            notify_update: false,
             ..Settings::default()
         };
-        assert_eq!(notify.update_surface(), UpdateSurface::Notification);
+        assert_eq!(dialog.update_surface(), UpdateSurface::Dialog);
 
         // Both on is not reachable from Settings, but a hand-edited row
         // resolves to the surface that can install what it announces.
         let both = Settings {
-            notify_update: true,
+            show_update_dialog: true,
             ..Settings::default()
         };
         assert_eq!(both.update_surface(), UpdateSurface::Dialog);
 
         let neither = Settings {
-            show_update_dialog: false,
+            notify_update: false,
             ..Settings::default()
         };
         assert_eq!(neither.update_surface(), UpdateSurface::Silent);
@@ -580,7 +589,6 @@ mod tests {
     fn no_automatic_checks_means_no_announcement() {
         let s = Settings {
             auto_check_updates: false,
-            notify_update: true,
             ..Settings::default()
         };
         assert_eq!(s.update_surface(), UpdateSurface::Silent);
