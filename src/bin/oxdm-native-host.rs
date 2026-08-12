@@ -75,7 +75,7 @@ async fn main() {
     };
 
     let auth = serde_json::json!({ "token": cfg.token }).to_string();
-    if let Err(e) = ws.send(Message::Text(auth)).await {
+    if let Err(e) = ws.send(Message::text(auth)).await {
         eprintln!("oxdm-native-host: auth send failed: {e}");
         std::process::exit(1);
     }
@@ -123,7 +123,7 @@ async fn main() {
         tokio::select! {
             maybe_frame = rx.recv() => match maybe_frame {
                 Some(text) => {
-                    if ws.send(Message::Text(text)).await.is_err() {
+                    if ws.send(Message::text(text)).await.is_err() {
                         break;
                     }
                 }

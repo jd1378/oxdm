@@ -131,7 +131,7 @@ async fn handle(state: Arc<AppState>, stream: tokio::net::TcpStream) -> Result<(
         };
         let resp = dispatch(&state, &text).await;
         let payload = serde_json::to_string(&resp).unwrap();
-        if ws.send(Message::Text(payload)).await.is_err() {
+        if ws.send(Message::text(payload)).await.is_err() {
             break;
         }
     }

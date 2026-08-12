@@ -31,7 +31,7 @@ async-trait = "0.1"
 humantime = "2"
 rusqlite = { version = "0.40", features = ["bundled", "chrono"] }
 arboard = "3"
-tokio-tungstenite = "0.24"
+tokio-tungstenite = "0.30"
 dark-light = "2"
 notify-rust = "4"
 rand = "0.10"
