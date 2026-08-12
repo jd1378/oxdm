@@ -13,27 +13,15 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum ProxyMode {
     Inherit,
+    /// Connect directly: ignore the global proxy, the environment's
+    /// (`HTTP_PROXY` and friends) and the platform's. Carried out by
+    /// odl's `no_proxy`.
     None,
     System,
     Http,
     Https,
     Socks5,
 }
-
-/// Whether `ProxyMode::None` — "connect directly, ignore every proxy" —
-/// actually reaches the network.
-///
-/// It needs `reqwest::ClientBuilder::no_proxy()`, which clears the
-/// configured proxies *and* switches off the environment-variable
-/// pickup. odl takes a `proxy: Option<String>`, where `None` means "do
-/// not set one" and leaves that pickup on, so the mode is selectable in
-/// the UI but cannot yet be honoured: `mapping::apply_job_proxy` falls
-/// back to Inherit and logs it.
-///
-/// One constant so the UI's promise and the mapping's behaviour cannot
-/// disagree — the UI says so plainly while this is false. Flip it when
-/// odl exposes the knob, and swap the coercion arm in `mapping`.
-pub const FORCE_DIRECT_HONOURED: bool = false;
 
 impl Default for ProxyMode {
     fn default() -> Self {
@@ -60,8 +48,9 @@ pub struct ProxyAdv {
     #[serde(default)]
     pub clear_password: bool,
     pub remote_dns: bool,
-    /// Unused: odl exposes no `no_proxy`/bypass API. Kept for serde
-    /// compat with persisted blobs; never surfaced in the UI.
+    /// Unused: odl's `no_proxy` is all-or-nothing, and there is no
+    /// per-host bypass list behind it. Kept for serde compat with
+    /// persisted blobs; never surfaced in the UI.
     pub bypass: String,
 }
 

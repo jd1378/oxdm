@@ -31,7 +31,7 @@ use crate::gui::widget::{
 /// environment variables decide, `None` asks for a direct connection,
 /// and the three explicit modes name a server. Digest-style guesswork
 /// is not on offer anywhere: a mode is here only if the data layer can
-/// carry it out, or — for `None` — says plainly that it cannot yet.
+/// carry it out.
 pub const PROXY_MODE_VALUES: &[ProxyMode] = &[
     ProxyMode::Inherit,
     ProxyMode::None,
@@ -88,12 +88,7 @@ impl Default for ProxyForm {
 impl ProxyForm {
     pub fn from_adv(p: &ProxyAdv) -> Self {
         Self {
-            // A legacy `None` from before the mode was offered still
-            // means "no override" to every job that carries it.
-            mode: match p.mode {
-                ProxyMode::None if !crate::domain::FORCE_DIRECT_HONOURED => ProxyMode::Inherit,
-                m => m,
-            },
+            mode: p.mode,
             host: p.host.clone(),
             port: p.port.clone(),
             auth_enabled: p.auth_enabled,
@@ -244,6 +239,16 @@ pub struct AuthMsgs<M> {
 /// segmented control's one-word label cannot convey gets a sentence;
 /// the explicit ones are self-explanatory and get none.
 fn mode_hint(st: &ProxyForm, ctx: FormCtx<'_>) -> Option<String> {
+    mode_hint_for(st, ctx)
+}
+
+/// The hint a window needs before it lays anything out, so it can size
+/// itself around the paragraph this will render.
+pub fn mode_hint_text(st: &ProxyForm) -> Option<String> {
+    mode_hint_for(st, FormCtx::default())
+}
+
+fn mode_hint_for(st: &ProxyForm, ctx: FormCtx<'_>) -> Option<String> {
     match st.mode {
         ProxyMode::Inherit => {
             let mut hint = "Inherit (global / environment): uses the proxy from \
@@ -259,18 +264,9 @@ fn mode_hint(st: &ProxyForm, ctx: FormCtx<'_>) -> Option<String> {
              job; the standard proxy environment variables still apply."
                 .to_owned(),
         ),
-        ProxyMode::None if crate::domain::FORCE_DIRECT_HONOURED => Some(
-            "None (direct): connects straight to the server, ignoring the global \
-             proxy and your proxy environment variables."
-                .to_owned(),
-        ),
-        // Selectable, saved, and not yet carried out. Said here because
-        // a user who picks "None" for privacy has to know their traffic
-        // still follows the environment's proxy for now.
         ProxyMode::None => Some(
-            "None (direct): not in effect yet — this build's downloader cannot switch \
-             off proxy environment variables, so the job behaves as Inherit until it \
-             can. The choice is saved."
+            "None (direct): connects straight to the server, ignoring the global \
+             proxy, your proxy environment variables and the system one."
                 .to_owned(),
         ),
         _ => None,
@@ -652,23 +648,6 @@ mod tests {
         p.host.clear();
         p.port.clear();
         assert!(!p.invalid());
-    }
-
-    /// A job saved before the mode existed carries `None` meaning
-    /// "no override"; showing it as a direct connection this build
-    /// cannot make would be a second lie on top of the first.
-    #[test]
-    fn a_legacy_none_shows_as_inherit_while_direct_is_unsupported() {
-        let adv = ProxyAdv {
-            mode: ProxyMode::None,
-            ..Default::default()
-        };
-        let expected = if crate::domain::FORCE_DIRECT_HONOURED {
-            ProxyMode::None
-        } else {
-            ProxyMode::Inherit
-        };
-        assert_eq!(ProxyForm::from_adv(&adv).mode, expected);
     }
 
     /// A job from before the scheme selector existed keeps working:

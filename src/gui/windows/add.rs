@@ -44,13 +44,35 @@ const FORCED_SINGLE_SEGMENT: &str = "1 connection (forced)";
 const IDLE_H: f32 = 204.0;
 /// The detected-file card above the destination form.
 const PROBED_H: f32 = 348.0;
-/// The scrolling area the Advanced tabs render into. Fixed, so the
-/// dialog is the same size on every tab and does not jump when a proxy
-/// mode unfolds its server rows.
-const ADV_BODY_H: f32 = 250.0;
-/// With the Advanced pane open: everything above it, the collapsible
-/// header, the tab strip and `ADV_BODY_H`.
-const ADVANCED_H: f32 = 600.0;
+/// Where the Advanced pane stops growing and starts scrolling. Past
+/// this the dialog would be taller than a small laptop screen, and a
+/// window that cannot be reached is worse than one that scrolls.
+const ADV_BODY_MAX: f32 = 260.0;
+/// The pane's fixed parts: the collapsible header, the tab strip, the
+/// hairline under it and the gaps around them.
+const ADV_CHROME_H: f32 = 92.0;
+/// A section's own furniture: the eyebrow label above the card, the
+/// gap under it, and the card's borders.
+const SEC_CHROME_H: f32 = 28.0;
+/// One row of a section: 10px padding, its content, 10px padding.
+/// Measured from the rendered Properties tabs, which these match.
+const ROW_TITLE_H: f32 = 17.0;
+const ROW_DESC_LINE_H: f32 = 15.0;
+const ROW_PAD_H: f32 = 20.0;
+const PILLS_H: f32 = 26.0;
+const INPUT_H: f32 = 30.0;
+const HINT_LINE_H: f32 = 17.0;
+const WARN_H: f32 = 19.0;
+/// Characters of hint or description that fit on one line at this
+/// dialog's width. Used to guess how many lines a paragraph wraps to;
+/// a guess that is one line short only costs a scrollbar.
+const WRAP_CHARS: f32 = 76.0;
+/// With the Advanced pane open: everything above it, the pane's
+/// chrome, and whatever the tab showing needs.
+///
+/// Everything above the pane, measured the way the other constants
+/// here were: the point where the Advanced row's content begins.
+const ABOVE_ADVANCED: f32 = 277.0;
 /// The "cannot be resumed" line and the gap above it: one 12px line of
 /// bold text plus the body column's spacing.
 const NOT_RESUMABLE_H: f32 = 27.0;
@@ -337,7 +359,7 @@ fn wanted_height(st: &AddState) -> f32 {
     // custom chrome, and space the heights below never counted: every
     // one of them was measured on an OS-decorated window.
     let content = if st.advanced_open {
-        ADVANCED_H + warning
+        ABOVE_ADVANCED + ADV_CHROME_H + adv_body_h(st) + BELOW_CONTENT + warning
     } else {
         match &st.probed {
             Some(Ok(_)) => PROBED_H + warning,
@@ -773,7 +795,9 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
         }
         Msg::SetAdvTab(tab) => {
             st.adv_tab = tab;
-            Task::none()
+            // Each tab is its own height; the pane is sized to the one
+            // showing, so switching resizes.
+            fit_window(st)
         }
         Msg::ProxyModeSel(i) => {
             if let Some(mode) = conn_form::PROXY_MODE_VALUES.get(i) {
@@ -862,11 +886,12 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
             if i < st.headers.len() {
                 st.headers.remove(i);
             }
-            Task::none()
+            // One row fewer under the Headers tab.
+            fit_window(st)
         }
         Msg::HeaderAdd => {
             st.headers.push((String::new(), String::new()));
-            Task::none()
+            fit_window(st)
         }
         Msg::RetryProbe => {
             st.probed = None;
@@ -1497,6 +1522,62 @@ fn detect_card(st: &AddState) -> Element<'_, Msg> {
     }
 }
 
+/// How tall the Advanced pane's body wants to be for the tab showing.
+///
+/// The pane is sized to its content rather than to the tallest tab, so
+/// there is no band of empty space under a short one. It does mean the
+/// window resizes when a tab is switched or a proxy mode unfolds its
+/// server rows — the trade the sizing everywhere else in this dialog
+/// already makes. Past `ADV_BODY_MAX` the body scrolls instead.
+fn adv_body_h(st: &AddState) -> f32 {
+    let lines = |text: &str| (text.len() as f32 / WRAP_CHARS).ceil().max(1.0);
+    let h = match st.adv_tab {
+        AdvTab::Proxy => {
+            let mut h = SEC_CHROME_H + ROW_PAD_H + ROW_TITLE_H + 2.0 * ROW_DESC_LINE_H + PILLS_H;
+            if let Some(hint) = conn_form::mode_hint_text(&st.proxy) {
+                h += lines(&hint) * HINT_LINE_H + 10.0;
+            }
+            if st.proxy.explicit() {
+                // Server rows, then the proxy-authentication switch.
+                h += ROW_PAD_H + ROW_TITLE_H + INPUT_H + ROW_PAD_H + ROW_TITLE_H + ROW_DESC_LINE_H;
+                if st.proxy.invalid() {
+                    h += WARN_H;
+                }
+                if st.proxy.auth_enabled {
+                    h += ROW_PAD_H + INPUT_H;
+                }
+                if st.proxy.mode == crate::domain::ProxyMode::Socks5 {
+                    h += ROW_PAD_H + ROW_TITLE_H + 2.0 * ROW_DESC_LINE_H;
+                }
+            }
+            h
+        }
+        AdvTab::Auth => {
+            let mut h = SEC_CHROME_H + ROW_PAD_H + ROW_TITLE_H + ROW_DESC_LINE_H + PILLS_H;
+            h += match st.auth.scheme {
+                crate::domain::AuthScheme::Basic => ROW_PAD_H + INPUT_H,
+                crate::domain::AuthScheme::Bearer => ROW_PAD_H + ROW_TITLE_H + INPUT_H,
+                _ => 0.0,
+            };
+            h
+        }
+        AdvTab::Headers => {
+            // One row per header, plus the "Add header" button and the
+            // line above them.
+            SEC_CHROME_H
+                + ROW_PAD_H
+                + ROW_DESC_LINE_H
+                + (st.headers.len() as f32 + 1.0) * (INPUT_H + theme::space::S2)
+        }
+        AdvTab::UserAgent => {
+            SEC_CHROME_H + ROW_PAD_H + ROW_TITLE_H + 2.0 * ROW_DESC_LINE_H + INPUT_H
+        }
+        // The editor is a fixed 96px.
+        AdvTab::Cookies => SEC_CHROME_H + ROW_PAD_H + ROW_TITLE_H + 2.0 * ROW_DESC_LINE_H + 96.0,
+    };
+    h.min(ADV_BODY_MAX)
+}
+
 fn advanced_section(st: &AddState) -> Element<'_, Msg> {
     let t = &st.tokens;
     let t2 = *t;
@@ -1697,7 +1778,7 @@ fn advanced_section(st: &AddState) -> Element<'_, Msg> {
     // The alternative — sizing the window to the tallest possible
     // tab — makes a dialog that is mostly empty space, and resizing it
     // per tab moves the footer buttons under the pointer.
-    let tab_body = crate::gui::widget::vscroll(tab_body).height(Length::Fixed(ADV_BODY_H));
+    let tab_body = crate::gui::widget::vscroll(tab_body).height(Length::Fixed(adv_body_h(st)));
 
     container(
         column![

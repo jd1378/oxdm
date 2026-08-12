@@ -135,39 +135,19 @@ pub fn job_overlay_options(
 ///   falls back to its standard environment-variable pickup.
 /// - `Http` / `Https` / `Socks5`: synthesize
 ///   `scheme://[user[:pw]@]host:port` (socks5h when remote-DNS is on).
-/// - `None`: coerced to `Inherit` with a WARN while
-///   `FORCE_DIRECT_HONOURED` is false — odl cannot disable reqwest's
-///   env-proxy pickup, so "force direct" is inexpressible and must
-///   never be silently faked (F6). The dialog says the same thing off
-///   the same constant.
+/// - `None`: connect directly. odl's `no_proxy` turns off the
+///   configured proxy, the environment's and the platform's — which is
+///   the whole point of the mode, and why it could not be offered
+///   before odl 3.1 could express it.
 fn apply_job_proxy(
     b: &mut DownloadOptionsBuilder,
     job: &Job,
     proxy_password: Option<&str>,
 ) -> Result<(), String> {
     let adv = &job.advanced.proxy;
-    let mode = match adv.mode {
-        // The compile-time arm that replaces this one calls odl's
-        // no-proxy knob; until it exists, saying "direct" and routing
-        // through the environment's proxy anyway would be a lie about
-        // where the user's traffic went.
-        ProxyMode::None if !crate::domain::FORCE_DIRECT_HONOURED => {
-            tracing::warn!(
-                job = %job.id,
-                "ProxyMode::None cannot be honoured yet (odl exposes no way to disable \
-                 reqwest's env-proxy pickup); treating as Inherit"
-            );
-            ProxyMode::Inherit
-        }
-        m => m,
-    };
-    match mode {
-        // Unreachable while the constant is false (coerced above).
-        // Flipping it without wiring odl's knob lands here, and a job
-        // that refuses to start is the honest failure: the alternative
-        // is traffic going through a proxy the user asked to bypass.
+    match adv.mode {
         ProxyMode::None => {
-            return Err("direct-connection proxy mode is not wired to the downloader".into());
+            b.no_proxy(true);
         }
         ProxyMode::Inherit => {
             if let Some(p) = job.proxy.clone() {
@@ -178,7 +158,7 @@ fn apply_job_proxy(
         ProxyMode::System => {
             b.proxy(None);
         }
-        ProxyMode::Http | ProxyMode::Https | ProxyMode::Socks5 => {
+        mode @ (ProxyMode::Http | ProxyMode::Https | ProxyMode::Socks5) => {
             b.proxy(Some(synth_proxy_url(mode, adv, proxy_password)?));
         }
     }
@@ -703,12 +683,11 @@ mod tests {
         assert_eq!(opts.proxy(), Some("http://legacy:9999"));
     }
 
-    /// "None" is saved and selectable, and until odl can switch off
-    /// reqwest's env-proxy pickup it behaves exactly as Inherit — the
-    /// one thing it must never do is silently look like a direct
-    /// connection while the traffic goes through a proxy.
+    /// "None" means no proxy at all, not "no override": the global one
+    /// goes, and so does the environment's — which is the difference
+    /// between it and System, and the whole reason for the mode.
     #[test]
-    fn force_direct_falls_back_to_inherit_until_odl_can_do_it() {
+    fn force_direct_drops_the_global_proxy_and_the_environment() {
         let base = DownloadOptionsBuilder::default()
             .proxy(Some("http://global:3128".to_owned()))
             .build()
@@ -716,15 +695,12 @@ mod tests {
         let mut job = sample_job();
         job.advanced.proxy.mode = ProxyMode::None;
         let opts = job_overlay_options(&base, &job, None, None, None).unwrap();
-        if crate::domain::FORCE_DIRECT_HONOURED {
-            assert_eq!(opts.proxy(), None, "direct means no proxy at all");
-        } else {
-            assert_eq!(
-                opts.proxy(),
-                Some("http://global:3128"),
-                "coerced to Inherit, which is what the dialog says it does"
-            );
-        }
+        assert!(opts.no_proxy(), "odl connects directly");
+        assert_eq!(
+            opts.proxy(),
+            None,
+            "odl collapses the pair, so nothing reads back a proxy it will not use"
+        );
     }
 
     #[test]

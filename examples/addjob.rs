@@ -48,21 +48,38 @@ async fn main() {
         .position(|a| a == "--proxy")
         .and_then(|i| rest.get(i + 1))
     {
-        let (scheme, addr) = spec.split_once("://").expect("scheme://host:port");
-        let (host, port) = addr.split_once(':').expect("host:port");
+        // `none` and `system` name no server, so they are written on
+        // their own; the rest are `scheme://host:port`.
+        let (scheme, addr) = spec.split_once("://").unwrap_or((spec.as_str(), ""));
+        let (host, port) = addr.split_once(':').unwrap_or(("", ""));
+        let mode = match scheme {
+            "http" => oxdm::domain::ProxyMode::Http,
+            "https" => oxdm::domain::ProxyMode::Https,
+            "socks5" => oxdm::domain::ProxyMode::Socks5,
+            "none" => oxdm::domain::ProxyMode::None,
+            "system" => oxdm::domain::ProxyMode::System,
+            "inherit" => oxdm::domain::ProxyMode::Inherit,
+            other => panic!("unknown proxy scheme {other}"),
+        };
+        let named = !host.is_empty();
         creds.proxy = oxdm::domain::ProxyAdv {
-            mode: match scheme {
-                "http" => oxdm::domain::ProxyMode::Http,
-                "https" => oxdm::domain::ProxyMode::Https,
-                "socks5" => oxdm::domain::ProxyMode::Socks5,
-                "none" => oxdm::domain::ProxyMode::None,
-                other => panic!("unknown proxy scheme {other}"),
-            },
+            mode,
             host: host.to_owned(),
             port: port.to_owned(),
-            auth_enabled: true,
-            username: "pu".to_owned(),
-            password: "pp".to_owned(),
+            // Credentials only where there is a proxy to send them to.
+            // They also need the keyring, which a headless run may not
+            // have.
+            auth_enabled: named,
+            username: if named {
+                "pu".to_owned()
+            } else {
+                String::new()
+            },
+            password: if named {
+                "pp".to_owned()
+            } else {
+                String::new()
+            },
             ..Default::default()
         };
     }
