@@ -148,7 +148,8 @@ fn print_help() {
     println!("    oxdm gui about            Run the About window");
     println!("    oxdm --tray               Start daemon hidden (no main window)");
     println!("    oxdm --install-native-host   Register oxdm with your browsers");
-    println!("        [--chromium-id ID] [--firefox-id ID] [--dry-run]");
+    println!("        [--chromium-id ID] [--firefox-id ID] [--host-binary PATH]");
+    println!("        [--db-path PATH] [--token-file PATH] [--patch-desktop] [--dry-run]");
     println!("    oxdm --quit               Tell the running daemon to exit");
     println!("    oxdm --version            Print version");
     println!("    oxdm --help               This text");
@@ -160,9 +161,14 @@ fn print_help() {
 /// and for the install scripts, which call it rather than keeping
 /// their own copy of where a manifest goes.
 fn install_native_host(mut args: impl Iterator<Item = String>) -> ! {
-    let mut ids = oxdm::data::native_host::Ids::default();
+    let mut opts = oxdm::data::native_host::Options::default();
     let (mut chromium, mut firefox) = (Vec::new(), Vec::new());
-    let mut dry_run = false;
+    let path = |arg: Option<String>, flag: &str| -> std::path::PathBuf {
+        match arg {
+            Some(v) => std::path::PathBuf::from(v),
+            None => fail(&format!("{flag} needs a value")),
+        }
+    };
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--chromium-id" => match args.next() {
@@ -173,10 +179,19 @@ fn install_native_host(mut args: impl Iterator<Item = String>) -> ! {
                 Some(v) => firefox.extend(v.split(',').map(str::trim).map(str::to_owned)),
                 None => fail("--firefox-id needs a value"),
             },
-            "--dry-run" => dry_run = true,
+            "--host-binary" => opts.host_binary = Some(path(args.next(), "--host-binary")),
+            "--db-path" => opts.db_path = Some(path(args.next(), "--db-path")),
+            "--token-file" => opts.token_file = Some(path(args.next(), "--token-file")),
+            "--patch-desktop" => opts.patch_desktop = true,
+            // The flag itself is the consent; kept so the old
+            // invocation still runs.
+            "-y" | "--yes" => {}
+            "--dry-run" => opts.dry_run = true,
             other => fail(&format!("unknown flag: {other}")),
         }
     }
+    let dry_run = opts.dry_run;
+    let ids = &mut opts.ids;
     // Given ids replace the shipped ones for that family only: pairing
     // a development build of the extension should not also stop the
     // published one working in the other browser.
@@ -187,7 +202,7 @@ fn install_native_host(mut args: impl Iterator<Item = String>) -> ! {
         ids.firefox = firefox;
     }
 
-    let report = match oxdm::data::native_host::install(&ids, dry_run) {
+    let report = match oxdm::data::native_host::install(&opts) {
         Ok(r) => r,
         Err(e) => fail(&e),
     };
@@ -211,6 +226,18 @@ fn install_native_host(mut args: impl Iterator<Item = String>) -> ! {
         println!("Flatpak browsers cannot reach oxdm until you grant them the paths:");
         for cmd in &report.flatpak_grants {
             println!("    {cmd}");
+        }
+        if !opts.patch_desktop {
+            println!();
+            println!("Or rerun with --patch-desktop to splice the same grants into each");
+            println!("browser's user .desktop file instead of keeping an override.");
+        }
+    }
+    if !report.desktop_patched.is_empty() {
+        println!();
+        println!("Desktop files:");
+        for line in &report.desktop_patched {
+            println!("    {line}");
         }
     }
     std::process::exit(if report.failures() > 0 { 1 } else { 0 });

@@ -81,6 +81,15 @@ oxdm --install-native-host --chromium-id <ID>    # a build of your own
 oxdm --install-native-host --dry-run             # show, write nothing
 ```
 
+For installs the defaults cannot describe:
+
+| flag | what it changes |
+|---|---|
+| `--host-binary <PATH>` | the `oxdm-native-host` the manifests name, when it is not beside the oxdm binary |
+| `--db-path <PATH>` | the `oxdm.db` a sandboxed host reads port and token from |
+| `--token-file <PATH>` | hands the token to the host on fd 3 from that file instead of letting it read the database; a wrapper does the redirect, so the secret never appears in `ps` |
+| `--patch-desktop` | splices the Flatpak grants into each browser's user `.desktop` file instead of leaving you a `flatpak override` to run |
+
 `tools/install-native-host.sh` and `.ps1` forward to exactly that, so
 there is one list of manifest locations rather than three.
 

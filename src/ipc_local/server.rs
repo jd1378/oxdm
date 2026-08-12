@@ -779,7 +779,7 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
         // slow home directory cannot stall the event loop.
         Request::InstallNativeHost => {
             match tokio::task::spawn_blocking(|| {
-                crate::data::native_host::install(&Default::default(), false)
+                crate::data::native_host::install(&Default::default())
             })
             .await
             {

@@ -4,7 +4,7 @@
 # Usage:
 #   .\install-native-host.ps1 [-ChromiumId <ID>[,<ID>...]] `
 #                             [-FirefoxId <ID>[,<ID>...]] `
-#                             [-Oxdm <PATH>] [-DryRun]
+#                             [-HostBinary <PATH>] [-Oxdm <PATH>] [-DryRun]
 #
 # The work itself lives in the app (`oxdm --install-native-host`),
 # which writes the manifests under %LOCALAPPDATA%\oxdm and registers
@@ -21,6 +21,7 @@
 param(
     [string[]] $ChromiumId = @(),
     [string[]] $FirefoxId  = @(),
+    [string]   $HostBinary = "",
     [string]   $Oxdm       = "",
     [switch]   $DryRun
 )
@@ -43,6 +44,7 @@ if (-not (Test-Path $Oxdm)) { throw "oxdm not found: $Oxdm" }
 $argv = @('--install-native-host')
 if ($ChromiumId.Count -gt 0) { $argv += @('--chromium-id', ($ChromiumId -join ',')) }
 if ($FirefoxId.Count  -gt 0) { $argv += @('--firefox-id',  ($FirefoxId  -join ',')) }
+if ($HostBinary)             { $argv += @('--host-binary', $HostBinary) }
 if ($DryRun)                 { $argv += '--dry-run' }
 
 & $Oxdm @argv

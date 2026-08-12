@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use iced::widget::{column, container, mouse_area, row, text};
+use iced::widget::{column, container, mouse_area, row, text, text_editor};
 use iced::{Alignment, Element, Length, Subscription, Task};
 
 use crate::domain::{
@@ -196,6 +196,11 @@ pub enum Msg {
     /// Register the native-messaging host with every browser found.
     InstallHost,
     Installed(Result<Box<crate::domain::HostReport>, String>),
+    /// Selection and scrolling inside the read-only grant list. Edits
+    /// are dropped: it is output, not a field.
+    GrantsAction(text_editor::Action),
+    CopyGrants,
+    GrantsCopyDone,
     /// General → Updates.
     AutoCheckUpdates(bool),
     // Notifications
@@ -308,6 +313,12 @@ pub struct State {
     installing_host: bool,
     host_report: Option<crate::domain::HostReport>,
     host_error: Option<String>,
+    /// The Flatpak grant commands, in a read-only editor so they can
+    /// be selected and copied a line at a time. A `text` widget paints
+    /// glyphs and nothing else — and a command the user cannot copy is
+    /// a command they have to retype from a screenshot.
+    host_grants: text_editor::Content,
+    host_grants_copied: bool,
     /// How many settings differ from what is saved. Drives the footer's
     /// Discard button; recomputed in `update_ready`.
     dirty: usize,
@@ -632,6 +643,8 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 installing_host: false,
                 host_report: None,
                 host_error: None,
+                host_grants: text_editor::Content::new(),
+                host_grants_copied: false,
                 s: settings,
                 work_dir: String::new(),
                 save_error: None,
@@ -998,9 +1011,32 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
         Msg::Installed(res) => {
             st.installing_host = false;
             match res {
-                Ok(report) => st.host_report = Some(*report),
+                Ok(report) => {
+                    st.host_grants =
+                        text_editor::Content::with_text(&report.flatpak_grants.join("\n"));
+                    st.host_report = Some(*report);
+                }
                 Err(e) => st.host_error = Some(e),
             }
+            Task::none()
+        }
+        Msg::GrantsAction(action) => {
+            // Move and select, never edit — the text is a result, and
+            // a half-typed command would be worse than none.
+            if !action.is_edit() {
+                st.host_grants.perform(action);
+            }
+            Task::none()
+        }
+        Msg::CopyGrants => {
+            st.host_grants_copied = true;
+            Task::batch([
+                iced::clipboard::write(st.host_grants.text()),
+                Task::perform(crate::gui::widget::copy::expire(), |()| Msg::GrantsCopyDone),
+            ])
+        }
+        Msg::GrantsCopyDone => {
+            st.host_grants_copied = false;
             Task::none()
         }
         Msg::ExtTokenSaved(Ok(saved)) => {
@@ -2473,15 +2509,39 @@ fn host_install_block(st: &State) -> Element<'_, Msg> {
             .size(11.0)
             .color(t.fg_3),
         );
-        for cmd in &report.flatpak_grants {
-            col = col.push(
-                text(cmd.clone())
-                    .font(theme::MONO)
-                    .size(10.5)
-                    .color(t.fg_2)
-                    .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
-            );
-        }
+        let t3 = *t;
+        col = col.push(
+            row![
+                iced::widget::Space::new().width(Length::Fill),
+                crate::gui::widget::copy::copy_btn(
+                    "Copy commands",
+                    st.host_grants_copied,
+                    Msg::CopyGrants,
+                )
+                .toolbar()
+                .view(t),
+            ]
+            .align_y(Alignment::Center),
+        );
+        col = col.push(
+            text_editor::TextEditor::new(&st.host_grants)
+                .font(theme::MONO)
+                .size(10.5)
+                .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+                .height(Length::Shrink)
+                .on_action(Msg::GrantsAction)
+                .style(move |_th, _status| text_editor::Style {
+                    background: t3.bg_sunken.into(),
+                    border: iced::Border {
+                        color: t3.border_subtle,
+                        width: 1.0,
+                        radius: theme::control::RADIUS.into(),
+                    },
+                    placeholder: t3.fg_4,
+                    value: t3.fg_2,
+                    selection: t3.selection_bg(),
+                }),
+        );
     }
     col.into()
 }

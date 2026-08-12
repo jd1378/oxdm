@@ -82,7 +82,7 @@ fn run() -> Result<(), String> {
 
     // One install pass fixes both cases: it rewrites exactly the
     // manifests that differ and leaves the rest untouched.
-    let report = native_host::install(&native_host::Ids::default(), false)?;
+    let report = native_host::install(&native_host::Options::default())?;
     tracing::info!(
         missing,
         wrong = wrong.len(),

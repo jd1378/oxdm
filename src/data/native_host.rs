@@ -41,6 +41,33 @@ impl Default for Ids {
     }
 }
 
+/// Everything an install can be told to do differently.
+///
+/// The defaults are what the app itself uses; the flags exist for the
+/// installs the defaults cannot describe — a portable copy whose
+/// binary is not beside the running one, a database somewhere else, a
+/// token the host should read from a file rather than from that
+/// database.
+#[derive(Debug, Clone, Default)]
+pub struct Options {
+    pub ids: Ids,
+    /// The `oxdm-native-host` to register. Defaults to the one beside
+    /// the running binary.
+    pub host_binary: Option<PathBuf>,
+    /// The `oxdm.db` a sandboxed host should read port and token from.
+    /// Defaults to this user's config directory.
+    pub db_path: Option<PathBuf>,
+    /// Hand the extension token to the host on file descriptor 3
+    /// instead of letting it read the database. A wrapper script does
+    /// the redirect, so the secret never appears in `ps` output.
+    pub token_file: Option<PathBuf>,
+    /// Also splice the Flatpak filesystem grants into the browsers'
+    /// user `.desktop` files, for people who would rather not keep a
+    /// persistent `flatpak override`.
+    pub patch_desktop: bool,
+    pub dry_run: bool,
+}
+
 /// A place a manifest can go, and what it means.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Target {
@@ -116,11 +143,22 @@ fn persist_host_copy(inside_bundle: &Path, name: &str) -> Result<PathBuf, String
 }
 
 /// Install (or refresh) the manifests for every browser found.
-pub fn install(ids: &Ids, dry_run: bool) -> Result<HostReport, String> {
-    let binary = host_binary()?;
+pub fn install(opts: &Options) -> Result<HostReport, String> {
+    let ids = &opts.ids;
+    let dry_run = opts.dry_run;
+    let binary = match &opts.host_binary {
+        Some(p) => absolute_existing(p)?,
+        None => host_binary()?,
+    };
     let home = dirs::home_dir().ok_or_else(|| "no home directory".to_string())?;
     let mut report = HostReport::default();
     let mut flatpak_seen: Vec<&'static str> = Vec::new();
+    // With a token file, the manifest points at a shim that opens it
+    // on fd 3 rather than at the host itself.
+    let direct = match &opts.token_file {
+        Some(token) => token_fd_wrapper(&binary, token, dry_run)?,
+        None => binary.clone(),
+    };
 
     for target in targets(&home) {
         // The browser's own config dir. Absent = not installed.
@@ -134,7 +172,7 @@ pub fn install(ids: &Ids, dry_run: bool) -> Result<HostReport, String> {
         // A Flatpak browser cannot run our binary directly; it runs a
         // wrapper inside its own sandbox, which then execs ours.
         let exec = match target.flatpak_id {
-            Some(app) => match flatpak_wrapper(&home, app, &binary, dry_run) {
+            Some(app) => match flatpak_wrapper(&home, app, &binary, opts) {
                 Ok(path) => {
                     if !flatpak_seen.contains(&app) {
                         flatpak_seen.push(app);
@@ -152,7 +190,7 @@ pub fn install(ids: &Ids, dry_run: bool) -> Result<HostReport, String> {
                     continue;
                 }
             },
-            None => binary.clone(),
+            None => direct.clone(),
         };
         let body = manifest_json(&exec, target.family, ids);
         let outcome = write_if_changed(&manifest, &body, dry_run);
@@ -166,11 +204,18 @@ pub fn install(ids: &Ids, dry_run: bool) -> Result<HostReport, String> {
     }
 
     if !flatpak_seen.is_empty() {
-        let grants = flatpak_grant_args(&binary);
-        for app in flatpak_seen {
+        let grants = flatpak_grant_args(&binary, opts);
+        for app in &flatpak_seen {
             report
                 .flatpak_grants
                 .push(format!("flatpak override --user {grants} {app}"));
+        }
+        if opts.patch_desktop {
+            for app in &flatpak_seen {
+                report
+                    .desktop_patched
+                    .push(patch_desktop(app, &grants, dry_run));
+            }
         }
     }
     #[cfg(windows)]
@@ -268,6 +313,66 @@ fn restrict(path: &Path) {
     let _ = path;
 }
 
+/// An override path is only useful if a browser can actually run it.
+fn absolute_existing(p: &Path) -> Result<PathBuf, String> {
+    if !p.is_absolute() {
+        return Err(format!("{} must be an absolute path", p.display()));
+    }
+    std::fs::canonicalize(p).map_err(|e| format!("{}: {e}", p.display()))
+}
+
+/// The shim that hands the token to the host on fd 3.
+///
+/// `--token <secret>` would put it in `ps` output for every process on
+/// the machine; a redirect from a file the shell opens does not. The
+/// shim is what the manifest names, so the browser launches it and it
+/// execs the host.
+fn token_fd_wrapper(binary: &Path, token_file: &Path, dry_run: bool) -> Result<PathBuf, String> {
+    let token = absolute_existing(token_file)?;
+    // The secret's own permissions are not ours to assume: tighten
+    // them before pointing a browser-launched process at it.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600));
+    }
+    let dir = dirs::data_dir()
+        .ok_or_else(|| "no data directory".to_string())?
+        .join("oxdm");
+    let wrapper = dir.join("oxdm-native-host-fd.sh");
+    let body = format!(
+        "#!/bin/sh\n\
+         # Written by oxdm. Reads the extension token from a file and\n\
+         # passes it to the native host on fd 3, so the secret never\n\
+         # appears in this process's arguments.\n\
+         exec {} --token-fd 3 \"$@\" 3< {}\n",
+        shell_quote(&binary.display().to_string()),
+        shell_quote(&token.display().to_string()),
+    );
+    if dry_run {
+        return Ok(wrapper);
+    }
+    write_script(&wrapper, &body)?;
+    Ok(wrapper)
+}
+
+/// Write an executable, owner-only script.
+fn write_script(path: &Path, body: &str) -> Result<(), String> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    }
+    if std::fs::read_to_string(path).is_ok_and(|old| old == body) {
+        return Ok(());
+    }
+    std::fs::write(path, body).map_err(|e| format!("write {}: {e}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+    }
+    Ok(())
+}
+
 /// Plant the shim a Flatpak browser runs.
 ///
 /// Two problems it solves. The browser cannot execute our binary
@@ -279,34 +384,37 @@ fn flatpak_wrapper(
     home: &Path,
     app: &str,
     binary: &Path,
-    dry_run: bool,
+    opts: &Options,
 ) -> Result<PathBuf, String> {
     let dir = home.join(".var/app").join(app).join("data");
     let wrapper = dir.join("oxdm-native-host");
-    let db = db_path()?;
+    // A token file is reached from inside the sandbox, so it needs a
+    // grant of its own — printed with the others.
+    let (token_arg, redirect) = match &opts.token_file {
+        Some(t) => (
+            " --token-fd 3".to_owned(),
+            format!(" 3< {}", shell_quote(&t.display().to_string())),
+        ),
+        None => (String::new(), String::new()),
+    };
+    let db = match &opts.db_path {
+        Some(p) => p.clone(),
+        None => db_path()?,
+    };
     let body = format!(
         "#!/bin/sh\n\
          # Written by oxdm. The browser runs this from inside its\n\
          # Flatpak sandbox; the real host is bind-mounted at the path\n\
          # below, and --db-path stops it looking for oxdm.db under the\n\
          # sandbox's own $HOME.\n\
-         exec {} --db-path {} \"$@\"\n",
+         exec {}{token_arg} --db-path {} \"$@\"{redirect}\n",
         shell_quote(&binary.display().to_string()),
         shell_quote(&db.display().to_string()),
     );
-    if dry_run {
+    if opts.dry_run {
         return Ok(wrapper);
     }
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-    if std::fs::read_to_string(&wrapper).is_ok_and(|old| old == body) {
-        return Ok(wrapper);
-    }
-    std::fs::write(&wrapper, &body).map_err(|e| format!("write {}: {e}", wrapper.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700));
-    }
+    write_script(&wrapper, &body)?;
     Ok(wrapper)
 }
 
@@ -327,16 +435,104 @@ fn db_path() -> Result<PathBuf, String> {
 /// The grants a Flatpak browser needs: the host binary, and the
 /// database's *directory* — SQLite in WAL mode reads `-wal` and `-shm`
 /// sidecars beside the file even when opening read-only.
-fn flatpak_grant_args(binary: &Path) -> String {
-    let db_dir = db_path()
-        .ok()
+fn flatpak_grant_args(binary: &Path, opts: &Options) -> String {
+    let db = match &opts.db_path {
+        Some(p) => Some(p.clone()),
+        None => db_path().ok(),
+    };
+    let db_dir = db
         .and_then(|p| p.parent().map(Path::to_path_buf))
         .unwrap_or_default();
-    format!(
+    let mut args = format!(
         "--filesystem={}:ro --filesystem={}:ro",
         binary.display(),
         db_dir.display()
-    )
+    );
+    if let Some(token) = &opts.token_file {
+        args.push_str(&format!(" --filesystem={}:ro", token.display()));
+    }
+    args
+}
+
+/// Splice the same filesystem grants into a Flatpak browser's user
+/// `.desktop` file, for people who would rather not keep a persistent
+/// override.
+///
+/// Only the user's copy under `~/.local/share/applications` is
+/// written; the system-wide file is read and never touched. Every
+/// `Exec=` line is patched, not just the first — desktop files carry
+/// extra ones for their actions (a private window, say), and a browser
+/// launched from one of those would otherwise be the one that cannot
+/// reach oxdm. Each argument is checked independently, so re-running
+/// adds nothing twice.
+fn patch_desktop(app: &str, grants: &str, dry_run: bool) -> String {
+    let Some(home) = dirs::home_dir() else {
+        return format!("{app}: no home directory");
+    };
+    let dest = home
+        .join(".local/share/applications")
+        .join(format!("{app}.desktop"));
+    let candidates = [
+        dest.clone(),
+        PathBuf::from("/var/lib/flatpak/exports/share/applications").join(format!("{app}.desktop")),
+        PathBuf::from("/var/lib/flatpak/app")
+            .join(app)
+            .join("current/active/export/share/applications")
+            .join(format!("{app}.desktop")),
+    ];
+    let Some(src) = candidates.iter().find(|p| p.is_file()) else {
+        return format!("{app}: no .desktop file found");
+    };
+    let Ok(body) = std::fs::read_to_string(src) else {
+        return format!("{app}: could not read {}", src.display());
+    };
+    let patched = splice_exec(&body, grants);
+    if patched == body {
+        return format!("{app}: already granted in {}", dest.display());
+    }
+    if dry_run {
+        return format!("{app}: would patch {}", dest.display());
+    }
+    match write_desktop(&dest, &patched) {
+        Ok(()) => format!("{app}: patched {}", dest.display()),
+        Err(e) => format!("{app}: {e}"),
+    }
+}
+
+fn write_desktop(dest: &Path, body: &str) -> Result<(), String> {
+    if let Some(dir) = dest.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    }
+    std::fs::write(dest, body).map_err(|e| format!("write {}: {e}", dest.display()))
+}
+
+/// Insert each grant after `flatpak run` on every `Exec=` line that
+/// does not already carry it.
+fn splice_exec(body: &str, grants: &str) -> String {
+    let tokens: Vec<&str> = grants.split_whitespace().collect();
+    body.lines()
+        .map(|line| {
+            if !line.starts_with("Exec=") {
+                return line.to_owned();
+            }
+            let mut out = line.to_owned();
+            for token in &tokens {
+                if out.contains(token) {
+                    continue;
+                }
+                // `flatpak run` is what takes these; a line that does
+                // not launch through it is left alone rather than
+                // guessed at.
+                if let Some(at) = out.find("flatpak run") {
+                    let cut = at + "flatpak run".len();
+                    out.insert_str(cut, &format!(" {token}"));
+                }
+            }
+            out
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + if body.ends_with('\n') { "\n" } else { "" }
 }
 
 /// Every place a manifest can go, for the browsers oxdm knows about.
@@ -737,6 +933,76 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Every `Exec=` line gets the grants, not just the first: a
+    /// browser launched from a desktop *action* (a private window,
+    /// say) is the same browser and needs the same access.
+    #[test]
+    fn every_exec_line_is_granted_once() {
+        let desktop = "[Desktop Entry]\n\
+             Name=Firefox\n\
+             Exec=/usr/bin/flatpak run --branch=stable org.mozilla.firefox @@u %U @@\n\
+             \n\
+             [Desktop Action new-private-window]\n\
+             Exec=/usr/bin/flatpak run --branch=stable org.mozilla.firefox --private-window\n";
+        let grants = "--filesystem=/opt/host:ro --filesystem=/home/u/.config/oxdm:ro";
+        let once = splice_exec(desktop, grants);
+        assert_eq!(once.matches("--filesystem=/opt/host:ro").count(), 2);
+        assert_eq!(
+            once.matches("--filesystem=/home/u/.config/oxdm:ro").count(),
+            2
+        );
+        for line in once.lines().filter(|l| l.starts_with("Exec=")) {
+            assert!(line.contains("flatpak run --filesystem="), "{line}");
+        }
+        // Rerunning adds nothing: each grant is checked on its own.
+        assert_eq!(splice_exec(&once, grants), once);
+    }
+
+    /// A line that does not launch through `flatpak run` is left
+    /// alone — there is nowhere to put the arguments that would mean
+    /// anything.
+    #[test]
+    fn a_non_flatpak_exec_line_is_not_guessed_at() {
+        let desktop = "[Desktop Entry]\nExec=/usr/bin/firefox %U\n";
+        assert_eq!(splice_exec(desktop, "--filesystem=/opt/host:ro"), desktop);
+    }
+
+    #[test]
+    fn an_override_path_has_to_be_absolute_and_real() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = dir.path().join("oxdm-native-host");
+        std::fs::write(&host, b"x").unwrap();
+        assert!(absolute_existing(&host).is_ok());
+        assert!(absolute_existing(Path::new("relative/path")).is_err());
+        assert!(absolute_existing(&dir.path().join("absent")).is_err());
+    }
+
+    /// The token wrapper is the whole point of `--token-file`: the
+    /// secret is redirected onto fd 3, never passed as an argument
+    /// where `ps` would show it to every process on the machine.
+    #[cfg(unix)]
+    #[test]
+    fn the_token_never_reaches_the_command_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = dir.path().join("token");
+        std::fs::write(&token, b"s3cret").unwrap();
+        let host = dir.path().join("oxdm-native-host");
+        std::fs::write(&host, b"x").unwrap();
+
+        // Written into the user's data dir, so only its shape is
+        // asserted here; the dry run gives the path without writing.
+        let wrapper = token_fd_wrapper(&host, &token, true).unwrap();
+        assert!(wrapper.ends_with("oxdm-native-host-fd.sh"));
+
+        let body = format!(
+            "exec {} --token-fd 3 \"$@\" 3< {}",
+            shell_quote(&std::fs::canonicalize(&host).unwrap().display().to_string()),
+            shell_quote(&std::fs::canonicalize(&token).unwrap().display().to_string()),
+        );
+        assert!(!body.contains("s3cret"), "the secret is read, not passed");
+        assert!(body.contains("--token-fd 3"));
     }
 
     #[cfg(unix)]

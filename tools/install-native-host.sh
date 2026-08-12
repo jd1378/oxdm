@@ -5,6 +5,8 @@
 # Usage:
 #   install-native-host.sh [--chromium-id <ID>[,<ID>...]]
 #                          [--firefox-id <ID>[,<ID>...]]
+#                          [--host-binary <PATH>] [--db-path <PATH>]
+#                          [--token-file <PATH>] [--patch-desktop]
 #                          [--oxdm <PATH>] [--dry-run]
 #
 #   --chromium-id / --firefox-id
@@ -12,6 +14,19 @@
 #       Given for one family, the shipped id for the other still
 #       applies — pairing a development build in Chrome should not
 #       unpair the store build in Firefox.
+#   --host-binary <PATH>
+#       The oxdm-native-host to register. Defaults to the one beside
+#       the oxdm binary.
+#   --db-path <PATH>
+#       The oxdm.db a sandboxed host should read port and token from.
+#       Defaults to this user's config directory.
+#   --token-file <PATH>
+#       Hand the extension token to the host on fd 3 from this file
+#       instead of letting it read the database. A wrapper does the
+#       redirect, so the secret never appears in `ps` output.
+#   --patch-desktop
+#       Also splice the Flatpak filesystem grants into each browser's
+#       user .desktop file, instead of keeping a `flatpak override`.
 #   --oxdm <PATH>
 #       The oxdm binary to ask. Defaults to one beside this script,
 #       then to whatever is on $PATH.
@@ -44,13 +59,15 @@ while [ $# -gt 0 ]; do
         --oxdm)
             shift; [ $# -gt 0 ] || err "--oxdm needs a value"
             OXDM="$1" ;;
-        --chromium-id|--firefox-id)
+        --chromium-id|--firefox-id|--host-binary|--db-path|--token-file)
             flag="$1"; shift; [ $# -gt 0 ] || err "$flag needs a value"
             ARGS="$ARGS $flag $1" ;;
-        --dry-run)
-            ARGS="$ARGS --dry-run" ;;
+        --patch-desktop|--dry-run)
+            ARGS="$ARGS $1" ;;
+        -y|--yes)
+            : ;; # the flag it used to confirm is now the consent
         -h|--help)
-            sed -n '2,32p' "$0"; exit 0 ;;
+            sed -n '2,46p' "$0"; exit 0 ;;
         *) err "unknown flag: $1" ;;
     esac
     shift

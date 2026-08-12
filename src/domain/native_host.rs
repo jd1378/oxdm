@@ -75,6 +75,10 @@ pub struct HostReport {
     /// them would mean shelling out to `flatpak override` with their
     /// rights — a bigger promise than "we wrote a file".
     pub flatpak_grants: Vec<String>,
+    /// One line per Flatpak `.desktop` file that `--patch-desktop`
+    /// touched, or explained why it did not.
+    #[serde(default)]
+    pub desktop_patched: Vec<String>,
     /// Nothing was found to install into. Distinguished from "all
     /// good" so the UI can say which.
     pub no_browsers: bool,
