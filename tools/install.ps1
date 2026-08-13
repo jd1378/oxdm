@@ -67,7 +67,16 @@ try {
   # what the release actually built".
   Step 'Verifying'
   try {
-    $sums = (Invoke-WebRequest -Uri "$url.sha256" -UseBasicParsing).Content
+    # To a file, then read it as text. `Invoke-WebRequest` hands back
+    # `Content` as a byte array whenever the server does not call the
+    # response text — GitHub serves .sha256 as application/octet-stream
+    # — and splitting a byte array stringifies it to "51 49 ...", so
+    # the digest came out as the decimal value of its first character.
+    $shaFile = "$pkg.sha256"
+    Invoke-WebRequest -Uri "$url.sha256" -OutFile $shaFile -UseBasicParsing
+    $sums = (Get-Content -Raw -Path $shaFile).Trim()
+    # `<hash>  <name>`, or `<hash> *<name>` when it was written in
+    # binary mode; the digest is the first field either way.
     $want = ($sums -split '\s+')[0]
     $got = (Get-FileHash -Path $pkg -Algorithm SHA256).Hash.ToLower()
     if ($want.ToLower() -ne $got) { Fail "checksum mismatch: expected $want, got $got" }
