@@ -1,0 +1,64 @@
+name: CI
+
+# Checks on the way in, rather than at the tag.
+#
+# Two reasons this exists. The obvious one: a release used to be the
+# first time anything was compiled for Windows or macOS, so a test that
+# assumed a Unix path failed on the tag, after five other platforms had
+# already spent half an hour building.
+#
+# The less obvious one: GitHub scopes caches by ref. A cache written by
+# a run on a *tag* cannot be read by the next tag's run, but every
+# branch and tag can read one written on the default branch. So without
+# a workflow on `main` there is nothing for the release to restore, and
+# every release compiles the whole dependency graph from scratch on six
+# runners. This is what fills that cache.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push makes the previous one's answer stale; nothing is
+# published from here, so there is nothing to protect by finishing it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Incremental artifacts are per-machine state that never survives a
+  # runner, so they cost disk and cache size for nothing.
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Lint and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt -- --check
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo test --locked
+
+  platforms:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, macos-14]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run tests
+        # Library tests only, same as the release build runs: the
+        # binaries are GUI and daemon entry points with nothing to
+        # assert without a session bus and a display.
+        run: cargo test --locked --lib
