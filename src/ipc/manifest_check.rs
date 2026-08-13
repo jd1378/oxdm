@@ -58,8 +58,18 @@ enum State {
 }
 
 fn run() -> Result<(), String> {
-    let expected = native_host::host_binary()?;
     let home = dirs::home_dir().ok_or_else(|| "no home directory".to_string())?;
+    // Without the host program there is nothing to point a browser at,
+    // and writing a manifest naming a file that does not exist would
+    // be worse than writing none. Which of those two situations this
+    // is depends on whether anything was ever registered.
+    let expected = match native_host::host_binary() {
+        Ok(p) => p,
+        Err(e) => {
+            report_missing_host(&home, &e);
+            return Ok(());
+        }
+    };
     let mut missing = 0usize;
     let mut wrong: Vec<(PathBuf, String)> = Vec::new();
 
@@ -100,6 +110,35 @@ fn run() -> Result<(), String> {
         notify_repaired(&wrong);
     }
     Ok(())
+}
+
+/// The host program is gone. Say so only if a browser was told about
+/// it, because then something that used to work has stopped: an
+/// install that never registered anything is not broken, it is just an
+/// install nobody has set up yet, and starting the app is not the
+/// moment to nag about that.
+fn report_missing_host(home: &Path, reason: &str) {
+    let registered: Vec<PathBuf> = native_host::targets(home)
+        .into_iter()
+        .map(|t| t.dir.join(format!("{HOST_NAME}.json")))
+        .filter(|p| p.is_file())
+        .collect();
+    if registered.is_empty() {
+        tracing::debug!(%reason, "no browser host to register");
+        return;
+    }
+    tracing::warn!(
+        %reason,
+        browsers = registered.len(),
+        "the browser host is missing; capture will not work"
+    );
+    crate::platform::show_notification(
+        "oxdm cannot capture browser downloads".to_owned(),
+        format!(
+            "{reason}\n\n{} browser registration(s) point at it.",
+            registered.len()
+        ),
+    );
 }
 
 fn inspect(manifest: &Path, expected: &Path) -> State {

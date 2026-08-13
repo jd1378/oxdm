@@ -94,6 +94,12 @@ pub struct Target {
 /// data directory, which does not move.
 pub fn host_binary() -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+    host_binary_beside(&exe)
+}
+
+/// The path half of [`host_binary`], split out so it is testable
+/// without putting a file next to the test runner.
+fn host_binary_beside(exe: &Path) -> Result<PathBuf, String> {
     let dir = exe
         .parent()
         .ok_or_else(|| "the running binary has no parent directory".to_string())?;
@@ -102,8 +108,21 @@ pub fn host_binary() -> Result<PathBuf, String> {
     if crate::data::update_channel::running_as_appimage().is_some() {
         return persist_host_copy(&beside, &name);
     }
+    if !beside.exists() {
+        // Said in full, because this is what a user sees when a
+        // browser stops capturing: which file, where it was looked
+        // for, and what puts it back. An install missing it is not
+        // broken for downloading, only for the browser bridge.
+        return Err(format!(
+            "{name} is missing from {}. oxdm downloads and updates \
+             without it, but a browser cannot hand downloads over \
+             until it is back. Reinstalling puts it there, or copy it \
+             next to oxdm from the release archive.",
+            dir.display()
+        ));
+    }
     std::fs::canonicalize(&beside)
-        .map_err(|e| format!("expected oxdm-native-host at {}: {e}", beside.display()))
+        .map_err(|e| format!("{name} is in {} but cannot be read: {e}", dir.display()))
 }
 
 /// Copy the host out of an AppImage mount into a path that survives
@@ -999,6 +1018,28 @@ mod tests {
             chromium: vec!["abc".into()],
             firefox: vec!["oxdm@example".into()],
         }
+    }
+
+    /// A message about a missing program has to name the program, the
+    /// place it was looked for, and a way to put it back. An IO error
+    /// on its own leaves the user with nothing to act on, and this is
+    /// the message a browser that stopped capturing leads to.
+    #[test]
+    fn a_missing_host_is_explained_rather_than_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("oxdm");
+        std::fs::write(&exe, b"app").unwrap();
+
+        let err = host_binary_beside(&exe).unwrap_err();
+        assert!(err.contains("oxdm-native-host"), "{err}");
+        assert!(err.contains(&dir.path().display().to_string()), "{err}");
+        assert!(err.contains("Reinstalling"), "{err}");
+        // Downloads keep working without it; saying otherwise would
+        // send people looking for a problem they do not have.
+        assert!(err.contains("downloads and updates without it"), "{err}");
+
+        std::fs::write(dir.path().join("oxdm-native-host"), b"host").unwrap();
+        assert!(host_binary_beside(&exe).is_ok());
     }
 
     #[test]
