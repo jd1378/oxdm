@@ -1038,7 +1038,11 @@ mod tests {
         // send people looking for a problem they do not have.
         assert!(err.contains("downloads and updates without it"), "{err}");
 
-        std::fs::write(dir.path().join("oxdm-native-host"), b"host").unwrap();
+        // With the suffix this platform actually uses: the host is
+        // `oxdm-native-host.exe` on Windows, and a test that writes
+        // the bare name there is testing nothing.
+        let name = format!("oxdm-native-host{}", std::env::consts::EXE_SUFFIX);
+        std::fs::write(dir.path().join(name), b"host").unwrap();
         assert!(host_binary_beside(&exe).is_ok());
     }
 
