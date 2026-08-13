@@ -552,6 +552,11 @@ fn spawn_detached(exe: &PathBuf) -> io::Result<()> {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    // Nothing of this updater's descriptor table travels into the app
+    // it is starting. Whatever this process inherited from the daemon
+    // that spawned it would otherwise be held open by the very process
+    // that has to start cleanly.
+    crate::platform::attach_close_high_fds(&mut cmd);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

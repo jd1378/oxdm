@@ -1,9 +1,10 @@
 //! Single-instance guard.
 //!
 //! Two cooperating mechanisms:
-//! - `single-instance` crate holds a per-user named lock (POSIX file
-//!   lock on Unix, `CreateMutex` on Windows). It cheaply answers
-//!   "am I the first?".
+//! - A per-user named lock answers "am I the first?" cheaply. On Linux
+//!   that is an abstract unix socket bound here (see [`Lock`]);
+//!   elsewhere it is the `single-instance` crate's own (a flock'd file
+//!   on macOS, `CreateMutex` on Windows).
 //! - `interprocess` local socket (a 0600 filesystem socket in the
 //!   per-user runtime dir on Unix, named pipe on Windows) carries a
 //!   one-line `SHOW` ping from secondary launches to the primary. The
@@ -27,6 +28,7 @@ use std::time::Duration;
 use interprocess::local_socket::{
     ListenerOptions, Stream, prelude::*, traits::tokio::Listener as _,
 };
+#[cfg(not(target_os = "linux"))]
 use single_instance::SingleInstance;
 
 const SHOW_CMD: &str = "SHOW\n";
@@ -66,12 +68,109 @@ pub enum InstanceOutcome {
 }
 
 pub struct InstanceGuard {
-    lock: SingleInstance,
+    lock: Lock,
+}
+
+/// The Linux lock, bound here rather than through the `single-instance`
+/// crate, for one reason: the crate creates its socket with
+/// `SockFlag::empty()`, so the descriptor has no `FD_CLOEXEC` and every
+/// child the daemon spawns inherits it.
+///
+/// An abstract socket's name stays taken while *any* process holds a
+/// descriptor bound to it. So a child outliving the daemon by a moment
+/// keeps the name taken, and the next oxdm to start gets `EADDRINUSE`,
+/// decides another instance is running, and exits. That is what broke
+/// the self-update: the updater is a child, and it is alive across
+/// exactly the window in which the replacement app starts.
+///
+/// `SOCK_CLOEXEC` ends the whole class at the source — no spawn site
+/// has to remember anything.
+#[cfg(target_os = "linux")]
+struct Lock {
+    /// `None` when the name was already taken.
+    fd: Option<std::os::fd::RawFd>,
+}
+
+#[cfg(target_os = "linux")]
+impl Lock {
+    fn new(name: &str) -> std::io::Result<Self> {
+        // "\0name": the leading NUL is what makes it abstract, so it
+        // lives in the network namespace rather than the filesystem and
+        // needs no cleanup after a crash.
+        let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        let bytes = name.as_bytes();
+        if bytes.len() + 1 > addr.sun_path.len() {
+            return Err(std::io::Error::other("single-instance name too long"));
+        }
+        for (slot, b) in addr.sun_path.iter_mut().skip(1).zip(bytes) {
+            *slot = *b as libc::c_char;
+        }
+        // Only the bytes actually used, or the kernel takes the
+        // trailing NULs as part of the name.
+        let len = (std::mem::size_of::<libc::sa_family_t>() + 1 + bytes.len()) as libc::socklen_t;
+
+        // SAFETY: a plain socket call; the fd is checked before use and
+        // owned by this struct from here on.
+        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: `addr` outlives the call and `len` describes it.
+        let bound = unsafe { libc::bind(fd, std::ptr::addr_of!(addr).cast(), len) };
+        if bound == 0 {
+            return Ok(Self { fd: Some(fd) });
+        }
+        let err = std::io::Error::last_os_error();
+        // SAFETY: `fd` came from a successful `socket` and is not
+        // stored anywhere.
+        unsafe { libc::close(fd) };
+        if err.raw_os_error() == Some(libc::EADDRINUSE) {
+            Ok(Self { fd: None })
+        } else {
+            Err(err)
+        }
+    }
+
+    fn is_single(&self) -> bool {
+        self.fd.is_some()
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for Lock {
+    /// Only reached when a guard is dropped without being handed to
+    /// [`InstanceGuard::spawn_listener`] — a boot that failed after
+    /// taking the lock. The live daemon forgets the guard instead and
+    /// lets the kernel free the name at exit.
+    fn drop(&mut self) {
+        if let Some(fd) = self.fd.take() {
+            // SAFETY: the fd is ours, taken so it cannot close twice.
+            unsafe { libc::close(fd) };
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+struct Lock {
+    inner: SingleInstance,
+}
+
+#[cfg(not(target_os = "linux"))]
+impl Lock {
+    fn new(name: &str) -> std::io::Result<Self> {
+        SingleInstance::new(name)
+            .map(|inner| Self { inner })
+            .map_err(|e| std::io::Error::other(e.to_string()))
+    }
+
+    fn is_single(&self) -> bool {
+        self.inner.is_single()
+    }
 }
 
 pub fn acquire() -> std::io::Result<InstanceOutcome> {
-    let lock =
-        SingleInstance::new(&lock_name()).map_err(|e| std::io::Error::other(e.to_string()))?;
+    let lock = Lock::new(&lock_name())?;
 
     if !lock.is_single() {
         // Lock failed → primary is alive. Signal it and exit.
@@ -118,6 +217,9 @@ impl InstanceGuard {
     /// process lifetime via `mem::forget` — the OS releases it on
     /// exit, so a crash cannot leave us permanently locked out.
     pub fn spawn_listener(self, state: Arc<crate::data::AppState>) -> std::io::Result<()> {
+        // Held for the process lifetime: never closed, never dropped.
+        // The OS releases it on exit, so a crash cannot leave us
+        // permanently locked out.
         let Self { lock } = self;
         std::mem::forget(lock);
 
@@ -179,5 +281,58 @@ async fn handle_signal(
     if line == "SHOW" {
         state.events_emit(crate::data::DomainEvent::ShowMainWindow);
         let _ = stream.write_all(SHOW_OK).await;
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    fn name(tag: &str) -> String {
+        format!("oxdm-test-{}-{}-{tag}", std::process::id(), unsafe {
+            libc::getuid()
+        })
+    }
+
+    #[test]
+    fn the_second_instance_is_not_single() {
+        let n = name("second");
+        let first = Lock::new(&n).unwrap();
+        assert!(first.is_single());
+        assert!(!Lock::new(&n).unwrap().is_single());
+        drop(first);
+        // Freed with the last descriptor, so a later launch is primary.
+        assert!(Lock::new(&n).unwrap().is_single());
+    }
+
+    /// The regression this file exists for.
+    ///
+    /// A child that inherited the lock descriptor kept the name taken
+    /// after the daemon holding it had gone, and the oxdm the updater
+    /// started next concluded another instance was already running and
+    /// exited. `SOCK_CLOEXEC` means the child never receives it, so the
+    /// name frees the moment the holder does — even while the child is
+    /// still alive.
+    #[test]
+    fn a_surviving_child_does_not_keep_the_name_taken() {
+        let n = name("child");
+        let lock = Lock::new(&n).unwrap();
+        assert!(lock.is_single());
+
+        // No `attach_close_high_fds`: the point is that the descriptor
+        // does not travel even to a child that takes no precautions.
+        let mut child = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("sleep 5")
+            .spawn()
+            .expect("spawn a child that outlives the lock");
+
+        drop(lock);
+        let taken_over = Lock::new(&n).unwrap();
+        let single = taken_over.is_single();
+
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(single, "the child pinned the abstract name");
     }
 }

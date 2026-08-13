@@ -1606,7 +1606,15 @@ impl AppState {
             }
         };
 
-        let mut child = match tokio::process::Command::new(&updater)
+        let mut cmd = tokio::process::Command::new(&updater);
+        // The updater outlives this process by design, and a child that
+        // inherited this daemon's descriptors would hold its
+        // single-instance lock open past its death — leaving the
+        // replacement app to conclude another oxdm is already running.
+        // The lock itself is `SOCK_CLOEXEC` now, so this is the second
+        // lock on the same door rather than the only one.
+        crate::platform::attach_close_high_fds(cmd.as_std_mut());
+        let mut child = match cmd
             .arg("--install-update")
             .arg("--exe")
             .arg(&exe)
