@@ -102,6 +102,15 @@ pub const ENDPOINTS: &[Endpoint] = &[
         checksums: Checksums::None,
     },
     Endpoint {
+        path: "/model-weights-1g.safetensors",
+        blurb: "ordinary resumable download under a long extension — \
+                the name the extension tile has to fit in its square.",
+        fill: 0x00,
+        ranges: Ranges::Honour,
+        length_known: true,
+        checksums: Checksums::None,
+    },
+    Endpoint {
         path: "/zeros-1g-fake-range.bin",
         blurb: "claims Accept-Ranges, then answers every Range with a \
                 200 from byte zero — a resume silently restarts.",
