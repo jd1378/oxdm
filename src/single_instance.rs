@@ -328,6 +328,24 @@ async fn handle_signal(
 mod tests {
     use super::*;
 
+    /// Does the name come free, and stay free long enough to take?
+    ///
+    /// Polled rather than checked once: any *other* process this test
+    /// binary forks in parallel holds a copy of every descriptor for the
+    /// moment between `fork` and `exec`, `FD_CLOEXEC` included, and that
+    /// moment can land between a release and the next bind. A regression
+    /// keeps the name for as long as the holder lives, so a second of
+    /// retries cannot paper one over.
+    fn becomes_free(name: &str) -> bool {
+        for _ in 0..40 {
+            if Lock::new(name).unwrap().is_single() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        false
+    }
+
     fn name(tag: &str) -> String {
         format!("oxdm-test-{}-{}-{tag}", std::process::id(), unsafe {
             libc::getuid()
@@ -342,7 +360,7 @@ mod tests {
         assert!(!Lock::new(&n).unwrap().is_single());
         drop(first);
         // Freed with the last descriptor, so a later launch is primary.
-        assert!(Lock::new(&n).unwrap().is_single());
+        assert!(becomes_free(&n));
     }
 
     /// The regression this file exists for.
@@ -368,8 +386,8 @@ mod tests {
             .expect("spawn a child that outlives the lock");
 
         drop(lock);
-        let taken_over = Lock::new(&n).unwrap();
-        let single = taken_over.is_single();
+        // The name has to come free while the child is still alive.
+        let single = becomes_free(&n);
 
         let _ = child.kill();
         let _ = child.wait();
