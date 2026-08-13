@@ -212,6 +212,9 @@ pub enum Msg {
     LinksPasted(Vec<url::Url>),
     // Toasts (design `.toast`)
     Toast(ToastSeverity, String),
+    /// A run of adds has gone quiet (or hit its cap): say how many.
+    /// Carries the generation it was scheduled for.
+    AddsSettled(u64),
     ToastExpired(u64),
     /// Clicked away before its TTL ran out. Same removal as expiry —
     /// the pending `ToastExpired` for this id then finds nothing.
@@ -478,6 +481,22 @@ pub struct Main {
     pub anim_t: f32,
     /// Job count at the last snapshot — used to toast genuine adds.
     pub prev_job_count: usize,
+    /// Adds seen since the last "downloads added" toast was scheduled.
+    ///
+    /// The daemon broadcasts a snapshot per job, so anything that adds
+    /// several — the batch window, an extension capture, a paste of
+    /// twenty links — arrives as a run of +1 snapshots. Toasting each
+    /// one stacked a column of "Download added" the user then had to
+    /// wait out. They are counted here instead and announced once the
+    /// run stops.
+    pub pending_added: usize,
+    /// Bumps on every add, so only the newest timer's message counts.
+    /// A timer for a superseded generation is ignored, which is how the
+    /// wait restarts without cancelling anything.
+    pub added_gen: u64,
+    /// When the current run of adds started, for the cap below: a slow
+    /// but unbroken trickle should still say something eventually.
+    pub added_since: Option<std::time::Instant>,
     /// First-run welcome overlay already shown this session — never
     /// re-show even if the settings flag hasn't round-tripped yet.
     pub welcome_shown: bool,
@@ -545,6 +564,9 @@ impl Main {
             drag_hover: false,
             anim_t: 0.0,
             prev_job_count: snap.jobs.len(),
+            pending_added: 0,
+            added_gen: 0,
+            added_since: None,
             welcome_shown: false,
             snap,
         }
@@ -837,6 +859,33 @@ fn fetch_watch_limit(client: Arc<Client>) -> Task<Msg> {
     })
 }
 
+/// How long a run of adds has to go quiet before it is announced.
+/// Comfortably longer than the gap between two jobs added back to back
+/// over the local socket, and short enough that a single add still
+/// feels immediate.
+const ADD_SETTLE_MS: u64 = 400;
+
+/// The longest a run can hold the toast back. A batch of a hundred, or
+/// an extension capturing steadily, would otherwise keep restarting the
+/// wait and never say anything.
+const ADD_SETTLE_CAP_MS: u64 = 2_500;
+
+/// Count an add, and arrange for the run it belongs to to be announced
+/// once it stops.
+fn note_adds(m: &mut Main, added: usize) -> Task<Msg> {
+    m.pending_added += added;
+    let started = *m.added_since.get_or_insert_with(std::time::Instant::now);
+    m.added_gen = m.added_gen.wrapping_add(1);
+    let generation = m.added_gen;
+    // Whatever is left of the cap, so a run that keeps going is still
+    // announced on time rather than at cap + settle.
+    let wait = std::time::Duration::from_millis(ADD_SETTLE_MS)
+        .min(std::time::Duration::from_millis(ADD_SETTLE_CAP_MS).saturating_sub(started.elapsed()));
+    Task::perform(async move { tokio::time::sleep(wait).await }, move |()| {
+        Msg::AddsSettled(generation)
+    })
+}
+
 /// Push a toast and schedule its expiry. The TTL timer is a one-shot
 /// task keyed to the toast id (no periodic subscription needed).
 fn spawn_toast(m: &mut Main, severity: ToastSeverity, message: String) -> Task<Msg> {
@@ -918,12 +967,7 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                 m.welcome_shown = true;
             }
             if added > 0 {
-                let msg = if added == 1 {
-                    "Download added".to_owned()
-                } else {
-                    format!("{added} downloads added")
-                };
-                return spawn_toast(m, ToastSeverity::Info, msg);
+                return note_adds(m, added);
             }
             Task::none()
         }
@@ -1421,6 +1465,24 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             }
         }
         Msg::Toast(severity, message) => spawn_toast(m, severity, message),
+        Msg::AddsSettled(generation) => {
+            // A later add already restarted the wait; that timer will
+            // carry the whole count.
+            if generation != m.added_gen {
+                return Task::none();
+            }
+            let added = std::mem::take(&mut m.pending_added);
+            m.added_since = None;
+            if added == 0 {
+                return Task::none();
+            }
+            let msg = if added == 1 {
+                "Download added".to_owned()
+            } else {
+                format!("{added} downloads added")
+            };
+            spawn_toast(m, ToastSeverity::Info, msg)
+        }
         Msg::ToastExpired(id) | Msg::ToastDismissed(id) => {
             m.toasts.retain(|t| t.id != id);
             Task::none()
