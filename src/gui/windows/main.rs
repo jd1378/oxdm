@@ -597,24 +597,46 @@ impl Main {
     /// "Startable" is the daemon's own rule (`Phase::is_startable`),
     /// failed jobs included — the button must not refuse work that
     /// `start_queue` / `resume_all` would happily do.
-    /// What a Pause/Resume press would do to the current selection, and
-    /// whether it would do anything at all.
+    /// Which of Pause and Resume a press on the current selection is.
     ///
-    /// `running` says which of the two the press is; `enabled` is false
-    /// when nothing is selected, or when nothing in the selection can
-    /// take the action. Folded from the same per-job rule the row's
-    /// context menu applies ([`pause_resume_job`]), so the toolbar and
-    /// the menu cannot drift apart.
-    fn selection_pause_resume(&self) -> (bool, bool) {
-        let running = self.selection.iter().any(|id| self.phase(*id).is_running());
-        // Only the jobs the press would actually act on: with a mixed
-        // selection the direction is decided first, and a job facing
-        // the other way is not what makes the button live.
-        let enabled = self.selection.iter().any(|id| {
-            let (job_running, actionable) = pause_resume_job(self, *id);
-            actionable && job_running == running
-        });
-        (running, enabled)
+    /// Pause as soon as anything in the selection is running: that is
+    /// the half of a mixed selection a user looking at it wants to
+    /// stop. Resume otherwise.
+    fn pause_resume_direction(&self) -> bool {
+        self.selection.iter().any(|id| self.phase(*id).is_running())
+    }
+
+    /// Would a press in `running`'s direction act on this job?
+    ///
+    /// The one test behind the button's enabled state, the jobs the
+    /// toolbar sends to, and the jobs the row menu sends to, so a
+    /// selection is never offered an action that reaches something it
+    /// should not. A finished download is the case that matters:
+    /// selected alongside a paused one, Resume must leave it alone, and
+    /// a selection of nothing but finished downloads offers no press at
+    /// all. Same for Pause over already-paused or cancelled jobs.
+    fn is_pause_resume_target(&self, id: JobId, running: bool) -> bool {
+        let (job_running, actionable) = pause_resume_job(self, id);
+        actionable && job_running == running
+    }
+
+    /// Anything for a press to act on, in the direction it would take.
+    fn any_pause_resume_target(&self, running: bool) -> bool {
+        self.selection
+            .iter()
+            .any(|id| self.is_pause_resume_target(*id, running))
+    }
+
+    /// The jobs a press acts on, and the direction it takes.
+    fn pause_resume_targets(&self) -> (bool, Vec<JobId>) {
+        let running = self.pause_resume_direction();
+        let ids = self
+            .selection
+            .iter()
+            .copied()
+            .filter(|id| self.is_pause_resume_target(*id, running))
+            .collect();
+        (running, ids)
     }
 
     fn toggle_actionable(&self) -> bool {
@@ -860,10 +882,10 @@ fn fetch_watch_limit(client: Arc<Client>) -> Task<Msg> {
 }
 
 /// How long a run of adds has to go quiet before it is announced.
-/// Comfortably longer than the gap between two jobs added back to back
-/// over the local socket, and short enough that a single add still
-/// feels immediate.
-const ADD_SETTLE_MS: u64 = 400;
+/// Several times the gap between two jobs added back to back over the
+/// local socket (under 50ms), and short enough that a single add still
+/// reads as immediate.
+const ADD_SETTLE_MS: u64 = 150;
 
 /// The longest a run can hold the toast back. A batch of a hundred, or
 /// an extension capturing steadily, would otherwise keep restarting the
@@ -1839,8 +1861,8 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                 // message: the selection can change between the paint
                 // that drew the button and the press that fires it.
                 ToolbarAction::PauseResume => {
-                    let ids: Vec<JobId> = m.selection.iter().copied().collect();
-                    if m.selection_pause_resume().0 {
+                    let (running, ids) = m.pause_resume_targets();
+                    if running {
                         act(async move {
                             for id in ids {
                                 client.pause(id).await?;
@@ -2125,18 +2147,28 @@ fn context_action(m: &mut Main, action: ContextAction) -> Task<Msg> {
             }
             Task::none()
         }
-        ContextAction::Resume => act_reporting(async move {
-            for id in ids {
-                client.resume(id).await?;
-            }
-            Ok(())
-        }),
-        ContextAction::Pause => act(async move {
-            for id in ids {
-                client.pause(id).await?;
-            }
-            Ok(())
-        }),
+        // Only the rows the press is actually for: the menu is opened
+        // on one row but acts on the whole selection, so a finished
+        // download sitting in it must not be resumed alongside a paused
+        // one, and an already-paused one must not be paused again.
+        ContextAction::Resume => {
+            let ids = m.pause_resume_targets().1;
+            act_reporting(async move {
+                for id in ids {
+                    client.resume(id).await?;
+                }
+                Ok(())
+            })
+        }
+        ContextAction::Pause => {
+            let ids = m.pause_resume_targets().1;
+            act(async move {
+                for id in ids {
+                    client.pause(id).await?;
+                }
+                Ok(())
+            })
+        }
         // Restarting throws away everything already fetched, so it
         // asks first — the same question the download window's own
         // Restart puts, in the same words.
@@ -2858,7 +2890,8 @@ fn toolbar(m: &Main) -> Element<'_, Msg> {
     };
     // Per-row Pause/Resume, beside the queue-wide controls: same
     // direction and same enablement rule as the row's context menu.
-    let (sel_running, sel_actionable) = m.selection_pause_resume();
+    let sel_running = m.pause_resume_direction();
+    let sel_actionable = m.any_pause_resume_target(sel_running);
     let bar = row![
         Btn::new("Add URL")
             .primary()
@@ -3894,13 +3927,18 @@ fn free_disk_str(path: &std::path::Path) -> String {
 /// for one whose integrity check failed with no missing bytes to go
 /// back for.
 fn pause_resume_job(m: &Main, id: JobId) -> (bool, bool) {
-    let phase = m.phase(id);
-    let running = phase.is_running();
     let integrity_failed = m
         .snap
         .jobs
         .iter()
         .any(|j| j.id == id && j.integrity_failed());
+    pause_resume_rule(m.phase(id), integrity_failed)
+}
+
+/// The rule itself, over nothing but a job's phase and whether its
+/// integrity check failed.
+fn pause_resume_rule(phase: Phase, integrity_failed: bool) -> (bool, bool) {
+    let running = phase.is_running();
     let enabled =
         phase != Phase::Completed && phase != Phase::Assembling && !(integrity_failed && !running);
     (running, enabled)
@@ -4012,7 +4050,12 @@ fn context_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>, id: JobId) -> E
     // slot, and "start it now" is exactly what the user means. Only a
     // finished download has nothing to resume; `Restart Download`
     // below is the entry for that.
-    let (running, pause_resume_enabled) = pause_resume_job(m, id);
+    // Described by the selection, not by the row under the cursor,
+    // because that is what it acts on: right-clicking the paused row of
+    // a selection that also holds a running one would otherwise offer
+    // "Resume" and pause the other one.
+    let running = m.pause_resume_direction();
+    let pause_resume_enabled = m.any_pause_resume_target(running);
     let done = phase == Phase::Completed;
 
     // Destructive row morphs with live modifiers (design: Finder-like):
@@ -4504,5 +4547,94 @@ pub fn launch_main() {
     if let Err(e) = app.run() {
         eprintln!("gui error: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A press acts on a job only when the job faces the direction the
+    /// press takes. This is the fold `is_pause_resume_target` applies
+    /// over a selection, over a list of phases instead of a snapshot.
+    fn targets(jobs: &[(Phase, bool)]) -> (bool, Vec<usize>) {
+        let running = jobs.iter().any(|(p, _)| p.is_running());
+        let ids = jobs
+            .iter()
+            .enumerate()
+            .filter(|(_, (p, bad))| {
+                let (job_running, actionable) = pause_resume_rule(*p, *bad);
+                actionable && job_running == running
+            })
+            .map(|(i, _)| i)
+            .collect();
+        (running, ids)
+    }
+
+    /// A finished download has nothing to resume, so Resume passes it
+    /// by and acts on the one that does.
+    #[test]
+    fn resume_leaves_finished_downloads_alone() {
+        let (running, ids) = targets(&[
+            (Phase::Completed, false),
+            (Phase::Paused, false),
+            (Phase::Completed, true), // finished, failed its checksum
+        ]);
+        assert!(!running, "nothing is running, so this is a Resume");
+        assert_eq!(ids, vec![1]);
+    }
+
+    /// Nothing but finished downloads leaves the press with nothing to
+    /// do, whatever their checksums said.
+    #[test]
+    fn a_selection_of_finished_downloads_offers_no_press() {
+        let (_, ids) = targets(&[(Phase::Completed, false), (Phase::Completed, true)]);
+        assert!(ids.is_empty());
+    }
+
+    /// Pause stops what is running and leaves alone what already
+    /// stopped — paused, cancelled, queued or finished.
+    #[test]
+    fn pause_only_reaches_what_is_running() {
+        let (running, ids) = targets(&[
+            (Phase::Downloading, false),
+            (Phase::Paused, false),
+            (Phase::Cancelled, false),
+            (Phase::Queued, false),
+            (Phase::Completed, false),
+            (Phase::Reconnecting, false),
+        ]);
+        assert!(running, "something is running, so this is a Pause");
+        assert_eq!(ids, vec![0, 5]);
+    }
+
+    /// Assembly writes the final file and ends on its own; a selection
+    /// holding only that has no press to offer, and one holding it
+    /// beside a running download does not stop the assembly.
+    #[test]
+    fn assembly_is_never_interrupted() {
+        assert!(targets(&[(Phase::Assembling, false)]).1.is_empty());
+        assert_eq!(
+            targets(&[(Phase::Assembling, false), (Phase::Downloading, false)]).1,
+            vec![1]
+        );
+    }
+
+    /// A failed integrity check has the whole file and no missing bytes
+    /// to go back for. Restart is the way forward, not Resume.
+    #[test]
+    fn a_failed_integrity_check_is_not_resumable() {
+        assert!(targets(&[(Phase::Failed, true)]).1.is_empty());
+        assert_eq!(targets(&[(Phase::Failed, false)]).1, vec![0]);
+    }
+
+    /// Queued counts as resumable: it is holding bytes and waiting for
+    /// a slot, and "start it now" is what the user means.
+    #[test]
+    fn queued_downloads_resume() {
+        assert_eq!(
+            targets(&[(Phase::Queued, false), (Phase::Paused, false)]).1,
+            vec![0, 1]
+        );
     }
 }
