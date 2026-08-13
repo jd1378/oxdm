@@ -3,8 +3,9 @@
 //! Two cooperating mechanisms:
 //! - A per-user named lock answers "am I the first?" cheaply. On Linux
 //!   that is an abstract unix socket bound here (see [`Lock`]);
-//!   elsewhere it is the `single-instance` crate's own (a flock'd file
-//!   on macOS, `CreateMutex` on Windows).
+//!   elsewhere it is the `single-instance` crate's own — a file locked
+//!   with `flock` on macOS (at the absolute path [`lock_path`] gives),
+//!   `CreateMutex` on Windows.
 //! - `interprocess` local socket (a 0600 filesystem socket in the
 //!   per-user runtime dir on Unix, named pipe on Windows) carries a
 //!   one-line `SHOW` ping from secondary launches to the primary. The
@@ -53,6 +54,31 @@ fn user_suffix() -> String {
 
 fn lock_name() -> String {
     format!("oxdm-lock-{}", user_suffix())
+}
+
+/// The file macOS locks, as an absolute path.
+///
+/// The `single-instance` crate takes one `&str` for every platform and
+/// means something different by it on each: a mutex name on Windows, an
+/// abstract socket name on Linux, and on macOS a *filesystem path* it
+/// hands straight to `File::create`. Passing the bare name there made
+/// the lock relative to the working directory, so two launches from
+/// different directories locked two different files and each concluded
+/// it was the only instance.
+///
+/// It lives beside the database rather than in the runtime dir that
+/// holds the socket: on macOS that dir is under `$TMPDIR`, which the
+/// system prunes by last-access time. A daemon left running for days
+/// would have kept its lock while the file it locks was deleted from
+/// under it, and the next launch would have created a fresh file,
+/// locked that instead, and started a second daemon.
+#[cfg(target_os = "macos")]
+fn lock_path() -> std::io::Result<std::path::PathBuf> {
+    let dir = dirs::data_dir()
+        .ok_or_else(|| std::io::Error::other("no data directory to lock in"))?
+        .join("oxdm");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir.join(format!("{}.lock", lock_name())))
 }
 
 /// Windows named-pipe name. Unix uses a filesystem socket in the 0700
@@ -170,6 +196,20 @@ impl Lock {
 }
 
 pub fn acquire() -> std::io::Result<InstanceOutcome> {
+    // macOS locks a path; the others are handed a name.
+    #[cfg(target_os = "macos")]
+    let lock = {
+        let path = lock_path()?;
+        // Refused rather than converted lossily: a path that is not
+        // UTF-8 would come out of `to_string_lossy` as a *different*
+        // path, and locking the wrong file is the bug this exists to
+        // fix.
+        let path = path
+            .to_str()
+            .ok_or_else(|| std::io::Error::other("lock path is not valid UTF-8"))?;
+        Lock::new(path)?
+    };
+    #[cfg(not(target_os = "macos"))]
     let lock = Lock::new(&lock_name())?;
 
     if !lock.is_single() {
