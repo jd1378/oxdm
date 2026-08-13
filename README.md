@@ -42,6 +42,12 @@ people who prefer a bundle. Download it from the
 it, and run it. There is nothing to install and the installer script
 does not use it.
 
+It needs FUSE 2 to mount itself, which most desktops have and Ubuntu
+22.04 and later do not (`sudo apt install libfuse2`). Without it, the
+bundle still runs with `./oxdm-<tag>-<arch>.AppImage
+--appimage-extract-and-run`, and the tarball above avoids the question
+entirely.
+
 Either way oxdm updates itself in place: it notices at run time whether
 it was launched from a bundle and fetches the matching artifact, so an
 AppImage stays an AppImage and an installed build stays installed

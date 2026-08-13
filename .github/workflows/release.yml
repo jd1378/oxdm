@@ -346,29 +346,57 @@ jobs:
         EOF
         chmod +x "$APPDIR/AppRun"
 
-        # appimagetool itself is an x86_64 AppImage; `--runtime-file`
-        # is what lets it stamp an aarch64 runtime onto an aarch64
-        # payload without emulating anything.
-        TOOL_ARCH=$(uname -m)
-        # Both come from a `continuous` release, which is served often
-        # enough to fail: a bare 503 from the CDN failed the whole
-        # release once. Retried, including on HTTP errors, because the
-        # alternative is a green build for five platforms and no Linux
-        # artifact.
+        # Built by hand rather than with appimagetool, because what
+        # appimagetool produces today does not run on a large share of
+        # desktops.
+        #
+        # Its `continuous` build bundles a zstd-only mksquashfs and
+        # stamps the new static-pie runtime. AppImageLauncher — which
+        # several distros install by default and which takes over every
+        # AppImage through binfmt_misc — carries an older libappimage
+        # that reads neither: zstd it rejects outright ("uses (null)
+        # compression"), and the static-pie runtime confuses its offset
+        # calculation ("this doesn't look like a squashfs image").
+        # Upstream's own appimagetool AppImage fails the same way on
+        # such a machine.
+        #
+        # So: the classic AppImageKit runtime, which every AppImage
+        # that does work there uses, and an xz payload, which its
+        # squashfuse can read. mksquashfs is the distro's own, so
+        # nothing needs an AppImage to build one.
+        #
+        # The cost of the classic runtime is that it wants libfuse2 at
+        # run time; where that is missing, `--appimage-extract-and-run`
+        # still works, and the tarball is the better answer anyway.
         fetch() {
           curl -fsSL --retry 6 --retry-all-errors --retry-delay 5 \
             --connect-timeout 20 -o "$1" "$2"
         }
-        fetch appimagetool \
-          "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${TOOL_ARCH}.AppImage"
-        chmod +x appimagetool
         fetch "runtime-${ARCH}" \
-          "https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-${ARCH}"
+          "https://github.com/AppImage/AppImageKit/releases/download/continuous/runtime-${ARCH}"
 
         APPIMAGE_NAME="${{ needs.crate_metadata.outputs.name }}-${TAG}-${ARCH}.AppImage"
-        ./appimagetool --appimage-extract-and-run \
-          --runtime-file "runtime-${ARCH}" \
-          "$APPDIR" "_cicd-intermediates/${APPIMAGE_NAME}"
+        sudo apt-get install -y --no-install-recommends squashfs-tools >/dev/null
+        mksquashfs "$APPDIR" payload.squashfs \
+          -root-owned -noappend -no-progress \
+          -comp xz -b 128K -Xdict-size 100%
+        cat "runtime-${ARCH}" payload.squashfs \
+          > "_cicd-intermediates/${APPIMAGE_NAME}"
+        chmod +x "_cicd-intermediates/${APPIMAGE_NAME}"
+
+        # A structural check, so a broken layout fails here rather than
+        # on somebody's desktop: the payload has to start exactly where
+        # the runtime says it does.
+        OFFSET=$(stat -c %s "runtime-${ARCH}")
+        MAGIC=$(dd if="_cicd-intermediates/${APPIMAGE_NAME}" bs=1 \
+          skip="$OFFSET" count=4 2>/dev/null)
+        if [ "$MAGIC" != "hsqs" ]; then
+          echo "::error::no squashfs at offset $OFFSET (found '${MAGIC}')"
+          exit 1
+        fi
+        unsquashfs -l -o "$OFFSET" "_cicd-intermediates/${APPIMAGE_NAME}" \
+          | grep -q 'squashfs-root/usr/bin/oxdm$' \
+          || { echo "::error::AppImage payload has no oxdm in it"; exit 1; }
 
         echo "APPIMAGE_NAME=${APPIMAGE_NAME}" >> $GITHUB_OUTPUT
         echo "APPIMAGE_PATH=_cicd-intermediates/${APPIMAGE_NAME}" >> $GITHUB_OUTPUT
