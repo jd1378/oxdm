@@ -1127,12 +1127,26 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let job = test_job(&url, dir.path().to_path_buf(), GOOD_SHA256);
 
+        // Cancel once the server has actually been asked, rather than
+        // after a fixed sleep: a loaded runner can take longer than any
+        // number picked here to get the first request out, and this
+        // test is about what the *second* run does, not about how fast
+        // the first one was.
+        let cancel_after_a_request =
+            |hits: Arc<std::sync::atomic::AtomicUsize>, floor: usize, cancel: CancellationToken| {
+                tokio::spawn(async move {
+                    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                    while hits.load(std::sync::atomic::Ordering::Relaxed) <= floor
+                        && std::time::Instant::now() < deadline
+                    {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    cancel.cancel();
+                })
+            };
+
         let cancel = CancellationToken::new();
-        let stopper = cancel.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(700)).await;
-            stopper.cancel();
-        });
+        cancel_after_a_request(hits.clone(), 0, cancel.clone());
         let _ = run_job_cancellable(
             job.clone(),
             dir.path(),
@@ -1141,15 +1155,13 @@ mod tests {
         )
         .await;
         let before = hits.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(before >= 1, "the server was never asked");
 
-        // Second run, stopped just as quickly. If it had inherited the
-        // 30s wait it would make no request at all in that window.
+        // Second run. If it had inherited the 30s wait it would make no
+        // request at all, and the watcher below would give up on its
+        // own deadline instead of seeing one.
         let cancel = CancellationToken::new();
-        let stopper = cancel.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(700)).await;
-            stopper.cancel();
-        });
+        cancel_after_a_request(hits.clone(), before, cancel.clone());
         let _ = run_job_cancellable(
             job,
             dir.path(),

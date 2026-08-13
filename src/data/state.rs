@@ -1066,6 +1066,18 @@ impl AppState {
             .is_some_and(|t| t.queue_run)
     }
 
+    /// Is this queue's run switched off while its tally is still
+    /// open? That happens when Stop queue leaves a hand-started
+    /// download running: the entry survives to count that download's
+    /// outcome, but the queue is not running any more.
+    async fn queue_stopped(&self, id: QueueId) -> bool {
+        self.active_queues
+            .read()
+            .await
+            .get(&id)
+            .is_some_and(|t| !t.queue_run)
+    }
+
     /// Snapshot of currently running queues. Same rule as
     /// [`Self::is_queue_active`].
     pub async fn active_queue_ids(&self) -> std::collections::HashSet<QueueId> {
@@ -1101,6 +1113,12 @@ impl AppState {
             None => return Ok(()),
         }
         drop(active);
+        // Stopping pauses what is running; a job the cap sent back to
+        // the queue is not running, so nothing above touches it. Left
+        // marked, the deferral filler would start it the moment any
+        // slot anywhere freed — and the queue the user just stopped
+        // would carry on downloading by itself.
+        clear_queue_deferrals(&*self.jobs.read().await, id);
         // Stopped, not finished: on-finish hooks belong to a queue that
         // ran out of work, and arming a shutdown because someone
         // pressed Stop queue is a decision oxdm does not get to make.
@@ -3480,9 +3498,17 @@ impl AppState {
                 return;
             };
             tried.insert(id);
+            let queue = self.queue_of(id).await;
             // The queue this job belongs to may be at its own limit
             // even while the global one has room; it keeps waiting.
-            if self.slots_full_for(self.queue_of(id).await).await {
+            if self.slots_full_for(queue).await {
+                continue;
+            }
+            // A queue that was stopped while one of its hand-started
+            // downloads is still going keeps its tally, with the run
+            // switched off. Its queued work is not waiting for a slot
+            // any more — it was stopped.
+            if self.queue_stopped(queue).await {
                 continue;
             }
             self.mark_run_intent(id, false).await;
@@ -3540,16 +3566,33 @@ impl AppState {
         // means.
         let manual = entry.manual_run.load(Ordering::Acquire);
         let _admission = self.admission.lock().await;
-        match admit(
-            entry.running.load(Ordering::Acquire),
-            manual,
-            self.slots_full_for(entry.job.queue_id).await,
-        ) {
+        let slots_full = self.slots_full_for(entry.job.queue_id).await;
+        // Re-read the entry now, under the registry lock, and make the
+        // claim on whatever the map currently holds.
+        //
+        // The `Arc` captured above can be stale: every path that edits
+        // a job (a probe landing, a rename, a Properties Apply) swaps
+        // in a rebuilt entry, and the awaits between the capture and
+        // here — the settings read, the free-space check, settling the
+        // previous run — are long enough for one to land. Claiming the
+        // orphan would leave the registry saying `running = false` for
+        // a live download: Remove would then delete the file out from
+        // under it, and a second Start would spawn a second runner
+        // over the same parts.
+        let jobs = self.jobs.write().await;
+        let Some(entry) = jobs.get(&id).cloned() else {
+            return Err(JobError::Other("job not found".into()));
+        };
+        match admit(entry.running.load(Ordering::Acquire), manual, slots_full) {
             Admission::AlreadyRunning => return Ok(()),
             Admission::Defer => {
                 entry.deferred_by_cap.store(true, Ordering::Release);
-                if entry.phase() != Phase::Queued {
+                let announce = entry.phase() != Phase::Queued;
+                if announce {
                     entry.set_phase(Phase::Queued);
+                }
+                drop(jobs);
+                if announce {
                     let _ = self.events.send(DomainEvent::JobUpdated {
                         id,
                         phase: Phase::Queued,
@@ -3559,12 +3602,15 @@ impl AppState {
             }
             Admission::Start => {}
         }
-        // The claim itself, under the same lock the decision was made
-        // with: two starts landing together must not both take it.
+        // The claim itself, under both the admission lock the decision
+        // was made with and the registry lock that entry rebuilds take:
+        // two starts landing together must not both take it, and a
+        // rebuild must not land between the decision and the claim.
         if entry.running.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
         entry.deferred_by_cap.store(false, Ordering::Release);
+        drop(jobs);
         drop(_admission);
         // Fresh cancel token per run. The previous run's token may be
         // already cancelled (pause trips it); installing a new one lets
@@ -5142,6 +5188,16 @@ fn next_deferred(
 /// download, not for the queue. Stopping the queue takes back what the
 /// queue decided to run; taking back their press as well would make
 /// Resume on a row mean "until the queue is next stopped".
+/// Take back the "waiting for a slot" mark from every job in `queue`.
+///
+/// Only this queue's: a stop is about one queue, and the global cap
+/// still owes every other queue's deferred work a slot.
+fn clear_queue_deferrals(jobs: &IndexMap<JobId, Arc<JobEntry>>, queue: QueueId) {
+    for entry in jobs.values().filter(|e| e.job.queue_id == queue) {
+        entry.deferred_by_cap.store(false, Ordering::Release);
+    }
+}
+
 fn queue_stop_targets(jobs: &IndexMap<JobId, Arc<JobEntry>>, queue: QueueId) -> Vec<JobId> {
     jobs.values()
         .filter(|e| {
@@ -5845,6 +5901,40 @@ mod tests {
         assert_eq!(decode_pairing_code(""), None);
     }
 
+    /// Stopping a queue has to stop the jobs the cap sent back to it,
+    /// not just the ones transferring. Left marked, the deferral
+    /// filler starts them again the moment any slot frees, and the
+    /// scheduler never re-stops the queue because its edge has passed.
+    #[test]
+    fn stopping_a_queue_takes_back_its_deferrals_and_no_others() {
+        let stopped = crate::domain::QueueId::new();
+        let other = crate::domain::QueueId::new();
+        let mut jobs: IndexMap<JobId, Arc<JobEntry>> = IndexMap::new();
+        let mut add = |queue: QueueId| -> JobId {
+            let mut entry = entry_in(Phase::Queued);
+            entry.job.queue_id = queue;
+            entry.deferred_by_cap.store(true, Ordering::Release);
+            let id = entry.job.id;
+            jobs.insert(id, Arc::new(entry));
+            id
+        };
+        let here = add(stopped);
+        let elsewhere = add(other);
+
+        clear_queue_deferrals(&jobs, stopped);
+
+        assert!(
+            !jobs[&here].deferred_by_cap.load(Ordering::Acquire),
+            "the stopped queue's job stops waiting for a slot"
+        );
+        assert!(
+            jobs[&elsewhere].deferred_by_cap.load(Ordering::Acquire),
+            "another queue's job keeps its place in the line"
+        );
+        // And it is not picked up again by the filler.
+        assert_eq!(next_deferred(&jobs, &Default::default()), Some(elsewhere));
+    }
+
     /// One name, one download — whatever folder each saves into and
     /// whatever state it is in.
     #[test]
@@ -5954,7 +6044,15 @@ mod tests {
 
     #[test]
     fn a_cache_folder_has_to_name_a_place() {
-        assert!(validate_work_dir(std::path::Path::new("/var/tmp/oxdm")).is_ok());
+        // "Absolute" is a different shape per platform: `/var/tmp` is
+        // a relative path on Windows, which has no root without a
+        // drive letter.
+        let absolute = if cfg!(windows) {
+            r"C:\ProgramData\oxdm"
+        } else {
+            "/var/tmp/oxdm"
+        };
+        assert!(validate_work_dir(std::path::Path::new(absolute)).is_ok());
         assert!(validate_work_dir(std::path::Path::new("")).is_err());
         // Relative: the parts would land wherever the daemon was
         // started, and the free-space check would have no volume.

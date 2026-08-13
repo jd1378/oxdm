@@ -328,10 +328,19 @@ jobs:
         # is what lets it stamp an aarch64 runtime onto an aarch64
         # payload without emulating anything.
         TOOL_ARCH=$(uname -m)
-        curl -fsSL -o appimagetool \
+        # Both come from a `continuous` release, which is served often
+        # enough to fail: a bare 503 from the CDN failed the whole
+        # release once. Retried, including on HTTP errors, because the
+        # alternative is a green build for five platforms and no Linux
+        # artifact.
+        fetch() {
+          curl -fsSL --retry 6 --retry-all-errors --retry-delay 5 \
+            --connect-timeout 20 -o "$1" "$2"
+        }
+        fetch appimagetool \
           "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${TOOL_ARCH}.AppImage"
         chmod +x appimagetool
-        curl -fsSL -o runtime-${ARCH} \
+        fetch "runtime-${ARCH}" \
           "https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-${ARCH}"
 
         APPIMAGE_NAME="${{ needs.crate_metadata.outputs.name }}-${TAG}-${ARCH}.AppImage"

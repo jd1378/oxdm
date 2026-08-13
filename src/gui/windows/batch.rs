@@ -13,6 +13,7 @@ use crate::data::ProbeResult;
 use crate::domain::{CaptureRequest, QueueId};
 use crate::gui::chrome::{self, WindowControl, titlebar};
 use crate::gui::format::format_bytes;
+use crate::gui::icons;
 use crate::gui::shot::Shot;
 use crate::gui::theme::{self, Tokens};
 use crate::gui::widget::{Btn, checkbox, combo, hairline, sibling};
@@ -80,6 +81,11 @@ pub struct State {
     /// than refusing it; the window carries the list so a row can say
     /// that before the send instead of after.
     taken_names: Vec<String>,
+    /// A send is in flight, or the last one came back with something
+    /// to say. The window stays open on a failure: a batch that closed
+    /// on error is a batch that lost downloads silently.
+    sending: bool,
+    error: Option<String>,
 }
 
 fn staged_path() -> Option<PathBuf> {
@@ -167,6 +173,8 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 shot: Shot::from_env(),
                 client,
                 taken_names,
+                sending: false,
+                error: None,
             }));
             Task::batch(probes)
         }
@@ -233,8 +241,12 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                     (r.req.clone(), probed.cloned())
                 })
                 .collect();
+            st.sending = true;
+            st.error = None;
             Task::perform(
                 async move {
+                    let mut added = Vec::new();
+                    let mut failed: Vec<String> = Vec::new();
                     for (req, probed) in reqs {
                         let add = AddJobReq {
                             url: req.url.clone(),
@@ -256,20 +268,46 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                             size: probed.as_ref().and_then(|p| p.size),
                             checksums: probed.map(|p| p.checksums.clone()).unwrap_or_default(),
                         };
-                        let id = client.add_job(add).await?;
-                        if start_now {
-                            // Bulk: the triage list can start dozens at
-                            // once, so failures belong in the list, not
-                            // in a window each.
-                            client.start_job_bulk(id).await?;
+                        match client.add_job(add).await {
+                            Ok(id) => added.push(id),
+                            // One row the daemon refused must not take
+                            // the rest of the list with it: the user
+                            // picked these together and expects them
+                            // all, or to be told which one did not go.
+                            Err(e) => failed.push(e),
                         }
                     }
-                    Ok(())
+                    if start_now {
+                        // Started by hand, one gesture, after every job
+                        // exists: this is not a queue run, so the
+                        // global cap does not get to defer them. Bulk
+                        // starts are silent about failures — a triage
+                        // list can start dozens, and one window each
+                        // would bury the screen — so they are collected
+                        // and reported here instead.
+                        for id in added {
+                            if let Err(e) = client.start_job(id).await {
+                                failed.push(e);
+                            }
+                        }
+                    }
+                    if failed.is_empty() {
+                        return Ok(());
+                    }
+                    Err(failed.join("; "))
                 },
                 Msg::Sent,
             )
         }
-        Msg::Sent(_) => iced::exit(),
+        Msg::Sent(Ok(())) => iced::exit(),
+        // The window stays open on a failure and says what happened.
+        // Exiting either way is how a batch could lose downloads
+        // without anyone finding out.
+        Msg::Sent(Err(e)) => {
+            st.error = Some(e);
+            st.sending = false;
+            Task::none()
+        }
         Msg::Cancel => iced::exit(),
         Msg::Daemon(crate::gui::ipc::DaemonSignal::Lost) => iced::exit(),
         Msg::Daemon(crate::gui::ipc::DaemonSignal::Event(ev)) => match ev {
@@ -530,15 +568,33 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
         .spacing(theme::space::S3)
         .align_y(Alignment::Center)
         .into(),
-        Btn::new(format!(
-            "Add {n_sel} URL{}",
-            if n_sel == 1 { "" } else { "s" }
-        ))
-        .primary()
-        .icon("download")
-        .enabled(n_sel > 0)
-        .on_press(Msg::Send)
-        .view(t),
+        row![
+            match &st.error {
+                Some(e) => row![
+                    icons::icon("triangle-alert", 12.0, t.status_danger),
+                    text(e.clone())
+                        .font(theme::BODY)
+                        .size(11.0)
+                        .color(t.status_danger),
+                ]
+                .spacing(4.0)
+                .align_y(Alignment::Center)
+                .into(),
+                None => Element::from(iced::widget::Space::new()),
+            },
+            Btn::new(format!(
+                "Add {n_sel} URL{}",
+                if n_sel == 1 { "" } else { "s" }
+            ))
+            .primary()
+            .icon("download")
+            .enabled(n_sel > 0 && !st.sending)
+            .on_press(Msg::Send)
+            .view(t),
+        ]
+        .spacing(theme::space::S3)
+        .align_y(Alignment::Center)
+        .into(),
     );
 
     let page = column![

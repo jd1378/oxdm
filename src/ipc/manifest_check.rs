@@ -166,12 +166,18 @@ fn notify_repaired(wrong: &[(PathBuf, String)]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
+    /// Built through serde, not by hand: every path on Windows is
+    /// full of backslashes, and `"C:\Users\..."` spliced into JSON
+    /// by hand is an invalid escape rather than a path.
     fn manifest(dir: &Path, path_value: &str) -> PathBuf {
         let file = dir.join(format!("{HOST_NAME}.json"));
-        let mut f = std::fs::File::create(&file).unwrap();
-        write!(f, r#"{{"name":"x","path":"{path_value}","type":"stdio"}}"#).unwrap();
+        let body = serde_json::json!({
+            "name": HOST_NAME,
+            "path": path_value,
+            "type": "stdio",
+        });
+        std::fs::write(&file, serde_json::to_vec(&body).unwrap()).unwrap();
         file
     }
 

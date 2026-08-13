@@ -78,7 +78,13 @@ mod tests {
     fn the_note_appears_only_when_the_text_understates_where_it_goes() {
         let d = dest("/home/u/Videos", Some("clip.mkv"));
         let n = note("/home/u/Videos", &d, Some("clip.mkv")).expect("a note");
-        assert_eq!(n.text, "Will save to /home/u/Videos/clip.mkv");
+        // The note shows a joined path, and joining uses the
+        // platform's separator — a backslash on Windows.
+        let joined = std::path::Path::new("/home/u/Videos")
+            .join("clip.mkv")
+            .display()
+            .to_string();
+        assert_eq!(n.text, format!("Will save to {joined}"));
         assert!(!n.warning);
         assert!(note("/home/u/Videos/clip.mkv", &d, Some("clip.mkv")).is_none());
         // Trailing separators and stray spaces are spelling, not a
