@@ -475,8 +475,12 @@ jobs:
         echo "ARTIFACTS=${STAGING}/*" >> $GITHUB_OUTPUT
         echo "STAGING=${STAGING}" >> $GITHUB_OUTPUT
 
+    # v7 rather than v5: v5 still declares `runs.using: node20`, so it
+    # would keep the deprecation warning. v6 is the runtime bump to
+    # node24 and v7 only adds inputs (`archive`, defaulting to the old
+    # behaviour), so `name` + `path` mean what they always did.
     - name: "Artifact upload"
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: ${{ matrix.job.target }}
         path: ${{ steps.publish.outputs.STAGING }}/*
