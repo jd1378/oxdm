@@ -18,8 +18,6 @@ name: CI
 # the next release.
 
 on:
-  push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -51,12 +49,6 @@ jobs:
 
   platforms:
     name: ${{ matrix.os }}
-    # Not on every push to main: these two runners are the expensive
-    # half of this workflow. They run where a platform difference is
-    # most likely to be introduced — a pull request — and on demand,
-    # which is also how to warm their caches on `main` before tagging
-    # (a cache written on any other ref is invisible to the release).
-    if: github.event_name != 'push'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
