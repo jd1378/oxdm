@@ -129,9 +129,19 @@ async fn run(args: Args) -> Result<(), String> {
 
     // 2. Swap. Each program is moved into place atomically; on Windows
     // a brief retry tides over handle release.
-    match &args.source {
-        Source::Artifact(file) => swap_executable(file, &args.exe)?,
-        Source::Payload(dir) => install_payload(dir, &args.exe)?,
+    let swapped = match &args.source {
+        Source::Artifact(file) => swap_executable(file, &args.exe),
+        Source::Payload(dir) => install_payload(dir, &args.exe),
+    };
+    if let Err(e) = swapped {
+        // oxdm has already exited — that is what let its own file be
+        // replaced — so failing here leaves the user with no app at
+        // all, and this process's output goes nowhere they will look.
+        // Put the old one back on screen and leave the reason on disk
+        // beside the staged update.
+        record_failure(&args.exe, &e);
+        let _ = spawn_detached(&args.exe);
+        return Err(e);
     }
 
     // 3. Relaunch from the same path. Detach so this updater can exit.
@@ -139,6 +149,27 @@ async fn run(args: Args) -> Result<(), String> {
 
     emit(&Event::Done);
     Ok(())
+}
+
+/// Leave the reason somewhere a person can find it.
+///
+/// The parent that would have shown this in a window is gone by the
+/// time an install can fail, and stderr goes to a pipe nobody is
+/// reading any more. The next launch does not read this file either —
+/// it is for the user and for a bug report.
+fn record_failure(exe: &Path, reason: &str) {
+    let Some(dir) = dirs::data_dir().map(|d| d.join("oxdm")) else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    let body = format!(
+        "oxdm could not install an update.\n\n\
+         target: {}\n\
+         reason: {reason}\n\n\
+         The previous version has been left in place and restarted.\n",
+        exe.display(),
+    );
+    let _ = std::fs::write(dir.join("update-failed.txt"), body);
 }
 
 async fn wait_for_go() -> Result<(), String> {

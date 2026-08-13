@@ -1437,6 +1437,31 @@ impl AppState {
         self.pending_update.read().await.clone()
     }
 
+    /// Can the update actually be written where this copy of oxdm
+    /// lives?
+    ///
+    /// Tested by writing, not by reading permission bits: a read-only
+    /// mount, an immutable flag and a directory owned by root all end
+    /// the same way, and only an attempt tells them apart from a
+    /// `-rwx` that happens to be someone else's.
+    fn installable_in_place(exe: &std::path::Path) -> Result<(), String> {
+        let dir = exe
+            .parent()
+            .ok_or_else(|| format!("{} is not in a directory", exe.display()))?;
+        let probe = dir.join(format!(".oxdm-update-probe-{}", std::process::id()));
+        match std::fs::write(&probe, b"") {
+            Ok(()) => {
+                let _ = std::fs::remove_file(&probe);
+                Ok(())
+            }
+            Err(e) => Err(format!(
+                "oxdm cannot update itself in {}: {e}. Install it somewhere you own \
+                 (the installer uses ~/.local/bin), or replace the files by hand.",
+                dir.display()
+            )),
+        }
+    }
+
     /// Hand the finished artifact to the installer and wait.
     ///
     /// Nothing is replaced here: the helper stops at `ready` and waits
@@ -1465,6 +1490,16 @@ impl AppState {
         // version of.
         let bundle = crate::data::update_channel::running_as_appimage();
         let exe = bundle.clone().unwrap_or_else(|| running.clone());
+        // Asked before anything is staged, and long before the app
+        // quits to be replaced. An install the user put somewhere they
+        // cannot write — `sudo cp` into /usr/local/bin is the usual
+        // way — fails at the swap, which happens *after* oxdm has
+        // exited to release its own file. The user would be left with
+        // no window, no message, and the old version still on disk.
+        if let Err(e) = Self::installable_in_place(&exe) {
+            self.fail_update(e).await;
+            return;
+        }
         // The program that performs the swap is oxdm, copied out of
         // the install and run from there. It has to be a copy: the
         // installed file is one of the files being replaced, and a
@@ -5954,6 +5989,34 @@ mod tests {
         assert_eq!(decode_pairing_code("Lo5CGC4oXwjGpVmvle3Dz"), None);
         assert_eq!(decode_pairing_code("oxdm1.@@@"), None);
         assert_eq!(decode_pairing_code(""), None);
+    }
+
+    /// An install oxdm cannot write to is refused while the app is
+    /// still running, when there is still a window to say so in. The
+    /// swap happens after it exits, so a failure there is silent.
+    #[test]
+    fn an_update_into_a_read_only_directory_is_refused_up_front() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("oxdm");
+        std::fs::write(&exe, b"binary").unwrap();
+        assert!(AppState::installable_in_place(&exe).is_ok());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+            let refused = AppState::installable_in_place(&exe);
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            let message = refused.unwrap_err();
+            assert!(message.contains("cannot update itself"), "{message}");
+            // The message has to name the place and a way out; "denied"
+            // alone leaves the user nothing to do.
+            assert!(
+                message.contains(&dir.path().display().to_string()),
+                "{message}"
+            );
+            assert!(message.contains("~/.local/bin"), "{message}");
+        }
     }
 
     /// Stopping a queue has to stop the jobs the cap sent back to it,
