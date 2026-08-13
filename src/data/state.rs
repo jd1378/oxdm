@@ -587,7 +587,7 @@ impl AppState {
             Ok(crate::data::crypto::BootOutcome::Locked) => {
                 tracing::warn!(
                     "master key missing from OS keyring but DB holds encrypted job \
-                     secrets — entering Locked mode; the GUI will prompt the user \
+                     secrets, entering Locked mode; the GUI will prompt the user \
                      to wipe ciphertext before any download with secrets can run"
                 );
                 None
@@ -632,7 +632,7 @@ impl AppState {
                 tracing::error!(error = %e, "failed to read the download list");
                 db_warning = db_warning.or(Some(format!(
                     "The download list could not be read ({e}). Your downloads are still \
-                     on disk — do not add new ones until this is sorted out."
+                     on disk. Do not add new ones until this is sorted out."
                 )));
                 Vec::new()
             }
@@ -1438,12 +1438,18 @@ impl AppState {
     }
 
     /// Can the update actually be written where this copy of oxdm
-    /// lives?
+    /// lives, one way or another?
     ///
     /// Tested by writing, not by reading permission bits: a read-only
     /// mount, an immutable flag and a directory owned by root all end
     /// the same way, and only an attempt tells them apart from a
     /// `-rwx` that happens to be someone else's.
+    ///
+    /// A system-wide install fails that test and is still installable:
+    /// the updater asks for administrator rights when it gets there.
+    /// This refuses only when nothing could rescue it, because the
+    /// swap happens after oxdm exits and a refusal is only useful
+    /// while there is still a window to show it in.
     fn installable_in_place(exe: &std::path::Path) -> Result<(), String> {
         let dir = exe
             .parent()
@@ -1454,9 +1460,12 @@ impl AppState {
                 let _ = std::fs::remove_file(&probe);
                 Ok(())
             }
+            Err(_) if crate::platform::elevate::available() => Ok(()),
             Err(e) => Err(format!(
-                "oxdm cannot update itself in {}: {e}. Install it somewhere you own \
-                 (the installer uses ~/.local/bin), or replace the files by hand.",
+                "oxdm is installed in {}, which it cannot write to ({e}), and this \
+                 system has no way to ask for administrator rights. Install it \
+                 somewhere you own (the installer uses ~/.local/bin), or replace \
+                 the files by hand.",
                 dir.display()
             )),
         }
@@ -5180,7 +5189,7 @@ fn validate_work_dir(dir: &std::path::Path) -> Result<(), String> {
     }
     if !dir.is_absolute() {
         return Err(format!(
-            "the cache folder must be a full path — `{}` is relative",
+            "the cache folder must be a full path, `{}` is relative",
             dir.display()
         ));
     }
@@ -5991,11 +6000,11 @@ mod tests {
         assert_eq!(decode_pairing_code(""), None);
     }
 
-    /// An install oxdm cannot write to is refused while the app is
+    /// An install oxdm cannot write to is settled while the app is
     /// still running, when there is still a window to say so in. The
     /// swap happens after it exits, so a failure there is silent.
     #[test]
-    fn an_update_into_a_read_only_directory_is_refused_up_front() {
+    fn an_update_it_cannot_perform_is_refused_while_a_window_can_show_it() {
         let dir = tempfile::tempdir().unwrap();
         let exe = dir.path().join("oxdm");
         std::fs::write(&exe, b"binary").unwrap();
@@ -6005,17 +6014,29 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
-            let refused = AppState::installable_in_place(&exe);
+            let verdict = AppState::installable_in_place(&exe);
             std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-            let message = refused.unwrap_err();
-            assert!(message.contains("cannot update itself"), "{message}");
-            // The message has to name the place and a way out; "denied"
-            // alone leaves the user nothing to do.
-            assert!(
-                message.contains(&dir.path().display().to_string()),
-                "{message}"
-            );
-            assert!(message.contains("~/.local/bin"), "{message}");
+
+            // Where the desktop can ask for rights, an install oxdm
+            // cannot write to is still installable: the updater
+            // prompts when it gets there. Where it cannot ask, the
+            // refusal has to name the place and a way out, because
+            // "denied" on its own leaves the user nothing to do.
+            match verdict {
+                Ok(()) => assert!(
+                    crate::platform::elevate::available(),
+                    "accepted an install it has no way to perform"
+                ),
+                Err(message) => {
+                    assert!(!crate::platform::elevate::available(), "{message}");
+                    assert!(message.contains("cannot write to"), "{message}");
+                    assert!(
+                        message.contains(&dir.path().display().to_string()),
+                        "{message}"
+                    );
+                    assert!(message.contains("~/.local/bin"), "{message}");
+                }
+            }
         }
     }
 

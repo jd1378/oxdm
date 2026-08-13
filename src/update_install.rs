@@ -75,6 +75,11 @@ pub fn main(argv: impl Iterator<Item = String>) -> ! {
 struct Args {
     exe: PathBuf,
     pid: u32,
+    /// Run as an administrator to do the replacing, and stop there.
+    /// Relaunching oxdm is the unprivileged half's job: an app started
+    /// from here would run as root, own every file it touched, and be
+    /// a worse problem than the one being solved.
+    swap_only: bool,
     /// What to install: a directory of programs, or the single file an
     /// AppImage build replaces itself with.
     source: Source,
@@ -91,7 +96,14 @@ fn parse_args(argv: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut pid: Option<u32> = None;
     let mut artifact: Option<PathBuf> = None;
     let mut payload: Option<PathBuf> = None;
+    let mut swap_only = false;
     while let Some(flag) = argv.next() {
+        // The one flag that takes no value: it says "you are the
+        // elevated half, do the swap and nothing else".
+        if flag == "--swap-only" {
+            swap_only = true;
+            continue;
+        }
         let val = argv
             .next()
             .ok_or_else(|| format!("missing value for {flag}"))?;
@@ -110,12 +122,21 @@ fn parse_args(argv: impl Iterator<Item = String>) -> Result<Args, String> {
     };
     Ok(Args {
         exe: exe.ok_or_else(|| "missing --exe".to_string())?,
-        pid: pid.ok_or_else(|| "missing --pid".to_string())?,
+        // An elevated run is handed the swap alone; there is no parent
+        // left to wait for by then.
+        pid: pid.unwrap_or(0),
         source,
+        swap_only,
     })
 }
 
 async fn run(args: Args) -> Result<(), String> {
+    // The elevated half: no handshake, no waiting, no relaunch. It was
+    // started by the unprivileged half, which is still there and will
+    // do the rest.
+    if args.swap_only {
+        return swap(&args);
+    }
     emit(&Event::Started);
 
     // 1. Ready — wait for the parent to confirm + exit. The artifact
@@ -129,19 +150,30 @@ async fn run(args: Args) -> Result<(), String> {
 
     // 2. Swap. Each program is moved into place atomically; on Windows
     // a brief retry tides over handle release.
-    let swapped = match &args.source {
-        Source::Artifact(file) => swap_executable(file, &args.exe),
-        Source::Payload(dir) => install_payload(dir, &args.exe),
-    };
-    if let Err(e) = swapped {
-        // oxdm has already exited — that is what let its own file be
-        // replaced — so failing here leaves the user with no app at
-        // all, and this process's output goes nowhere they will look.
-        // Put the old one back on screen and leave the reason on disk
-        // beside the staged update.
-        record_failure(&args.exe, &e);
-        let _ = spawn_detached(&args.exe);
-        return Err(e);
+    if let Err(e) = swap(&args) {
+        // A system-wide install belongs to root, and this process does
+        // not. Ask, once, through the desktop's own prompt.
+        let elevated = if needs_rights(&e) {
+            emit(&Event::Elevating);
+            elevated_swap(&args)
+        } else {
+            Err(e.clone())
+        };
+        if let Err(why) = elevated {
+            // oxdm has already exited, which is what let its own file
+            // be replaced, so failing here leaves the user with no app
+            // at all and this process's output goes nowhere they will
+            // look. Put the old one back on screen and leave the
+            // reason on disk beside the staged update.
+            let reason = if why == e {
+                e
+            } else {
+                format!("{e}. Installing as an administrator did not work either: {why}")
+            };
+            record_failure(&args.exe, &reason);
+            let _ = spawn_detached(&args.exe);
+            return Err(reason);
+        }
     }
 
     // 3. Relaunch from the same path. Detach so this updater can exit.
@@ -149,6 +181,64 @@ async fn run(args: Args) -> Result<(), String> {
 
     emit(&Event::Done);
     Ok(())
+}
+
+fn swap(args: &Args) -> Result<(), String> {
+    match &args.source {
+        Source::Artifact(file) => swap_executable(file, &args.exe),
+        Source::Payload(dir) => install_payload(dir, &args.exe),
+    }
+}
+
+/// Is this the kind of failure administrator rights would fix?
+///
+/// Matched on the message rather than on an error kind because the two
+/// swap paths fold several IO calls into one string; a false positive
+/// costs one prompt the user can dismiss, a false negative costs them
+/// the update.
+fn needs_rights(reason: &str) -> bool {
+    let reason = reason.to_ascii_lowercase();
+    reason.contains("permission denied")
+        || reason.contains("access is denied")
+        || reason.contains("operation not permitted")
+        || reason.contains("read-only file system")
+        || reason.contains("os error 13")
+        || reason.contains("os error 1")
+}
+
+/// Do the same swap again, as an administrator.
+///
+/// The elevated process is this same program with `--swap-only`, so
+/// there is one implementation of "replace these files" and the
+/// privileged half does nothing else: it never relaunches the app,
+/// never touches the user's data directory, and exits as soon as the
+/// files are in place.
+fn elevated_swap(args: &Args) -> Result<(), String> {
+    if !crate::platform::elevate::available() {
+        return Err("this system has no way to ask for administrator rights".into());
+    }
+    let me = std::env::current_exe().map_err(|e| format!("cannot find the installer: {e}"))?;
+    let argv = elevated_args(args);
+    let borrowed: Vec<&str> = argv.iter().map(String::as_str).collect();
+    crate::platform::elevate::run(&me, &borrowed)
+}
+
+/// What the privileged half is asked to do. Built here so it can be
+/// read without a password prompt: `--swap-only` and no `--pid`, so it
+/// waits for nothing and relaunches nothing.
+fn elevated_args(args: &Args) -> Vec<String> {
+    let (flag, value) = match &args.source {
+        Source::Artifact(file) => ("--artifact", file.display().to_string()),
+        Source::Payload(dir) => ("--payload", dir.display().to_string()),
+    };
+    vec![
+        "--install-update".to_owned(),
+        "--swap-only".to_owned(),
+        "--exe".to_owned(),
+        args.exe.display().to_string(),
+        flag.to_owned(),
+        value,
+    ]
 }
 
 /// Leave the reason somewhere a person can find it.
@@ -370,8 +460,13 @@ enum Event {
     Started,
     Ready,
     Installing,
+    /// The install needs rights this process does not have, and the
+    /// system's own prompt is now in front of the user.
+    Elevating,
     Done,
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 fn emit(ev: &Event) {
@@ -379,4 +474,65 @@ fn emit(ev: &Event) {
     let mut out = io::stdout().lock();
     let _ = writeln!(out, "{line}");
     let _ = out.flush();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only failures administrator rights would actually fix are worth
+    /// a prompt. A wrong guess either way costs the user something: a
+    /// pointless password dialog, or an update that stops with a fixable
+    /// error nobody was asked about.
+    #[test]
+    fn only_permission_failures_ask_for_rights() {
+        for yes in [
+            "staging next to the install failed: Permission denied (os error 13)",
+            "install /usr/local/bin/oxdm: Access is denied. (os error 5)",
+            "rename: Operation not permitted",
+            "write: Read-only file system",
+        ] {
+            assert!(needs_rights(yes), "{yes}");
+        }
+        for no in [
+            "update payload: No such file or directory",
+            "the update archive holds none of oxdm's programs",
+            "relaunch: Exec format error",
+        ] {
+            assert!(!needs_rights(no), "{no}");
+        }
+    }
+
+    /// The privileged half replaces files and does nothing else. No
+    /// pid to wait for, and no relaunch, because an oxdm started from
+    /// there would run as root and own every file it touched.
+    #[test]
+    fn the_elevated_half_is_asked_only_to_swap() {
+        let args = Args {
+            exe: PathBuf::from("/usr/local/bin/oxdm"),
+            pid: 4321,
+            source: Source::Payload(PathBuf::from("/tmp/staged")),
+            swap_only: false,
+        };
+        let argv = elevated_args(&args);
+        assert_eq!(
+            argv,
+            vec![
+                "--install-update",
+                "--swap-only",
+                "--exe",
+                "/usr/local/bin/oxdm",
+                "--payload",
+                "/tmp/staged",
+            ]
+        );
+        assert!(!argv.iter().any(|a| a == "--pid"));
+
+        // And it round-trips: what is sent is what the other side
+        // parses back.
+        let parsed = parse_args(argv.into_iter().skip(1)).unwrap();
+        assert!(parsed.swap_only);
+        assert_eq!(parsed.pid, 0);
+        assert_eq!(parsed.exe, PathBuf::from("/usr/local/bin/oxdm"));
+    }
 }

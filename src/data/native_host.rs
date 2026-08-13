@@ -531,7 +531,7 @@ fn patch_desktop(app: &str, grants: &[String], dry_run: bool) -> String {
     // fires it is a bug in `splice_exec`, and the right response is to
     // leave the file alone and say so.
     if let Err(e) = only_exec_grants_changed(&body, &patched, grants) {
-        return format!("{app}: refusing to write {} — {e}", dest.display());
+        return format!("{app}: refusing to write {}: {e}", dest.display());
     }
     if dry_run {
         return format!("{app}: would patch {}", dest.display());

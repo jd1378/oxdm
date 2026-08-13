@@ -212,7 +212,7 @@ fn install_native_host(mut args: impl Iterator<Item = String>) -> ! {
             oxdm::domain::HostOutcome::Written => "wrote",
             oxdm::domain::HostOutcome::Unchanged => "unchanged",
             oxdm::domain::HostOutcome::Failed(e) => {
-                println!("{}: FAILED — {e}", entry.browser);
+                println!("{}: FAILED: {e}", entry.browser);
                 continue;
             }
         };
@@ -252,7 +252,7 @@ fn run_daemon() {
     let guard = match single_instance::acquire() {
         Ok(single_instance::InstanceOutcome::Primary(g)) => g,
         Ok(single_instance::InstanceOutcome::AlreadyRunning) => {
-            tracing::info!("oxdm daemon already running — surfacing main window");
+            tracing::info!("oxdm daemon already running, surfacing main window");
             ask_daemon_to_open_main();
             return;
         }

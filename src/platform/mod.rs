@@ -1,6 +1,7 @@
 //! Platform helpers: opening a path or a URL, desktop entries,
 //! notifications, and the inotify-watch ceiling on Linux.
 
+pub mod elevate;
 pub mod watch_limit;
 
 pub fn open_path(path: &std::path::Path) {

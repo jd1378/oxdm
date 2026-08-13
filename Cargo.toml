@@ -77,11 +77,13 @@ windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_Registry",
     "Win32_System_Threading",
+    "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_Graphics_Gdi",
     "Win32_System_Console",
     "Win32_System_Threading",
+    "Win32_UI_Shell",
     # Queue conditions: idle time (GetTickCount64) and mains/battery
     # state (GetSystemPowerStatus).
     "Win32_System_SystemInformation",

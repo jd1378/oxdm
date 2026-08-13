@@ -2728,7 +2728,7 @@ fn update_rows(st: &State) -> Vec<Element<'_, Msg>> {
     if !auto {
         rows.push(set_note(
             t,
-            "Off while automatic update checks are off — a check you run yourself \
+            "Off while automatic update checks are off. A check you run yourself \
              answers in About.",
         ));
     }

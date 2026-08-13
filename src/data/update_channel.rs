@@ -51,8 +51,13 @@ pub enum UpdaterEvent {
     Verified,
     Ready,
     Installing,
+    /// The install needs administrator rights, and the system's own
+    /// prompt is now in front of the user.
+    Elevating,
     Done,
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 /// Default no-op channel. `check` returns `Ok(None)`.

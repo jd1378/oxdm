@@ -295,7 +295,7 @@ async fn sweep(state: &Arc<AppState>) {
 
     for (id, path) in gone {
         tracing::info!(id = %id, path = %path.display(),
-            "what this download had is no longer there — forgetting it");
+            "what this download had is no longer there, forgetting it");
         // The partial state goes with it: keeping a work dir for a job
         // that is no longer listed leaves bytes nobody can reach. The
         // file itself is never touched — it is not there to touch.
