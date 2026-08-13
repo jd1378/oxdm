@@ -2728,10 +2728,17 @@ fn cookies_tab(st: &State) -> Element<'_, Msg> {
         .split(';')
         .filter(|s| s.contains('='))
         .count();
-    let caption = if parsed == 0 {
-        "No cookies parsed yet.".to_owned()
-    } else {
-        format!("{parsed} cookie(s) parsed.")
+    // A stored jar never comes back as plaintext, so the editor is
+    // empty for every capture that arrived with cookies. Counting what
+    // is in the box and stopping there said "No cookies parsed yet."
+    // over a download that had them all along, which reads as the
+    // capture having dropped them.
+    let blank = st.cookies.text().trim().is_empty();
+    let caption = match (parsed, blank, st.has_stored_cookies, st.cookies_edited) {
+        (0, true, true, true) => "Stored cookies will be removed when you apply.".to_owned(),
+        (0, true, true, false) => "Cookies are stored for this download (encrypted).".to_owned(),
+        (0, _, _, _) => "No cookies parsed yet.".to_owned(),
+        _ => format!("{parsed} cookie(s) parsed."),
     };
     labeled_section(
         t,

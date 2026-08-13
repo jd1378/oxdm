@@ -233,6 +233,10 @@ pub struct AddState {
     /// does — a blank box must not read as "there is no password".
     stored_proxy_secret: bool,
     stored_auth_secret: bool,
+    /// The job being edited already holds encrypted cookies. They never
+    /// come back as plaintext, so the editor stays empty and says so
+    /// rather than looking like the capture arrived without them.
+    stored_cookies: bool,
     user_agent: String,
     cookies: text_editor::Content,
     headers: Vec<(String, String)>,
@@ -516,6 +520,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 original_queue: None,
                 stored_proxy_secret: false,
                 stored_auth_secret: false,
+                stored_cookies: false,
                 user_agent: String::new(),
                 cookies: text_editor::Content::new(),
                 headers: Vec::new(),
@@ -552,6 +557,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 st.auth = AuthForm::from_adv(&job.advanced.auth, job.auth_user.as_deref());
                 st.stored_proxy_secret = job.enc_proxy_password.is_some();
                 st.stored_auth_secret = job.enc_auth_password.is_some();
+                st.stored_cookies = job.enc_cookies.is_some();
                 for (k, v) in &job.headers {
                     // Shown in the User-Agent field, not among the
                     // free-form rows — two editors for one header
@@ -1739,8 +1745,17 @@ fn advanced_section(st: &AddState) -> Element<'_, Msg> {
         ),
         AdvTab::Cookies => {
             let t3 = *t;
+            // Cookies a capture arrived with are on the encrypted rail
+            // and never round-trip back as plaintext, so an edit opens
+            // this box empty over a job that has them. Say so, or it
+            // reads as the capture having dropped them. Submitting an
+            // empty box keeps what is stored; see `update_job_location`.
             let editor = text_editor::TextEditor::new(&st.cookies)
-                .placeholder("session_id=…; csrf=…")
+                .placeholder(if st.stored_cookies {
+                    "Cookies stored (encrypted). Type to replace them."
+                } else {
+                    "session_id=…; csrf=…"
+                })
                 .font(theme::MONO)
                 .size(12.0)
                 // A cookie string is one long run with no spaces to
@@ -1771,10 +1786,13 @@ fn advanced_section(st: &AddState) -> Element<'_, Msg> {
                             .font(theme::BODY_MEDIUM)
                             .size(12.0)
                             .color(t.fg_1),
-                        text(
+                        text(if st.stored_cookies {
+                            "Cookies are stored for this download (encrypted). A raw \
+                              \"name=value; name2=value2\" string replaces them."
+                        } else {
                             "A raw \"name=value; name2=value2\" string, sent as the Cookie \
                               header."
-                        )
+                        })
                         .font(theme::BODY)
                         .size(11.0)
                         .color(t.fg_3),
