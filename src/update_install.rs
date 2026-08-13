@@ -176,7 +176,16 @@ async fn run(args: Args) -> Result<(), String> {
         }
     }
 
-    // 3. Relaunch from the same path. Detach so this updater can exit.
+    // 3. The launcher icon, which lives in the user's icon theme rather
+    // than beside the programs. Deliberately after the swap and outside
+    // it: it is not part of "the install either happened or it did
+    // not", it is the user's own directory even when the programs are
+    // root's, and it must never be the reason an update reports failure.
+    if let Source::Payload(dir) = &args.source {
+        refresh_icon(dir);
+    }
+
+    // 4. Relaunch from the same path. Detach so this updater can exit.
     spawn_detached(&args.exe).map_err(|e| format!("relaunch: {e}"))?;
 
     emit(&Event::Done);
@@ -350,6 +359,12 @@ fn install_payload(dir: &PathBuf, exe: &Path) -> Result<(), String> {
             continue;
         }
         let name = entry.file_name();
+        // The payload carries more than programs. `oxdm.png` has the
+        // same file stem as the app, so anything less exact than this
+        // would install a picture over the executable.
+        if !crate::data::update_bundle::is_ours(&name.to_string_lossy()) {
+            continue;
+        }
         let stem = std::path::Path::new(&name)
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
@@ -368,6 +383,102 @@ fn install_payload(dir: &PathBuf, exe: &Path) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// Replace the launcher icon the installer put in the user's icon
+/// theme, if there is one.
+///
+/// The archive carries `oxdm.png` and `tools/install.sh` copies it to
+/// `~/.local/share/icons/hicolor/512x512/apps/oxdm.png`, where the
+/// `.desktop` entry's `Icon=oxdm` resolves it. Nothing was refreshing
+/// that afterwards, so a release that changed the icon reached new
+/// installs only.
+///
+/// Only ever *overwrites*: an install with no icon there is an
+/// AppImage, a portable copy, or someone who set `OXDM_NO_DESKTOP`, and
+/// an updater is not the place to start creating desktop integration
+/// the user declined. Every failure is silent for the same reason the
+/// call site is outside the swap — a stale picture is not a failed
+/// update.
+#[cfg(target_os = "linux")]
+fn refresh_icon(payload: &Path) {
+    refresh_icon_in(payload, &icon_theme_dirs())
+}
+
+/// The body of [`refresh_icon`], with the icon theme roots handed in.
+///
+/// Split so a test can point it at a temporary directory by argument.
+/// Doing it by environment variable would mutate process-global state
+/// that every other test in the binary shares, and the failure mode of
+/// getting it wrong is overwriting the icon in the developer's own
+/// `~/.local/share/icons`.
+#[cfg(target_os = "linux")]
+fn refresh_icon_in(payload: &Path, themes: &[PathBuf]) {
+    let staged = payload.join(crate::data::update_bundle::ICON);
+    if !staged.is_file() {
+        return;
+    }
+    for theme in themes {
+        let target = theme.join("512x512/apps").join("oxdm.png");
+        if !target.is_file() {
+            continue;
+        }
+        // Beside the target so the final step is a rename within one
+        // filesystem, and so a half-copied PNG is never what a launcher
+        // reads.
+        let tmp = target.with_extension("oxdm-new");
+        if std::fs::copy(&staged, &tmp).is_err() {
+            continue;
+        }
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = std::fs::metadata(&tmp) {
+                let mut perm = meta.permissions();
+                perm.set_mode(0o644);
+                let _ = std::fs::set_permissions(&tmp, perm);
+            }
+        }
+        if std::fs::rename(&tmp, &target).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            continue;
+        }
+        // Desktops read the icon through a cache that keeps serving the
+        // old picture until it is told otherwise. Absent on plenty of
+        // systems, which is fine: without a cache there is nothing
+        // stale to invalidate.
+        let _ = std::process::Command::new("gtk-update-icon-cache")
+            .args(["-q", "-t", "-f"])
+            .arg(theme)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
+/// Where an installed icon could be.
+///
+/// `install.sh` writes to `$HOME/.local/share` literally while the spec
+/// says `$XDG_DATA_HOME`, and the two differ on a machine that sets the
+/// variable. Both are checked rather than one guessed at: the caller
+/// only touches a file that already exists, so the extra candidate
+/// costs a `stat` and covers the mismatch either way round.
+#[cfg(target_os = "linux")]
+fn icon_theme_dirs() -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    let candidates = [
+        dirs::data_dir(),
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")),
+    ];
+    for base in candidates.into_iter().flatten() {
+        let theme = base.join("icons/hicolor");
+        if !out.contains(&theme) {
+            out.push(theme);
+        }
+    }
+    out
+}
+
+#[cfg(not(target_os = "linux"))]
+fn refresh_icon(_payload: &Path) {}
 
 fn swap_executable(staged: &PathBuf, target: &PathBuf) -> Result<(), String> {
     // The staging folder is under the user's data dir and the install
@@ -555,6 +666,82 @@ mod tests {
         assert_eq!(std::fs::read(&exe).unwrap(), b"new app");
         assert!(!install.join("oxdm").exists(), "no second copy appeared");
         assert!(install.join("oxdm-native-host").exists());
+    }
+
+    /// The payload carries the launcher icon, and `oxdm.png` shares a
+    /// file stem with the app. Installing payload entries by stem alone
+    /// would put a picture where the executable goes, which is the
+    /// worst outcome this whole file exists to avoid.
+    #[cfg(unix)]
+    #[test]
+    fn the_icon_is_never_installed_as_a_program() {
+        let dir = tempfile::tempdir().unwrap();
+        let install = dir.path().join("bin");
+        let payload = dir.path().join("payload");
+        std::fs::create_dir_all(&install).unwrap();
+        std::fs::create_dir_all(&payload).unwrap();
+
+        let exe = install.join("oxdm");
+        std::fs::write(&exe, b"old app").unwrap();
+        std::fs::write(payload.join("oxdm"), b"new app").unwrap();
+        std::fs::write(payload.join("oxdm-native-host"), b"new host").unwrap();
+        std::fs::write(payload.join("oxdm.png"), b"PNG").unwrap();
+
+        install_payload(&payload, &exe).unwrap();
+
+        assert_eq!(std::fs::read(&exe).unwrap(), b"new app", "still the app");
+        assert!(
+            !install.join("oxdm.png").exists(),
+            "an icon has no business beside the binaries"
+        );
+    }
+
+    /// An install whose icon the user can see gets the one this version
+    /// ships. Overwritten in place, so a launcher never reads a
+    /// half-copied file.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_installed_icon_is_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = dir.path().join("payload");
+        std::fs::create_dir_all(&payload).unwrap();
+        std::fs::write(payload.join("oxdm.png"), b"new icon").unwrap();
+
+        let theme = dir.path().join("icons/hicolor");
+        let apps = theme.join("512x512/apps");
+        std::fs::create_dir_all(&apps).unwrap();
+        let icon = apps.join("oxdm.png");
+        std::fs::write(&icon, b"old icon").unwrap();
+
+        refresh_icon_in(&payload, &[theme]);
+
+        assert_eq!(std::fs::read(&icon).unwrap(), b"new icon");
+        assert!(
+            !apps.join("oxdm.oxdm-new").exists(),
+            "and nothing left staged"
+        );
+    }
+
+    /// No icon installed means no desktop integration to refresh. An
+    /// updater that created one would be adding a launcher entry to an
+    /// AppImage, a portable copy, or an install that passed
+    /// `OXDM_NO_DESKTOP` precisely to avoid it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_install_without_an_icon_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = dir.path().join("payload");
+        std::fs::create_dir_all(&payload).unwrap();
+        std::fs::write(payload.join("oxdm.png"), b"new icon").unwrap();
+        let theme = dir.path().join("icons/hicolor");
+
+        refresh_icon_in(&payload, std::slice::from_ref(&theme));
+
+        assert!(
+            !theme.join("512x512/apps/oxdm.png").exists(),
+            "nothing was there, so nothing was made"
+        );
+        assert!(!theme.exists(), "not even the directory");
     }
 
     /// The privileged half replaces files and does nothing else. No

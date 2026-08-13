@@ -14,11 +14,11 @@
 //! near-duplicate beside it.
 //!
 //! Nothing is trusted about the archive's own paths. Only entries whose
-//! *file name* is one of the binaries we ship are written, into a
-//! directory of our choosing — an entry claiming to be `../../.bashrc`
-//! never gets the chance to say so. The artifact is already checked
-//! against the digest the feed published, so this is the second lock on
-//! the same door rather than the only one.
+//! *file name* is one we ship are written, into a directory of our
+//! choosing — an entry claiming to be `../../.bashrc` never gets the
+//! chance to say so. The artifact is already checked against the digest
+//! the feed published, so this is the second lock on the same door
+//! rather than the only one.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -27,10 +27,24 @@ use std::path::{Path, PathBuf};
 /// anything else is ignored.
 const BINARIES: [&str; 2] = ["oxdm", "oxdm-native-host"];
 
+/// The launcher icon, which travels in the same archive.
+///
+/// Not a program: it belongs in the icon theme, not beside the
+/// binaries, and the installer only put it there in the first place on
+/// Linux. It comes out of the archive so that an install whose icon the
+/// user can see keeps showing the icon this version ships, but an
+/// archive without one is still a perfectly good update.
+pub const ICON: &str = "oxdm.png";
+
 /// Is this the name of one of our binaries, with or without the
 /// Windows suffix? Compared case-insensitively because Windows file
 /// names are.
-fn is_ours(name: &str) -> bool {
+///
+/// Public because the other half of an update reads the staged payload
+/// back and has to tell a program from a passenger: `oxdm.png` has the
+/// same file *stem* as the app, so a check any coarser than this one
+/// would install an icon over the executable.
+pub fn is_ours(name: &str) -> bool {
     let stem = name
         .strip_suffix(".exe")
         .or_else(|| name.strip_suffix(".EXE"))
@@ -38,19 +52,26 @@ fn is_ours(name: &str) -> bool {
     BINARIES.iter().any(|b| b.eq_ignore_ascii_case(stem))
 }
 
-/// Unpack the binaries from `archive` into `dest`, returning what was
-/// written. `dest` is created if missing.
+/// Is this an entry worth taking out of the archive at all?
+fn wanted(name: &str) -> bool {
+    is_ours(name) || name.eq_ignore_ascii_case(ICON)
+}
+
+/// Unpack the binaries and the icon from `archive` into `dest`,
+/// returning what was written. `dest` is created if missing.
 ///
 /// An archive with none of our binaries in it is an error rather than
 /// an empty success: it means the release published something this
 /// build does not understand, and installing nothing while reporting
 /// success would leave the user on the old version believing they had
-/// updated.
+/// updated. The icon does not count towards that — it is a nicety, and
+/// an update that fails because a picture is missing helps nobody.
 pub fn extract(archive: &Path, dest: &Path) -> io::Result<Vec<PathBuf>> {
     std::fs::create_dir_all(dest)?;
     let file = std::fs::File::open(archive)?;
     let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(file));
     let mut written = Vec::new();
+    let mut programs = 0usize;
     for entry in tar.entries()? {
         let mut entry = entry?;
         if !entry.header().entry_type().is_file() {
@@ -63,21 +84,23 @@ pub fn extract(archive: &Path, dest: &Path) -> io::Result<Vec<PathBuf>> {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
         {
-            Some(n) if is_ours(&n) => n,
+            Some(n) if wanted(&n) => n,
             _ => continue,
         };
+        let program = is_ours(&name);
         let out = dest.join(&name);
         entry.unpack(&out)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let mut perm = std::fs::metadata(&out)?.permissions();
-            perm.set_mode(0o755);
+            perm.set_mode(if program { 0o755 } else { 0o644 });
             std::fs::set_permissions(&out, perm)?;
         }
+        programs += usize::from(program);
         written.push(out);
     }
-    if written.is_empty() {
+    if programs == 0 {
         return Err(io::Error::other(
             "the update archive holds none of oxdm's programs",
         ));
@@ -171,10 +194,33 @@ mod tests {
         let dest = dir.path().join("out");
         let mut written = extract(&archive, &dest).unwrap();
         written.sort();
-        assert_eq!(written.len(), 2, "{written:?}");
+        assert_eq!(written.len(), 3, "{written:?}");
         assert!(dest.join("oxdm").exists());
         assert!(dest.join("oxdm-native-host").exists());
+        assert!(dest.join("oxdm.png").exists(), "and the icon");
         assert!(!dest.join("README.md").exists(), "no passengers");
+    }
+
+    /// The icon comes along, but it is not a program: it is not
+    /// executable, and an archive carrying nothing but an icon is still
+    /// an update with no update in it.
+    #[cfg(unix)]
+    #[test]
+    fn the_icon_is_carried_but_is_not_a_program() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out");
+
+        let archive = tarball(dir.path(), &[("oxdm", b"app"), ("oxdm.png", b"icon")]);
+        extract(&archive, &dest).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dest.join("oxdm")), 0o755);
+        assert_eq!(mode(&dest.join("oxdm.png")), 0o644);
+
+        let other = dir.path().join("x");
+        std::fs::create_dir_all(&other).unwrap();
+        let iconly = tarball(&other, &[("oxdm.png", b"icon")]);
+        assert!(extract(&iconly, &dir.path().join("out2")).is_err());
     }
 
     /// The digest check already stands between a hostile archive and
@@ -223,9 +269,10 @@ mod tests {
         let dest = dir.path().join("out");
         let mut written = extract(&archive, &dest).unwrap();
         written.sort();
-        assert_eq!(written.len(), 2, "{written:?}");
+        assert_eq!(written.len(), 3, "{written:?}");
         assert!(dest.join("oxdm").exists());
         assert!(dest.join("oxdm-native-host").exists());
+        assert!(dest.join("oxdm.png").exists());
         assert!(!dest.join("README.md").exists(), "no passengers");
         assert!(!dest.join(root).exists(), "and no directory to walk");
     }
