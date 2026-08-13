@@ -196,6 +196,10 @@ fn tamper_banner<'a>(t: &Tokens) -> Element<'a, Msg> {
 const FILE_TILE: f32 = 40.0;
 const FILE_TILE_RADIUS: f32 = 7.0;
 const FILE_EXT_SIZE: f32 = 10.0;
+/// Breathing room either side of an extension tile's label, so a label
+/// wide enough to wrap does not touch the tile's edge (design
+/// `.ext-big { padding: 0 3px }`).
+pub const EXT_TILE_PAD: f32 = 3.0;
 const FILE_NAME_SIZE: f32 = 13.5;
 const FILE_META_SIZE: f32 = 11.0;
 /// Table metrics, the verdict chip and the danger edge come from the
@@ -1452,19 +1456,29 @@ fn header_card(st: &State) -> Element<'_, Msg> {
 
     let dotsep = || text("·").size(11.0).color(t.fg_4);
 
-    let tile = container(text(ext).font(theme::MONO_BOLD).size(12.0).color(cat_color))
-        .width(Length::Fixed(56.0))
-        .height(Length::Fixed(56.0))
-        .align_x(Alignment::Center)
-        .align_y(Alignment::Center)
-        .style(move |_| container::Style {
-            background: Some(tile_bg.into()),
-            border: iced::Border {
-                radius: theme::radius::SM.into(),
-                ..Default::default()
-            },
+    // Two lines and then an ellipsis, rather than one line that runs
+    // out past the tile: an extension like `safetensors` is longer than
+    // any square this size can hold on one line.
+    let tile = container(crate::gui::widget::ellipsized_lines(
+        ext,
+        theme::MONO_BOLD,
+        12.0,
+        cat_color,
+        2,
+    ))
+    .width(Length::Fixed(56.0))
+    .height(Length::Fixed(56.0))
+    .padding([0.0, EXT_TILE_PAD])
+    .align_x(Alignment::Center)
+    .align_y(Alignment::Center)
+    .style(move |_| container::Style {
+        background: Some(tile_bg.into()),
+        border: iced::Border {
+            radius: theme::radius::SM.into(),
             ..Default::default()
-        });
+        },
+        ..Default::default()
+    });
 
     // A dash, not "0%", when nothing has said how big the file is:
     // zero-of-unknown is not zero percent, and the stat strip beside
@@ -2508,14 +2522,16 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
     // Design `.complete-file .ext-big` overrides the 44px detected-card
     // tile with a 40px one: this card names a file that is already on
     // disk, so the extension is a label, not the headline.
-    let tile = container(
-        text(ext)
-            .font(theme::MONO_BOLD)
-            .size(FILE_EXT_SIZE)
-            .color(accent),
-    )
+    let tile = container(crate::gui::widget::ellipsized_lines(
+        ext,
+        theme::MONO_BOLD,
+        FILE_EXT_SIZE,
+        accent,
+        2,
+    ))
     .width(Length::Fixed(FILE_TILE))
     .height(Length::Fixed(FILE_TILE))
+    .padding([0.0, EXT_TILE_PAD])
     .align_x(Alignment::Center)
     .align_y(Alignment::Center)
     .style(move |_| container::Style {

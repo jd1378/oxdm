@@ -1391,21 +1391,28 @@ fn detect_card(st: &AddState) -> Element<'_, Msg> {
     let tile: Element<'_, Msg> = match detected {
         Some(p) => {
             let ext = crate::gui::format::ext_label(Some(&p.filename));
-            container(text(ext).font(theme::MONO_BOLD).size(12.0).color(tile_fg))
-                .width(Length::Fixed(EXT_TILE))
-                .height(Length::Fixed(EXT_TILE))
-                .align_x(Alignment::Center)
-                .align_y(Alignment::Center)
-                .style(move |_| container::Style {
-                    background: Some(tile_bg.into()),
-                    border: iced::Border {
-                        color: color::clay::C400,
-                        width: 1.0,
-                        radius: theme::radius::SM.into(),
-                    },
-                    ..Default::default()
-                })
-                .into()
+            container(crate::gui::widget::ellipsized_lines(
+                ext,
+                theme::MONO_BOLD,
+                12.0,
+                tile_fg,
+                2,
+            ))
+            .width(Length::Fixed(EXT_TILE))
+            .height(Length::Fixed(EXT_TILE))
+            .padding([0.0, crate::gui::windows::download::EXT_TILE_PAD])
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center)
+            .style(move |_| container::Style {
+                background: Some(tile_bg.into()),
+                border: iced::Border {
+                    color: color::clay::C400,
+                    width: 1.0,
+                    radius: theme::radius::SM.into(),
+                },
+                ..Default::default()
+            })
+            .into()
         }
         None => container(icons::icon(
             if st.probing { "ellipsis" } else { "link" },

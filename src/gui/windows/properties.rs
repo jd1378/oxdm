@@ -1866,14 +1866,16 @@ fn general_tab(st: &State) -> Element<'_, Msg> {
     let tile_bg = color::mix(t.bg_surface, t.action_primary, 0.20);
     let hero = container(
         row![
-            container(
-                text(ext)
-                    .font(theme::MONO_BOLD)
-                    .size(12.0)
-                    .color(t.action_primary)
-            )
+            container(crate::gui::widget::ellipsized_lines(
+                ext,
+                theme::MONO_BOLD,
+                12.0,
+                t.action_primary,
+                2,
+            ))
             .width(Length::Fixed(56.0))
             .height(Length::Fixed(56.0))
+            .padding([0.0, crate::gui::windows::download::EXT_TILE_PAD])
             .align_x(Alignment::Center)
             .align_y(Alignment::Center)
             .style(move |_| container::Style {

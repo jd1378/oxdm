@@ -1,4 +1,4 @@
-//! Single-line text that ends in an ellipsis when it does not fit.
+//! Text that ends in an ellipsis when it does not fit.
 //!
 //! iced's `text` has no `text-overflow`: with `Wrapping::None` inside a
 //! clipping container the glyphs are simply sliced mid-stroke, which is
@@ -6,12 +6,20 @@
 //! the shaped width of a candidate string, and only `layout` has the
 //! renderer to measure with — hence a widget rather than a helper that
 //! trims the `String` up front.
+//!
+//! Two shapes, one measurement: [`ellipsized`] fits one line to a width,
+//! and [`ellipsized_lines`] fills a fixed number of lines, breaking
+//! between glyphs, before ellipsising the last one.
 
 use iced::advanced::text::{Paragraph as _, Renderer as TextRenderer};
 use iced::advanced::{Layout, Widget, layout, mouse, renderer, widget};
 use iced::{Color, Element, Font, Length, Pixels, Rectangle, Size};
 
 const ELLIPSIS: &str = "\u{2026}";
+
+/// A chip's text is centred over the full width it was fitted to; a
+/// single line reports its own width and is placed by its parent.
+const CHIP_LINE_HEIGHT: f32 = 1.1;
 
 /// Text that truncates to `…` at the width its parent allows.
 pub fn ellipsized<'a, M: 'a>(
@@ -25,6 +33,31 @@ pub fn ellipsized<'a, M: 'a>(
         font,
         size,
         color,
+        max_lines: 1,
+    })
+}
+
+/// Text that fills up to `max_lines` lines at the width its parent
+/// allows and ellipsises whatever is left over.
+///
+/// Breaks between glyphs rather than between words: this is for labels
+/// with no spaces to break at (a file extension), where wrapping at word
+/// boundaries means not wrapping at all and the glyphs run out past the
+/// box they were meant to sit in. Lines are centred on each other, so
+/// the parent only has to centre the block.
+pub fn ellipsized_lines<'a, M: 'a>(
+    content: impl Into<String>,
+    font: Font,
+    size: f32,
+    color: Color,
+    max_lines: u16,
+) -> Element<'a, M> {
+    Element::new(Ellipsized {
+        content: content.into(),
+        font,
+        size,
+        color,
+        max_lines: max_lines.max(1),
     })
 }
 
@@ -33,6 +66,11 @@ struct Ellipsized {
     font: Font,
     size: f32,
     color: Color,
+    /// `1` keeps the original single-line behaviour: fit by width, and
+    /// take only as much width as the result needs. Above that the fit
+    /// is by height instead, and the widget claims the whole width so
+    /// the centred lines land where the parent expects them.
+    max_lines: u16,
 }
 
 /// Laid-out paragraph plus the width it was fitted to, so a re-layout at
@@ -57,17 +95,54 @@ impl<P: Default> Default for State<P> {
 }
 
 impl Ellipsized {
-    fn text<'a>(&self, content: &'a str) -> iced::advanced::text::Text<&'a str, Font> {
+    fn wraps(&self) -> bool {
+        self.max_lines > 1
+    }
+
+    fn text<'a>(&self, content: &'a str, width: f32) -> iced::advanced::text::Text<&'a str, Font> {
         iced::advanced::text::Text {
             content,
-            bounds: Size::INFINITE,
+            // A wrapping paragraph has to be measured inside the width
+            // it will wrap at; a single line is measured unbounded and
+            // compared against that width afterwards.
+            bounds: if self.wraps() {
+                Size::new(width, f32::INFINITY)
+            } else {
+                Size::INFINITE
+            },
             size: Pixels(self.size),
-            line_height: iced::advanced::text::LineHeight::default(),
+            line_height: if self.wraps() {
+                iced::advanced::text::LineHeight::Relative(CHIP_LINE_HEIGHT)
+            } else {
+                iced::advanced::text::LineHeight::default()
+            },
             font: self.font,
-            align_x: iced::advanced::text::Alignment::Left,
+            align_x: if self.wraps() {
+                iced::advanced::text::Alignment::Center
+            } else {
+                iced::advanced::text::Alignment::Left
+            },
             align_y: iced::alignment::Vertical::Top,
             shaping: iced::advanced::text::Shaping::Advanced,
-            wrapping: iced::advanced::text::Wrapping::None,
+            wrapping: if self.wraps() {
+                iced::advanced::text::Wrapping::Glyph
+            } else {
+                iced::advanced::text::Wrapping::None
+            },
+        }
+    }
+
+    /// Does this paragraph sit inside the space it was given? Width for
+    /// one line, height for several: a wrapped paragraph is always as
+    /// wide as it was allowed to be, so only the line count says whether
+    /// it fits.
+    fn fits<P: iced::advanced::text::Paragraph<Font = Font>>(&self, p: &P, max: f32) -> bool {
+        if self.wraps() {
+            // Half a pixel of slack: the measured height of N lines is
+            // a rounded accumulation, not exactly N × line height.
+            p.min_bounds().height <= f32::from(self.max_lines) * self.size * CHIP_LINE_HEIGHT + 0.5
+        } else {
+            p.min_bounds().width <= max
         }
     }
 
@@ -75,8 +150,8 @@ impl Ellipsized {
     /// appended. Binary search over character counts — byte slicing
     /// would split multi-byte characters.
     fn truncate<P: iced::advanced::text::Paragraph<Font = Font>>(&self, max: f32) -> P {
-        let full = P::with_text(self.text(&self.content));
-        if full.min_bounds().width <= max {
+        let full = P::with_text(self.text(&self.content, max));
+        if self.fits(&full, max) {
             return full;
         }
 
@@ -89,12 +164,12 @@ impl Ellipsized {
 
         // `lo` always fits, `hi` never does; converge on the boundary.
         let (mut lo, mut hi) = (0usize, chars.len() - 1);
-        let mut best = P::with_text(self.text(ELLIPSIS));
+        let mut best = P::with_text(self.text(ELLIPSIS, max));
         while lo < hi {
             let mid = lo + (hi - lo).div_ceil(2);
             let candidate = format!("{}{ELLIPSIS}", &self.content[..chars[mid]]);
-            let paragraph = P::with_text(self.text(&candidate));
-            if paragraph.min_bounds().width <= max {
+            let paragraph = P::with_text(self.text(&candidate, max));
+            if self.fits(&paragraph, max) {
                 best = paragraph;
                 lo = mid;
             } else {
@@ -135,8 +210,16 @@ where
             state.source.clone_from(&self.content);
         }
         let bounds = state.paragraph.min_bounds();
+        // The wrapped paragraph centres its lines inside the width it
+        // was laid out at, so the node has to be that width for the
+        // glyphs to land where the centring put them. A single line is
+        // placed by whatever centres it, and claims only what it needs.
         layout::Node::new(limits.resolve(
-            Length::Shrink,
+            if self.wraps() {
+                Length::Fill
+            } else {
+                Length::Shrink
+            },
             Length::Shrink,
             Size::new(bounds.width, bounds.height),
         ))

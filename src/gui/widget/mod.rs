@@ -28,7 +28,7 @@ pub use controls::{
     toggle, toggle_row,
 };
 pub use dashed::{dashed_frame, dashed_rule};
-pub use ellipsis::ellipsized;
+pub use ellipsis::{ellipsized, ellipsized_lines};
 pub use inputs::{FileInput, PasswordInput, TextInput, search_field};
 pub use pills::{
     Mark, ProgressTone, TRACKING_EM, chip, dot, eyebrow, field_label, inline_progress, pill_count,
