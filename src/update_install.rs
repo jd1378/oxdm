@@ -503,6 +503,60 @@ mod tests {
         }
     }
 
+    /// An install missing the browser host gets one. A user who copied
+    /// only the app out of the archive, or who installed before the
+    /// host existed, should not be left without browser integration
+    /// forever: the payload carries both programs, and each one is put
+    /// where it belongs whether or not something is already there.
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_program_is_added_rather_than_skipped() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let install = dir.path().join("bin");
+        let payload = dir.path().join("payload");
+        std::fs::create_dir_all(&install).unwrap();
+        std::fs::create_dir_all(&payload).unwrap();
+
+        let exe = install.join("oxdm");
+        std::fs::write(&exe, b"old app").unwrap();
+        std::fs::write(payload.join("oxdm"), b"new app").unwrap();
+        std::fs::write(payload.join("oxdm-native-host"), b"new host").unwrap();
+        assert!(!install.join("oxdm-native-host").exists());
+
+        install_payload(&payload, &exe).unwrap();
+
+        assert_eq!(std::fs::read(&exe).unwrap(), b"new app");
+        let host = install.join("oxdm-native-host");
+        assert_eq!(std::fs::read(&host).unwrap(), b"new host");
+        // And it has to be runnable, or the browser cannot launch it.
+        let mode = std::fs::metadata(&host).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "{mode:o}");
+    }
+
+    /// A binary the user renamed keeps its name: the app is identified
+    /// by being the app, not by what it is called.
+    #[cfg(unix)]
+    #[test]
+    fn a_renamed_app_is_replaced_under_its_own_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let install = dir.path().join("bin");
+        let payload = dir.path().join("payload");
+        std::fs::create_dir_all(&install).unwrap();
+        std::fs::create_dir_all(&payload).unwrap();
+
+        let exe = install.join("oxdm-nightly");
+        std::fs::write(&exe, b"old app").unwrap();
+        std::fs::write(payload.join("oxdm"), b"new app").unwrap();
+        std::fs::write(payload.join("oxdm-native-host"), b"new host").unwrap();
+
+        install_payload(&payload, &exe).unwrap();
+
+        assert_eq!(std::fs::read(&exe).unwrap(), b"new app");
+        assert!(!install.join("oxdm").exists(), "no second copy appeared");
+        assert!(install.join("oxdm-native-host").exists());
+    }
+
     /// The privileged half replaces files and does nothing else. No
     /// pid to wait for, and no relaunch, because an oxdm started from
     /// there would run as root and own every file it touched.
