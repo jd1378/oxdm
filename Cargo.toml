@@ -106,6 +106,14 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
 # so the size is not only an install-time cost. `panic` stays at
 # unwind: the daemon catches panics in download tasks so one bad run
 # cannot take the process (and every other download) with it.
+# Build-time only: there is no way to put an icon in a .exe from Rust
+# source — it has to be a linked resource, and this generates and links
+# one. Not gated on `cfg(windows)`, which would describe the machine
+# doing the building rather than the machine the binary is for; the
+# build script decides by target and does nothing for the others.
+[build-dependencies]
+winresource = "0.1"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

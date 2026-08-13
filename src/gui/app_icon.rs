@@ -129,8 +129,15 @@ pub fn image_handle(theme: ResolvedTheme) -> Option<iced::widget::image::Handle>
 }
 
 /// RGBA bytes + dimensions for the window icon (framework-agnostic).
+///
+/// Always the opaque variant, whatever theme the app is running in.
+/// This icon is drawn by the *desktop* — taskbar, dock, Alt-Tab — on a
+/// background oxdm does not choose and cannot read. The tray glyphs
+/// above are a different job: a status area asks for a flat shape in
+/// the panel's own colour, and one of those on a dark taskbar is a
+/// black arrow on nothing.
 pub fn window_icon_data() -> Option<(Vec<u8>, u32, u32)> {
-    let d = normal(crate::gui::theme::system_theme())?;
+    let d = idle_light()?;
     Some((d.rgba.clone(), d.width, d.height))
 }
 

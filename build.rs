@@ -16,9 +16,32 @@ fn main() {
     // feed is published per target, so the app has to know which one
     // it is — and `TARGET` is only visible to build scripts.
     emit("OXDM_TARGET", std::env::var("TARGET").ok());
+    embed_windows_icon();
     emit("OXDM_ODL_VERSION", locked_version("odl"));
     emit("OXDM_GIT_COMMIT", git_short_commit());
     emit("OXDM_RUSTC", rustc_version());
+}
+
+/// Put the app icon in the executable.
+///
+/// Windows reads a program's icon from a resource linked into the
+/// binary — Explorer, the taskbar and Alt-Tab all end up there. Without
+/// one they show the generic executable icon, which is what oxdm looked
+/// like on Windows however the window itself was configured.
+///
+/// Never fatal. Cross-checking from Linux has no resource compiler, and
+/// a missing icon is not a reason to fail a build that is otherwise
+/// fine — it says so and carries on.
+fn embed_windows_icon() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+    println!("cargo:rerun-if-changed=assets/oxdm.ico");
+    let mut res = winresource::WindowsResource::new();
+    res.set_icon("assets/oxdm.ico");
+    if let Err(e) = res.compile() {
+        println!("cargo:warning=could not embed the Windows icon: {e}");
+    }
 }
 
 fn emit(key: &str, value: Option<String>) {

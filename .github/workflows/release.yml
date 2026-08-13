@@ -286,7 +286,13 @@ jobs:
         # The launcher entry the installer writes points at this, so a
         # tarball install looks like an application rather than a
         # generic download arrow.
-        cp assets/oxdm_idle_dark.png "$ARCHIVE_DIR/oxdm.png"
+        # The opaque variant on purpose. A launcher icon cannot vary
+        # with the desktop's theme — a .desktop entry names one icon
+        # and the icon theme resolves one file — so it has to be the
+        # one that reads on a light *and* a dark panel. The `_dark`
+        # asset is a dark glyph *for* light backgrounds and vanishes
+        # into a dark dock.
+        cp assets/oxdm_idle_light.png "$ARCHIVE_DIR/oxdm.png"
 
         pushd "${PKG_STAGING}/" >/dev/null
         tar czf "${PKG_NAME}" "${PKG_BASENAME}"/*
@@ -316,7 +322,7 @@ jobs:
         for bin in oxdm oxdm-native-host; do
           install -Dm755 "${{ steps.bin.outputs.OUT_DIR }}/${bin}" "$APPDIR/usr/bin/${bin}"
         done
-        install -Dm644 assets/oxdm_idle_dark.png \
+        install -Dm644 assets/oxdm_idle_light.png \
           "$APPDIR/usr/share/icons/hicolor/512x512/apps/oxdm.png"
         cp "$APPDIR/usr/share/icons/hicolor/512x512/apps/oxdm.png" "$APPDIR/oxdm.png"
 
