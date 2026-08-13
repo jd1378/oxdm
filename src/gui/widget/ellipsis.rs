@@ -237,9 +237,18 @@ where
     ) {
         let state = tree.state.downcast_ref::<State<R::Paragraph>>();
         let bounds = layout.bounds();
+        // A paragraph is drawn from the origin it is handed; its own
+        // `align_x` only arranges its lines against each other, so
+        // centring the block inside the node is this widget's job. The
+        // single-line node is exactly as wide as its text, which makes
+        // this a no-op there.
+        let mut origin = bounds.position();
+        if self.wraps() {
+            origin.x += ((bounds.width - state.paragraph.min_bounds().width) / 2.0).max(0.0);
+        }
         renderer.fill_paragraph(
             &state.paragraph,
-            bounds.position(),
+            origin,
             self.color,
             bounds.intersection(viewport).unwrap_or(bounds),
         );
