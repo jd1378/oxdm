@@ -358,8 +358,8 @@ fn pending_settings(st: &State) -> Settings {
     if let Ok(v) = st.fixed_retries.trim().parse() {
         s.n_fixed_retries = v;
     }
-    if let Ok(v) = humantime::parse_duration(st.retry_wait.trim()) {
-        s.wait_between_retries = v;
+    if let Ok(ms) = st.retry_wait.trim().parse::<u64>() {
+        s.wait_between_retries = std::time::Duration::from_millis(ms);
     }
     if let Ok(v) = st.concurrent.trim().parse() {
         s.max_concurrent_downloads = v;
@@ -535,7 +535,10 @@ fn mirror(st: &mut State) {
     st.work_dir = s.work_dir.display().to_string();
     st.max_retries = s.max_retries.to_string();
     st.fixed_retries = s.n_fixed_retries.to_string();
-    st.retry_wait = humantime::format_duration(s.wait_between_retries).to_string();
+    // Milliseconds, as digits alone: the field carries its own unit, so
+    // a value like "1s 500ms" would be two things to type and one of
+    // them wrong.
+    st.retry_wait = s.wait_between_retries.as_millis().to_string();
     st.concurrent = s.max_concurrent_downloads.to_string();
     // Bytes/sec on the wire; shown in whichever unit divides evenly.
     st.limit_on = s.speed_limit.is_some();
@@ -804,7 +807,7 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
             Task::none()
         }
         Msg::RetryWait(v) => {
-            st.retry_wait = v;
+            st.retry_wait = digits_only(&v, RETRY_WAIT_DIGITS);
             Task::none()
         }
         Msg::UseServerTime(v) => {
@@ -1492,6 +1495,78 @@ const PANE_HEAD_DESC_LINE: f32 = 18.0;
 /// flows through the existing string mirror + `Save` parse.
 const RETRIES_MIN: i64 = 0;
 const RETRIES_MAX: i64 = 20;
+/// Longest retry wait the field accepts, in digits: nine of them is
+/// about eleven days, which is past any answer a person means and short
+/// enough that the value always fits the `u64` it is parsed into.
+const RETRY_WAIT_DIGITS: usize = 9;
+
+/// The waits this configuration actually produces, spelled out.
+///
+/// odl's policy is fixed-then-exponential: the first `n_fixed_retries`
+/// waits are the configured one, and every wait after that is the
+/// configured one times two to the power of how far past the fixed run
+/// it is. Naming that "backoff" tells the user nothing they can predict,
+/// so the setting shows the sequence its own numbers give.
+fn retry_schedule(wait: &str, max_retries: &str, fixed_retries: &str) -> String {
+    let ms: u64 = wait.trim().parse().unwrap_or(0);
+    let max: u32 = max_retries.trim().parse().unwrap_or(0);
+    let fixed: u32 = fixed_retries.trim().parse().unwrap_or(0).min(max);
+    if max == 0 {
+        return "No retries: the first failure fails the download.".to_owned();
+    }
+    // Enough to show the shape without becoming a paragraph.
+    const SHOWN: u32 = 6;
+    let mut parts: Vec<String> = (0..max.min(SHOWN))
+        .map(|n| {
+            let wait = if n < fixed {
+                ms
+            } else {
+                // Saturating: a huge wait with a long backoff would
+                // otherwise wrap and print something absurd.
+                2u64.checked_pow(n - fixed + 1)
+                    .and_then(|f| ms.checked_mul(f))
+                    .unwrap_or(u64::MAX)
+            };
+            format_wait(wait)
+        })
+        .collect();
+    if max > SHOWN {
+        parts.push("\u{2026}".to_owned());
+    }
+    format!("Waits: {}.", parts.join(", "))
+}
+
+/// A retry wait, in whichever unit reads as a number rather than a
+/// count of zeros.
+fn format_wait(ms: u64) -> String {
+    if ms < 1000 {
+        return format!("{ms} ms");
+    }
+    let secs = ms as f64 / 1000.0;
+    if secs < 60.0 {
+        let s = format!("{secs:.1}");
+        return format!("{} s", s.trim_end_matches(".0"));
+    }
+    let mins = secs / 60.0;
+    if mins < 60.0 {
+        return format!("{mins:.0} min");
+    }
+    let hours = mins / 60.0;
+    if hours < 48.0 {
+        return format!("{hours:.0} h");
+    }
+    format!("{:.0} days", hours / 24.0)
+}
+
+/// Keep the digits and drop everything else.
+///
+/// The field is a number with its unit printed beside it, so a letter
+/// typed into it can only be a mistake — and one that would otherwise
+/// be swallowed silently by a parse that failed and left the old value
+/// in place.
+fn digits_only(s: &str, max: usize) -> String {
+    s.chars().filter(char::is_ascii_digit).take(max).collect()
+}
 /// Concurrent downloads must stay ≥ 1 (zero would stall the queue).
 const CONCURRENT_MIN: i64 = 1;
 const CONCURRENT_MAX: i64 = 20;
@@ -1968,6 +2043,8 @@ fn general_section(st: &State) -> Element<'_, Msg> {
 
 fn downloads_section(st: &State) -> Element<'_, Msg> {
     let t = &st.tokens;
+    // Bound before the sections so it outlives the row that borrows it.
+    let schedule = retry_schedule(&st.retry_wait, &st.max_retries, &st.fixed_retries);
     pane(
         t,
         Section::Downloads,
@@ -2015,8 +2092,11 @@ fn downloads_section(st: &State) -> Element<'_, Msg> {
                     ),
                     set_row(
                         t,
-                        "Fixed retries before backoff",
-                        Some("Early attempts reuse the same wait; later ones back off."),
+                        "Retries before the wait doubles",
+                        Some(
+                            "The first attempts all wait the same. After these, each \
+                             wait is twice the one before it."
+                        ),
                         stepper(
                             t,
                             &st.fixed_retries,
@@ -2029,9 +2109,10 @@ fn downloads_section(st: &State) -> Element<'_, Msg> {
                     set_row(
                         t,
                         "Wait between retries",
-                        None,
+                        Some(schedule.as_str()),
                         TextInput::new(&st.retry_wait)
                             .width(Length::Fixed(120.0))
+                            .suffix("ms")
                             .on_input(Msg::RetryWait)
                             .view(t)
                     ),
@@ -2973,6 +3054,76 @@ pub fn launch_settings() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The example odl's own retry policy documents, and its tests
+    /// assert: max 6, fixed 3, 500ms gives 500, 500, 500, 1000, 2000,
+    /// 4000. If the engine's curve ever changes, this is where oxdm
+    /// finds out that what it tells the user became a lie.
+    #[test]
+    fn the_schedule_matches_the_engines_own_example() {
+        assert_eq!(
+            retry_schedule("500", "6", "3"),
+            "Waits: 500 ms, 500 ms, 500 ms, 1 s, 2 s, 4 s."
+        );
+    }
+
+    /// Fixed retries alone: every wait is the one that was typed.
+    #[test]
+    fn without_backoff_every_wait_is_the_same() {
+        assert_eq!(
+            retry_schedule("250", "3", "3"),
+            "Waits: 250 ms, 250 ms, 250 ms."
+        );
+    }
+
+    /// Backoff from the first retry: no fixed run to sit through.
+    #[test]
+    fn with_no_fixed_run_the_doubling_starts_at_once() {
+        assert_eq!(
+            retry_schedule("1000", "4", "0"),
+            "Waits: 2 s, 4 s, 8 s, 16 s."
+        );
+    }
+
+    /// More retries than the preview shows: the shape, then an ellipsis
+    /// rather than a paragraph.
+    #[test]
+    fn a_long_run_is_summarised() {
+        let text = retry_schedule("500", "9", "2");
+        assert!(text.ends_with("\u{2026}."), "{text}");
+        assert!(text.starts_with("Waits: 500 ms, 500 ms, 1 s,"), "{text}");
+    }
+
+    /// Zero retries is a real setting, and "Waits:" followed by nothing
+    /// would be a worse answer than saying so.
+    #[test]
+    fn no_retries_says_so() {
+        assert_eq!(
+            retry_schedule("500", "0", "3"),
+            "No retries: the first failure fails the download."
+        );
+    }
+
+    /// A wait long enough to overflow the doubling must not wrap into a
+    /// small number and promise a retry that never comes.
+    #[test]
+    fn an_absurd_wait_saturates_rather_than_wrapping() {
+        let text = retry_schedule("999999999", "9", "0");
+        assert!(!text.contains("-"), "{text}");
+        assert!(text.starts_with("Waits: 23 days, 46 days,"), "{text}");
+    }
+
+    /// The field carries its unit beside it, so anything that is not a
+    /// digit can only be a mistake.
+    #[test]
+    fn the_wait_field_takes_digits_only() {
+        assert_eq!(digits_only("500ms", RETRY_WAIT_DIGITS), "500");
+        assert_eq!(digits_only("1s 500ms", RETRY_WAIT_DIGITS), "1500");
+        assert_eq!(digits_only("abc", RETRY_WAIT_DIGITS), "");
+        assert_eq!(digits_only("-5", RETRY_WAIT_DIGITS), "5");
+        // Bounded so the value always fits the u64 it is parsed into.
+        assert_eq!(digits_only("1234567890123", RETRY_WAIT_DIGITS).len(), 9);
+    }
 
     /// The code the window hands out has to describe the settings the
     /// Apply button would write, port included: pairing against the

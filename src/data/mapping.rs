@@ -610,6 +610,34 @@ mod tests {
         assert!(!overlay.dynamic_split());
     }
 
+    /// The three retry settings are handed to odl untouched, and
+    /// survive the per-job overlay: a job that overrides its connection
+    /// count must not quietly get the engine's own defaults back.
+    ///
+    /// odl builds `FixedThenExponentialRetry` straight from these, so
+    /// what the Settings pane previews is what the engine waits.
+    #[test]
+    fn the_retry_policy_travels_from_settings_into_the_job_overlay() {
+        let s = Settings {
+            max_retries: 7,
+            n_fixed_retries: 2,
+            wait_between_retries: std::time::Duration::from_millis(750),
+            ..Settings::default()
+        };
+
+        let base = settings_to_download_options(&s, None).unwrap();
+        assert_eq!(base.max_retries(), 7);
+        assert_eq!(base.n_fixed_retries(), 2);
+        assert_eq!(base.wait_between_retries(), s.wait_between_retries);
+
+        let mut job = sample_job();
+        job.max_connections = Some(4);
+        let overlay = job_overlay_options(&base, &job, None, None, None).unwrap();
+        assert_eq!(overlay.max_retries(), 7);
+        assert_eq!(overlay.n_fixed_retries(), 2);
+        assert_eq!(overlay.wait_between_retries(), s.wait_between_retries);
+    }
+
     #[test]
     fn global_proxy_assembles_from_parts_with_the_stored_secret() {
         let mut s = Settings::default();

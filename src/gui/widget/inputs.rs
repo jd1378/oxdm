@@ -1,7 +1,7 @@
 //! Text-entry primitives: text input, search field, password input,
 //! file input. All sized to `control::H_MD` (28) with `control::RADIUS`.
 
-use iced::widget::{container, mouse_area, row, text_input};
+use iced::widget::{container, mouse_area, row, text, text_input};
 use iced::{Alignment, Border, Color, Element, Length};
 
 use crate::gui::icons;
@@ -46,6 +46,7 @@ pub struct TextInput<'a, M> {
     enabled: bool,
     read_only: Option<M>,
     border: Option<Color>,
+    suffix: Option<String>,
     on_input: Option<Box<dyn Fn(String) -> M + 'a>>,
     on_submit: Option<M>,
 }
@@ -63,6 +64,7 @@ impl<'a, M: Clone + 'a> TextInput<'a, M> {
             enabled: true,
             read_only: None,
             border: None,
+            suffix: None,
             on_input: None,
             on_submit: None,
         }
@@ -107,6 +109,17 @@ impl<'a, M: Clone + 'a> TextInput<'a, M> {
         self.border = Some(color);
         self
     }
+    /// A unit printed inside the field, against its right edge.
+    ///
+    /// Inside rather than beside: a unit sitting outside the box reads
+    /// as part of the next thing along, and one typed *into* the box is
+    /// something the user then has to keep typing. The value keeps its
+    /// own right padding, so the two never overlap.
+    pub fn suffix(mut self, unit: impl Into<String>) -> Self {
+        self.suffix = Some(unit.into());
+        self
+    }
+
     pub fn on_input(mut self, f: impl Fn(String) -> M + 'a) -> Self {
         self.on_input = Some(Box::new(f));
         self
@@ -119,15 +132,31 @@ impl<'a, M: Clone + 'a> TextInput<'a, M> {
     pub fn view(self, t: &Tokens) -> Element<'a, M> {
         let t = *t;
         let border = self.border;
+        let pad_y = (theme::control::H_MD - self.font_size * 1.3) / 2.0;
+        // Room for the unit, so a long value runs under it rather than
+        // through it. A monospace-ish estimate is enough for the one or
+        // two characters a unit is.
+        let suffix_w = self
+            .suffix
+            .as_deref()
+            .map(|u| u.chars().count() as f32 * self.font_size * 0.62)
+            .unwrap_or(0.0);
         let mut input = text_input(&self.hint, self.value)
             .font(self.font)
             .size(self.font_size)
             .secure(self.secure)
             .width(self.width)
-            .padding([
-                (theme::control::H_MD - self.font_size * 1.3) / 2.0,
-                theme::control::INPUT_PAD_X,
-            ])
+            .padding(iced::Padding {
+                top: pad_y,
+                bottom: pad_y,
+                left: theme::control::INPUT_PAD_X,
+                right: theme::control::INPUT_PAD_X
+                    + if suffix_w > 0.0 {
+                        suffix_w + theme::space::S1
+                    } else {
+                        0.0
+                    },
+            })
             .style(move |_th, status| base_style(&t, status, border));
         if let Some(noop) = self.read_only {
             input = input.on_input(move |_| noop.clone());
@@ -139,7 +168,26 @@ impl<'a, M: Clone + 'a> TextInput<'a, M> {
                 input = input.on_submit(m);
             }
         }
-        input.into()
+        let Some(unit) = self.suffix else {
+            return input.into();
+        };
+        // Stacked rather than placed in a row: the field keeps its own
+        // border and its focus ring, and the unit rides inside them.
+        iced::widget::stack![
+            input,
+            container(
+                text(unit)
+                    .font(self.font)
+                    .size(self.font_size)
+                    .color(t.fg_3)
+            )
+            .width(self.width)
+            .height(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Right)
+            .align_y(Alignment::Center)
+            .padding([0.0, theme::control::INPUT_PAD_X]),
+        ]
+        .into()
     }
 }
 
