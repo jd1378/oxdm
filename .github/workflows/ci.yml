@@ -12,7 +12,10 @@ name: CI
 # branch and tag can read one written on the default branch. So without
 # a workflow on `main` there is nothing for the release to restore, and
 # every release compiles the whole dependency graph from scratch on six
-# runners. This is what fills that cache.
+# runners. The Linux job here fills that cache on every push; the
+# Windows and macOS jobs only on a pull request or when asked, so run
+# this workflow by hand on `main` if you want their caches warm for
+# the next release.
 
 on:
   push:
@@ -48,6 +51,12 @@ jobs:
 
   platforms:
     name: ${{ matrix.os }}
+    # Not on every push to main: these two runners are the expensive
+    # half of this workflow. They run where a platform difference is
+    # most likely to be introduced — a pull request — and on demand,
+    # which is also how to warm their caches on `main` before tagging
+    # (a cache written on any other ref is invisible to the release).
+    if: github.event_name != 'push'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
