@@ -1,6 +1,7 @@
 //! Batch-capture triage window (`oxdm gui batch <staged-json-path>`):
 //! row per captured link with probe status, queue selector, select
-//! all, Start-now toggle, "Add N URLs" footer.
+//! all, a toggle that runs the chosen queue once the rows are in, and
+//! an "Add N URLs" footer.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -86,6 +87,20 @@ pub struct State {
     /// on error is a batch that lost downloads silently.
     sending: bool,
     error: Option<String>,
+}
+
+impl State {
+    /// The queue these rows are headed for, by name.
+    ///
+    /// `None` when the daemon reports no queues at all: nothing to name
+    /// and nothing to start.
+    fn queue_name(&self) -> Option<&str> {
+        let id = self.queue?;
+        self.queues
+            .iter()
+            .find(|(qid, _)| *qid == id)
+            .map(|(_, name)| name.as_str())
+    }
 }
 
 fn staged_path() -> Option<PathBuf> {
@@ -280,19 +295,17 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                             Err(e) => failed.push(e),
                         }
                     }
-                    if start_now {
-                        // Started by hand, one gesture, after every job
-                        // exists: this is not a queue run, so the
-                        // global cap does not get to defer them. Bulk
-                        // starts are silent about failures — a triage
-                        // list can start dozens, and one window each
-                        // would bury the screen — so they are collected
-                        // and reported here instead.
-                        for id in added {
-                            if let Err(e) = client.start_job(id).await {
-                                failed.push(e);
-                            }
-                        }
+                    // Start the queue the rows were just added to, once,
+                    // exactly as pressing start on that queue would.
+                    // Launching every row by hand instead ran a triage
+                    // list of dozens straight past the queue's own
+                    // limits, which is the opposite of what choosing a
+                    // queue for them meant.
+                    if let (true, Some(q)) = (start_now, queue)
+                        && !added.is_empty()
+                        && let Err(e) = client.start_queue(q).await
+                    {
+                        failed.push(e);
                     }
                     if failed.is_empty() {
                         return Ok(());
@@ -566,7 +579,20 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
         t,
         row![
             Btn::new("Cancel").ghost().on_press(Msg::Cancel).view(t),
-            checkbox(t, "Start now", st.start_now, true, Msg::StartNow),
+            // Named after what it actually does now: run that queue,
+            // not launch these rows. Without a queue there is nothing
+            // to run, so the toggle says so rather than offering an
+            // action that would do nothing.
+            match st.queue_name() {
+                Some(name) => checkbox(
+                    t,
+                    format!("Start {name} now"),
+                    st.start_now,
+                    true,
+                    Msg::StartNow,
+                ),
+                None => checkbox(t, "Start now", false, false, Msg::StartNow),
+            },
         ]
         .spacing(theme::space::S3)
         .align_y(Alignment::Center)
