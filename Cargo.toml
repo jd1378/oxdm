@@ -44,7 +44,6 @@ trash = "5"
 libc = "0.2"
 fs4 = "1.1"
 interprocess = { version = "2", features = ["tokio"] }
-single-instance = "0.3"
 image = { version = "0.25", default-features = false, features = ["png"] }
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 # `crisp` (an iced default we lost by opting out of default-features)
@@ -71,6 +70,12 @@ zbus = { version = "5", default-features = false, features = ["tokio"] }
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 tray-icon = "0.24"
 muda = "0.19"
+# Single-instance lock everywhere but Linux, which binds its own
+# abstract socket (the crate's has no `SOCK_CLOEXEC`, so children
+# inherit it and keep the name taken after the daemon is gone — see
+# `single_instance::Lock`). Gated on exactly the cfg the `use` in that
+# module carries, so the two cannot drift.
+single-instance = "0.3"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = [
