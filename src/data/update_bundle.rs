@@ -6,8 +6,12 @@
 //! beside a native host from another, talking a protocol that may have
 //! moved on.
 //!
-//! So the artifact for an installed build is a small tar.gz of exactly
-//! those two files, and this unpacks it.
+//! So the artifact for an installed build is the release archive
+//! itself — the same tar.gz a person downloads — and this takes the
+//! two programs out of it. Everything else in there (the README, the
+//! licence, the icon, the install script) is ignored, which is what
+//! lets one archive serve both purposes instead of publishing a
+//! near-duplicate beside it.
 //!
 //! Nothing is trusted about the archive's own paths. Only entries whose
 //! *file name* is one of the binaries we ship are written, into a
@@ -194,6 +198,56 @@ mod tests {
         assert!(dest.join("oxdm").exists(), "written by its name alone");
         assert!(dest.join("oxdm-native-host").exists());
         assert!(!dir.path().join("../../oxdm").exists());
+    }
+
+    /// The shape the release workflow actually produces: everything
+    /// inside one versioned directory, with documentation beside the
+    /// programs. This is the archive the updater downloads, so if the
+    /// packaging changed under it the update would fail at the last
+    /// step, after the download, on the user's machine.
+    #[test]
+    fn the_release_archive_gives_up_its_programs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = "oxdm-v1.2.3-x86_64-unknown-linux-gnu";
+        let archive = tarball(
+            dir.path(),
+            &[
+                (&format!("{root}/oxdm"), b"app"),
+                (&format!("{root}/oxdm-native-host"), b"host"),
+                (&format!("{root}/README.md"), b"docs"),
+                (&format!("{root}/LICENSE"), b"agpl"),
+                (&format!("{root}/oxdm.png"), b"icon"),
+                (&format!("{root}/install-native-host.sh"), b"script"),
+            ],
+        );
+        let dest = dir.path().join("out");
+        let mut written = extract(&archive, &dest).unwrap();
+        written.sort();
+        assert_eq!(written.len(), 2, "{written:?}");
+        assert!(dest.join("oxdm").exists());
+        assert!(dest.join("oxdm-native-host").exists());
+        assert!(!dest.join("README.md").exists(), "no passengers");
+        assert!(!dest.join(root).exists(), "and no directory to walk");
+    }
+
+    /// The same archive as Windows builds it.
+    #[test]
+    fn the_windows_release_archive_works_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = "oxdm-v1.2.3-x86_64-pc-windows-msvc";
+        let archive = tarball(
+            dir.path(),
+            &[
+                (&format!("{root}/oxdm.exe"), b"app"),
+                (&format!("{root}/oxdm-native-host.exe"), b"host"),
+                (&format!("{root}/README.md"), b"docs"),
+            ],
+        );
+        let dest = dir.path().join("out");
+        let written = extract(&archive, &dest).unwrap();
+        assert_eq!(written.len(), 2, "{written:?}");
+        assert!(dest.join("oxdm.exe").exists());
+        assert!(dest.join("oxdm-native-host.exe").exists());
     }
 
     #[test]

@@ -47,7 +47,10 @@ if ($Version -eq 'latest') {
   Info "pinned = $tag"
 }
 
-$asset = "oxdm-$tag-$target.zip"
+# One archive per target on every platform, so the updater and a
+# person downloading by hand take the same file. `tar.exe` is bsdtar,
+# shipped with Windows since 10 1803.
+$asset = "oxdm-$tag-$target.tar.gz"
 $url   = "https://github.com/$Repo/releases/download/$tag/$asset"
 
 $tmp = Join-Path $env:TEMP ("oxdm-install-" + [guid]::NewGuid())
@@ -74,7 +77,10 @@ try {
   }
 
   Step 'Extracting'
-  Expand-Archive -Path $pkg -DestinationPath $tmp -Force
+  tar -xzf $pkg -C $tmp
+  if ($LASTEXITCODE -ne 0) {
+    throw "could not unpack $pkg (needs tar.exe, present on Windows 10 1803 and later)"
+  }
 
   $oxdm = Get-ChildItem -Path $tmp -Recurse -File -Filter 'oxdm.exe' | Select-Object -First 1
   $host_ = Get-ChildItem -Path $tmp -Recurse -File -Filter 'oxdm-native-host.exe' | Select-Object -First 1

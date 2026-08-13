@@ -2,15 +2,13 @@ name: GitHub release
 
 #
 # What a release publishes, per target:
-#   - oxdm-<tag>-<target>.tar.gz / .zip — both binaries, the icon,
-#     README, LICENSE
-#   - oxdm-<tag>-<target>[.exe] — the bare executable, which is what an
-#     installed build replaces itself with when it updates
+#   - oxdm-<tag>-<target>.tar.gz — both binaries, the icon, README,
+#     LICENSE. One archive per target, on every platform: it is what a
+#     person downloads *and* what the in-app updater fetches, which
+#     takes the two programs out of it by name and ignores the rest.
 #   - oxdm-<tag>-<arch>.AppImage on desktop Linux, for people who
 #     prefer a bundle; the installer script does not use it
 #   - <asset>.sha256 beside every one of them
-#   - oxdm-<tag>-<target>-update.tar.gz — the two programs alone,
-#     which is what an installed build replaces itself with.
 #   - update-<target>.json and, where there is a bundle,
 #     update-<target>-appimage.json — the feeds the in-app updater
 #     reads. Each names one artifact and carries its digest, which the
@@ -240,7 +238,12 @@ jobs:
       shell: bash
       run: |
         set -euo pipefail
-        PKG_suffix=".tar.gz" ; case ${{ matrix.job.target }} in *-pc-windows-*) PKG_suffix=".zip" ;; esac
+        # A .tar.gz on every platform, Windows included. The updater
+        # takes the same archive a person downloads — one artifact per
+        # target instead of a near-duplicate for each — so its format
+        # has to be one the daemon can unpack itself. Windows ships
+        # bsdtar as `tar.exe`, which is what install.ps1 uses.
+        PKG_suffix=".tar.gz"
         # Named from the tag, not from Cargo.toml: the installers build
         # this exact filename from the tag they resolved, and a release
         # tagged differently from the manifest used to publish assets
@@ -264,10 +267,7 @@ jobs:
         cp assets/oxdm_idle_dark.png "$ARCHIVE_DIR/oxdm.png"
 
         pushd "${PKG_STAGING}/" >/dev/null
-        case ${{ matrix.job.target }} in
-          *-pc-windows-*) 7z -y a "${PKG_NAME}" "${PKG_BASENAME}"/* | tail -2 ;;
-          *) tar czf "${PKG_NAME}" "${PKG_BASENAME}"/* ;;
-        esac
+        tar czf "${PKG_NAME}" "${PKG_BASENAME}"/*
         popd >/dev/null
 
         echo "PKG_NAME=${PKG_NAME}" >> $GITHUB_OUTPUT
@@ -360,30 +360,21 @@ jobs:
         TARGET="${{ matrix.job.target }}"
         NAME="${{ needs.crate_metadata.outputs.name }}"
         VERSION="${{ needs.crate_metadata.outputs.version }}"
-        EXE="${{ steps.bin.outputs.EXE_SUFFIX }}"
         STAGING="_cicd-intermediates/publish"
         mkdir -p "$STAGING"
 
-        # What the updater downloads. An installed build is the app and
-        # the browser's native host, so its artifact is a tar.gz of
-        # exactly those two and the update replaces both. Leaving the
+        # The updater downloads the same archive a person does. It
+        # holds the app, the browser's native host and some
+        # documentation; the daemon takes the two programs out by name
+        # and ignores the rest, so a second near-identical artifact
+        # bought nothing but bandwidth and one more thing to keep in
+        # step. An installed build replaces both programs — leaving the
         # host behind would pair a new app with an older program
         # speaking to it.
         #
-        # A tarball on every platform, Windows included: the daemon
-        # unpacks it itself, so the format is ours to choose rather than
-        # whatever the OS can open. The user-facing package stays a .zip
-        # there.
-        #
         # An AppImage needs none of this. One file holds all three, so
         # the bundle is its own artifact.
-        SINGLE_NAME="${NAME}-${TAG}-${TARGET}-update.tar.gz"
-        UPDATE_DIR="_cicd-intermediates/update"
-        rm -rf "$UPDATE_DIR" && mkdir -p "$UPDATE_DIR"
-        for bin in oxdm oxdm-native-host; do
-          cp "${{ steps.bin.outputs.OUT_DIR }}/${bin}${EXE}" "$UPDATE_DIR/"
-        done
-        tar -czf "$STAGING/$SINGLE_NAME" -C "$UPDATE_DIR" .
+        SINGLE_NAME="${{ steps.package.outputs.PKG_NAME }}"
         APPIMAGE_NAME="${{ steps.appimage.outputs.APPIMAGE_NAME }}"
         if [ -n "$APPIMAGE_NAME" ]; then
           cp "${{ steps.appimage.outputs.APPIMAGE_PATH }}" "$STAGING/$APPIMAGE_NAME"
