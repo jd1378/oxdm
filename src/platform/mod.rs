@@ -1,8 +1,5 @@
-//! Platform helpers: menu actions (open URL, install desktop entry)
-//! and per-OS window integration (e.g. Windows borderless resize).
-
-#[cfg(target_os = "windows")]
-pub mod windows;
+//! Platform helpers: opening a path or a URL, desktop entries,
+//! notifications, and the inotify-watch ceiling on Linux.
 
 pub mod watch_limit;
 

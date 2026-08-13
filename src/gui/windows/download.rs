@@ -323,7 +323,6 @@ pub enum Msg {
     RefusalAck,
     /// Failure recovery for a write fault: pick a new destination, then
     /// retry. The bytes already downloaded carry over.
-    Open,
     OpenFolder,
     /// Same two actions from the completed view, which has nothing left
     /// to say once the file is handed over: the window is in the way of
@@ -1122,11 +1121,6 @@ fn update_state(st: &mut State, msg: Msg) -> Task<Msg> {
             let client = st.client.clone();
             let id = st.id;
             Task::perform(async move { client.restart_job(id).await }, |_| Msg::Noop)
-        }
-        Msg::Open => {
-            let path = final_path(&st.entry);
-            crate::platform::open_path(&path);
-            Task::none()
         }
         Msg::OpenAndClose => {
             crate::platform::open_path(&final_path(&st.entry));

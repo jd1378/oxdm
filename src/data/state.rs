@@ -1365,15 +1365,35 @@ impl AppState {
         if self.is_exiting() {
             return;
         }
-        if self.active_queues.read().await.contains_key(&queue_id) {
+        // Whether the *queue* is running, not whether it has a tally:
+        // an entry lingers while a hand-started download in the queue
+        // finishes, and reading that as "running" made the arrival of
+        // a job do nothing at all — the trigger was suppressed and no
+        // slot was filled either.
+        if self.is_queue_active(queue_id).await {
             self.fill_queue_slots(queue_id, None).await;
             return;
         }
         let Some(queue) = self.queue(queue_id).await else {
             return;
         };
-        let crate::domain::QueueSchedule::Condition(set) = &queue.schedule else {
-            return;
+        let set = match &queue.schedule {
+            crate::domain::QueueSchedule::Condition(set) => set,
+            // A queue on a clock is running or it is not, and a job
+            // arriving inside its window belongs to the run that is
+            // already going. Without this, adding a download at 02:15
+            // to a queue scheduled for 02:00 left it sitting there
+            // until the next day.
+            crate::domain::QueueSchedule::Daily { .. }
+            | crate::domain::QueueSchedule::Once { .. } => {
+                if crate::data::queue_scheduler::within_window(&queue, chrono::Local::now())
+                    && let Err(e) = self.start_queue(queue_id).await
+                {
+                    tracing::warn!(queue = %queue.name, error = %e, "start on job added");
+                }
+                return;
+            }
+            _ => return,
         };
         if !set.on_job_added {
             return;
@@ -1695,16 +1715,18 @@ impl AppState {
         let new_entry = clone_entry_with_job(&old, new_job.clone()).await;
         // Push the change into the live odl run loop (no-op if the job
         // is not currently running — odl will pick the value up the
-        // next time it starts). `None` falls back to the global default
-        // baked into the manager's config.
-        let target = n.map(|v| v as usize).unwrap_or_else(|| {
-            // Mirror odl's own behaviour: 0 = unset, downloader will
-            // re-seed from the per-job options on the next iteration.
-            0
-        });
-        if target > 0 {
-            new_entry.live_controls.set_max_connections(target);
-        }
+        // next time it starts). `None` falls back to the global
+        // default baked into the manager's config, which odl expresses
+        // as 0: "unset, re-seed from the options on the next run".
+        //
+        // Written unconditionally, including that 0. Skipping it left
+        // the last explicit cap in the shared control, and odl only
+        // seeds an *unset* one — so clearing the override in Properties
+        // changed the stored job and nothing else, for every later run
+        // until the daemon restarted.
+        new_entry
+            .live_controls
+            .set_max_connections(n.unwrap_or(0) as usize);
         jobs.insert(id, new_entry);
         drop(jobs);
         self.store
@@ -2971,8 +2993,31 @@ impl AppState {
         // Rebuild the JobEntry; it holds runtime atomics behind shared
         // refs, so spawning a fresh one keeps things consistent.
         // Counters / final_path are preserved by `clone_entry_with_job`.
-        let new_entry = clone_entry_with_job(&entry, new_job.clone()).await;
-        self.jobs.write().await.insert(id, new_entry);
+        //
+        // The fields this edit owns are applied to whatever the
+        // registry holds now, under its lock: encrypting the secrets
+        // above took long enough for a probe or a rename to land, and
+        // inserting the copy read before that would revert it — and
+        // then write the reverted job to the database.
+        let mut jobs = self.jobs.write().await;
+        let base = jobs.get(&id).cloned().unwrap_or(entry.clone());
+        let mut merged = base.job.clone();
+        merged.url = new_job.url.clone();
+        merged.save_dir = new_job.save_dir.clone();
+        merged.filename = new_job.filename.clone();
+        merged.referrer = new_job.referrer.clone();
+        merged.headers = new_job.headers.clone();
+        merged.max_connections = new_job.max_connections;
+        merged.proxy = new_job.proxy.clone();
+        merged.auth_user = new_job.auth_user.clone();
+        merged.advanced = new_job.advanced.clone();
+        merged.enc_auth_password = new_job.enc_auth_password.clone();
+        merged.enc_proxy_password = new_job.enc_proxy_password.clone();
+        merged.enc_cookies = new_job.enc_cookies.clone();
+        let new_job = merged;
+        let new_entry = clone_entry_with_job(&base, new_job.clone()).await;
+        jobs.insert(id, new_entry);
+        drop(jobs);
         self.store
             .upsert_job(&new_job)
             .await
@@ -4037,14 +4082,24 @@ impl AppState {
         if !stale_verdicts {
             return entry;
         }
-        let mut job = entry.job.clone();
+        // Rebuilt from what the registry holds *now*, not from the
+        // copy this run started with. A probe landing between the two
+        // replaces the entry with one carrying the resolved filename
+        // and size; rebuilding from the older copy and inserting it
+        // blind would throw both away, and the run would then persist
+        // the version without them.
+        let jobs = self.jobs.write().await;
+        let current = jobs.get(&id).cloned().unwrap_or(entry);
+        let mut job = current.job.clone();
         for c in &mut job.checksums {
             c.status = crate::domain::CsStatus::Unverified;
             c.expected = None;
         }
         job.status.final_path = None;
-        let fresh = clone_entry_with_job(&entry, job).await;
-        self.jobs.write().await.insert(id, fresh.clone());
+        let fresh = clone_entry_with_job(&current, job).await;
+        let mut jobs = jobs;
+        jobs.insert(id, fresh.clone());
+        drop(jobs);
         fresh
     }
 

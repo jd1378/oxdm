@@ -223,6 +223,11 @@ pub struct AddState {
     /// things depending on which window set it.
     proxy: ProxyForm,
     auth: AuthForm,
+    /// What the job's category and queue were when the window opened,
+    /// so an untouched picker sends nothing. `None` on a fresh add,
+    /// where there is no "before".
+    original_category: Option<Category>,
+    original_queue: Option<QueueId>,
     /// Editing a job that already has secrets stored. The forms show
     /// "(unchanged)" and offer to remove them, exactly as Properties
     /// does — a blank box must not read as "there is no password".
@@ -504,6 +509,8 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 adv_tab: AdvTab::Proxy,
                 proxy: ProxyForm::default(),
                 auth: AuthForm::default(),
+                original_category: None,
+                original_queue: None,
                 stored_proxy_secret: false,
                 stored_auth_secret: false,
                 user_agent: String::new(),
@@ -523,6 +530,8 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 st.url = job.url.to_string();
                 st.queue = job.queue_id;
                 st.category = Some(job.category);
+                st.original_category = Some(job.category);
+                st.original_queue = Some(job.queue_id);
                 if let Some(n) = job.max_connections {
                     st.segments = n;
                 }

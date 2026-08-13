@@ -1113,7 +1113,14 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             m.snap.settings.warn_watch_limit = false;
             let settings = m.snap.settings.clone();
             let client = m.client.clone();
-            act(async move { client.update_settings(settings).await })
+            // One field, not the whole page: this window's copy of the
+            // settings can be minutes old, and writing all of it back
+            // reverts anything the Settings window saved since.
+            act(async move {
+                client
+                    .update_settings_fields(settings, vec!["warn_watch_limit".to_owned()])
+                    .await
+            })
         }
         Msg::Refused(reason) => {
             m.refusal = Some(reason);
@@ -1153,7 +1160,11 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             m.snap.settings.first_run_seen = true;
             let settings = m.snap.settings.clone();
             let client = m.client.clone();
-            act(async move { client.update_settings(settings).await })
+            act(async move {
+                client
+                    .update_settings_fields(settings, vec!["first_run_seen".to_owned()])
+                    .await
+            })
         }
         Msg::KeyPressed(key, mods) => handle_key(m, key, mods),
         Msg::Modifiers(mods) => {
@@ -1491,7 +1502,15 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                         } else {
                             settings.remove_confirm_incomplete = false;
                         }
-                        let _ = client.update_settings(settings).await;
+                        let _ = client
+                            .update_settings_fields(
+                                settings,
+                                vec![
+                                    "remove_confirm_completed".to_owned(),
+                                    "remove_confirm_incomplete".to_owned(),
+                                ],
+                            )
+                            .await;
                     }
                     problems
                 },

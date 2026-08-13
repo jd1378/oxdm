@@ -54,8 +54,36 @@ fi
 
 if [ "$PURGE" = 1 ]; then
   step "Purging user data"
-  for d in "$HOME/.config/oxdm" "$HOME/Library/Application Support/oxdm"; do
+  # The database, the queue and the update staging live under the
+  # *data* directory — `~/.local/share/oxdm` on Linux, which this list
+  # used to miss entirely, so `--purge` removed nothing there and
+  # reinstalling picked the old database straight back up. The config
+  # directory holds the window's own preferences, and the cache
+  # directory whatever has been staged.
+  for d in \
+    "${XDG_DATA_HOME:-$HOME/.local/share}/oxdm" \
+    "${XDG_CONFIG_HOME:-$HOME/.config}/oxdm" \
+    "${XDG_CACHE_HOME:-$HOME/.cache}/oxdm" \
+    "${XDG_STATE_HOME:-$HOME/.local/state}/oxdm" \
+    "$HOME/Library/Application Support/oxdm" \
+    "$HOME/Library/Caches/oxdm"; do
     if [ -d "$d" ]; then rm -rf "$d"; ok "removed $d"; fi
+  done
+  # The browser registrations point at a binary that is now gone.
+  for d in \
+    "${XDG_CONFIG_HOME:-$HOME/.config}"/*/NativeMessagingHosts \
+    "$HOME"/.mozilla/native-messaging-hosts \
+    "$HOME"/.zen/native-messaging-hosts \
+    "$HOME"/.librewolf/native-messaging-hosts \
+    "$HOME"/.var/app/*/config/*/NativeMessagingHosts \
+    "$HOME"/.var/app/*/.mozilla/native-messaging-hosts \
+    "$HOME"/.var/app/*/.librewolf/native-messaging-hosts \
+    "$HOME"/Library/Application\ Support/*/NativeMessagingHosts; do
+    f="$d/io.github.jd1378.oxdm.host.json"
+    if [ -f "$f" ]; then rm -f "$f"; ok "removed $f"; fi
+  done
+  for w in "$HOME"/.var/app/*/data/oxdm-native-host; do
+    if [ -f "$w" ]; then rm -f "$w"; ok "removed $w"; fi
   done
 else
   warn "user data preserved (run with --purge to also delete settings + queue)"

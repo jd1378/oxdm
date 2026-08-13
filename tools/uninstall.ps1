@@ -47,6 +47,20 @@ if ($Purge) {
   if (Test-Path $cfg) { Remove-Item $cfg -Recurse -Force; Ok "removed $cfg" }
   $cfg2 = Join-Path $env:LOCALAPPDATA 'oxdm'
   if (Test-Path $cfg2) { Remove-Item $cfg2 -Recurse -Force; Ok "removed $cfg2" }
+
+  # The browser registrations name a binary that is now gone. The
+  # manifests went with %LOCALAPPDATA%\oxdm above; these are the keys
+  # that point at them.
+  $hostName = 'io.github.jd1378.oxdm.host'
+  $vendors = @(
+    'Software\Google\Chrome', 'Software\Chromium', 'Software\Microsoft\Edge',
+    'Software\BraveSoftware\Brave-Browser', 'Software\Vivaldi',
+    'Software\Mozilla', 'Software\LibreWolf'
+  )
+  foreach ($v in $vendors) {
+    $key = "HKCU:\$v\NativeMessagingHosts\$hostName"
+    if (Test-Path $key) { Remove-Item $key -Force -Recurse; Ok "removed $key" }
+  }
 } else {
   Warn 'user data preserved (set $env:OXDM_PURGE = "1" to also delete settings + queue)'
 }

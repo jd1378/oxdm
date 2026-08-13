@@ -97,11 +97,23 @@ pub fn spawn(state: Arc<AppState>, idle: crate::data::idle::IdleWatch) {
                     if let Err(e) = state.start_queue(q.id).await {
                         tracing::warn!(queue = %q.name, error = %e, "scheduler start_queue");
                     }
-                } else if !active
-                    && prev
-                    && let Err(e) = state.stop_queue(q.id).await
-                {
-                    tracing::warn!(queue = %q.name, error = %e, "scheduler stop_queue");
+                } else if !may_continue(q, now, &available, &conds, cmd_ok) {
+                    // Two ways to be running: the tick started it (the
+                    // edge below remembers that), or an arriving
+                    // download did. The second kind is invisible to
+                    // `last_active`, so it is asked about directly —
+                    // and only for queues whose trigger can start
+                    // them, so a queue the *user* started by hand is
+                    // never stopped from here.
+                    let by_trigger = matches!(
+                        &q.schedule,
+                        QueueSchedule::Condition(set) if set.on_job_added
+                    ) && state.is_queue_active(q.id).await;
+                    if (prev || by_trigger)
+                        && let Err(e) = state.stop_queue(q.id).await
+                    {
+                        tracing::warn!(queue = %q.name, error = %e, "scheduler stop_queue");
+                    }
                 }
                 last_active.insert(q.id, active);
             }
@@ -148,6 +160,22 @@ async fn poll_due_commands(queues: &[Queue], polls: &mut HashMap<QueueId, CmdPol
     }
 }
 
+/// Is a clock-scheduled queue inside its window right now?
+///
+/// Asked by the state layer when a download lands in a queue that is
+/// not running: a job added at 02:15 to a queue scheduled 02:00–04:00
+/// belongs to the run that is already meant to be happening, and
+/// waiting for the next tick — or, if the run had already started and
+/// finished its work, for tomorrow — is not what the schedule says.
+pub fn within_window(q: &Queue, now: chrono::DateTime<Local>) -> bool {
+    match &q.schedule {
+        QueueSchedule::Daily { .. } | QueueSchedule::Once { .. } => {
+            verdict(q, now, &[], &CondSnapshot::default(), None, false)
+        }
+        _ => false,
+    }
+}
+
 /// `cmd_ok`: cached verdict of this queue's condition command, if it
 /// has one (`None` before the first poll completes ⇒ not met yet, like
 /// every other unread condition).
@@ -157,6 +185,36 @@ fn should_run(
     available: &[CondKind],
     conds: &CondSnapshot,
     cmd_ok: Option<bool>,
+) -> bool {
+    verdict(q, now, available, conds, cmd_ok, false)
+}
+
+/// May a queue that is *already running* keep going?
+///
+/// The same conditions, except that "a download was added" counts as
+/// satisfied: it fired when the queue started, and a moment that has
+/// passed cannot be re-observed. Without this, a queue combining
+/// `JobAdded` with `All` was never running as far as the tick was
+/// concerned, so nothing ever stopped it — it kept downloading after
+/// the link went metered or the machine went back on battery, which is
+/// exactly what the other half of the combination was for.
+fn may_continue(
+    q: &Queue,
+    now: chrono::DateTime<Local>,
+    available: &[CondKind],
+    conds: &CondSnapshot,
+    cmd_ok: Option<bool>,
+) -> bool {
+    verdict(q, now, available, conds, cmd_ok, true)
+}
+
+fn verdict(
+    q: &Queue,
+    now: chrono::DateTime<Local>,
+    available: &[CondKind],
+    conds: &CondSnapshot,
+    cmd_ok: Option<bool>,
+    job_added_holds: bool,
 ) -> bool {
     match &q.schedule {
         QueueSchedule::Manual => false,
@@ -193,12 +251,14 @@ fn should_run(
             }
         }
         QueueSchedule::Condition(set) => set.holds(available, |kind| match kind {
-            // Never on a tick: nothing was added a moment ago, or this
-            // would not be a tick. The queue starts from the event
-            // itself — see `AppState::start_queue_on_job_added` — and
-            // with `All` this is what stops the tick from starting a
-            // queue whose trigger has not fired.
-            CondKind::JobAdded => false,
+            // Never true when deciding whether to *start*: nothing was
+            // added a moment ago, or this would not be a tick. The
+            // queue starts from the event itself — see
+            // `AppState::queue_took_a_job` — and with `All` this is
+            // what stops the tick from starting a queue whose trigger
+            // has not fired. `may_continue` passes true instead, so
+            // the other conditions can still stop a running queue.
+            CondKind::JobAdded => job_added_holds,
             CondKind::Unmetered => conds.unmetered(),
             CondKind::AcPower => conds.on_ac(),
             CondKind::Idle => conds.idle_at_least(set.idle_minutes.unwrap_or(u16::MAX)),

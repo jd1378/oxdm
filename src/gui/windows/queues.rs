@@ -321,6 +321,10 @@ pub struct State {
     tokens: Tokens,
     queues: Vec<Queue>,
     selected: Option<QueueId>,
+    /// Why the last Apply did not take. The window stays open after
+    /// applying, so a refusal that says nothing looks exactly like a
+    /// save that worked.
+    error: Option<String>,
 
     name: String,
     max_concurrent: usize,
@@ -726,6 +730,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 jobs,
             } = *boot;
             let mut st = State {
+                error: None,
                 tokens: Tokens::from_settings(&settings),
                 selected: queues.first().map(|q| q.id),
                 queues,
@@ -1191,8 +1196,18 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
         }
         // Applying leaves the window open: editing several queues in one
         // sitting is the normal case, and closing after each would make
-        // the user reopen it every time.
-        Msg::Saved(_) => Task::none(),
+        // the user reopen it every time. A refusal has to be visible,
+        // though — the daemon rejects a queue whose schedule or
+        // conditions it cannot honour, and silence there reads as
+        // saved.
+        Msg::Saved(Ok(())) => {
+            st.error = None;
+            Task::none()
+        }
+        Msg::Saved(Err(e)) => {
+            st.error = Some(e);
+            Task::none()
+        }
         // Back to the saved queue: `hydrate` is the same load the editor
         // does when a queue is selected.
         Msg::Discard => {
@@ -2202,9 +2217,23 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
             .view(t),
         );
     }
+    let left: Element<'_, Msg> = match &st.error {
+        Some(e) => row![
+            Btn::new("Cancel").ghost().on_press(Msg::Cancel).view(t),
+            icons::icon("triangle-alert", 12.0, t.status_danger),
+            text(e.clone())
+                .font(theme::BODY)
+                .size(11.0)
+                .color(t.status_danger),
+        ]
+        .spacing(theme::space::S2)
+        .align_y(Alignment::Center)
+        .into(),
+        None => Btn::new("Cancel").ghost().on_press(Msg::Cancel).view(t),
+    };
     let footer_el = crate::gui::windows::add::footer(
         t,
-        Btn::new("Cancel").ghost().on_press(Msg::Cancel).view(t),
+        left,
         right
             .push(
                 Btn::new("Apply")

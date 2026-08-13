@@ -176,11 +176,32 @@ fn pid_alive(pid: u32) -> bool {
     }
 }
 
+/// Windows has no `kill(pid, 0)`; opening the process for a query is
+/// the equivalent, and a handle that cannot be opened — or a process
+/// whose exit code is no longer `STILL_ACTIVE` — means it is gone.
+///
+/// Answering "not running" without asking, as this used to, meant the
+/// updater started replacing binaries while the old app might still
+/// have them open, and then relaunched into a single-instance guard
+/// the old process had not released yet.
 #[cfg(windows)]
 fn pid_alive(pid: u32) -> bool {
-    let _ = pid;
-    std::thread::sleep(Duration::from_millis(500));
-    false
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    // SAFETY: a failed open returns null, which is checked before use;
+    // the handle is closed on every path out.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return false;
+        }
+        let mut code: u32 = 0;
+        let ok = GetExitCodeProcess(handle, &mut code) != 0;
+        CloseHandle(handle);
+        ok && code == STILL_ACTIVE as u32
+    }
 }
 
 #[cfg(not(any(unix, windows)))]
