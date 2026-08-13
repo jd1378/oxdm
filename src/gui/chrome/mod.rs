@@ -30,6 +30,23 @@ pub fn window_task<M: Send + 'static>(control: WindowControl) -> Task<M> {
     }
 }
 
+/// Ask the desktop to put this window in front, once, at startup.
+///
+/// Every window here is its own process, started by the daemon rather
+/// than by the user's click. Windows treats that as a background
+/// process opening a window and puts it behind the one the user was
+/// looking at, blinking in the taskbar; macOS will not activate an app
+/// that was not launched through the usual path. The window asking for
+/// itself is what makes both raise it, together with the handoff the
+/// clicked-in window performs before the request
+/// (`platform::allow_foreground_handoff`).
+///
+/// Harmless where it is already true: on X11 and Wayland the new
+/// window arrives on top anyway, and asking again changes nothing.
+pub fn focus_on_open<M: Send + 'static>() -> Task<M> {
+    window::latest().and_then(window::gain_focus)
+}
+
 /// Wrap a window's root view in the design's 1px black window ring
 /// (`.win` box-shadow `0 0 0 1px rgba(0,0,0,.6)` — borderless windows
 /// otherwise blend into whatever is behind them). Padding insets the

@@ -124,7 +124,10 @@ pub fn boot() -> (App, Task<Msg>) {
                 }))
             },
             Msg::Connected,
-        ),
+        )
+        // Started by the daemon, not by the user's own click, so the
+        // window has to ask to be in front. See `focus_on_open`.
+        .chain(chrome::focus_on_open()),
     )
 }
 

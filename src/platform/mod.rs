@@ -276,6 +276,38 @@ pub fn set_autostart(enabled: bool) -> Result<(), String> {
 /// so fall back to the suffix-stripped path — but only when the
 /// suffixed one is really gone and the stripped one is really there,
 /// so a file genuinely named `"… (deleted)"` is left alone.
+/// Hand this process's right to come to the front over to whoever the
+/// daemon is about to start.
+///
+/// Windows only lets the *foreground* process decide what may take the
+/// foreground next. A window opened from a click here is opened by the
+/// daemon, which is a background process with no such right to give,
+/// so its `AllowSetForegroundWindow` for the child fails and the new
+/// window lands behind this one, blinking in the taskbar.
+///
+/// Called from the window the user just clicked in, which is the
+/// foreground process at that moment and is therefore allowed to say
+/// "the next window to ask may have it". The permission covers a
+/// single activation and expires by itself.
+///
+/// Nothing to do elsewhere: X11 and Wayland let the new window raise
+/// itself, and on macOS the window asks for focus when it opens.
+pub fn allow_foreground_handoff() {
+    #[cfg(windows)]
+    {
+        // ASFW_ANY: any process may take the foreground next. The
+        // alternative needs the child's pid, which does not exist yet
+        // when this is called.
+        const ASFW_ANY: u32 = u32::MAX;
+        // SAFETY: FFI call with no preconditions. It fails when this
+        // process is not in the foreground, which is exactly when the
+        // permission would not have been ours to give.
+        unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(ASFW_ANY);
+        }
+    }
+}
+
 pub fn current_exe() -> std::io::Result<std::path::PathBuf> {
     Ok(undelete_exe_path(std::env::current_exe()?))
 }

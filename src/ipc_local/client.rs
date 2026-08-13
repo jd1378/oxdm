@@ -603,12 +603,15 @@ impl Client {
     }
 
     pub async fn open_download_window(&self, id: crate::domain::JobId) -> Result<(), String> {
+        crate::platform::allow_foreground_handoff();
         self.expect_ok(Request::OpenDownloadWindow(id)).await
     }
     pub async fn open_properties_window(&self, id: crate::domain::JobId) -> Result<(), String> {
+        crate::platform::allow_foreground_handoff();
         self.expect_ok(Request::OpenPropertiesWindow(id)).await
     }
     pub async fn open_main_window(&self) -> Result<(), String> {
+        crate::platform::allow_foreground_handoff();
         self.expect_ok(Request::OpenMainWindow).await
     }
     pub async fn open_settings_window(
@@ -616,6 +619,7 @@ impl Client {
         tab: Option<String>,
         highlight_proxy: bool,
     ) -> Result<(), String> {
+        crate::platform::allow_foreground_handoff();
         self.expect_ok(Request::OpenSettingsWindow {
             tab,
             highlight_proxy,
@@ -623,9 +627,11 @@ impl Client {
         .await
     }
     pub async fn open_queues_window(&self) -> Result<(), String> {
+        crate::platform::allow_foreground_handoff();
         self.expect_ok(Request::OpenQueuesWindow).await
     }
     pub async fn open_about_window(&self) -> Result<(), String> {
+        crate::platform::allow_foreground_handoff();
         self.expect_ok(Request::OpenAboutWindow).await
     }
     /// Report this window's focus state, so the daemon knows whether it
@@ -635,6 +641,7 @@ impl Client {
     }
     /// Open the batch-triage window for a pasted or dropped list.
     pub async fn open_batch_window(&self, urls: Vec<url::Url>) -> Result<(), String> {
+        crate::platform::allow_foreground_handoff();
         self.expect_ok(Request::OpenBatchWindow(urls)).await
     }
 
@@ -643,6 +650,7 @@ impl Client {
         edit_id: Option<JobId>,
         prefill_url: Option<String>,
     ) -> Result<(), String> {
+        crate::platform::allow_foreground_handoff();
         self.expect_ok(Request::OpenAddWindow {
             edit_id,
             prefill_url,
