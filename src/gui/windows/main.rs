@@ -256,6 +256,11 @@ pub enum ToolbarAction {
     /// queue by `active_queues` membership; other scopes pause/resume
     /// everything. The handler re-derives the direction from state.
     ToggleRun,
+    /// Pause or resume the selected downloads. Sits beside the queue
+    /// controls because the queue ones act on a whole scope and this
+    /// one acts on the rows the user picked, which is the commonest
+    /// action of the two and was reachable only from the context menu.
+    PauseResume,
     StopAll,
     Clean,
     Schedule,
@@ -570,6 +575,26 @@ impl Main {
     /// "Startable" is the daemon's own rule (`Phase::is_startable`),
     /// failed jobs included — the button must not refuse work that
     /// `start_queue` / `resume_all` would happily do.
+    /// What a Pause/Resume press would do to the current selection, and
+    /// whether it would do anything at all.
+    ///
+    /// `running` says which of the two the press is; `enabled` is false
+    /// when nothing is selected, or when nothing in the selection can
+    /// take the action. Folded from the same per-job rule the row's
+    /// context menu applies ([`pause_resume_job`]), so the toolbar and
+    /// the menu cannot drift apart.
+    fn selection_pause_resume(&self) -> (bool, bool) {
+        let running = self.selection.iter().any(|id| self.phase(*id).is_running());
+        // Only the jobs the press would actually act on: with a mixed
+        // selection the direction is decided first, and a job facing
+        // the other way is not what makes the button live.
+        let enabled = self.selection.iter().any(|id| {
+            let (job_running, actionable) = pause_resume_job(self, *id);
+            actionable && job_running == running
+        });
+        (running, enabled)
+    }
+
     fn toggle_actionable(&self) -> bool {
         let any_startable = |f: &dyn Fn(&crate::domain::Job) -> bool| -> bool {
             self.snap
@@ -1748,6 +1773,27 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                         }
                     }
                 },
+                // Direction re-derived here rather than carried on the
+                // message: the selection can change between the paint
+                // that drew the button and the press that fires it.
+                ToolbarAction::PauseResume => {
+                    let ids: Vec<JobId> = m.selection.iter().copied().collect();
+                    if m.selection_pause_resume().0 {
+                        act(async move {
+                            for id in ids {
+                                client.pause(id).await?;
+                            }
+                            Ok(())
+                        })
+                    } else {
+                        act_reporting(async move {
+                            for id in ids {
+                                client.resume(id).await?;
+                            }
+                            Ok(())
+                        })
+                    }
+                }
                 ToolbarAction::StopAll => act(async move { client.stop_all().await }),
                 ToolbarAction::Clean => request_clean(m),
                 ToolbarAction::Schedule => act(async move { client.open_queues_window().await }),
@@ -2748,6 +2794,9 @@ fn toolbar(m: &Main) -> Element<'_, Msg> {
         _ if m.any_running() => ("Pause all", "pause"),
         _ => ("Resume all", "play"),
     };
+    // Per-row Pause/Resume, beside the queue-wide controls: same
+    // direction and same enablement rule as the row's context menu.
+    let (sel_running, sel_actionable) = m.selection_pause_resume();
     let bar = row![
         Btn::new("Add URL")
             .primary()
@@ -2757,6 +2806,13 @@ fn toolbar(m: &Main) -> Element<'_, Msg> {
             .tb()
             .icon("plus")
             .on_press(Msg::Toolbar(ToolbarAction::AddUrl))
+            .view(t),
+        container(vdivider(t.border_subtle, 24.0)).padding([0.0, theme::space::S1]),
+        Btn::new(if sel_running { "Pause" } else { "Resume" })
+            .toolbar()
+            .icon(if sel_running { "pause" } else { "play" })
+            .enabled(sel_actionable)
+            .on_press(Msg::Toolbar(ToolbarAction::PauseResume))
             .view(t),
         container(vdivider(t.border_subtle, 24.0)).padding([0.0, theme::space::S1]),
         Btn::new(toggle_label)
@@ -3762,6 +3818,32 @@ fn free_disk_str(path: &std::path::Path) -> String {
 
 // ---------------------------------------------------------------- context menu
 
+/// Whether one job is running, and whether Pause/Resume can act on it.
+///
+/// The single rule behind both the row's context menu and the toolbar
+/// button, so the two always offer the same thing:
+///
+/// Pausing is offered for anything running. Resuming covers Paused,
+/// Failed and Queued alike — a queued job is holding bytes and waiting
+/// for a slot, and "start it now" is exactly what the user means.
+/// Nothing is offered for a finished download (Restart Download is the
+/// entry for that), for one mid-assembly (interrupting the write leaves
+/// a file that looks finished and is not, and it ends on its own), or
+/// for one whose integrity check failed with no missing bytes to go
+/// back for.
+fn pause_resume_job(m: &Main, id: JobId) -> (bool, bool) {
+    let phase = m.phase(id);
+    let running = phase.is_running();
+    let integrity_failed = m
+        .snap
+        .jobs
+        .iter()
+        .any(|j| j.id == id && j.integrity_failed());
+    let enabled =
+        phase != Phase::Completed && phase != Phase::Assembling && !(integrity_failed && !running);
+    (running, enabled)
+}
+
 fn context_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>, id: JobId) -> Element<'a, Msg> {
     let t = &m.tokens;
     let phase = m.phase(id);
@@ -3868,18 +3950,8 @@ fn context_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>, id: JobId) -> E
     // slot, and "start it now" is exactly what the user means. Only a
     // finished download has nothing to resume; `Restart Download`
     // below is the entry for that.
-    let running = phase.is_running();
+    let (running, pause_resume_enabled) = pause_resume_job(m, id);
     let done = phase == Phase::Completed;
-    // Assembly writes the final file; interrupting it leaves a file
-    // that looks finished and is not. It ends on its own.
-    let assembling = phase == Phase::Assembling;
-    // A failed integrity check has no missing bytes to go back for.
-    // Restart Download, below, is the only way forward.
-    let integrity_failed = m
-        .snap
-        .jobs
-        .iter()
-        .any(|j| j.id == id && j.integrity_failed());
 
     // Destructive row morphs with live modifiers (design: Finder-like):
     // default neutral "Remove from list" → ⇧ ochre "Move to Trash" →
@@ -3962,7 +4034,7 @@ fn context_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>, id: JobId) -> E
                 if running { "pause" } else { "play" },
                 if running { "Pause" } else { "Resume" },
                 None,
-                !done && !assembling && !(integrity_failed && !running),
+                pause_resume_enabled,
                 Msg::Context(if running {
                     ContextAction::Pause
                 } else {
