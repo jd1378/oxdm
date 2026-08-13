@@ -77,11 +77,16 @@ pub struct JobEntry {
     /// Live mirror of `Job::interruptions` — part retries plus explicit
     /// resumes, the one number the completed view reports.
     pub interruptions: AtomicU32,
-    /// ULIDs of parts currently mid-retry. Drives the `Reconnecting`
-    /// phase: non-empty ⇒ at least one part is retrying. Keyed by ulid
-    /// (rather than a bare counter) so a sibling part's progress tick
-    /// can't spuriously clear a still-retrying part — debounces the
-    /// banner. Cleared on restart / cancel-to-queued.
+    /// ULIDs of parts currently mid-retry. Keyed by ulid (rather than a
+    /// bare counter) so a sibling part's progress tick can't spuriously
+    /// clear a still-retrying part — debounces the banner. Cleared on
+    /// restart / cancel-to-queued.
+    ///
+    /// Non-empty is *not* on its own the `Reconnecting` phase: see
+    /// [`JobEntry::any_part_transferring`]. One segment of eight losing
+    /// its connection is not a download that stopped, and calling it
+    /// "Reconnecting" in the row and the window told the user the
+    /// transfer had halted while seven parts were still moving bytes.
     pub retrying_parts: std::sync::Mutex<std::collections::HashSet<String>>,
     pub parts: std::sync::RwLock<IndexMap<String, Arc<PartCounters>>>,
     pub cancel: std::sync::Mutex<CancellationToken>,
@@ -173,6 +178,46 @@ async fn file_identity(path: &std::path::Path) -> Option<(u64, i64)> {
 }
 
 impl JobEntry {
+    /// Is any segment still moving, while others retry?
+    ///
+    /// A part counts when odl sampled it inside the grace window and it
+    /// is not itself one of the parts mid-retry. That is what separates
+    /// "one connection dropped" from "the download stopped": with eight
+    /// segments and one retrying, seven are still transferring and the
+    /// download is downloading.
+    ///
+    /// False when nothing has parts yet, which is the whole-job retry
+    /// before the first segment exists — there the retry *is* the
+    /// download's state.
+    pub fn any_part_transferring(&self, now_ms: i64) -> bool {
+        let Ok(parts) = self.parts.try_read() else {
+            // Rather than claim a transfer we could not look at. The
+            // caller only uses this to hold a phase back, so a missed
+            // read costs one tick of the older, louder answer.
+            return false;
+        };
+        if self.parts_stale.load(Ordering::Relaxed) {
+            return false;
+        }
+        let retrying = self.retrying_parts.lock().ok();
+        parts.iter().any(|(ulid, p)| {
+            !p.finished.load(Ordering::Acquire)
+                && p.is_connected(now_ms)
+                && !retrying.as_ref().is_some_and(|r| r.contains(ulid))
+        })
+    }
+
+    /// The phase a retry should leave the job in: still `Downloading`
+    /// while some other segment carries on, `Reconnecting` when none
+    /// does.
+    fn retry_phase(&self, now_ms: i64) -> Phase {
+        if self.any_part_transferring(now_ms) {
+            Phase::Downloading
+        } else {
+            Phase::Reconnecting
+        }
+    }
+
     /// Digests already known for the file `ident` describes.
     fn known_digests(
         &self,
@@ -5707,14 +5752,23 @@ impl LiveBridge for StateLiveBridge {
                     // This part is making progress again — drop it from
                     // the retrying set. Removing by ulid (not a blanket
                     // counter decrement) means a sibling part's tick
-                    // can't clear a still-retrying part. When the last
-                    // retrying part clears, restore Downloading — but
-                    // only if we are still in Reconnecting, so we never
-                    // clobber a later Assembling / Verifying transition.
-                    if let Ok(mut retrying) = entry.retrying_parts.lock()
-                        && retrying.remove(ulid)
-                        && retrying.is_empty()
-                        && entry.phase() == Phase::Reconnecting
+                    // can't clear a still-retrying part.
+                    //
+                    // The guard is dropped before anything asks whether
+                    // a part is transferring: that answer reads the
+                    // same lock.
+                    let all_clear = entry
+                        .retrying_parts
+                        .lock()
+                        .map(|mut retrying| retrying.remove(ulid) && retrying.is_empty())
+                        .unwrap_or(false);
+                    // Either the last retry finished, or this part is
+                    // carrying the download on its own while another
+                    // one retries. Both are `Downloading` — but only
+                    // out of `Reconnecting`, so a later Assembling /
+                    // Verifying transition is never clobbered.
+                    if entry.phase() == Phase::Reconnecting
+                        && (all_clear || entry.any_part_transferring(now_ms()))
                     {
                         entry.set_phase(Phase::Downloading);
                     }
@@ -5736,7 +5790,7 @@ impl LiveBridge for StateLiveBridge {
                         // phase change lands.
                         retrying.insert(ulid.clone().unwrap_or_else(|| WHOLE_JOB_RETRY.to_owned()));
                     }
-                    entry.set_phase(Phase::Reconnecting);
+                    entry.set_phase(entry.retry_phase(now_ms()));
                 }
             }
             OdlProgressEvent::PartRetrying { ulid, .. } => {
@@ -5753,7 +5807,7 @@ impl LiveBridge for StateLiveBridge {
                     if let Ok(mut retrying) = entry.retrying_parts.lock() {
                         retrying.insert(ulid.clone());
                     }
-                    entry.set_phase(Phase::Reconnecting);
+                    entry.set_phase(entry.retry_phase(now_ms()));
                 }
             }
             OdlProgressEvent::PartSpeed {
@@ -5860,6 +5914,115 @@ mod tests {
         };
         job.status.phase = phase;
         JobEntry::with_completion(job, crate::domain::OnCompletion::default())
+    }
+
+    /// A job with `n` parts, all sampled just now and none finished.
+    fn entry_with_parts(n: usize) -> (JobEntry, Vec<String>, i64) {
+        let entry = entry_in(Phase::Downloading);
+        let now = now_ms();
+        let mut ulids = Vec::new();
+        {
+            let mut parts = entry.parts.write().unwrap();
+            for i in 0..n {
+                let ulid = format!("part-{i}");
+                let p = Arc::new(crate::data::runner::PartCounters {
+                    ulid: ulid.clone(),
+                    offset: 0,
+                    size: AtomicU64::new(1024),
+                    downloaded: AtomicU64::new(0),
+                    speed_bps_bits: AtomicU64::new(0),
+                    finished: AtomicBool::new(false),
+                    sampled_at_ms: std::sync::atomic::AtomicI64::new(now),
+                });
+                parts.insert(ulid.clone(), p);
+                ulids.push(ulid);
+            }
+        }
+        (entry, ulids, now)
+    }
+
+    fn mark_retrying(entry: &JobEntry, ulid: &str) {
+        entry.retrying_parts.lock().unwrap().insert(ulid.to_owned());
+    }
+
+    /// One segment of eight losing its connection is not a download
+    /// that stopped. The other seven are still moving bytes, and a row
+    /// that says "Reconnecting" over them is telling the user the
+    /// transfer halted when it did not.
+    #[test]
+    fn one_retrying_segment_among_many_is_still_downloading() {
+        let (entry, ulids, now) = entry_with_parts(8);
+        mark_retrying(&entry, &ulids[0]);
+        assert!(entry.any_part_transferring(now));
+        assert_eq!(entry.retry_phase(now), Phase::Downloading);
+    }
+
+    /// When the last live segment goes, there is nothing left to call
+    /// downloading, and the phase says so.
+    #[test]
+    fn a_download_whose_every_segment_retries_is_reconnecting() {
+        let (entry, ulids, now) = entry_with_parts(3);
+        for u in &ulids {
+            mark_retrying(&entry, u);
+        }
+        assert!(!entry.any_part_transferring(now));
+        assert_eq!(entry.retry_phase(now), Phase::Reconnecting);
+    }
+
+    /// A single-segment download has no sibling to carry it, so its one
+    /// retry is the whole download reconnecting — the case the old rule
+    /// got right and this one must not lose.
+    #[test]
+    fn a_single_segment_retry_is_reconnecting() {
+        let (entry, ulids, now) = entry_with_parts(1);
+        mark_retrying(&entry, &ulids[0]);
+        assert_eq!(entry.retry_phase(now), Phase::Reconnecting);
+    }
+
+    /// The whole-job retry before any segment exists: the retry is all
+    /// there is to report.
+    #[test]
+    fn a_retry_before_any_segment_exists_is_reconnecting() {
+        let entry = entry_in(Phase::Downloading);
+        mark_retrying(&entry, WHOLE_JOB_RETRY);
+        assert_eq!(entry.retry_phase(now_ms()), Phase::Reconnecting);
+    }
+
+    /// A part odl stopped sampling is not transferring, whatever its
+    /// last reported rate was: a stalled segment must not hold the row
+    /// at "Downloading" while its siblings retry.
+    #[test]
+    fn a_segment_that_stopped_being_sampled_does_not_count() {
+        let (entry, ulids, now) = entry_with_parts(2);
+        mark_retrying(&entry, &ulids[0]);
+        {
+            let parts = entry.parts.read().unwrap();
+            parts[&ulids[1]].sampled_at_ms.store(
+                now - crate::data::runner::PART_SAMPLE_GRACE_MS - 1,
+                Ordering::Relaxed,
+            );
+        }
+        assert_eq!(entry.retry_phase(now), Phase::Reconnecting);
+    }
+
+    /// A finished segment has nothing left to transfer, so it cannot
+    /// stand in for one that is still going.
+    #[test]
+    fn a_finished_segment_does_not_count_as_transferring() {
+        let (entry, ulids, now) = entry_with_parts(2);
+        mark_retrying(&entry, &ulids[0]);
+        entry.parts.read().unwrap()[&ulids[1]].mark_finished();
+        assert_eq!(entry.retry_phase(now), Phase::Reconnecting);
+    }
+
+    /// The parts map still describes the previous run until odl
+    /// re-announces them, so it says nothing about this one.
+    #[test]
+    fn a_stale_parts_map_says_nothing_about_this_run() {
+        let (entry, ulids, now) = entry_with_parts(4);
+        mark_retrying(&entry, &ulids[0]);
+        entry.parts_stale.store(true, Ordering::Relaxed);
+        assert!(!entry.any_part_transferring(now));
     }
 
     fn table(names: &[Option<&str>]) -> IndexMap<JobId, Arc<JobEntry>> {
