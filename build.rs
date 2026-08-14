@@ -3,6 +3,9 @@
 //! commit, and the toolchain that produced the binary. Every one of
 //! them degrades to "unknown" instead of failing the build, so a source
 //! tarball without a `.git` or a `git`/`rustc` binary still compiles.
+//!
+//! Also the one build-time switch: `OXDM_NO_SELF_UPDATE`, for builds
+//! whose files belong to a package manager rather than to oxdm.
 
 use std::process::Command;
 
@@ -16,10 +19,35 @@ fn main() {
     // feed is published per target, so the app has to know which one
     // it is — and `TARGET` is only visible to build scripts.
     emit("OXDM_TARGET", std::env::var("TARGET").ok());
+    emit_self_update();
     embed_windows_icon();
     emit("OXDM_ODL_VERSION", locked_version("odl"));
     emit("OXDM_GIT_COMMIT", git_short_commit());
     emit("OXDM_RUSTC", rustc_version());
+}
+
+/// Whether this build may replace its own files.
+///
+/// Set `OXDM_NO_SELF_UPDATE=1` for a build installed by something else
+/// — a distro package, a Flatpak, a Homebrew formula. There the files
+/// belong to a package manager: replacing them behind its back makes
+/// its database wrong and the next system upgrade undoes the update.
+/// Such a build never checks, never downloads, and never offers to
+/// install; the packaging is what updates it.
+///
+/// Any value other than empty or `0` turns it off, so the usual
+/// `OXDM_NO_SELF_UPDATE=1` and a bare `OXDM_NO_SELF_UPDATE=true` mean
+/// the same thing. `rerun-if-env-changed` so flipping it rebuilds:
+/// without it cargo would hand back a cached build that disagrees.
+fn emit_self_update() {
+    println!("cargo:rerun-if-env-changed=OXDM_NO_SELF_UPDATE");
+    let off = std::env::var("OXDM_NO_SELF_UPDATE")
+        .map(|v| !v.is_empty() && v != "0")
+        .unwrap_or(false);
+    emit(
+        "OXDM_SELF_UPDATE",
+        Some(if off { "0" } else { "1" }.to_owned()),
+    );
 }
 
 /// Put the app icon in the executable.

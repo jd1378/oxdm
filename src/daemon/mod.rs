@@ -111,8 +111,13 @@ fn spawn_workers(
     let support = rt.block_on(crate::data::conditions::detect_support(idle.supported()));
     state.attach_cond_support(support);
     crate::data::spawn_queue_scheduler(state.clone(), idle.clone());
-    crate::data::spawn_update_watch(state.clone(), idle);
-    update_alerts::spawn(state.clone());
+    // A build a package manager owns never looks for a new version:
+    // there is nothing it could do with one, and the check would be a
+    // weekly request on behalf of a feature that is not there.
+    if crate::domain::SELF_UPDATE {
+        crate::data::spawn_update_watch(state.clone(), idle);
+        update_alerts::spawn(state.clone());
+    }
     crate::data::spawn_file_watch(state.clone());
     tray::install(rt.handle().clone(), state.clone());
 

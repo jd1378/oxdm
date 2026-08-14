@@ -1,6 +1,7 @@
 //! Pure domain types. No I/O, no UI, no `odl` types leak through here.
 
 pub mod advanced;
+pub mod build_flags;
 pub mod capture;
 pub mod category;
 pub mod checksum;
@@ -15,6 +16,7 @@ pub mod user_agent;
 pub mod watch_limit;
 
 pub use advanced::{Advanced, AuthAdv, AuthScheme, Creds, CustomHeader, ProxyAdv, ProxyMode};
+pub use build_flags::SELF_UPDATE;
 pub use capture::CaptureRequest;
 pub use category::{Category, classify};
 pub use checksum::{Algo, Checksum, CsSource, CsStatus};

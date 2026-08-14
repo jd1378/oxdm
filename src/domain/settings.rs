@@ -359,8 +359,12 @@ impl Settings {
     /// Nothing is raised when automatic checks are off — the only
     /// checks left are the ones the user ran from About, and About is
     /// already in front of them.
+    ///
+    /// A build that cannot update itself raises nothing either: the
+    /// stored toggles are whatever they were, and announcing a version
+    /// the user has no way to install from here is worse than silence.
     pub fn update_surface(&self) -> UpdateSurface {
-        if !self.auto_check_updates {
+        if !crate::domain::SELF_UPDATE || !self.auto_check_updates {
             UpdateSurface::Silent
         } else if self.show_update_dialog {
             UpdateSurface::Dialog
@@ -548,8 +552,31 @@ mod tests {
         );
     }
 
+    /// A build a package manager owns announces nothing, whatever the
+    /// stored toggles say — the settings survive across a switch from
+    /// a self-updating install to a packaged one, and a notification
+    /// for a version this build cannot install leads nowhere.
+    #[test]
+    fn a_packaged_build_announces_nothing() {
+        if crate::domain::SELF_UPDATE {
+            return;
+        }
+        let loudest = Settings {
+            auto_check_updates: true,
+            show_update_dialog: true,
+            notify_update: true,
+            ..Settings::default()
+        };
+        assert_eq!(loudest.update_surface(), UpdateSurface::Silent);
+    }
+
     #[test]
     fn one_update_surface_at_a_time() {
+        // Surfaces only a build that can install one has; the packaged
+        // case is `a_packaged_build_announces_nothing`.
+        if !crate::domain::SELF_UPDATE {
+            return;
+        }
         // A new version is news, not a task: it reports rather than
         // taking focus, unless the user asks for the window.
         let s = Settings::default();

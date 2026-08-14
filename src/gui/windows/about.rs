@@ -28,6 +28,21 @@ const WIN_W: f32 = 468.0;
 /// off a screenshot lands a few pixels short and the page scrolls by
 /// exactly that much; the 5 is that shortfall.
 const WIN_H: f32 = 517.0;
+/// The update card at rest, plus the gap under it. Subtracted from
+/// [`WIN_H`] where the build has no such card, so the window is sized
+/// to what it actually shows instead of opening with a hole in it.
+/// Measured off the rendered card in its Idle state, which is the one
+/// the window opens in; the taller states scroll, as they already did.
+const UPDATE_CARD_H: f32 = 100.0 + GAP;
+
+/// The window's height for this build.
+fn win_h() -> f32 {
+    if crate::domain::SELF_UPDATE {
+        WIN_H
+    } else {
+        WIN_H - UPDATE_CARD_H
+    }
+}
 
 /// The page to open for this version, when the feed named one.
 ///
@@ -177,7 +192,15 @@ pub fn boot() -> (App, Task<Msg>) {
                 // found. This window can be closed and reopened
                 // mid-download; without asking, it would offer to
                 // start an update that is already running.
-                let state = client.update_state().await;
+                //
+                // Not asked at all where this build cannot update
+                // itself: the daemon refuses the request, and there is
+                // no card here for the answer to fill in.
+                let state = if crate::domain::SELF_UPDATE {
+                    client.update_state().await
+                } else {
+                    crate::ipc_local::protocol::UpdateState::Idle
+                };
                 Ok(Box::new((client, snap.settings, state)))
             },
             Msg::Connected,
@@ -912,15 +935,18 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
     // Scrolls because the window is sized to the content it normally
     // has: a release note long enough to wrap several times grows the
     // update card, and growing past the window should not cut it off.
+    // The update card is the whole of what a packaged build drops:
+    // the version itself still shows, on the chip beside the wordmark.
+    let mut stack = column![].spacing(GAP);
+    if crate::domain::SELF_UPDATE {
+        stack = stack.push(set_rows(t, vec![updates(st)]));
+    }
     let body = crate::gui::widget::vscroll(
         container(
-            column![
-                set_rows(t, vec![updates(st)]),
-                set_rows(t, vec![facts]),
-                repository,
-                donate,
-            ]
-            .spacing(GAP),
+            stack
+                .push(set_rows(t, vec![facts]))
+                .push(repository)
+                .push(donate),
         )
         .width(Length::Fill)
         .padding(iced::Padding {
@@ -991,8 +1017,8 @@ pub fn launch_about() {
         .default_font(theme::BODY)
         .antialiasing(true)
         .window(chrome::window_settings(
-            iced::Size::new(WIN_W, WIN_H + chrome::overhead_h()),
-            iced::Size::new(WIN_W, WIN_H + chrome::overhead_h()),
+            iced::Size::new(WIN_W, win_h() + chrome::overhead_h()),
+            iced::Size::new(WIN_W, win_h() + chrome::overhead_h()),
         ));
     for f in theme::fonts::ALL {
         app = app.font(*f);

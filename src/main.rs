@@ -119,8 +119,17 @@ fn main() {
         // Hidden: oxdm re-runs itself from a copy elsewhere to replace
         // the installed programs, because a running program cannot
         // replace itself. Not in --help; the app spawns it, users do
-        // not.
-        Some("--install-update") => oxdm::update_install::main(args),
+        // not — and a build whose files belong to a package manager
+        // never spawns it at all, so being asked here is either a
+        // mistake or someone else's idea.
+        Some("--install-update") if oxdm::domain::SELF_UPDATE => oxdm::update_install::main(args),
+        Some("--install-update") => {
+            eprintln!(
+                "this build does not update itself — it is installed and updated by \
+                 your package manager"
+            );
+            std::process::exit(2);
+        }
         Some("--install-native-host") => install_native_host(args),
         Some("--quit") => quit_remote(),
         Some("--tray") => run_daemon_tray(),

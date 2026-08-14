@@ -54,7 +54,12 @@ impl Section {
     /// (design `.s-pane-head`).
     fn desc(self) -> &'static str {
         match self {
-            Section::General => "Updates, startup, appearance, and what leaves the list.",
+            // The pane leads with Updates, unless this build has no
+            // such section to lead with.
+            Section::General if crate::domain::SELF_UPDATE => {
+                "Updates, startup, appearance, and what leaves the list."
+            }
+            Section::General => "Startup, appearance, and what leaves the list.",
             Section::Downloads => {
                 "Cache location, retry behavior, and when to hold downloads back."
             }
@@ -1906,138 +1911,146 @@ fn general_section(st: &State) -> Element<'_, Msg> {
         AppTheme::Warm => 2,
         AppTheme::Dark => 3,
     };
-    pane(
-        t,
-        Section::General,
-        column![
-            set_section(
+    let mut sections: Vec<Element<'_, Msg>> = Vec::new();
+    // A build a package manager owns has nothing to check for, so the
+    // section is absent rather than present and dead.
+    if crate::domain::SELF_UPDATE {
+        sections.push(set_section(
+            t,
+            "Updates",
+            vec![toggle_row(
                 t,
-                "Updates",
-                vec![toggle_row(
+                "Check for updates automatically",
+                Some(
+                    "Once when oxdm starts, then about weekly while the computer \
+                     is idle. What it finds is announced when you are back.",
+                ),
+                st.s.auto_check_updates,
+                Msg::AutoCheckUpdates,
+            )],
+        ));
+    }
+    sections.extend([
+        set_section(
+            t,
+            "Startup",
+            vec![
+                toggle_row(
                     t,
-                    "Check for updates automatically",
-                    Some(
-                        "Once when oxdm starts, then about weekly while the computer \
-                         is idle. What it finds is announced when you are back."
-                    ),
-                    st.s.auto_check_updates,
-                    Msg::AutoCheckUpdates
-                )]
-            ),
-            set_section(
-                t,
-                "Startup",
-                vec![
-                    toggle_row(
+                    "Launch at login",
+                    Some("Start oxdm automatically when you log in."),
+                    st.s.start_at_login,
+                    Msg::StartAtLogin,
+                ),
+                toggle_row(
+                    t,
+                    "Start to tray",
+                    Some("Boot without opening the main window."),
+                    st.s.start_to_tray,
+                    Msg::StartToTray,
+                ),
+            ],
+        ),
+        set_section(
+            t,
+            "Appearance",
+            vec![
+                set_row(
+                    t,
+                    "Theme",
+                    Some("Color palette for the whole app. Auto follows your system."),
+                    segmented(
                         t,
-                        "Launch at login",
-                        Some("Start oxdm automatically when you log in."),
-                        st.s.start_at_login,
-                        Msg::StartAtLogin
-                    ),
-                    toggle_row(
-                        t,
-                        "Start to tray",
-                        Some("Boot without opening the main window."),
-                        st.s.start_to_tray,
-                        Msg::StartToTray
-                    ),
-                ]
-            ),
-            set_section(
-                t,
-                "Appearance",
-                vec![
-                    set_row(
-                        t,
-                        "Theme",
-                        Some("Color palette for the whole app. Auto follows your system."),
-                        segmented(
-                            t,
-                            &[
-                                ("Auto", None),
-                                ("Utility", None),
-                                ("Warm", None),
-                                ("Dark", None)
-                            ],
-                            theme_idx,
-                            BtnSize::Md,
-                            |i| Msg::SetTheme(
+                        &[
+                            ("Auto", None),
+                            ("Utility", None),
+                            ("Warm", None),
+                            ("Dark", None),
+                        ],
+                        theme_idx,
+                        BtnSize::Md,
+                        |i| {
+                            Msg::SetTheme(
                                 match i {
                                     1 => "light",
                                     2 => "warm",
                                     3 => "dark",
                                     _ => "system",
                                 }
-                                .to_owned()
-                            ),
-                        )
+                                .to_owned(),
+                            )
+                        },
                     ),
-                    toggle_row(
-                        t,
-                        "Reduce motion",
-                        Some("Skip animations and transitions across the app."),
-                        st.s.reduce_motion,
-                        Msg::ReduceMotion
-                    ),
-                    toggle_row(
-                        t,
-                        "Custom window chrome",
-                        Some(
-                            "Draw oxdm's own title bar and frame instead of your \
-                             desktop's. Applies to windows opened after saving."
-                        ),
-                        st.s.custom_window_chrome,
-                        Msg::CustomWindowChrome
-                    ),
-                ]
-            ),
-            set_section(
-                t,
-                "Remove behavior",
-                vec![
-                    toggle_row(
-                        t,
-                        "Confirm removing incomplete downloads",
-                        Some("Ask before discarding a job that has not finished."),
-                        st.s.remove_confirm_incomplete,
-                        Msg::ConfirmIncomplete
-                    ),
-                    toggle_row(
-                        t,
-                        "Confirm removing completed downloads",
-                        Some("Ask before clearing a finished job from the list."),
-                        st.s.remove_confirm_completed,
-                        Msg::ConfirmCompleted
-                    ),
-                    toggle_row(
-                        t,
-                        "Confirm cleaning finished downloads",
-                        Some("Ask before the toolbar's Clean clears every finished job at once."),
-                        st.s.remove_confirm_clean,
-                        Msg::ConfirmClean
-                    ),
-                ]
-            ),
-            set_section(
-                t,
-                "File tracking",
-                vec![toggle_row(
+                ),
+                toggle_row(
                     t,
-                    "Forget downloads whose files are gone",
+                    "Reduce motion",
+                    Some("Skip animations and transitions across the app."),
+                    st.s.reduce_motion,
+                    Msg::ReduceMotion,
+                ),
+                toggle_row(
+                    t,
+                    "Custom window chrome",
                     Some(
-                        "Watch what each download has on disk (the saved file, or \
+                        "Draw oxdm's own title bar and frame instead of your \
+                             desktop's. Applies to windows opened after saving.",
+                    ),
+                    st.s.custom_window_chrome,
+                    Msg::CustomWindowChrome,
+                ),
+            ],
+        ),
+        set_section(
+            t,
+            "Remove behavior",
+            vec![
+                toggle_row(
+                    t,
+                    "Confirm removing incomplete downloads",
+                    Some("Ask before discarding a job that has not finished."),
+                    st.s.remove_confirm_incomplete,
+                    Msg::ConfirmIncomplete,
+                ),
+                toggle_row(
+                    t,
+                    "Confirm removing completed downloads",
+                    Some("Ask before clearing a finished job from the list."),
+                    st.s.remove_confirm_completed,
+                    Msg::ConfirmCompleted,
+                ),
+                toggle_row(
+                    t,
+                    "Confirm cleaning finished downloads",
+                    Some("Ask before the toolbar's Clean clears every finished job at once."),
+                    st.s.remove_confirm_clean,
+                    Msg::ConfirmClean,
+                ),
+            ],
+        ),
+        set_section(
+            t,
+            "File tracking",
+            vec![toggle_row(
+                t,
+                "Forget downloads whose files are gone",
+                Some(
+                    "Watch what each download has on disk (the saved file, or \
                          the cached parts of an unfinished one) and clear its entry \
                          as soon as that is no longer there. Nothing is deleted, and \
-                         an entry on a drive that is unplugged is kept."
-                    ),
-                    st.s.forget_moved_files,
-                    Msg::ForgetMovedFiles
-                )]
-            ),
-        ]
-        .spacing(SECTION_GAP)
-        .into(),
+                         an entry on a drive that is unplugged is kept.",
+                ),
+                st.s.forget_moved_files,
+                Msg::ForgetMovedFiles,
+            )],
+        ),
+    ]);
+    pane(
+        t,
+        Section::General,
+        iced::widget::Column::with_children(sections)
+            .spacing(SECTION_GAP)
+            .into(),
     )
 }
 
@@ -2706,80 +2719,85 @@ fn browser_section(st: &State) -> Element<'_, Msg> {
 
 fn notifications_section(st: &State) -> Element<'_, Msg> {
     let t = &st.tokens;
+    let mut sections: Vec<Element<'_, Msg>> = Vec::new();
+    sections.extend([
+        set_section(
+            t,
+            "Download complete",
+            vec![
+                toggle_row(
+                    t,
+                    "Show dialog",
+                    Some("Opens the job's window with a summary and what to do next."),
+                    st.s.show_complete_dialog,
+                    Msg::ShowCompleteDialog,
+                ),
+                toggle_row(
+                    t,
+                    "System notification",
+                    Some("Reports the finished file without taking focus."),
+                    st.s.notify_complete,
+                    Msg::NotifyComplete,
+                ),
+            ],
+        ),
+        set_section(
+            t,
+            "Download failed",
+            vec![
+                toggle_row(
+                    t,
+                    "Show dialog",
+                    Some("Opens the job's window on the error, where you can retry."),
+                    st.s.show_failed_dialog,
+                    Msg::ShowFailedDialog,
+                ),
+                toggle_row(
+                    t,
+                    "System notification",
+                    Some("Reports the failure without taking focus."),
+                    st.s.notify_failed,
+                    Msg::NotifyFailed,
+                ),
+            ],
+        ),
+        set_section(
+            t,
+            "Download needs an answer",
+            vec![
+                toggle_row(
+                    t,
+                    "Show dialog",
+                    Some(
+                        "Opens the job's window on the question, a file that changed \
+                             on the server or a name already taken, so you can answer it.",
+                    ),
+                    st.s.show_conflict_dialog,
+                    Msg::ShowConflictDialog,
+                ),
+                toggle_row(
+                    t,
+                    "System notification",
+                    Some(
+                        "Says the download stopped and is waiting, without taking focus. \
+                             It stays stopped until you answer.",
+                    ),
+                    st.s.notify_conflict,
+                    Msg::NotifyConflict,
+                ),
+            ],
+        ),
+    ]);
+    // Nothing announces a version this build cannot install.
+    if crate::domain::SELF_UPDATE {
+        sections.push(set_section(t, "New version available", update_rows(st)));
+    }
     pane(
         t,
         Section::Notifications,
-        column![
-            set_section(
-                t,
-                "Download complete",
-                vec![
-                    toggle_row(
-                        t,
-                        "Show dialog",
-                        Some("Opens the job's window with a summary and what to do next."),
-                        st.s.show_complete_dialog,
-                        Msg::ShowCompleteDialog,
-                    ),
-                    toggle_row(
-                        t,
-                        "System notification",
-                        Some("Reports the finished file without taking focus."),
-                        st.s.notify_complete,
-                        Msg::NotifyComplete,
-                    ),
-                ],
-            ),
-            set_section(
-                t,
-                "Download failed",
-                vec![
-                    toggle_row(
-                        t,
-                        "Show dialog",
-                        Some("Opens the job's window on the error, where you can retry."),
-                        st.s.show_failed_dialog,
-                        Msg::ShowFailedDialog,
-                    ),
-                    toggle_row(
-                        t,
-                        "System notification",
-                        Some("Reports the failure without taking focus."),
-                        st.s.notify_failed,
-                        Msg::NotifyFailed,
-                    ),
-                ],
-            ),
-            set_section(
-                t,
-                "Download needs an answer",
-                vec![
-                    toggle_row(
-                        t,
-                        "Show dialog",
-                        Some(
-                            "Opens the job's window on the question, a file that changed \
-                             on the server or a name already taken, so you can answer it.",
-                        ),
-                        st.s.show_conflict_dialog,
-                        Msg::ShowConflictDialog,
-                    ),
-                    toggle_row(
-                        t,
-                        "System notification",
-                        Some(
-                            "Says the download stopped and is waiting, without taking focus. \
-                             It stays stopped until you answer.",
-                        ),
-                        st.s.notify_conflict,
-                        Msg::NotifyConflict,
-                    ),
-                ],
-            ),
-            set_section(t, "New version available", update_rows(st)),
-        ]
-        .spacing(SECTION_GAP)
-        .into(),
+        iced::widget::Column::with_children(sections)
+            .spacing(SECTION_GAP)
+            .into(),
     )
 }
 

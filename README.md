@@ -78,6 +78,26 @@ Outputs:
 - `target/release/oxdm`: main app
 - `target/release/oxdm-native-host`: browser native-messaging bridge
 
+### Packaging oxdm
+
+If you are building oxdm for a distro repository, a Flatpak, or any
+other channel where a package manager owns the installed files, build
+it with:
+
+```bash
+OXDM_NO_SELF_UPDATE=1 cargo build --release --bins
+```
+
+That build never checks for a new version, never downloads one, and
+offers no way to install one: About shows the version and nothing else,
+and the update rows disappear from Settings → General and Settings →
+Notifications. The daemon refuses update requests over its own IPC
+socket too, so nothing left over from a previous install can start a
+self-install behind the package manager's back.
+
+Leave it unset for anything users install themselves — the tarball, the
+install scripts, a local build.
+
 For development there is also `cargo run -p oxdm-testserver`, a local
 server whose endpoints each misbehave in one specific way (no ranges,
 unknown length, wrong checksums, ranges advertised but ignored). Its

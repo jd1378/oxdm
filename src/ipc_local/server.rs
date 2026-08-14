@@ -570,7 +570,32 @@ fn job_err_string(e: JobError) -> String {
     e.to_string()
 }
 
+/// Every request that would move a build towards replacing its own
+/// files. Refused outright where the files are a package manager's.
+///
+/// The windows hide their update surfaces in such a build, so nothing
+/// oxdm ships sends these. This is the boundary, not the UI: an older
+/// window left running across an upgrade, or anything else holding the
+/// socket, must not be able to start a self-install either.
+fn is_self_update_request(req: &Request) -> bool {
+    matches!(
+        req,
+        Request::UpdateCheck
+            | Request::UpdateState
+            | Request::CancelUpdate
+            | Request::InstallUpdate
+            | Request::AddUpdateJob(_)
+    )
+}
+
 async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
+    if !crate::domain::SELF_UPDATE && is_self_update_request(&req) {
+        return Reply::Err(
+            "this build does not update itself — it is installed and updated by \
+             your package manager"
+                .to_owned(),
+        );
+    }
     match req {
         Request::Auth(_) => unreachable!("auth handled in the conn loop"),
         Request::Ping => Reply::Ok,
