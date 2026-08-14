@@ -163,11 +163,14 @@ pub fn load() -> UiPrefs {
     prefs
 }
 
-/// Written beside the target and renamed over it, so a crash or a
-/// power cut leaves either the old file or the new one — never a
-/// truncated one that `load` would silently answer with defaults.
-/// The temp name carries the pid because every window kind is its own
-/// process and two of them can save at once.
+/// Written beside the target and renamed over it, so a reader sees the
+/// old file or the new one and never half of one. Every window kind is
+/// its own process, so two can save at once — hence both the rename and
+/// the pid in the temp name.
+///
+/// Deliberately not fsynced: this file holds window size, columns and
+/// the sidebar view. Losing it to a power cut costs a re-tune, which is
+/// not worth a disk flush on every sidebar click.
 pub fn save(prefs: &UiPrefs) {
     let Some(path) = prefs_path() else { return };
     save_at(&path, prefs);
@@ -181,20 +184,9 @@ fn save_at(path: &std::path::Path, prefs: &UiPrefs) {
         return;
     };
     let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
-    if write_synced(&tmp, &bytes).is_err() || std::fs::rename(&tmp, path).is_err() {
+    if std::fs::write(&tmp, &bytes).is_err() || std::fs::rename(&tmp, path).is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
-}
-
-/// The bytes have to reach the disk before the rename, or a crash can
-/// leave the rename applied and the content still in cache — an empty
-/// file under the real name, which is the case the rename is here to
-/// prevent.
-fn write_synced(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut f = std::fs::File::create(path)?;
-    f.write_all(bytes)?;
-    f.sync_all()
 }
 
 pub fn save_window(w: WindowPrefs) {
