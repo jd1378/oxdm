@@ -1521,10 +1521,8 @@ impl AppState {
     /// Nothing is replaced here: the helper stops at `ready` and waits
     /// for [`Self::install_update`].
     ///
-    /// An installed build's artifact is an archive of all three
-    /// programs, unpacked here so the helper only has to move files. A
-    /// bundle is one file and is handed over as it is — replacing the
-    /// AppImage replaces everything inside it.
+    /// The artifact is an archive of all three programs, unpacked here
+    /// so the helper only has to move files.
     pub async fn stage_update(self: &Arc<Self>, artifact: std::path::PathBuf) {
         let Some(pending) = self.pending_update().await else {
             return;
@@ -1537,13 +1535,7 @@ impl AppState {
                 return;
             }
         };
-        // What gets replaced. Inside an AppImage, `current_exe` is a
-        // path in a read-only mount that vanishes when the app exits —
-        // replacing it would update nothing. The bundle is the file the
-        // user launched and the file the feed's artifact is a new
-        // version of.
-        let bundle = crate::data::update_channel::running_as_appimage();
-        let exe = bundle.clone().unwrap_or_else(|| running.clone());
+        let exe = running.clone();
         // Asked before anything is staged, and long before the app
         // quits to be replaced. An install the user put somewhere they
         // cannot write — `sudo cp` into /usr/local/bin is the usual
@@ -1568,43 +1560,37 @@ impl AppState {
             }
         };
 
-        // One file for a bundle; for an installed build, the programs
-        // unpacked out of the archive that was just verified.
-        let source = match &bundle {
-            Some(_) => ("--artifact", artifact.clone()),
-            None => {
-                // Appended, not `with_extension`: the artifact is
-                // named after a version, and replacing the last dotted
-                // segment of "oxdm-update-9.9.9" would land two
-                // releases in the same directory.
-                let dest = artifact.with_file_name(format!(
-                    "{}.payload",
-                    artifact.file_name().unwrap_or_default().to_string_lossy()
-                ));
-                // Whatever an interrupted attempt left there is not
-                // part of this update.
-                let _ = std::fs::remove_dir_all(&dest);
-                let from = artifact.clone();
-                let to = dest.clone();
-                match tokio::task::spawn_blocking(move || {
-                    crate::data::update_bundle::extract(&from, &to)
-                })
-                .await
-                {
-                    Ok(Ok(_)) => ("--payload", dest),
-                    Ok(Err(e)) => {
-                        self.fail_update(format!("the update could not be unpacked: {e}"))
-                            .await;
-                        return;
-                    }
-                    Err(e) => {
-                        self.fail_update(format!("unpacking the update panicked: {e}"))
-                            .await;
-                        return;
-                    }
-                }
+        // The programs, unpacked out of the archive that was just
+        // verified.
+        //
+        // Appended, not `with_extension`: the artifact is named after a
+        // version, and replacing the last dotted segment of
+        // "oxdm-update-9.9.9" would land two releases in the same
+        // directory.
+        let payload = artifact.with_file_name(format!(
+            "{}.payload",
+            artifact.file_name().unwrap_or_default().to_string_lossy()
+        ));
+        // Whatever an interrupted attempt left there is not part of
+        // this update.
+        let _ = std::fs::remove_dir_all(&payload);
+        let from = artifact.clone();
+        let to = payload.clone();
+        match tokio::task::spawn_blocking(move || crate::data::update_bundle::extract(&from, &to))
+            .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                self.fail_update(format!("the update could not be unpacked: {e}"))
+                    .await;
+                return;
             }
-        };
+            Err(e) => {
+                self.fail_update(format!("unpacking the update panicked: {e}"))
+                    .await;
+                return;
+            }
+        }
 
         let mut cmd = tokio::process::Command::new(&updater);
         // The updater outlives this process by design, and a child that
@@ -1620,8 +1606,8 @@ impl AppState {
             .arg(&exe)
             .arg("--pid")
             .arg(std::process::id().to_string())
-            .arg(source.0)
-            .arg(&source.1)
+            .arg("--payload")
+            .arg(&payload)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
@@ -4811,10 +4797,8 @@ impl AppState {
     }
 
     pub async fn update_channel(&self) -> Arc<dyn UpdateChannel> {
-        // Built per call rather than held: which feed this build reads
-        // depends on how it is *running* — an AppImage updates itself
-        // with an AppImage — and constructing one costs nothing until
-        // it is asked a question.
+        // Built per call rather than held: constructing one costs
+        // nothing until it is asked a question.
         crate::data::update_channel::built_in()
     }
 

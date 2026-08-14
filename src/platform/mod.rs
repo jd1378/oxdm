@@ -149,29 +149,12 @@ pub fn install_desktop_entry() -> Result<std::path::PathBuf, String> {
     Err("Create Desktop Entry is Linux-only".into())
 }
 
-/// Is this process running from an AppImage, and if so where is the
-/// bundle?
-///
-/// The AppImage runtime exports `APPIMAGE` with the bundle's own path.
-/// It matters wherever we record a path to run later: [`current_exe`]
-/// points *inside* the bundle's mount (`/tmp/.mount_oxdmXXXX/usr/bin/
-/// oxdm`), which is unmounted the moment the app exits.
-pub fn bundle_path() -> Option<std::path::PathBuf> {
-    std::env::var_os("APPIMAGE")
-        .map(std::path::PathBuf::from)
-        .filter(|p| p.is_absolute())
-}
-
 /// The path an autostart entry, launcher or Run key should name.
 ///
-/// The bundle when there is one, so the entry survives the mount going
-/// away; otherwise the running binary, by way of [`current_exe`] so a
-/// binary replaced under a running daemon does not get recorded with
-/// `" (deleted)"` glued to its name.
+/// The running binary, by way of [`current_exe`] so a binary replaced
+/// under a running daemon does not get recorded with `" (deleted)"`
+/// glued to its name.
 fn launch_target() -> Result<std::path::PathBuf, String> {
-    if let Some(bundle) = bundle_path() {
-        return Ok(bundle);
-    }
     current_exe().map_err(|e| e.to_string())
 }
 
@@ -324,7 +307,7 @@ pub fn set_autostart(enabled: bool) -> Result<(), String> {
 ///
 /// The entry records an absolute path, and the path can stop being
 /// right without the setting ever being touched: oxdm was moved, or
-/// reinstalled elsewhere, or an AppImage was renamed. The setting then
+/// reinstalled elsewhere, or renamed. The setting then
 /// reads "on" while nothing starts at login. Same reasoning as the
 /// browser manifests in [`crate::ipc::manifest_check`], and the same
 /// deliberate limit: an entry the user edited by hand keeps whatever

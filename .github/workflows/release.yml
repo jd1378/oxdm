@@ -6,14 +6,10 @@ name: GitHub release
 #     LICENSE. One archive per target, on every platform: it is what a
 #     person downloads *and* what the in-app updater fetches, which
 #     takes the two programs out of it by name and ignores the rest.
-#   - oxdm-<tag>-<arch>.AppImage on desktop Linux, for people who
-#     prefer a bundle; the installer script does not use it
 #   - <asset>.sha256 beside every one of them
-#   - update-<target>.json and, where there is a bundle,
-#     update-<target>-appimage.json — the feeds the in-app updater
-#     reads. Each names one artifact and carries its digest, which the
-#     updater verifies before replacing anything. The app picks the
-#     flavour at run time by whether it was launched from a bundle.
+#   - update-<target>.json — the feed the in-app updater reads. It
+#     names the archive and carries its digest, which the updater
+#     verifies before replacing anything.
 #
 # The feeds are fetched from the `latest` release, so their URLs are
 # stable across releases:
@@ -178,13 +174,14 @@ jobs:
           #
           # A dynamically linked musl target would work on Alpine, at
           # which point it is no longer the portable static binary
-          # people ask musl for. Old-glibc systems are what the
-          # AppImage is for.
+          # people ask musl for.
           #
-          # `appimage: true` marks the Linux targets that also get a
-          # single-file bundle.
-          - { target: x86_64-unknown-linux-gnu    , os: ubuntu-latest,    appimage: true }
-          - { target: aarch64-unknown-linux-gnu   , os: ubuntu-24.04-arm, appimage: true }
+          # The glibc these link against is the runner's, and that is
+          # the floor for the release: a distro older than the runner
+          # cannot run it. Moving the floor means moving the build
+          # host, not adding a bundle format on top.
+          - { target: x86_64-unknown-linux-gnu    , os: ubuntu-latest }
+          - { target: aarch64-unknown-linux-gnu   , os: ubuntu-24.04-arm }
           - { target: x86_64-apple-darwin         , os: macos-15-intel }
           - { target: aarch64-apple-darwin        , os: macos-14 }
           - { target: x86_64-pc-windows-msvc      , os: windows-2025 }
@@ -300,112 +297,6 @@ jobs:
         echo "PKG_NAME=${PKG_NAME}" >> $GITHUB_OUTPUT
         echo "PKG_PATH=${PKG_STAGING}/${PKG_NAME}" >> $GITHUB_OUTPUT
 
-    - name: Build AppImage
-      id: appimage
-      if: matrix.job.appimage
-      shell: bash
-      run: |
-        set -euo pipefail
-        TAG="${{ needs.crate_metadata.outputs.tag }}"
-        TARGET="${{ matrix.job.target }}"
-        case "$TARGET" in
-          x86_64-*)  ARCH=x86_64 ;;
-          aarch64-*) ARCH=aarch64 ;;
-          *) echo "::error::no AppImage runtime for $TARGET"; exit 1 ;;
-        esac
-
-        APPDIR="_cicd-intermediates/AppDir"
-        mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/applications" \
-                 "$APPDIR/usr/share/icons/hicolor/512x512/apps"
-
-        for bin in oxdm oxdm-native-host; do
-          install -Dm755 "${{ steps.bin.outputs.OUT_DIR }}/${bin}" "$APPDIR/usr/bin/${bin}"
-        done
-        install -Dm644 assets/oxdm_idle_light.png \
-          "$APPDIR/usr/share/icons/hicolor/512x512/apps/oxdm.png"
-        cp "$APPDIR/usr/share/icons/hicolor/512x512/apps/oxdm.png" "$APPDIR/oxdm.png"
-
-        cat > "$APPDIR/oxdm.desktop" <<'EOF'
-        [Desktop Entry]
-        Type=Application
-        Name=oxdm
-        Comment=Cross-platform download manager
-        Exec=oxdm %U
-        Icon=oxdm
-        Terminal=false
-        Categories=Network;FileTransfer;
-        StartupNotify=true
-        StartupWMClass=oxdm
-        EOF
-        cp "$APPDIR/oxdm.desktop" "$APPDIR/usr/share/applications/oxdm.desktop"
-
-        # The AppImage is one file that is also the executable, which
-        # is exactly what the in-app updater swaps itself with. AppRun
-        # keeps the bundled siblings reachable: oxdm spawns its own
-        # windows and the updater by path next to itself.
-        cat > "$APPDIR/AppRun" <<'EOF'
-        #!/bin/sh
-        HERE="$(dirname "$(readlink -f "$0")")"
-        export PATH="$HERE/usr/bin:$PATH"
-        exec "$HERE/usr/bin/oxdm" "$@"
-        EOF
-        chmod +x "$APPDIR/AppRun"
-
-        # Built by hand rather than with appimagetool, because what
-        # appimagetool produces today does not run on a large share of
-        # desktops.
-        #
-        # Its `continuous` build bundles a zstd-only mksquashfs and
-        # stamps the new static-pie runtime. AppImageLauncher — which
-        # several distros install by default and which takes over every
-        # AppImage through binfmt_misc — carries an older libappimage
-        # that reads neither: zstd it rejects outright ("uses (null)
-        # compression"), and the static-pie runtime confuses its offset
-        # calculation ("this doesn't look like a squashfs image").
-        # Upstream's own appimagetool AppImage fails the same way on
-        # such a machine.
-        #
-        # So: the classic AppImageKit runtime, which every AppImage
-        # that does work there uses, and an xz payload, which its
-        # squashfuse can read. mksquashfs is the distro's own, so
-        # nothing needs an AppImage to build one.
-        #
-        # The cost of the classic runtime is that it wants libfuse2 at
-        # run time; where that is missing, `--appimage-extract-and-run`
-        # still works, and the tarball is the better answer anyway.
-        fetch() {
-          curl -fsSL --retry 6 --retry-all-errors --retry-delay 5 \
-            --connect-timeout 20 -o "$1" "$2"
-        }
-        fetch "runtime-${ARCH}" \
-          "https://github.com/AppImage/AppImageKit/releases/download/continuous/runtime-${ARCH}"
-
-        APPIMAGE_NAME="${{ needs.crate_metadata.outputs.name }}-${TAG}-${ARCH}.AppImage"
-        sudo apt-get install -y --no-install-recommends squashfs-tools >/dev/null
-        mksquashfs "$APPDIR" payload.squashfs \
-          -root-owned -noappend -no-progress \
-          -comp xz -b 128K -Xdict-size 100%
-        cat "runtime-${ARCH}" payload.squashfs \
-          > "_cicd-intermediates/${APPIMAGE_NAME}"
-        chmod +x "_cicd-intermediates/${APPIMAGE_NAME}"
-
-        # A structural check, so a broken layout fails here rather than
-        # on somebody's desktop: the payload has to start exactly where
-        # the runtime says it does.
-        OFFSET=$(stat -c %s "runtime-${ARCH}")
-        MAGIC=$(dd if="_cicd-intermediates/${APPIMAGE_NAME}" bs=1 \
-          skip="$OFFSET" count=4 2>/dev/null)
-        if [ "$MAGIC" != "hsqs" ]; then
-          echo "::error::no squashfs at offset $OFFSET (found '${MAGIC}')"
-          exit 1
-        fi
-        unsquashfs -l -o "$OFFSET" "_cicd-intermediates/${APPIMAGE_NAME}" \
-          | grep -q 'squashfs-root/usr/bin/oxdm$' \
-          || { echo "::error::AppImage payload has no oxdm in it"; exit 1; }
-
-        echo "APPIMAGE_NAME=${APPIMAGE_NAME}" >> $GITHUB_OUTPUT
-        echo "APPIMAGE_PATH=_cicd-intermediates/${APPIMAGE_NAME}" >> $GITHUB_OUTPUT
-
     - name: Stage the updatable artifact, checksums and update feed
       id: publish
       shell: bash
@@ -426,14 +317,7 @@ jobs:
         # step. An installed build replaces both programs — leaving the
         # host behind would pair a new app with an older program
         # speaking to it.
-        #
-        # An AppImage needs none of this. One file holds all three, so
-        # the bundle is its own artifact.
         SINGLE_NAME="${{ steps.package.outputs.PKG_NAME }}"
-        APPIMAGE_NAME="${{ steps.appimage.outputs.APPIMAGE_NAME }}"
-        if [ -n "$APPIMAGE_NAME" ]; then
-          cp "${{ steps.appimage.outputs.APPIMAGE_PATH }}" "$STAGING/$APPIMAGE_NAME"
-        fi
         cp "${{ steps.package.outputs.PKG_PATH }}" "$STAGING/"
 
         # A digest beside every asset, and the same digest inside the
@@ -448,14 +332,10 @@ jobs:
           fi
         done
         SINGLE_SHA=$(cut -d' ' -f1 < "${SINGLE_NAME}.sha256")
-        if [ -n "$APPIMAGE_NAME" ]; then
-          APPIMAGE_SHA=$(cut -d' ' -f1 < "${APPIMAGE_NAME}.sha256")
-        fi
         popd >/dev/null
 
-        # One feed per flavour. `update-<target>.json` is what an
-        # installed build reads; `update-<target>-appimage.json` is
-        # what the same build reads when it was launched from a bundle.
+        # One feed per target: `update-<target>.json`, naming the
+        # archive that build replaces itself with.
         write_feed() {
           cat > "$STAGING/$1" <<EOF
         {
@@ -467,9 +347,6 @@ jobs:
         EOF
         }
         write_feed "update-${TARGET}.json" "$SINGLE_NAME" "$SINGLE_SHA"
-        if [ -n "$APPIMAGE_NAME" ]; then
-          write_feed "update-${TARGET}-appimage.json" "$APPIMAGE_NAME" "$APPIMAGE_SHA"
-        fi
 
         echo "ARTIFACTS=${STAGING}/*" >> $GITHUB_OUTPUT
         echo "STAGING=${STAGING}" >> $GITHUB_OUTPUT

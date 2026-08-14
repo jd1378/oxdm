@@ -128,33 +128,17 @@ impl UpdateChannel for HttpFeedUpdateChannel {
     }
 }
 
-/// Is this process running from an AppImage?
+/// The feed for this build.
 ///
-/// The AppImage runtime exports `APPIMAGE` with the path of the bundle
-/// itself. It matters twice over: the artifact to fetch is a whole
-/// AppImage rather than a bare executable, and the file to replace is
-/// the bundle, not `current_exe()` — which points inside a read-only
-/// mount that disappears when the app exits.
-pub fn running_as_appimage() -> Option<std::path::PathBuf> {
-    crate::platform::bundle_path()
-}
-
-/// The feed for this build, as it is currently running.
-///
-/// Resolved per check rather than stored in settings: the same
-/// installed files can be launched as an AppImage or not, and each
-/// wants a different artifact. `releases/latest` keeps the URL stable
-/// across releases and resolves to the newest one not tagged as a
-/// pre-release.
+/// `releases/latest` keeps the URL stable across releases and resolves
+/// to the newest one not tagged as a pre-release.
 pub fn built_in_feed_url() -> String {
-    feed_url_for(env!("OXDM_TARGET"), running_as_appimage().is_some())
+    feed_url_for(env!("OXDM_TARGET"))
 }
 
-/// The feed naming the artifact this flavour of install replaces
-/// itself with.
-fn feed_url_for(target: &str, appimage: bool) -> String {
-    let flavour = if appimage { "-appimage" } else { "" };
-    format!("https://github.com/jd1378/oxdm/releases/latest/download/update-{target}{flavour}.json")
+/// The feed naming the artifact this build replaces itself with.
+fn feed_url_for(target: &str) -> String {
+    format!("https://github.com/jd1378/oxdm/releases/latest/download/update-{target}.json")
 }
 
 /// The channel this build updates through.
@@ -212,22 +196,16 @@ mod tests {
         assert!(channel_for("not a url").feed_url().is_none());
     }
 
-    /// An installed build and a bundle are updated with different
-    /// artifacts, so they read different feeds — and the same files
-    /// can be run either way, which is why this is decided per check
-    /// rather than stored.
+    /// A build reads the feed named for its own target: the artifact
+    /// it would install is the one built for the platform it runs on.
     #[test]
-    fn each_flavour_reads_its_own_feed() {
+    fn a_build_reads_the_feed_for_its_target() {
         assert!(
-            feed_url_for("x86_64-unknown-linux-gnu", false)
+            feed_url_for("x86_64-unknown-linux-gnu")
                 .ends_with("/update-x86_64-unknown-linux-gnu.json")
         );
-        assert!(
-            feed_url_for("x86_64-unknown-linux-gnu", true)
-                .ends_with("/update-x86_64-unknown-linux-gnu-appimage.json")
-        );
         // Always the `latest` release, so the URL survives releases.
-        assert!(feed_url_for("aarch64-apple-darwin", false).contains("/releases/latest/download/"));
+        assert!(feed_url_for("aarch64-apple-darwin").contains("/releases/latest/download/"));
     }
 
     /// There is one feed and this build knows it.

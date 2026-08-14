@@ -1,8 +1,8 @@
 //! Keeping the browser bridge registered, and noticing when it is not.
 //!
 //! A native-messaging manifest names the binary a browser will launch.
-//! It goes stale for ordinary reasons — oxdm was moved, reinstalled
-//! somewhere else, or updated as an AppImage — and each time the
+//! It goes stale for ordinary reasons — oxdm was moved or reinstalled
+//! somewhere else — and each time the
 //! extension silently stops being able to reach the app. It can also
 //! go wrong for a hostile reason: anything that can write to the
 //! user's home can point the manifest at a binary of its own, and the

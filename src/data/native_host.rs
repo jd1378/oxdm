@@ -85,13 +85,7 @@ pub struct Target {
 }
 
 /// The canonical `oxdm-native-host`, as an absolute path a browser can
-/// execute.
-///
-/// Normally it sits beside the running binary. An AppImage is the
-/// exception worth caring about: its contents live in a mount point
-/// that changes on every launch, so a manifest naming the path inside
-/// it works exactly once. There the host is copied out to oxdm's own
-/// data directory, which does not move.
+/// execute. It sits beside the running binary.
 pub fn host_binary() -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
     host_binary_beside(&exe)
@@ -105,9 +99,6 @@ fn host_binary_beside(exe: &Path) -> Result<PathBuf, String> {
         .ok_or_else(|| "the running binary has no parent directory".to_string())?;
     let name = format!("oxdm-native-host{}", std::env::consts::EXE_SUFFIX);
     let beside = dir.join(&name);
-    if crate::data::update_channel::running_as_appimage().is_some() {
-        return persist_host_copy(&beside, &name);
-    }
     if !beside.exists() {
         // Said in full, because this is what a user sees when a
         // browser stops capturing: which file, where it was looked
@@ -123,42 +114,6 @@ fn host_binary_beside(exe: &Path) -> Result<PathBuf, String> {
     }
     std::fs::canonicalize(&beside)
         .map_err(|e| format!("{name} is in {} but cannot be read: {e}", dir.display()))
-}
-
-/// Copy the host out of an AppImage mount into a path that survives
-/// the next launch. Re-copied whenever the sizes differ, which is the
-/// cheap half of "did the bundle change" — an update replaces both
-/// binaries at once, so a stale copy would be talking a protocol the
-/// app has moved on from.
-fn persist_host_copy(inside_bundle: &Path, name: &str) -> Result<PathBuf, String> {
-    let dir = dirs::data_dir()
-        .ok_or_else(|| "no data directory".to_string())?
-        .join("oxdm");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-    let dest = dir.join(name);
-    let same_size = match (std::fs::metadata(inside_bundle), std::fs::metadata(&dest)) {
-        (Ok(a), Ok(b)) => a.len() == b.len(),
-        _ => false,
-    };
-    if !same_size {
-        std::fs::copy(inside_bundle, &dest).map_err(|e| {
-            format!(
-                "copy {} -> {}: {e}",
-                inside_bundle.display(),
-                dest.display()
-            )
-        })?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perm = std::fs::metadata(&dest)
-                .map_err(|e| format!("stat {}: {e}", dest.display()))?
-                .permissions();
-            perm.set_mode(0o755);
-            let _ = std::fs::set_permissions(&dest, perm);
-        }
-    }
-    Ok(dest)
 }
 
 /// Install (or refresh) the manifests for every browser found.

@@ -23,11 +23,10 @@
 //!
 //! ```text
 //! oxdm --install-update --exe <PATH> --pid <PID> --payload <DIR>
-//! oxdm --install-update --exe <PATH> --pid <PID> --artifact <PATH>
 //! ```
 //!
-//! The artifact form is for an AppImage, which is one file holding
-//! everything; the payload form is a directory of programs.
+//! The payload is a directory of programs, unpacked from the release
+//! archive before any of this runs.
 //!
 //! Nothing here hashes the artifact. The download manager checked it
 //! against the digest the feed published before any of this ran.
@@ -80,21 +79,14 @@ struct Args {
     /// from here would run as root, own every file it touched, and be
     /// a worse problem than the one being solved.
     swap_only: bool,
-    /// What to install: a directory of programs, or the single file an
-    /// AppImage build replaces itself with.
-    source: Source,
-}
-
-enum Source {
-    Payload(PathBuf),
-    Artifact(PathBuf),
+    /// The directory of programs to install.
+    payload: PathBuf,
 }
 
 fn parse_args(argv: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut argv = argv;
     let mut exe: Option<PathBuf> = None;
     let mut pid: Option<u32> = None;
-    let mut artifact: Option<PathBuf> = None;
     let mut payload: Option<PathBuf> = None;
     let mut swap_only = false;
     while let Some(flag) = argv.next() {
@@ -110,22 +102,16 @@ fn parse_args(argv: impl Iterator<Item = String>) -> Result<Args, String> {
         match flag.as_str() {
             "--exe" => exe = Some(PathBuf::from(val)),
             "--pid" => pid = Some(val.parse().map_err(|_| "invalid pid".to_string())?),
-            "--artifact" => artifact = Some(PathBuf::from(val)),
             "--payload" => payload = Some(PathBuf::from(val)),
             other => return Err(format!("unknown flag: {other}")),
         }
     }
-    let source = match (payload, artifact) {
-        (Some(dir), _) => Source::Payload(dir),
-        (None, Some(file)) => Source::Artifact(file),
-        (None, None) => return Err("missing --payload or --artifact".into()),
-    };
     Ok(Args {
         exe: exe.ok_or_else(|| "missing --exe".to_string())?,
         // An elevated run is handed the swap alone; there is no parent
         // left to wait for by then.
         pid: pid.unwrap_or(0),
-        source,
+        payload: payload.ok_or_else(|| "missing --payload".to_string())?,
         swap_only,
     })
 }
@@ -181,9 +167,7 @@ async fn run(args: Args) -> Result<(), String> {
     // it: it is not part of "the install either happened or it did
     // not", it is the user's own directory even when the programs are
     // root's, and it must never be the reason an update reports failure.
-    if let Source::Payload(dir) = &args.source {
-        refresh_icon(dir);
-    }
+    refresh_icon(&args.payload);
 
     // 4. Relaunch from the same path. Detach so this updater can exit.
     spawn_detached(&args.exe).map_err(|e| format!("relaunch: {e}"))?;
@@ -193,16 +177,13 @@ async fn run(args: Args) -> Result<(), String> {
 }
 
 fn swap(args: &Args) -> Result<(), String> {
-    match &args.source {
-        Source::Artifact(file) => swap_executable(file, &args.exe),
-        Source::Payload(dir) => install_payload(dir, &args.exe),
-    }
+    install_payload(&args.payload, &args.exe)
 }
 
 /// Is this the kind of failure administrator rights would fix?
 ///
-/// Matched on the message rather than on an error kind because the two
-/// swap paths fold several IO calls into one string; a false positive
+/// Matched on the message rather than on an error kind because the
+/// swap folds several IO calls into one string; a false positive
 /// costs one prompt the user can dismiss, a false negative costs them
 /// the update.
 fn needs_rights(reason: &str) -> bool {
@@ -236,17 +217,13 @@ fn elevated_swap(args: &Args) -> Result<(), String> {
 /// read without a password prompt: `--swap-only` and no `--pid`, so it
 /// waits for nothing and relaunches nothing.
 fn elevated_args(args: &Args) -> Vec<String> {
-    let (flag, value) = match &args.source {
-        Source::Artifact(file) => ("--artifact", file.display().to_string()),
-        Source::Payload(dir) => ("--payload", dir.display().to_string()),
-    };
     vec![
         "--install-update".to_owned(),
         "--swap-only".to_owned(),
         "--exe".to_owned(),
         args.exe.display().to_string(),
-        flag.to_owned(),
-        value,
+        "--payload".to_owned(),
+        args.payload.display().to_string(),
     ]
 }
 
@@ -393,9 +370,9 @@ fn install_payload(dir: &PathBuf, exe: &Path) -> Result<(), String> {
 /// that afterwards, so a release that changed the icon reached new
 /// installs only.
 ///
-/// Only ever *overwrites*: an install with no icon there is an
-/// AppImage, a portable copy, or someone who set `OXDM_NO_DESKTOP`, and
-/// an updater is not the place to start creating desktop integration
+/// Only ever *overwrites*: an install with no icon there is a
+/// portable copy or someone who set `OXDM_NO_DESKTOP`, and an
+/// updater is not the place to start creating desktop integration
 /// the user declined. Every failure is silent for the same reason the
 /// call site is outside the swap — a stale picture is not a failed
 /// update.
@@ -728,9 +705,9 @@ mod tests {
     }
 
     /// No icon installed means no desktop integration to refresh. An
-    /// updater that created one would be adding a launcher entry to an
-    /// AppImage, a portable copy, or an install that passed
-    /// `OXDM_NO_DESKTOP` precisely to avoid it.
+    /// updater that created one would be adding a launcher entry to a
+    /// portable copy, or to an install that passed `OXDM_NO_DESKTOP`
+    /// precisely to avoid it.
     #[cfg(target_os = "linux")]
     #[test]
     fn an_install_without_an_icon_is_left_alone() {
@@ -757,7 +734,7 @@ mod tests {
         let args = Args {
             exe: PathBuf::from("/usr/local/bin/oxdm"),
             pid: 4321,
-            source: Source::Payload(PathBuf::from("/tmp/staged")),
+            payload: PathBuf::from("/tmp/staged"),
             swap_only: false,
         };
         let argv = elevated_args(&args);

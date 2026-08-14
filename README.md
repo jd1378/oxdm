@@ -60,20 +60,6 @@ irm https://raw.githubusercontent.com/jd1378/oxdm/main/tools/install.ps1 | iex
 
 Installs to `%LOCALAPPDATA%\Programs\oxdm`, adds it to your user PATH, drops a Start-menu shortcut.
 
-### AppImage (Linux)
-
-Desktop Linux releases also carry `oxdm-<tag>-<arch>.AppImage` for
-people who prefer a bundle. Download it from the
-[releases page](https://github.com/jd1378/oxdm/releases), `chmod +x`
-it, and run it. There is nothing to install and the installer script
-does not use it.
-
-It needs FUSE 2 to mount itself, which most desktops have and Ubuntu
-22.04 and later do not (`sudo apt install libfuse2`). Without it, the
-bundle still runs with `./oxdm-<tag>-<arch>.AppImage
---appimage-extract-and-run`, and the tarball above avoids the question
-entirely.
-
 ### Build from source
 
 ```bash
