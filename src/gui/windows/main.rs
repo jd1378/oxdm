@@ -3925,9 +3925,10 @@ fn statusbar(m: &Main) -> Element<'_, Msg> {
         && let crate::domain::QueueSchedule::Once { start, .. } = queue.schedule
     {
         left = left.push(sep()).push(
+            // Unnamed: the queue it belongs to is two segments to the
+            // left, on the same line.
             text(format!(
-                "{} scheduled for {}",
-                queue.name,
+                "Scheduled for {}",
                 crate::gui::format::schedule_when(start, chrono::Local::now())
             ))
             .font(theme::BODY)
