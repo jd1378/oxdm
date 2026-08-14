@@ -133,14 +133,38 @@ pub fn load() -> UiPrefs {
     prefs
 }
 
+/// Written beside the target and renamed over it, so a crash or a
+/// power cut leaves either the old file or the new one — never a
+/// truncated one that `load` would silently answer with defaults.
+/// The temp name carries the pid because every window kind is its own
+/// process and two of them can save at once.
 pub fn save(prefs: &UiPrefs) {
     let Some(path) = prefs_path() else { return };
+    save_at(&path, prefs);
+}
+
+fn save_at(path: &std::path::Path, prefs: &UiPrefs) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    if let Ok(bytes) = serde_json::to_vec_pretty(prefs) {
-        let _ = std::fs::write(path, bytes);
+    let Ok(bytes) = serde_json::to_vec_pretty(prefs) else {
+        return;
+    };
+    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    if write_synced(&tmp, &bytes).is_err() || std::fs::rename(&tmp, path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
+}
+
+/// The bytes have to reach the disk before the rename, or a crash can
+/// leave the rename applied and the content still in cache — an empty
+/// file under the real name, which is the case the rename is here to
+/// prevent.
+fn write_synced(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::File::create(path)?;
+    f.write_all(bytes)?;
+    f.sync_all()
 }
 
 pub fn save_window(w: WindowPrefs) {
@@ -165,4 +189,34 @@ pub fn save_columns(c: &ColumnsState) {
     let mut prefs = load();
     prefs.columns = Some(c.clone());
     save(&prefs);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The file is replaced whole, and the scratch copy never survives
+    /// the save that made it.
+    #[test]
+    fn a_save_replaces_the_file_and_leaves_nothing_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("oxdm").join("ui-prefs.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"{ truncated").unwrap();
+
+        let prefs = UiPrefs {
+            custom_window_chrome: Some(true),
+            ..UiPrefs::default()
+        };
+        save_at(&path, &prefs);
+
+        let back: UiPrefs = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(back.custom_window_chrome, Some(true));
+        let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.file_name()))
+            .filter(|n| n.to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "left {leftovers:?}");
+    }
 }
