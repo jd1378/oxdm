@@ -1292,12 +1292,37 @@ impl AppState {
         if !tally.queue_run {
             return;
         }
+        // Before the event, not after: an on-finish hook can shut the
+        // machine down, and a schedule still saying "once, at 14:00"
+        // when it comes back would run the whole thing again.
+        self.spend_one_off_schedule(queue_id).await;
         let _ = self.events.send(DomainEvent::QueueFinished {
             id: queue_id,
             completed: tally.completed,
             failed: tally.failed,
             needs_answer: tally.needs_answer,
         });
+    }
+
+    /// Put a queue back on Manual once the one-off it was booked for
+    /// has run. See [`QueueSchedule::spent_by_run`] for which schedules
+    /// this applies to and why.
+    ///
+    /// Failure is logged, not surfaced: the run itself succeeded, and
+    /// the worst a stale schedule does is offer the queue a second
+    /// start it can be told to skip.
+    async fn spend_one_off_schedule(self: &Arc<Self>, id: QueueId) {
+        let Some(mut queue) = self.queue(id).await else {
+            return;
+        };
+        if !queue.schedule.spent_by_run(chrono::Local::now()) {
+            return;
+        }
+        queue.schedule = crate::domain::QueueSchedule::Manual;
+        match self.upsert_queue(queue).await {
+            Ok(()) => tracing::info!(queue = %id, "one-off schedule ran; back to manual"),
+            Err(e) => tracing::warn!(queue = %id, error = %e, "cannot clear the one-off schedule"),
+        }
     }
 
     /// Record one job's terminal outcome against its queue's current

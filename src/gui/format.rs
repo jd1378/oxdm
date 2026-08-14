@@ -132,3 +132,74 @@ mod ext_tests {
         assert_eq!(ext_label(Some("  ")), "LINK");
     }
 }
+
+/// When a one-off queue schedule is booked for, said the way a person
+/// would say it.
+///
+/// "today" and "tomorrow" are what the near cases are actually called;
+/// a bare date for them makes the reader work out which day that is.
+/// Everything else gets the full date — including the year, because a
+/// queue booked for a date without one is ambiguous the moment the
+/// booking is months out.
+///
+/// `now` is passed in rather than read here so the boundaries are
+/// testable: "tomorrow" is the calendar day after today's, not
+/// twenty-four hours from this instant.
+pub fn schedule_when(
+    start: chrono::DateTime<chrono::Local>,
+    now: chrono::DateTime<chrono::Local>,
+) -> String {
+    use chrono::Datelike;
+    let time = start.format("%H:%M");
+    let (today, day) = (now.date_naive(), start.date_naive());
+    if day == today {
+        format!("today {time}")
+    } else if day == today.succ_opt().unwrap_or(today) {
+        format!("tomorrow {time}")
+    } else {
+        format!("{} {} {} {time}", day.day(), day.format("%B"), day.year())
+    }
+}
+
+#[cfg(test)]
+mod schedule_when_tests {
+    use chrono::{Local, TimeZone};
+
+    use super::schedule_when;
+
+    fn at(y: i32, m: u32, d: u32, h: u32, min: u32) -> chrono::DateTime<Local> {
+        Local.with_ymd_and_hms(y, m, d, h, min, 0).unwrap()
+    }
+
+    /// The near days are named, and the boundary is the calendar day —
+    /// 23:59 tonight is still today, and 00:01 is already tomorrow,
+    /// however few minutes separate them.
+    #[test]
+    fn today_and_tomorrow_are_named() {
+        let now = at(2026, 8, 14, 22, 30);
+        assert_eq!(schedule_when(at(2026, 8, 14, 23, 59), now), "today 23:59");
+        assert_eq!(schedule_when(at(2026, 8, 15, 0, 1), now), "tomorrow 00:01");
+        // Earlier today: still today. The queue may be running already.
+        assert_eq!(schedule_when(at(2026, 8, 14, 9, 0), now), "today 09:00");
+    }
+
+    /// Anything further out is a date, with the year on it.
+    #[test]
+    fn distant_days_get_the_full_date() {
+        let now = at(2026, 8, 14, 10, 0);
+        assert_eq!(
+            schedule_when(at(2026, 8, 16, 10, 0), now),
+            "16 August 2026 10:00"
+        );
+        assert_eq!(
+            schedule_when(at(2027, 1, 2, 7, 5), now),
+            "2 January 2027 07:05"
+        );
+        // A month boundary is not a special case, and neither is a
+        // year one: the day after tomorrow is a date like any other.
+        assert_eq!(
+            schedule_when(at(2026, 9, 1, 18, 0), now),
+            "1 September 2026 18:00"
+        );
+    }
+}

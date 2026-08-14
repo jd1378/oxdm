@@ -3917,6 +3917,25 @@ fn statusbar(m: &Main) -> Element<'_, Msg> {
     .spacing(theme::space::S2)
     .align_y(Alignment::Center);
 
+    // A queue booked for one run says so while you are looking at it.
+    // Only here: a one-off is the schedule you forget you set, and the
+    // list of downloads gives no other sign that something is coming.
+    if let SidebarFilter::Queue(q) = m.filter
+        && let Some(queue) = m.snap.queues.iter().find(|x| x.id == q)
+        && let crate::domain::QueueSchedule::Once { start, .. } = queue.schedule
+    {
+        left = left.push(sep()).push(
+            text(format!(
+                "{} scheduled for {}",
+                queue.name,
+                crate::gui::format::schedule_when(start, chrono::Local::now())
+            ))
+            .font(theme::BODY)
+            .size(11.0)
+            .color(t.fg_3),
+        );
+    }
+
     if !m.selection.is_empty() {
         left = left.push(sep()).push(
             text(format!(

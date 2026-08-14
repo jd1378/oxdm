@@ -146,6 +146,26 @@ pub enum QueueSchedule {
     Condition(CondSet),
 }
 
+impl QueueSchedule {
+    /// Has this schedule done what it describes, now that a run of the
+    /// queue has ended?
+    ///
+    /// Only a one-off can be: `Daily` and `Condition` describe standing
+    /// arrangements, and `Manual` describes none. A `Once` that has
+    /// come due has now had its run, and leaving it in place would say
+    /// the queue is still waiting for a moment that has passed — the
+    /// queues list would go on showing a date in the past, and the
+    /// scheduler would start the queue again for the rest of its
+    /// one-shot window if anything landed in it.
+    ///
+    /// A one-off whose time has *not* come is untouched: the user
+    /// pressing Start on Tuesday for a queue booked for Friday is not
+    /// cancelling Friday.
+    pub fn spent_by_run(&self, now: DateTime<Local>) -> bool {
+        matches!(self, QueueSchedule::Once { start, .. } if now >= *start)
+    }
+}
+
 /// The condition builder's state: which of the four conditions are
 /// enabled (plus their parameters) and how verdicts combine. Mirrors
 /// the design's `schedule: { mode: 'condition', combine, conditions }`
@@ -420,7 +440,9 @@ pub fn finish_summary(completed: u32, failed: u32, needs_answer: u32) -> String 
 
 #[cfg(test)]
 mod finish_summary_tests {
-    use super::{finish_summary, finish_title};
+    use chrono::Local;
+
+    use super::{CondSet, QueueSchedule, WeekDayMask, finish_summary, finish_title};
 
     #[test]
     fn title_names_the_queue() {
@@ -453,5 +475,39 @@ mod finish_summary_tests {
             finish_summary(3, 0, 1),
             "3 files downloaded, 1 needs your answer."
         );
+    }
+
+    /// A one-off describes one run. Once that run has happened the
+    /// schedule is spent, and the queue goes back to being started by
+    /// hand — otherwise the queues list keeps showing a date that has
+    /// passed, and anything added inside the one-shot window starts the
+    /// queue all over again.
+    #[test]
+    fn a_one_off_is_spent_by_the_run_it_asked_for() {
+        let now = Local::now();
+        let due = QueueSchedule::Once {
+            start: now - chrono::Duration::minutes(5),
+            stop: None,
+        };
+        assert!(due.spent_by_run(now));
+
+        // Started by hand days before the booking: Friday is still on.
+        let booked = QueueSchedule::Once {
+            start: now + chrono::Duration::days(3),
+            stop: None,
+        };
+        assert!(!booked.spent_by_run(now));
+
+        // Standing arrangements are never spent by one run of them.
+        assert!(!QueueSchedule::Manual.spent_by_run(now));
+        assert!(
+            !QueueSchedule::Daily {
+                start: chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
+                stop: None,
+                days: WeekDayMask::default(),
+            }
+            .spent_by_run(now)
+        );
+        assert!(!QueueSchedule::Condition(CondSet::default()).spent_by_run(now));
     }
 }
