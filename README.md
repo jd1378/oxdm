@@ -1,6 +1,38 @@
-# oxdm
+<div align="center">
 
-Cross-platform download manager built on the [`odl`](https://crates.io/crates/odl) crate, with an [iced](https://iced.rs) desktop UI (software-rendered, no GPU required) and a pluggable browser-extension bridge.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/oxdm_about_light.png">
+  <img src="assets/oxdm_about_dark.png" alt="oxdm" width="112">
+</picture>
+
+<h1>oxdm</h1>
+
+<p>Download manager for Linux, macOS and Windows.<br>
+One binary, no runtime to install.</p>
+
+<p>
+  <a href="https://github.com/jd1378/oxdm/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/jd1378/oxdm?style=flat-square&color=e07a5f"></a>
+  <a href="https://github.com/jd1378/oxdm/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/jd1378/oxdm/ci.yml?branch=main&style=flat-square&label=CI"></a>
+  <a href="LICENSE"><img alt="License: AGPL-3.0" src="https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square"></a>
+  <img alt="Platforms" src="https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-555?style=flat-square">
+</p>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/oxdm_screenshot_dark.png">
+  <img src="assets/oxdm_screenshot_light.png" alt="The oxdm main window" width="900">
+</picture>
+
+</div>
+
+## Features
+
+- **Light UI.** Drawn in software: no GPU, no toolkit. Every window is its own process and opens in well under a tenth of a second.
+- **Scheduled queues.** Run on a daily window, once at a date, or only while conditions hold: unmetered connection, AC power, so many minutes idle, a command of yours exiting 0, or a job being added. An emptied queue can sleep or shut the machine down.
+- **Segmented downloads.** A file is split across connections.
+- **Browser capture.** Downloads arrive from the extension with their cookies, headers and referrer, over WebSocket or native messaging.
+- **Resilient.** Interrupted parts resume, and failures retry on a fixed-then-exponential backoff that you can configure.
+- **Per-job settings.** Proxy, credentials, headers, cookies and checksum, with speed limits set globally or per job.
+- **Self-updating.** Checks for new releases and replaces itself in place.
 
 ## Install
 
@@ -19,12 +51,6 @@ Custom directory:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jd1378/oxdm/main/tools/install.sh | sh -s -- --dir /usr/local/bin
 ```
-
-The UI is rendered in software and links no toolkit: on Linux the
-binary needs nothing beyond libc. The tray, notifications, keyring,
-and the network and power checks all speak D-Bus directly, so there is
-no library to install — and without a session bus oxdm still runs,
-minus those features.
 
 ### Windows
 
@@ -47,11 +73,6 @@ It needs FUSE 2 to mount itself, which most desktops have and Ubuntu
 bundle still runs with `./oxdm-<tag>-<arch>.AppImage
 --appimage-extract-and-run`, and the tarball above avoids the question
 entirely.
-
-Either way oxdm updates itself in place: it notices at run time whether
-it was launched from a bundle and fetches the matching artifact, so an
-AppImage stays an AppImage and an installed build stays installed
-binaries.
 
 ### Build from source
 
@@ -101,7 +122,7 @@ oxdm exposes a stable host-side contract (see [`docs/EXTENSION_API.md`](docs/EXT
 
 - **WebSocket** at `ws://127.0.0.1:<port>`, simplest for development.
 - **Native messaging** via the `oxdm-native-host` shim plus a per-OS manifest.
-  oxdm registers the manifest itself — on first run, again whenever it
+  oxdm registers the manifest itself: on first run, again whenever it
   finds one missing or stale, and on demand from *Settings → Browser
   integration*. `oxdm --install-native-host [--chromium-id ID]` does
   the same from a terminal.
@@ -123,10 +144,11 @@ Every `odl::config::Config` field is editable from Settings, plus oxdm-only knob
 ## Architecture
 
 Four-layer clean architecture (`domain` → `data` → `ipc_local` → `gui`):
-`domain` is pure, `odl` types never leak past `data`, and the GUI
-windows are separate processes that talk to the daemon over a local
-socket. Pause/cancel and the update channel sit behind traits, so
-swapping either does not touch the UI.
+`domain` is pure, [`odl`](https://crates.io/crates/odl) types never leak
+past `data`, and the GUI windows are separate processes that talk to the
+daemon over a local socket. Pause/cancel and the update channel sit
+behind traits, so swapping either does not touch the UI. The desktop UI
+is built with [iced](https://iced.rs).
 
 ## License
 
