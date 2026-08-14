@@ -32,7 +32,7 @@ One binary, no runtime to install.</p>
 - **Browser capture.** Downloads arrive from the extension with their cookies, headers and referrer, over WebSocket or native messaging.
 - **Resilient.** Interrupted parts resume, and failures retry on a fixed-then-exponential backoff that you can configure.
 - **Per-job settings.** Proxy, credentials, headers, cookies and checksum, with speed limits set globally or per job.
-- **Self-updating.** Checks for new releases and replaces itself in place.
+- **Easy updates.** It tells you a release is out; you download and install it from About.
 
 ## Install
 
