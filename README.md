@@ -27,7 +27,7 @@ One binary, no runtime to install.</p>
 ## Features
 
 - **Lightweight UI.** Drawn in software: no GPU, no toolkit. Every window is its own process and opens in about 90 ms.
-- **Scheduled queues.** Run on a daily window, once at a date, or only while conditions hold: unmetered connection, AC power, so many minutes idle, a command of yours exiting 0, or a job being added. An emptied queue can sleep or shut the machine down.
+- **Scheduled queues.** Run on a timetable, or only under conditions you pick: unmetered connection, AC power, an idle machine. When a run ends it can notify you, run a command, or shut the machine down.
 - **Segmented downloads.** A file is split across connections.
 - **Browser capture.** Downloads arrive from the extension with their cookies, headers and referrer, over WebSocket or native messaging.
 - **Resilient.** Interrupted parts resume, and failures retry on a fixed-then-exponential backoff that you can configure.
