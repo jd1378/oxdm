@@ -213,6 +213,9 @@ pub enum Msg {
     HeaderRightClick,
     /// Status-bar disk button: reveal the in-flight cache folder.
     OpenWorkDir,
+    /// The status bar's network button: Settings, on the section that
+    /// decides what it is reporting.
+    OpenProxySettings,
     ColToggle(SortColumn),
     // Remove overlay
     RemoveAs(RemoveKind),
@@ -1413,6 +1416,14 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
         Msg::OpenWorkDir => {
             crate::platform::open_path(&m.snap.settings.work_dir);
             Task::none()
+        }
+        Msg::OpenProxySettings => {
+            let client = m.client.clone();
+            act(async move {
+                client
+                    .open_settings_window(Some("network".to_owned()), true)
+                    .await
+            })
         }
         Msg::HeaderRightClick => {
             m.columns_menu = true;
@@ -3899,7 +3910,7 @@ fn statusbar(m: &Main) -> Element<'_, Msg> {
             .toolbar()
             .icon(proxy_icon)
             .size(BtnSize::Sm)
-            .on_press(Msg::Tool(ToolAction::Settings))
+            .on_press(Msg::OpenProxySettings)
             .view(t),
     ]
     .spacing(theme::space::S2)
