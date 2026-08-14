@@ -117,8 +117,7 @@ pub fn open_url(url: &str) {
 #[cfg(target_os = "linux")]
 pub fn install_desktop_entry() -> Result<std::path::PathBuf, String> {
     use std::io::Write;
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let exe_str = exe.to_string_lossy();
+    let exe = launch_target()?;
     let dir = dirs::data_dir()
         .ok_or_else(|| "no data dir".to_string())?
         .join("applications");
@@ -133,7 +132,7 @@ pub fn install_desktop_entry() -> Result<std::path::PathBuf, String> {
          Terminal=false\n\
          Categories=Network;FileTransfer;\n\
          StartupNotify=true\n",
-        exe_str
+        desktop_exec_arg(&exe)
     );
     let mut f = std::fs::File::create(&path).map_err(|e| e.to_string())?;
     f.write_all(body.as_bytes()).map_err(|e| e.to_string())?;
@@ -148,6 +147,64 @@ pub fn install_desktop_entry() -> Result<std::path::PathBuf, String> {
 #[allow(dead_code)]
 pub fn install_desktop_entry() -> Result<std::path::PathBuf, String> {
     Err("Create Desktop Entry is Linux-only".into())
+}
+
+/// Is this process running from an AppImage, and if so where is the
+/// bundle?
+///
+/// The AppImage runtime exports `APPIMAGE` with the bundle's own path.
+/// It matters wherever we record a path to run later: [`current_exe`]
+/// points *inside* the bundle's mount (`/tmp/.mount_oxdmXXXX/usr/bin/
+/// oxdm`), which is unmounted the moment the app exits.
+pub fn bundle_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("APPIMAGE")
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_absolute())
+}
+
+/// The path an autostart entry, launcher or Run key should name.
+///
+/// The bundle when there is one, so the entry survives the mount going
+/// away; otherwise the running binary, by way of [`current_exe`] so a
+/// binary replaced under a running daemon does not get recorded with
+/// `" (deleted)"` glued to its name.
+fn launch_target() -> Result<std::path::PathBuf, String> {
+    if let Some(bundle) = bundle_path() {
+        return Ok(bundle);
+    }
+    current_exe().map_err(|e| e.to_string())
+}
+
+/// A path as the program token of a desktop entry's `Exec=`.
+///
+/// The value is parsed with shell-like quoting, so an unquoted path
+/// holding a space is read as several arguments and the entry silently
+/// launches nothing. Two layers of escaping stack here: the argument is
+/// double-quoted with `"`, `` ` ``, `$` and `\` backslash-escaped inside
+/// (Desktop Entry Spec, "Exec variables"), and then every backslash is
+/// doubled because the file format unescapes `\\` to `\` before the
+/// value is ever split (same spec, "String values").
+#[cfg(target_os = "linux")]
+fn desktop_exec_arg(path: &std::path::Path) -> String {
+    let mut quoted = String::from("\"");
+    for c in path.to_string_lossy().chars() {
+        if matches!(c, '"' | '`' | '$' | '\\') {
+            quoted.push('\\');
+        }
+        quoted.push(c);
+    }
+    quoted.push('"');
+    quoted.replace('\\', "\\\\")
+}
+
+/// A path as XML character data, for the launch agent's plist. `&` and
+/// `<` are legal in a macOS filename and would otherwise make the plist
+/// unparseable, at which point `launchctl` refuses the whole agent.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn xml_text(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// Write (or remove) the XDG autostart entry for `exe` under `dir`.
@@ -175,7 +232,7 @@ fn write_xdg_autostart(
          Terminal=false\n\
          X-GNOME-Autostart-enabled=true\n\
          Categories=Network;FileTransfer;\n",
-        exe.to_string_lossy()
+        desktop_exec_arg(exe)
     );
     let mut f = std::fs::File::create(&path).map_err(|e| e.to_string())?;
     f.write_all(body.as_bytes()).map_err(|e| e.to_string())?;
@@ -195,7 +252,7 @@ fn write_xdg_autostart(
 pub fn set_autostart(enabled: bool) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let exe = launch_target()?;
         let dir = dirs::config_dir()
             .ok_or_else(|| "no config dir".to_string())?
             .join("autostart");
@@ -204,7 +261,7 @@ pub fn set_autostart(enabled: bool) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         use std::io::Write;
-        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let exe = launch_target()?;
         let dir = dirs::home_dir()
             .ok_or_else(|| "no home dir".to_string())?
             .join("Library/LaunchAgents");
@@ -231,7 +288,7 @@ pub fn set_autostart(enabled: bool) -> Result<(), String> {
 </dict>
 </plist>
 "#,
-            exe.to_string_lossy()
+            xml_text(&exe.to_string_lossy())
         );
         let mut f = std::fs::File::create(&path).map_err(|e| e.to_string())?;
         f.write_all(body.as_bytes()).map_err(|e| e.to_string())?;
@@ -250,7 +307,7 @@ pub fn set_autostart(enabled: bool) -> Result<(), String> {
                 .status();
             return Ok(());
         }
-        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let exe = launch_target()?;
         let value = format!("\"{}\"", exe.to_string_lossy());
         let status = Command::new("reg")
             .args(["add", key, "/v", "oxdm", "/t", "REG_SZ", "/d", &value, "/f"])
@@ -260,6 +317,85 @@ pub fn set_autostart(enabled: bool) -> Result<(), String> {
             return Err(format!("reg add returned {status}"));
         }
         Ok(())
+    }
+}
+
+/// Rewrite the autostart entry when it no longer names this binary.
+///
+/// The entry records an absolute path, and the path can stop being
+/// right without the setting ever being touched: oxdm was moved, or
+/// reinstalled elsewhere, or an AppImage was renamed. The setting then
+/// reads "on" while nothing starts at login. Same reasoning as the
+/// browser manifests in [`crate::ipc::manifest_check`], and the same
+/// deliberate limit: an entry the user edited by hand keeps whatever
+/// arguments it was given, because only the program path is compared.
+///
+/// Never fails loudly. A login entry that could not be repaired is
+/// worth a log line, not a startup error.
+pub fn refresh_autostart(enabled: bool) {
+    if !enabled {
+        return;
+    }
+    let target = match launch_target() {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(error = %e, "autostart: cannot resolve this binary's path");
+            return;
+        }
+    };
+    if autostart_names(&target) {
+        return;
+    }
+    match set_autostart(true) {
+        Ok(()) => tracing::info!(target = %target.display(), "autostart entry repointed"),
+        Err(e) => tracing::warn!(error = %e, "autostart entry could not be repointed"),
+    }
+}
+
+/// Does the installed autostart entry launch `target`?
+fn autostart_names(target: &std::path::Path) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let Some(dir) = dirs::config_dir() else {
+            return true; // nowhere to look: leave it alone
+        };
+        let Ok(body) = std::fs::read_to_string(dir.join("autostart").join("oxdm.desktop")) else {
+            return false;
+        };
+        body.contains(&desktop_exec_arg(target))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let Some(home) = dirs::home_dir() else {
+            return true;
+        };
+        let path = home.join("Library/LaunchAgents/com.oxdm.app.plist");
+        let Ok(body) = std::fs::read_to_string(path) else {
+            return false;
+        };
+        body.contains(&format!(
+            "<string>{}</string>",
+            xml_text(&target.to_string_lossy())
+        ))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let out = std::process::Command::new("reg")
+            .args([
+                r"query",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                "/v",
+                "oxdm",
+            ])
+            .output();
+        match out {
+            Ok(out) if out.status.success() => {
+                String::from_utf8_lossy(&out.stdout).contains(target.to_string_lossy().as_ref())
+            }
+            // No value, or `reg` itself unavailable: writing one back is
+            // the safe move either way.
+            _ => false,
+        }
     }
 }
 
@@ -461,7 +597,7 @@ mod tests {
 
         write_xdg_autostart(&dir, exe, true).unwrap();
         let body = std::fs::read_to_string(dir.join("oxdm.desktop")).unwrap();
-        assert!(body.contains("Exec=/opt/oxdm/oxdm\n"));
+        assert!(body.contains("Exec=\"/opt/oxdm/oxdm\"\n"));
         // The entry must not force tray mode — `start_to_tray` owns that.
         assert!(!body.contains("--tray"));
 
@@ -505,6 +641,54 @@ mod tests {
             .spawn()
             .expect_err("spawning a missing binary must fail");
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    /// Nothing says a user keeps oxdm in a path without spaces. An
+    /// unquoted `Exec=` splits on them, so the session launches
+    /// `/home/me/My` at login and the setting quietly does nothing.
+    #[test]
+    fn a_path_with_spaces_still_launches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("autostart");
+        let exe = std::path::Path::new("/home/me/My Apps/oxdm");
+
+        write_xdg_autostart(&dir, exe, true).unwrap();
+        let body = std::fs::read_to_string(dir.join("oxdm.desktop")).unwrap();
+        assert!(
+            body.contains("Exec=\"/home/me/My Apps/oxdm\"\n"),
+            "got: {body}"
+        );
+    }
+
+    /// The characters the two escaping layers disagree about: `$` and a
+    /// backslash mean something to the argument splitter, and the
+    /// backslash means something to the file format on top of that.
+    #[test]
+    fn exec_escapes_what_the_shell_would_eat() {
+        assert_eq!(
+            desktop_exec_arg(std::path::Path::new("/opt/$HOME/oxdm")),
+            "\"/opt/\\\\$HOME/oxdm\""
+        );
+        // One literal backslash: escaped for the splitter (\\), then
+        // both of those doubled for the file format.
+        assert_eq!(
+            desktop_exec_arg(std::path::Path::new("/opt/a\\b/oxdm")),
+            "\"/opt/a\\\\\\\\b/oxdm\""
+        );
+        assert_eq!(
+            desktop_exec_arg(std::path::Path::new("/opt/plain/oxdm")),
+            "\"/opt/plain/oxdm\""
+        );
+    }
+
+    /// A launch agent whose plist does not parse is refused whole, so
+    /// an `&` in the path would cost the user the setting.
+    #[test]
+    fn the_launch_agent_path_is_xml_escaped() {
+        assert_eq!(
+            xml_text("/Users/me/Apps & Tools/oxdm"),
+            "/Users/me/Apps &amp; Tools/oxdm"
+        );
     }
 
     #[test]

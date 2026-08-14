@@ -136,9 +136,7 @@ impl UpdateChannel for HttpFeedUpdateChannel {
 /// the bundle, not `current_exe()` — which points inside a read-only
 /// mount that disappears when the app exits.
 pub fn running_as_appimage() -> Option<std::path::PathBuf> {
-    std::env::var_os("APPIMAGE")
-        .map(std::path::PathBuf::from)
-        .filter(|p| p.is_absolute())
+    crate::platform::bundle_path()
 }
 
 /// The feed for this build, as it is currently running.

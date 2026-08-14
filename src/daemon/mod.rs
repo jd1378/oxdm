@@ -91,6 +91,7 @@ fn spawn_workers(
         });
     }
     crate::ipc::manifest_check::spawn();
+    spawn_autostart_check(state.clone());
     notifications::spawn(state.clone());
     environment_guard::spawn(state.clone());
     spawn_power_prompt(state.clone());
@@ -191,6 +192,22 @@ fn install_panic_hook() {
 /// Surface the grace-countdown window whenever a destructive power
 /// action arms. The window itself handles Cancel / Confirm-now and
 /// closes on `ShutdownCancelled` or when the deadline passes.
+/// Keep the login entry pointing at this binary, the way
+/// [`crate::ipc::manifest_check`] keeps the browser manifests pointing
+/// at it. Moving oxdm elsewhere otherwise leaves the setting reading
+/// "on" while nothing starts at login.
+fn spawn_autostart_check(state: std::sync::Arc<crate::data::AppState>) {
+    // A sandboxed or development copy shares the user's login session
+    // but is not the app they asked to start with it.
+    if std::env::var_os("OXDM_INSTANCE_SUFFIX").is_some_and(|v| !v.is_empty()) {
+        return;
+    }
+    tokio::spawn(async move {
+        let want = state.settings().await.start_at_login;
+        let _ = tokio::task::spawn_blocking(move || crate::platform::refresh_autostart(want)).await;
+    });
+}
+
 fn spawn_power_prompt(state: std::sync::Arc<crate::data::AppState>) {
     tokio::spawn(async move {
         let mut rx = state.subscribe();
