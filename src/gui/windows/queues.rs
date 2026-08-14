@@ -147,6 +147,18 @@ fn parse_once_time(s: &str) -> Option<chrono::NaiveTime> {
     chrono::NaiveTime::parse_from_str(s.trim(), "%H:%M").ok()
 }
 
+/// How far ahead a fresh one-off is proposed.
+///
+/// Far enough that the suggestion is a usable answer rather than a
+/// time that has passed by the time the dialog is closed — the old
+/// default was 09:00 today, which is in the past for most of the day
+/// and was refused by nothing.
+const ONCE_SUGGEST_AHEAD_HOURS: i64 = 3;
+
+fn suggested_once() -> chrono::NaiveDateTime {
+    (chrono::Local::now() + chrono::Duration::hours(ONCE_SUGGEST_AHEAD_HOURS)).naive_local()
+}
+
 /// Builder cards in display order (design `CONDS`). Copy is verbatim
 /// from the mock, except "Wi-Fi / Ethernet" phrasing which the mock
 /// already carries; the mock gates `unmetered` per platform
@@ -544,10 +556,7 @@ impl State {
         };
         let once_start = match q.schedule {
             QueueSchedule::Once { start, .. } => start.naive_local(),
-            _ => chrono::Local::now()
-                .date_naive()
-                .and_hms_opt(9, 0, 0)
-                .unwrap(),
+            _ => suggested_once(),
         };
         self.once_date = once_start.format("%Y-%m-%d").to_string();
         self.once_time = once_start.format("%H:%M").to_string();
@@ -606,7 +615,39 @@ impl State {
             .unwrap_or_default();
     }
 
+    /// The instant the one-off fields describe, if they describe one.
+    ///
+    /// `None` for text that does not parse, and for a local time that
+    /// does not exist — the hour the clocks skip forward over.
+    fn once_instant(&self) -> Option<chrono::DateTime<chrono::Local>> {
+        parse_once_date(&self.once_date)
+            .zip(parse_once_time(&self.once_time))
+            .map(|(d, t)| d.and_time(t))
+            // `earliest`, not `single`: on the night the clocks go
+            // back a local time happens twice, and `single` is `None`
+            // for a time that is perfectly runnable.
+            .and_then(|n| n.and_local_timezone(chrono::Local).earliest())
+    }
+
+    /// Can the schedule on screen be saved?
+    ///
+    /// Only the one-off can fail: a date already past describes a run
+    /// that cannot happen, and saving it would leave the queue holding
+    /// a booking the scheduler will never honour. The other kinds are
+    /// either standing arrangements or nothing at all.
+    fn sched_ok(&self) -> bool {
+        self.sched != SchedKind::OneOff
+            || self
+                .once_instant()
+                .is_some_and(|t| t > chrono::Local::now())
+    }
+
     fn build_queue(&self) -> Option<Queue> {
+        // The Apply button is disabled for the same reason, so this is
+        // the backstop for every other way a save can be asked for.
+        if !self.sched_ok() {
+            return None;
+        }
         let mut q = self.selected_queue()?.clone();
         q.name = self.name.trim().to_owned();
         q.color = self.color;
@@ -641,19 +682,10 @@ impl State {
                 stop: None,
                 days: self.sched_days,
             },
+            // `sched_ok` above has already refused anything this
+            // cannot resolve, so the fields are known good here.
             SchedKind::OneOff => QueueSchedule::Once {
-                start: parse_once_date(&self.once_date)
-                    .zip(parse_once_time(&self.once_time))
-                    .map(|(d, t)| d.and_time(t))
-                    // `earliest`, not `single`: on the night the clocks
-                    // go back a local time happens twice and `single`
-                    // is `None`, and on the night they go forward the
-                    // chosen hour may not exist at all. `single` sent
-                    // both cases to `unwrap_or(now)`, which silently
-                    // rewrote "run this at 02:30 on Sunday" to "run it
-                    // the moment I pressed Save".
-                    .and_then(|n| n.and_local_timezone(chrono::Local).earliest())
-                    .unwrap_or_else(chrono::Local::now),
+                start: self.once_instant()?,
                 stop: None,
             },
         };
@@ -1046,6 +1078,17 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
         }
         Msg::Sched(k) => {
             st.sched = k;
+            // Arriving at the one-off with nothing usable in the
+            // fields — a queue that had no booking, or one whose
+            // booking has since passed — proposes a time a few hours
+            // out. A future time already on screen is the user's and
+            // is left alone.
+            if k == SchedKind::OneOff && !st.sched_ok() {
+                let s = suggested_once();
+                st.once_date = s.format("%Y-%m-%d").to_string();
+                st.once_time = s.format("%H:%M").to_string();
+                st.cal_ym = (chrono::Datelike::year(&s), chrono::Datelike::month(&s));
+            }
             Task::none()
         }
         Msg::SchedStart(v) => {
@@ -2107,16 +2150,27 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
                 .spacing(theme::space::S2)
                 .align_y(Alignment::Center),
             );
-            if !date_ok || !time_ok {
+            // One note, whichever way the fields are unusable: a
+            // format the parser cannot read, or a moment that has
+            // already been. Both refuse Apply, so both are said in the
+            // same place and the same voice.
+            let complaint = if !date_ok || !time_ok {
                 let what = match (date_ok, time_ok) {
                     (false, false) => "date (YYYY-MM-DD) and time (HH:MM)",
                     (false, true) => "date: use YYYY-MM-DD",
                     _ => "time: use HH:MM",
                 };
+                Some(format!("Invalid {what}."))
+            } else if !st.sched_ok() {
+                Some("That time has already passed. Pick one in the future.".to_owned())
+            } else {
+                None
+            };
+            if let Some(complaint) = complaint {
                 sched_col = sched_col.push(
                     row![
                         icons::icon("triangle-alert", 12.0, t.status_danger),
-                        text(format!("Invalid {what}."))
+                        text(complaint)
                             .font(theme::BODY)
                             .size(11.0)
                             .color(t.status_danger),
@@ -2242,8 +2296,10 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
                 Btn::new("Apply")
                     .primary()
                     .icon("check")
-                    // Nothing to write when nothing differs.
-                    .enabled(st.dirty > 0)
+                    // Nothing to write when nothing differs, and
+                    // nothing to write when what differs cannot be
+                    // honoured — the note under the field says which.
+                    .enabled(st.dirty > 0 && st.sched_ok())
                     .on_press(Msg::Save)
                     .view(t),
             )
