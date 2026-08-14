@@ -2707,6 +2707,10 @@ fn sidebar_row<'a>(
 /// Design `.nav-item { padding: 5px 10px }` / `.indent { padding-left: 22px }`.
 const NAV_PAD_X: f32 = 10.0;
 const NAV_INDENT: f32 = 22.0;
+/// Section header chevron. Queue rows centre their swatch in a box of
+/// the same width at the same left padding, so the swatch sits directly
+/// under the chevron instead of hanging left of it.
+const SEC_CHEV_W: f32 = 14.0;
 /// Design `.sec-head`: 700 10px, `letter-spacing: 0.1em`, uppercase.
 const SEC_HEAD_SIZE: f32 = 10.0;
 const SEC_HEAD_TRACKING: f32 = SEC_HEAD_SIZE * 0.1;
@@ -2733,7 +2737,7 @@ fn section_header<'a>(
     };
     let t2 = *t;
     let mut head = row![
-        icons::icon(chev, 14.0, color::with_alpha(t.fg_3, 0.85)),
+        icons::icon(chev, SEC_CHEV_W, color::with_alpha(t.fg_3, 0.85)),
         tracked_caps(
             label,
             SEC_HEAD_SIZE,
@@ -2855,7 +2859,9 @@ fn sidebar(m: &Main) -> Element<'_, Msg> {
         for q in &m.snap.queues {
             let active = m.filter == SidebarFilter::Queue(q.id);
             let count = m.snap.jobs.iter().filter(|j| j.queue_id == q.id).count() as u64;
-            let chip = swatch(8.0, 2.0, t.queue_color(q));
+            let chip = container(swatch(8.0, 2.0, t.queue_color(q)))
+                .width(Length::Fixed(SEC_CHEV_W))
+                .align_x(Alignment::Center);
             // Live dot (design `.q-live-dot`): a moss dot with a ring
             // pulsing out of it while the queue has something running.
             // It rides at the right, beside the count — it says what the
@@ -2866,7 +2872,7 @@ fn sidebar(m: &Main) -> Element<'_, Msg> {
                 .then(|| crate::gui::widget::pulse_dot(LIVE_DOT_SIZE, color::moss::M400, pulse));
             col = col.push(sidebar_row(
                 t,
-                chip,
+                chip.into(),
                 &q.name,
                 live_dot,
                 Some(count),
