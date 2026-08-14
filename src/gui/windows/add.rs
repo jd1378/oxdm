@@ -811,10 +811,12 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
                 fit
             }
         }
-        Msg::Paste => Task::perform(
-            async { crate::gui::clipboard::clipboard_first_link() },
-            Msg::Pasted,
-        ),
+        Msg::Paste => iced::clipboard::read().map(|text| {
+            Msg::Pasted(
+                text.as_deref()
+                    .and_then(crate::gui::clipboard::first_link_in),
+            )
+        }),
         Msg::Pasted(Some(s)) => update_ready(st, Msg::UrlChanged(s.trim().to_owned())),
         Msg::Pasted(None) => Task::none(),
         Msg::DebounceFired(generation) => {

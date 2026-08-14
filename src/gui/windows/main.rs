@@ -1900,13 +1900,16 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                 // has always had a Paste button saying so — this saves
                 // the press without taking the decision away, since the
                 // field is still theirs to edit.
-                ToolbarAction::AddUrl => act(async move {
-                    let prefill =
-                        tokio::task::spawn_blocking(crate::gui::clipboard::clipboard_first_link)
-                            .await
-                            .ok()
-                            .flatten();
-                    client.open_add_window(None, prefill).await
+                // The clipboard is read through this window, which is
+                // the only reader that works on every display server:
+                // the daemon that opens the dialog has no window and
+                // so no clipboard of its own.
+                ToolbarAction::AddUrl => iced::clipboard::read().then(move |text| {
+                    let client = client.clone();
+                    let prefill = text
+                        .as_deref()
+                        .and_then(crate::gui::clipboard::first_link_in);
+                    act(async move { client.open_add_window(None, prefill).await })
                 }),
                 ToolbarAction::ToggleRun => match m.filter {
                     // Queue scope: direction keyed on `active_queues`
@@ -1997,16 +2000,14 @@ fn handle_key(
             update_main(m, Msg::Toolbar(ToolbarAction::AddUrl))
         }
         // Paste is how a link arrives from a browser, and the list is
-        // where the user is looking when they copy one. Reading the
-        // clipboard is blocking on X11, so it goes off the UI thread.
-        Key::Character("v") if mods.command() => Task::perform(
-            async {
-                tokio::task::spawn_blocking(crate::gui::clipboard::clipboard_links)
-                    .await
-                    .unwrap_or_default()
-            },
-            Msg::LinksPasted,
-        ),
+        // where the user is looking when they copy one.
+        Key::Character("v") if mods.command() => iced::clipboard::read().map(|text| {
+            Msg::LinksPasted(
+                text.as_deref()
+                    .map(crate::gui::clipboard::extract_http_urls)
+                    .unwrap_or_default(),
+            )
+        }),
         // Select all of what the list currently shows — the filter,
         // tab and search narrow it, and the virtual list only renders a
         // window of it, so this walks the full filtered set rather than

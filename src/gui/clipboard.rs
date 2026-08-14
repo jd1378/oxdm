@@ -1,4 +1,23 @@
-//! One-shot clipboard URL detection.
+//! Making sense of pasted text: which links are in it, if any.
+//!
+//! Reading the clipboard itself is not done here. `iced::clipboard`
+//! does it, through the window's own connection to the display server,
+//! which is the only reader that works on every desktop oxdm runs on.
+//! This module is the pure half: text in, links out.
+//!
+//! That reader hands over `text/plain` and nothing else. A clipboard
+//! actually offers the same content in several formats at once — a
+//! browser adds `text/x-moz-url`, a file manager offers only
+//! `text/uri-list` — and oxdm used to shell out to `wl-paste` /
+//! `xclip` to list them and pick the best. That path is gone: those
+//! are separate programs, absent from a default Debian KDE install,
+//! and where they were missing the app had no clipboard at all. Plain
+//! text everywhere beats a richer read that is sometimes no read.
+//!
+//! What it costs: files copied in a file manager travel as
+//! `text/uri-list` with no plain-text form, so pasting those into oxdm
+//! finds nothing. Copying a link — the case this is for — puts the URL
+//! in plain text too, from every browser.
 
 /// The single link the Add window starts with, as text.
 ///
@@ -7,11 +26,10 @@
 /// at all, the first non-empty line — a paste that is not a URL is
 /// still what the user meant to put there, and the field is theirs to
 /// correct.
-pub fn clipboard_first_link() -> Option<String> {
-    if let Some(u) = clipboard_links().into_iter().next() {
+pub fn first_link_in(text: &str) -> Option<String> {
+    if let Some(u) = extract_http_urls(text).into_iter().next() {
         return Some(u.to_string());
     }
-    let text = read_text()?;
     let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
     Some(line.to_owned())
 }
@@ -107,142 +125,6 @@ pub fn links_in_file(path: &std::path::Path) -> Vec<url::Url> {
         return Vec::new();
     };
     extract_http_urls(&text)
-}
-
-/// Every link the clipboard can be read as offering.
-///
-/// The clipboard is not one string: an owner advertises several
-/// targets, and which one answers first decides what the user appears
-/// to have copied. `read_text` wants a single URL and takes the first
-/// line of the best target — right for a capture, wrong for a paste,
-/// where a list of ten links would arrive as one. This reads every
-/// textual target in full and keeps whichever yields the most links.
-pub fn clipboard_links() -> Vec<url::Url> {
-    let mut best: Vec<url::Url> = Vec::new();
-    for text in read_texts() {
-        let links = extract_http_urls(&text);
-        if links.len() > best.len() {
-            best = links;
-        }
-    }
-    best
-}
-
-/// Every textual payload the clipboard will hand over, in full.
-fn read_texts() -> Vec<String> {
-    let mut out = Vec::new();
-    if let Ok(mut cb) = arboard::Clipboard::new()
-        && let Ok(t) = cb.get_text()
-    {
-        out.push(t);
-    }
-    #[cfg(target_os = "linux")]
-    out.extend(read_linux_texts());
-    out
-}
-
-pub fn read_text() -> Option<String> {
-    if let Ok(mut cb) = arboard::Clipboard::new()
-        && let Ok(t) = cb.get_text()
-    {
-        return Some(t);
-    }
-    #[cfg(target_os = "linux")]
-    {
-        if let Some(t) = read_linux_fallback() {
-            return Some(t);
-        }
-    }
-    None
-}
-
-/// arboard requests a fixed plain-text target. Browsers often only
-/// advertise `text/uri-list` / `text/x-moz-url`, so that request
-/// fails. X11 / Wayland have no "give me any text" call — the consumer
-/// must name a target. So we ask the clipboard owner what it has,
-/// then pick the first one whose payload looks textual.
-#[cfg(target_os = "linux")]
-fn read_linux_fallback() -> Option<String> {
-    read_linux_texts()
-        .iter()
-        .find_map(|payload| first_url_line(payload))
-}
-
-/// Every textual target the clipboard owner advertises, in full and in
-/// preference order.
-///
-/// X11 and Wayland have no "give me any text" call — the consumer must
-/// name a target — so we ask what is on offer and read each textual one.
-/// Whole payloads, not first lines: a `text/uri-list` *is* the list.
-#[cfg(target_os = "linux")]
-fn read_linux_texts() -> Vec<String> {
-    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
-    let Some(targets) = (if wayland {
-        run_capture("wl-paste", &["--list-types"])
-    } else {
-        run_capture("xclip", &["-selection", "clipboard", "-o", "-t", "TARGETS"])
-    }) else {
-        return Vec::new();
-    };
-
-    // Score targets: prefer URL-shaped over generic text so a browser
-    // that advertises both gets the canonical URL line, but anything
-    // textual still wins over images / files.
-    let mut ordered: Vec<(&str, u8)> = targets
-        .lines()
-        .map(|l| l.trim())
-        .filter(|l| !l.is_empty())
-        .filter_map(|t| match t {
-            "text/uri-list" | "text/x-moz-url" => Some((t, 0)),
-            "UTF8_STRING" | "text/plain;charset=utf-8" | "text/plain" => Some((t, 1)),
-            "STRING" | "TEXT" => Some((t, 2)),
-            _ if t.starts_with("text/") => Some((t, 3)),
-            _ => None,
-        })
-        .collect();
-    ordered.sort_by_key(|&(_, p)| p);
-
-    ordered
-        .into_iter()
-        .filter_map(|(t, _)| {
-            if wayland {
-                run_capture("wl-paste", &["--no-newline", "-t", t])
-            } else {
-                run_capture("xclip", &["-selection", "clipboard", "-o", "-t", t])
-            }
-        })
-        .collect()
-}
-
-#[cfg(target_os = "linux")]
-fn run_capture(prog: &str, args: &[&str]) -> Option<String> {
-    use std::process::{Command, Stdio};
-    let out = Command::new(prog)
-        .args(args)
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    String::from_utf8(out.stdout).ok()
-}
-
-/// `text/x-moz-url` is `URL\nTITLE`; `text/uri-list` may include
-/// comments prefixed with `#`. Pick the first non-comment, non-empty
-/// line.
-#[cfg(target_os = "linux")]
-fn first_url_line(s: &str) -> Option<String> {
-    for line in s.lines() {
-        let t = line.trim();
-        if t.is_empty() || t.starts_with('#') {
-            continue;
-        }
-        return Some(t.to_string());
-    }
-    let t = s.trim();
-    (!t.is_empty()).then(|| t.to_string())
 }
 
 #[cfg(test)]

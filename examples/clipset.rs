@@ -6,29 +6,15 @@
 //! from argv (or stdin when given `-`), then sleeps.
 //!
 //!     DISPLAY=:99 cargo run --example clipset -- 'https://example/f.bin' &
+//!
+//! Writes only. What oxdm *reads* is `iced::clipboard`, which needs a
+//! window and a display-server connection of its own, so the way to
+//! see what a paste finds is to paste in the app.
 
 use std::io::Read;
 
 fn main() {
     let arg = std::env::args().nth(1).unwrap_or_else(|| "-".into());
-    // `--get` prints what oxdm's own reader sees, which is the question
-    // when a paste appears to do nothing.
-    if arg == "--get" {
-        match oxdm::gui::clipboard::read_text() {
-            Some(t) => println!("read_text: [{t}]"),
-            None => println!("read_text: <nothing>"),
-        }
-        match oxdm::gui::clipboard::clipboard_first_link() {
-            Some(t) => println!("first_link: [{t}]"),
-            None => println!("first_link: <nothing>"),
-        }
-        let links = oxdm::gui::clipboard::clipboard_links();
-        println!("links: {}", links.len());
-        for l in links {
-            println!("  {l}");
-        }
-        return;
-    }
     let text = if arg == "-" {
         let mut s = String::new();
         let _ = std::io::stdin().read_to_string(&mut s);
