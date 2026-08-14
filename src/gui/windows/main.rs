@@ -531,15 +531,6 @@ impl Main {
     fn new(client: Arc<Client>, snap: SnapshotData) -> Self {
         let tokens = Tokens::from_settings(&snap.settings);
         let counters = snap.counters.iter().map(|c| (c.id, c.clone())).collect();
-        let main_q = snap
-            .queues
-            .iter()
-            .find(|q| q.builtin)
-            .map(|q| q.id)
-            .or_else(|| snap.queues.first().map(|q| q.id));
-        let default_filter = main_q
-            .map(SidebarFilter::Queue)
-            .unwrap_or(SidebarFilter::All);
         let prefs = crate::gui::ui_prefs::load();
         Self {
             client,
@@ -555,7 +546,10 @@ impl Main {
                     SidebarFilter::Queue(q) => snap.queues.iter().any(|x| x.id == *q),
                     _ => true,
                 })
-                .unwrap_or(default_filter),
+                // Everything the user has, rather than one queue's
+                // share of it: a first run has nothing queued to look
+                // at, and a queue view now hides what has finished.
+                .unwrap_or(SidebarFilter::All),
             tab: Tab::All,
             sort: (SortColumn::Date, true),
             search: String::new(),
@@ -725,7 +719,7 @@ impl Main {
             .filter(|j| match self.filter {
                 SidebarFilter::All => true,
                 SidebarFilter::Category(c) => j.category == c,
-                SidebarFilter::Queue(q) => j.queue_id == q,
+                SidebarFilter::Queue(q) => self.in_queue_view(j, q),
             })
             .filter(|j| {
                 needle.is_empty()
@@ -781,6 +775,24 @@ impl Main {
         jobs
     }
 
+    /// Does this job belong in `q`'s view?
+    ///
+    /// A queue view is the queue's outstanding work: what a run would
+    /// pick up. A finished download has left that behind, so it is
+    /// reachable through the categories and "All downloads" but no
+    /// longer piles up in the queue it came from.
+    fn in_queue_view(&self, job: &crate::domain::Job, q: QueueId) -> bool {
+        job.queue_id == q && queue_view_shows(self.phase(job.id))
+    }
+
+    fn queue_count(&self, q: QueueId) -> u64 {
+        self.snap
+            .jobs
+            .iter()
+            .filter(|j| self.in_queue_view(j, q))
+            .count() as u64
+    }
+
     fn cat_count(&self, cat: Option<Category>) -> u64 {
         self.snap
             .jobs
@@ -788,6 +800,16 @@ impl Main {
             .filter(|j| cat.is_none_or(|c| j.category == c))
             .count() as u64
     }
+}
+
+/// The rule behind [`Main::in_queue_view`], over a phase alone.
+///
+/// Everything a queue run would take on stays: queued, paused,
+/// cancelled and failed downloads are all work it can still do, and a
+/// running one is work in progress. Only a completed download is done
+/// with the queue.
+fn queue_view_shows(phase: Phase) -> bool {
+    phase != Phase::Completed
 }
 
 fn eta_of(c: Option<&JobCounters>) -> Option<u64> {
@@ -2858,7 +2880,7 @@ fn sidebar(m: &Main) -> Element<'_, Msg> {
     if queues_open {
         for q in &m.snap.queues {
             let active = m.filter == SidebarFilter::Queue(q.id);
-            let count = m.snap.jobs.iter().filter(|j| j.queue_id == q.id).count() as u64;
+            let count = m.queue_count(q.id);
             let chip = container(swatch(8.0, 2.0, t.queue_color(q)))
                 .width(Length::Fixed(SEC_CHEV_W))
                 .align_x(Alignment::Center);
@@ -3531,6 +3553,14 @@ fn empty_state(m: &Main) -> Element<'_, Msg> {
         Tab::Active => (
             "Nothing active",
             "Queued and running downloads appear here.",
+        ),
+        // A queue view holds the work a run would pick up, so a
+        // finished download is not missing from it, it has left it.
+        // Saying "nothing finished yet" there would be a lie the user
+        // can disprove by clicking "All downloads".
+        Tab::Finished if matches!(m.filter, SidebarFilter::Queue(_)) => (
+            "Finished downloads leave the queue",
+            "Find them under All downloads or their category.",
         ),
         Tab::Finished => ("Nothing finished yet", "Completed downloads appear here."),
         Tab::All => ("No downloads yet", "Add a URL above to start."),
@@ -4697,6 +4727,32 @@ mod tests {
         assert_eq!(
             targets(&[(Phase::Queued, false), (Phase::Paused, false)]).1,
             vec![0, 1]
+        );
+    }
+
+    /// A queue view answers "what would a run of this queue do", so it
+    /// holds everything a run would pick up and nothing it would skip.
+    /// The list mirrors `Phase::is_startable` plus the live phases.
+    #[test]
+    fn a_queue_view_holds_the_work_a_run_would_pick_up() {
+        for phase in [
+            Phase::Queued,
+            Phase::Paused,
+            Phase::Cancelled,
+            Phase::Failed,
+            Phase::Downloading,
+            Phase::Reconnecting,
+            Phase::Assembling,
+            Phase::Conflict,
+        ] {
+            assert!(
+                queue_view_shows(phase),
+                "{phase:?} still belongs to a queue"
+            );
+        }
+        assert!(
+            !queue_view_shows(Phase::Completed),
+            "a finished download has left the queue behind"
         );
     }
 
