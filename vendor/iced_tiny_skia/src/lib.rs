@@ -145,8 +145,22 @@ impl Renderer {
                         for primitive in group.as_slice() {
                             self.engine.draw_primitive(
                                 primitive,
-                                group.transformation()
-                                    * Transformation::scale(scale_factor),
+                                // oxdm fix: scale outermost. Canvas
+                                // geometry is in the widget's *local*
+                                // logical coordinates, and the group's
+                                // transformation is its logical offset,
+                                // so physical = scale(offset + local).
+                                // Upstream composed these the other way
+                                // round, which paints at `offset +
+                                // scale * local` — while `group_bounds`
+                                // above (and so the clip mask) is
+                                // `scale * (offset + local)`. The two
+                                // agree only at scale 1, which is why
+                                // every canvas widget vanished on a
+                                // HiDPI or fractionally-scaled desktop:
+                                // painted outside its own clip.
+                                Transformation::scale(scale_factor)
+                                    * group.transformation(),
                                 pixels,
                                 clip_mask,
                                 group_bounds,
@@ -182,8 +196,14 @@ impl Renderer {
                         for text in group.as_slice() {
                             self.engine.draw_text(
                                 text,
-                                group.transformation()
-                                    * Transformation::scale(scale_factor),
+                                // oxdm fix: same ordering as the
+                                // primitive groups above. Text groups
+                                // carry an identity transformation in
+                                // practice, where both orders agree —
+                                // this keeps them agreeing if one ever
+                                // carries an offset.
+                                Transformation::scale(scale_factor)
+                                    * group.transformation(),
                                 pixels,
                                 clip_mask,
                                 layer_bounds,
