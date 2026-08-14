@@ -263,7 +263,6 @@ mod tests {
                 (&format!("{root}/README.md"), b"docs"),
                 (&format!("{root}/LICENSE"), b"agpl"),
                 (&format!("{root}/oxdm.png"), b"icon"),
-                (&format!("{root}/install-native-host.sh"), b"script"),
             ],
         );
         let dest = dir.path().join("out");

@@ -282,7 +282,6 @@ jobs:
           cp "${{ steps.bin.outputs.OUT_DIR }}/${bin}${EXE}" "$ARCHIVE_DIR"
         done
         cp README.md LICENSE "$ARCHIVE_DIR"
-        cp tools/install-native-host.sh "$ARCHIVE_DIR" 2>/dev/null || true
         # The launcher entry the installer writes points at this, so a
         # tarball install looks like an application rather than a
         # generic download arrow.

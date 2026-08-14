@@ -90,8 +90,8 @@ For installs the defaults cannot describe:
 | `--token-file <PATH>` | hands the token to the host on fd 3 from that file instead of letting it read the database; a wrapper does the redirect, so the secret never appears in `ps` |
 | `--patch-desktop` | splices the Flatpak grants into each browser's user `.desktop` file instead of leaving you a `flatpak override` to run |
 
-`tools/install-native-host.sh` and `.ps1` forward to exactly that, so
-there is one list of manifest locations rather than three.
+The app is the only thing that knows where a manifest goes: there is
+one list of locations rather than a copy per helper script.
 
 On Linux and macOS a manifest is written per browser directory; on
 Windows one manifest per family goes under `%LOCALAPPDATA%\oxdm` and

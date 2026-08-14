@@ -7,10 +7,10 @@
 //! fails and oxdm never hears about a download.
 //!
 //! This used to be `tools/install-native-host.sh` and its PowerShell
-//! twin, run by hand. They are still there, but as thin callers of
-//! this code: a shell script and an app that disagree about where a
-//! manifest goes is a bug nobody can see until a browser quietly stops
-//! capturing.
+//! twin, run by hand. Both are gone: a shell script and an app that
+//! disagree about where a manifest goes is a bug nobody can see until
+//! a browser quietly stops capturing. `oxdm --install-native-host`
+//! takes the same flags they did.
 //!
 //! What it writes is deliberately small: manifests, and — for Flatpak
 //! browsers, which cannot execute a path outside their sandbox without
@@ -720,8 +720,8 @@ fn after_flatpak_run(line: &str) -> Option<usize> {
 
 /// Every place a manifest can go, for the browsers oxdm knows about.
 ///
-/// Taken over from `tools/install-native-host.sh`, which is now a
-/// caller of this code rather than a second copy of this list.
+/// Taken over from `tools/install-native-host.sh`, which carried a
+/// second copy of this list until it was deleted.
 pub fn targets(home: &Path) -> Vec<Target> {
     let mut out = Vec::new();
     // Unused on Windows, whose browsers are pointed at a manifest by
