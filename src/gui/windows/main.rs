@@ -110,6 +110,28 @@ pub enum SidebarFilter {
     Queue(QueueId),
 }
 
+impl From<SidebarFilter> for crate::gui::ui_prefs::SidebarPref {
+    fn from(f: SidebarFilter) -> Self {
+        use crate::gui::ui_prefs::SidebarPref as P;
+        match f {
+            SidebarFilter::All => P::All,
+            SidebarFilter::Category(category) => P::Category { category },
+            SidebarFilter::Queue(id) => P::Queue { id },
+        }
+    }
+}
+
+impl From<crate::gui::ui_prefs::SidebarPref> for SidebarFilter {
+    fn from(p: crate::gui::ui_prefs::SidebarPref) -> Self {
+        use crate::gui::ui_prefs::SidebarPref as P;
+        match p {
+            P::All => SidebarFilter::All,
+            P::Category { category } => SidebarFilter::Category(category),
+            P::Queue { id } => SidebarFilter::Queue(id),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     All,
@@ -512,13 +534,25 @@ impl Main {
             .find(|q| q.builtin)
             .map(|q| q.id)
             .or_else(|| snap.queues.first().map(|q| q.id));
+        let default_filter = main_q
+            .map(SidebarFilter::Queue)
+            .unwrap_or(SidebarFilter::All);
+        let prefs = crate::gui::ui_prefs::load();
         Self {
             client,
             tokens,
             counters,
-            filter: main_q
-                .map(SidebarFilter::Queue)
-                .unwrap_or(SidebarFilter::All),
+            filter: prefs
+                .sidebar
+                .map(SidebarFilter::from)
+                // A queue deleted since the last run leaves the sidebar
+                // with nothing to highlight and the table empty, so the
+                // window opens where it would with no memory at all.
+                .filter(|f| match f {
+                    SidebarFilter::Queue(q) => snap.queues.iter().any(|x| x.id == *q),
+                    _ => true,
+                })
+                .unwrap_or(default_filter),
             tab: Tab::All,
             sort: (SortColumn::Date, true),
             search: String::new(),
@@ -547,7 +581,7 @@ impl Main {
             menu_anchor: (0.0, 0.0),
             win_size: (0.0, 0.0),
             resize_gen: 0,
-            columns: crate::gui::ui_prefs::load().columns.unwrap_or_default(),
+            columns: prefs.columns.unwrap_or_default(),
             col_drag: None,
             col_move: None,
             col_grab: 0.0,
@@ -1031,6 +1065,10 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
         },
         Msg::SetFilter(f) => {
             m.filter = f;
+            // Saved on every change rather than on close: the window can
+            // be killed, and the daemon can evict it to hand the kind to
+            // a new process, neither of which runs a shutdown path.
+            crate::gui::ui_prefs::save_sidebar(f.into());
             m.selection.clear();
             back_to_top(m)
         }
@@ -4688,5 +4726,29 @@ mod tests {
     fn a_proxy_without_a_host_falls_back_to_the_environment() {
         use crate::domain::ProxyMode as M;
         assert_eq!(proxy_status(&proxy(M::Socks5, "   ")).1, "System proxy");
+    }
+
+    /// What the window remembers is what it comes back to.
+    #[test]
+    fn the_sidebar_view_survives_a_round_trip() {
+        use crate::gui::ui_prefs::SidebarPref;
+        for f in [
+            SidebarFilter::All,
+            SidebarFilter::Category(Category::Videos),
+            SidebarFilter::Queue(QueueId::new()),
+        ] {
+            assert_eq!(SidebarFilter::from(SidebarPref::from(f)), f);
+        }
+    }
+
+    /// The on-disk shape is a contract with older and newer builds:
+    /// pin it, so renaming a variant has to be a deliberate migration.
+    #[test]
+    fn the_saved_sidebar_view_keeps_its_shape() {
+        let json = serde_json::to_string(&crate::gui::ui_prefs::SidebarPref::from(
+            SidebarFilter::Category(Category::Videos),
+        ))
+        .unwrap();
+        assert_eq!(json, r#"{"view":"category","category":"videos"}"#);
     }
 }

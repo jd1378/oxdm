@@ -1,7 +1,10 @@
-//! Persisted GUI view state (`$config/oxdm/ui-prefs.json`). Currently
-//! the main window's last size; loaded on launch, saved on resize.
+//! Persisted GUI view state (`$config/oxdm/ui-prefs.json`): the main
+//! window's last size, its table columns, and which sidebar entry it was
+//! looking at. Loaded on launch, saved as each changes.
 
 use serde::{Deserialize, Serialize};
+
+use crate::domain::{Category, QueueId};
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct UiPrefs {
@@ -19,6 +22,33 @@ pub struct UiPrefs {
     /// `None` = never seen, treated as the default (native chrome).
     #[serde(default)]
     pub custom_window_chrome: Option<bool>,
+    /// The sidebar entry the main window was on when it last closed.
+    /// `None` = never saved, or a file this build cannot read; the
+    /// window then falls back to its default (the built-in queue).
+    #[serde(default, deserialize_with = "sidebar_or_none")]
+    pub sidebar: Option<SidebarPref>,
+}
+
+/// Serialisable twin of `windows::main::SidebarFilter`. Kept here rather
+/// than deriving on the window's own enum so persistence does not depend
+/// on a UI type — and so renaming a variant in the window is a
+/// deliberate migration, not a silent change of the on-disk shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "view", rename_all = "snake_case")]
+pub enum SidebarPref {
+    All,
+    Category { category: Category },
+    Queue { id: QueueId },
+}
+
+/// A `sidebar` this build cannot parse (an unknown category, a
+/// hand-edited file) must cost the user nothing else in the file.
+fn sidebar_or_none<'de, D>(d: D) -> Result<Option<SidebarPref>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(raw).ok())
 }
 
 /// Number of table columns = `windows::main::SortColumn` variants.
@@ -182,6 +212,15 @@ pub fn sync_custom_window_chrome(v: bool) {
     }
     let mut prefs = load();
     prefs.custom_window_chrome = Some(v);
+    save(&prefs);
+}
+
+pub fn save_sidebar(s: SidebarPref) {
+    let mut prefs = load();
+    if prefs.sidebar == Some(s) {
+        return;
+    }
+    prefs.sidebar = Some(s);
     save(&prefs);
 }
 
