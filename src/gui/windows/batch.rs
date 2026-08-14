@@ -122,8 +122,7 @@ pub fn boot() -> (App, Task<Msg>) {
                     .hello(crate::ipc_local::protocol::GuiKind::Batch)
                     .await?;
                 let snap = client.snapshot().await?;
-                let items =
-                    crate::ipc::batch::load_and_consume(&path).map_err(|e| e.to_string())?;
+                let items = crate::ipc::staged::load_batch(&path).map_err(|e| e.to_string())?;
                 let taken_names = snap
                     .jobs
                     .iter()

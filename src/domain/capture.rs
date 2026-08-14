@@ -33,9 +33,10 @@ pub struct CaptureRequest {
     /// MIME type if known. Display-only, never used for routing.
     #[serde(default)]
     pub mime_type: Option<String>,
-    /// If `true`, oxdm should pop the Add-Download dialog. If `false`,
-    /// queue immediately with defaults. Mirrors IDM's "ask each time"
-    /// vs "auto-start" preference.
+    /// If `true`, oxdm should pop the Add-Download dialog prefilled
+    /// with this request and add nothing until the user confirms there.
+    /// If `false`, queue immediately with defaults. Mirrors IDM's "ask
+    /// each time" vs "auto-start" preference.
     #[serde(default)]
     pub interactive: bool,
     /// Power-user override — target queue by id. Drops to `Main` when
@@ -48,9 +49,10 @@ pub struct CaptureRequest {
     pub queue_name: Option<String>,
     /// If `true`, oxdm also tells the receiving queue to start its
     /// scheduler after adding the job. Lets scripts say "drop this in
-    /// Mirrors and go" in a single round-trip. When the captured job
-    /// goes interactive, this is treated as the dialog's Start now
-    /// preselect.
+    /// Mirrors and go" in a single round-trip. Ignored when the capture
+    /// is interactive: there is no job to start until the user presses
+    /// one of the dialog's buttons, and those buttons are the start
+    /// decision.
     #[serde(default)]
     pub auto_start_queue: bool,
 }
@@ -90,7 +92,12 @@ impl CaptureRequest {
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum CaptureResponse {
     Accepted {
-        job_id: String,
+        /// Absent when the capture was `interactive`: the dialog is
+        /// open and no job exists yet — it is the user's to create or
+        /// decline. Present for every non-interactive capture, which
+        /// is queued by the time this reply is written.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        job_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
     },
@@ -210,4 +217,33 @@ pub enum IpcRequest {
         auto_start_queue: bool,
         items: Vec<CaptureRequest>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The extension switches on `result` alone (`background.ts` only
+    /// tests for `rejected`), so an interactive capture — which has no
+    /// job yet — still reports `accepted`, just without an id. An
+    /// `Accepted` that serialized `"job_id": null` or an empty string
+    /// would be a job id that resolves to nothing.
+    #[test]
+    fn an_interactive_capture_is_accepted_without_a_job_id() {
+        let staged = serde_json::to_value(CaptureResponse::Accepted {
+            job_id: None,
+            id: Some("r1".to_owned()),
+        })
+        .unwrap();
+        assert_eq!(staged["result"], "accepted");
+        assert!(staged.get("job_id").is_none(), "{staged}");
+
+        let queued = serde_json::to_value(CaptureResponse::Accepted {
+            job_id: Some("01HX".to_owned()),
+            id: None,
+        })
+        .unwrap();
+        assert_eq!(queued["job_id"], "01HX");
+        assert!(queued.get("id").is_none(), "{queued}");
+    }
 }

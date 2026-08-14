@@ -1,8 +1,17 @@
-//! Add / Edit download window (`oxdm gui add [<id>] [--url <u>]`).
+//! Add / Edit download window
+//! (`oxdm gui add [<id>] [--url <u>] [--staged <path>]`).
 //! URL row + paste, detection card (empty / probing / detected /
 //! error), save-as row, category / queue / segments row, Advanced
 //! collapsible (Proxy / Headers / Auth / User agent / Cookies),
 //! footer with Cancel / Add-to-queue / Download-now.
+//!
+//! Three ways in, and only one of them edits:
+//! - bare / `--url` — a fresh add from oxdm itself.
+//! - `--staged <path>` — an interactive browser capture, prefilled from
+//!   the `CaptureRequest` the daemon staged (`ipc::staged`). Still an
+//!   *add*: nothing exists until the user presses a footer button, so
+//!   Cancel leaves the list exactly as it was.
+//! - `<id>` — edit a job that already exists.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -170,6 +179,9 @@ pub struct Boot {
     queues: Vec<(QueueId, String)>,
     main_queue: QueueId,
     edit: Option<Box<crate::domain::Job>>,
+    /// An interactive browser capture, already read out of its staged
+    /// file. Prefills the form; adds nothing on its own.
+    captured: Option<Box<crate::domain::CaptureRequest>>,
     prefill: Option<String>,
     /// Names other downloads already hold, as comparison keys. The
     /// daemon is the one that enforces this; the dialog carries the
@@ -240,6 +252,12 @@ pub struct AddState {
     user_agent: String,
     cookies: text_editor::Content,
     headers: Vec<(String, String)>,
+    /// The page the link came from. No field shows it — it rides its
+    /// own column on the job (`Job::referrer`, spliced in as `Referer`
+    /// at request time) rather than the header rows below. Carried so
+    /// neither an edit nor a captured add drops what the browser sent:
+    /// hosts that check it reject the download without it.
+    referrer: Option<url::Url>,
 
     error: Option<String>,
     shot: Option<Shot>,
@@ -331,7 +349,7 @@ impl AddState {
             queue: Some(self.queue),
             save_dir,
             filename,
-            referrer: None,
+            referrer: self.referrer.clone(),
             headers,
             max_connections: Some(segments),
             creds: conn_form::creds(&self.proxy, &self.auth),
@@ -418,22 +436,47 @@ fn fit_window(st: &mut AddState) -> Task<Msg> {
     })
 }
 
-fn parse_args() -> (Option<JobId>, Option<String>) {
+/// How the window was invoked. Mutually exclusive by construction:
+/// the last flag on the line wins, so a malformed spawn opens a plain
+/// Add rather than half an edit.
+enum Invocation {
+    Fresh(Option<String>),
+    Staged(PathBuf),
+    Edit(JobId),
+}
+
+fn parse_args() -> Invocation {
     let mut args = std::env::args().skip(3);
-    let mut edit_id = None;
-    let mut prefill = None;
+    let mut inv = Invocation::Fresh(None);
     while let Some(a) = args.next() {
         if a == "--url" {
-            prefill = args.next();
+            inv = Invocation::Fresh(args.next());
+        } else if a == "--staged" {
+            match args.next() {
+                Some(p) => inv = Invocation::Staged(PathBuf::from(p)),
+                None => break,
+            }
         } else if let Ok(id) = a.parse::<JobId>() {
-            edit_id = Some(id);
+            inv = Invocation::Edit(id);
         }
     }
-    (edit_id, prefill)
+    inv
 }
 
 pub fn boot() -> (App, Task<Msg>) {
-    let (edit_id, prefill) = parse_args();
+    let inv = parse_args();
+    let edit_id = match inv {
+        Invocation::Edit(id) => Some(id),
+        _ => None,
+    };
+    let prefill = match &inv {
+        Invocation::Fresh(u) => u.clone(),
+        _ => None,
+    };
+    let staged_path = match inv {
+        Invocation::Staged(p) => Some(p),
+        _ => None,
+    };
     (
         App::Connecting,
         Task::perform(
@@ -463,12 +506,25 @@ pub fn boot() -> (App, Task<Msg>) {
                     .filter_map(|j| j.filename.as_deref())
                     .map(crate::domain::name_key)
                     .collect::<Vec<_>>();
+                // Read once and deleted, cookies and all, whether or
+                // not the user goes on to add anything. A staged file
+                // we cannot read is not worth refusing to open over:
+                // the window falls back to a plain, empty Add.
+                let captured =
+                    staged_path.and_then(|p| match crate::ipc::staged::load_capture(&p) {
+                        Ok(req) => Some(Box::new(req)),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "add: unreadable staged capture");
+                            None
+                        }
+                    });
                 Ok(Box::new(Boot {
                     client,
                     settings: snap.settings,
                     queues: snap.queues.iter().map(|q| (q.id, q.name.clone())).collect(),
                     main_queue,
                     edit,
+                    captured,
                     prefill,
                     taken_names,
                 }))
@@ -524,6 +580,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 user_agent: String::new(),
                 cookies: text_editor::Content::new(),
                 headers: Vec::new(),
+                referrer: None,
                 error: None,
                 shot: Shot::from_env(),
                 settings: boot.settings,
@@ -536,6 +593,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 st.save_dirty = true;
                 st.queue_dirty = true;
                 st.url = job.url.to_string();
+                st.referrer = job.referrer.clone();
                 st.queue = job.queue_id;
                 st.category = Some(job.category);
                 st.original_category = Some(job.category);
@@ -567,6 +625,53 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                     } else {
                         st.headers.push((k.clone(), v.clone()));
                     }
+                }
+                st.probe_gen += 1;
+                st.probing = true;
+                task = start_probe(&st);
+            } else if let Some(cap) = boot.captured {
+                // An interactive browser capture. Everything the
+                // extension saw is prefilled, and nothing is added
+                // until a footer button says so — this is an add, not
+                // an edit, so `edit_id` stays `None` and Cancel really
+                // cancels.
+                st.url = cap.url.to_string();
+                st.referrer = cap.referrer.clone();
+                if let Some(name) = cap.filename.as_deref().filter(|n| !n.trim().is_empty()) {
+                    let dir = PathBuf::from(&st.save_path);
+                    st.save_path = dir.join(st.free_name(name)).display().to_string();
+                }
+                // The extension routed this one explicitly, so category
+                // routing must not move it (the same rule the picker's
+                // own `queue_dirty` follows).
+                if let Some(q) = cap.queue.map(QueueId) {
+                    st.queue = q;
+                    st.queue_dirty = true;
+                }
+                let mut cookies = cap.cookies.clone();
+                for (k, v) in &cap.headers {
+                    if crate::domain::header_name_eq(k, "User-Agent") {
+                        st.user_agent = v.clone();
+                    } else if crate::domain::header_name_eq(k, "Cookie") {
+                        // Cookies belong in the Cookies editor, which
+                        // is the field the daemon encrypts. Left among
+                        // the header rows they would be stored as
+                        // plaintext headers instead.
+                        cookies.get_or_insert_with(|| v.clone());
+                    } else {
+                        st.headers.push((k.clone(), v.clone()));
+                    }
+                }
+                // The capture's own UA field loses to an explicit
+                // `User-Agent` header, matching the merge order the
+                // extension API documents.
+                if st.user_agent.is_empty()
+                    && let Some(ua) = cap.user_agent.as_deref()
+                {
+                    st.user_agent = ua.to_owned();
+                }
+                if let Some(c) = cookies {
+                    st.cookies = text_editor::Content::with_text(&c);
                 }
                 st.probe_gen += 1;
                 st.probing = true;
@@ -972,6 +1077,13 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
                             client.update_job_location(id, edit).await?;
                             if start_now {
                                 client.start_job(id).await?;
+                                // Download now means "show me it
+                                // running", whichever way in the user
+                                // took: this window closes on submit,
+                                // and without the download window a
+                                // started job would leave nothing on
+                                // screen to have started.
+                                client.open_download_window(id).await?;
                             }
                             Ok(())
                         }

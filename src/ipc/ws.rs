@@ -159,6 +159,17 @@ async fn handle(state: Arc<AppState>, stream: tokio::net::TcpStream) -> Result<(
     Ok(())
 }
 
+/// The id to report for an accepted capture. `None` for an interactive
+/// one: the dialog is open and the job it may create is not this
+/// reply's to name. The extension treats anything that is not
+/// `rejected` as taken, and never reads the id.
+fn accepted_job_id(outcome: crate::ipc::CaptureOutcome) -> Option<String> {
+    match outcome {
+        crate::ipc::CaptureOutcome::Added(id) => Some(id.to_string()),
+        crate::ipc::CaptureOutcome::Staged => None,
+    }
+}
+
 async fn dispatch(state: &Arc<AppState>, text: &str) -> CaptureResponse {
     // Peek at `kind` to decide between tagged + bare shapes.
     let value: Value = match serde_json::from_str(text) {
@@ -184,8 +195,8 @@ async fn dispatch(state: &Arc<AppState>, text: &str) -> CaptureResponse {
             }
         };
         return match crate::ipc::accept_capture(state, req).await {
-            Ok(job_id) => CaptureResponse::Accepted {
-                job_id: job_id.to_string(),
+            Ok(outcome) => CaptureResponse::Accepted {
+                job_id: accepted_job_id(outcome),
                 id: None,
             },
             Err(reason) => CaptureResponse::Rejected { reason, id: None },
@@ -204,8 +215,8 @@ async fn dispatch(state: &Arc<AppState>, text: &str) -> CaptureResponse {
 
     match req {
         IpcRequest::Capture { id, req } => match crate::ipc::accept_capture(state, req).await {
-            Ok(job_id) => CaptureResponse::Accepted {
-                job_id: job_id.to_string(),
+            Ok(outcome) => CaptureResponse::Accepted {
+                job_id: accepted_job_id(outcome),
                 id,
             },
             Err(reason) => CaptureResponse::Rejected { reason, id },
@@ -280,7 +291,7 @@ async fn dispatch(state: &Arc<AppState>, text: &str) -> CaptureResponse {
                 let mut rejected = Vec::new();
                 for item in items {
                     match crate::ipc::accept_capture(state, item).await {
-                        Ok(jid) => accepted.push(jid.to_string()),
+                        Ok(outcome) => accepted.extend(accepted_job_id(outcome)),
                         Err(reason) => rejected.push(reason),
                     }
                 }
@@ -290,7 +301,7 @@ async fn dispatch(state: &Arc<AppState>, text: &str) -> CaptureResponse {
                     rejected,
                 };
             }
-            match crate::ipc::batch::stage_for_dialog(&items) {
+            match crate::ipc::staged::stage_batch(&items) {
                 Ok(path) => {
                     crate::daemon::tray::spawn_batch_gui(&path);
                     CaptureResponse::BatchResult {

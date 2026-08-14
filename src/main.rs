@@ -74,11 +74,17 @@ fn main() {
                 oxdm::gui::windows::properties::launch_properties(id);
             }
             Some("add") => {
+                // Re-parsed inside the window (see `add::parse_args`);
+                // read here only so an unusable invocation fails before
+                // a window opens.
                 let mut edit_id: Option<oxdm::domain::JobId> = None;
                 let mut prefill_url: Option<String> = None;
                 while let Some(a) = args.next() {
                     if a == "--url" {
                         prefill_url = args.next();
+                    } else if a == "--staged" {
+                        // The path is the window's to read and delete.
+                        let _ = args.next();
                     } else if let Ok(id) = a.parse::<oxdm::domain::JobId>() {
                         edit_id = Some(id);
                     }

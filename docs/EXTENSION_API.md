@@ -157,10 +157,10 @@ Two frame styles are accepted after auth:
 | `headers`     | `{ string: string }`  | no       | Extra headers. Merged on top of cookies / referrer / UA — a key here wins over the dedicated field of the same name. |
 | `size`        | integer (bytes)       | no       | Reported size if the extension already saw it.                                   |
 | `mime_type`   | string                | no       | Display-only.                                                                    |
-| `interactive` | bool (default false)  | no       | If `true`, oxdm opens the Add-Download dialog. If `false`, it queues immediately. |
-| `queue`            | UUID                | no | Target queue by id. Unknown id falls back to the Main queue. |
+| `interactive` | bool (default false)  | no       | If `true`, oxdm opens the Add-Download dialog prefilled with this request and adds **nothing** until the user confirms there. If `false`, it queues immediately. |
+| `queue`            | UUID                | no | Target queue by id. Unknown id falls back to the Main queue. On `interactive: true` it preselects the dialog's queue picker, which the user can still change. |
 | `queue_name`       | string              | no | Target queue by case-insensitive name. Ignored when `queue` is set. |
-| `auto_start_queue` | bool (default false)| no | After adding the job, also call `start_queue` on the resolved queue. Lets a script say "drop this in Mirrors and go" in a single round-trip. |
+| `auto_start_queue` | bool (default false)| no | After adding the job, also call `start_queue` on the resolved queue. Lets a script say "drop this in Mirrors and go" in a single round-trip. Ignored on `interactive: true`: the dialog's own Cancel / Add to queue / Download now buttons are the start decision, and there is no job to start until one of them is pressed. |
 
 ## Message: `CaptureResponse`
 
@@ -171,6 +171,11 @@ or
 ```json
 { "result": "rejected", "reason": "<human-readable>" }
 ```
+
+`job_id` is **absent** when the request was `interactive: true` — the
+dialog is open, no job exists yet, and the user may still cancel.
+`accepted` there means "oxdm took it from here", not "queued". Treat
+any non-`rejected` reply as success rather than switching on `job_id`.
 
 A queued job's progress is **not** streamed back to the extension. oxdm owns the UX from this point on.
 

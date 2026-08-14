@@ -225,8 +225,9 @@ pub fn spawn_properties_gui(id: JobId) {
 }
 
 /// Add Download window. `prefill_url` is the clipboard URL the caller
-/// already resolved (daemon has no clipboard); `edit_id` carries the
-/// capture-review path. Argv hints only apply to the fresh spawn.
+/// already resolved (daemon has no clipboard); `edit_id` opens the
+/// window on an existing job in edit mode. Argv hints only apply to the
+/// fresh spawn.
 pub fn spawn_add_gui(edit_id: Option<JobId>, prefill_url: Option<&str>) {
     let edit = edit_id.map(|id| id.to_string());
     let mut args: Vec<&str> = vec!["gui", "add"];
@@ -240,9 +241,22 @@ pub fn spawn_add_gui(edit_id: Option<JobId>, prefill_url: Option<&str>) {
     evict_and_spawn(crate::ipc_local::protocol::GuiKind::Add, &args);
 }
 
+/// Add Download window for an interactive browser capture. The request
+/// carries cookies, headers and a referrer, so it travels as a staged
+/// file rather than on the command line (see `ipc::staged`); the dialog
+/// reads + deletes it on launch. No job exists yet — the dialog creates
+/// one only if the user confirms.
+pub fn spawn_add_gui_staged(staged_path: &std::path::Path) {
+    let p = staged_path.to_string_lossy().to_string();
+    evict_and_spawn(
+        crate::ipc_local::protocol::GuiKind::Add,
+        &["gui", "add", "--staged", &p],
+    );
+}
+
 /// Batch-capture triage window. `staged_path` points at a JSON file
-/// the WS bridge wrote in the user's temp dir; the dialog subprocess
-/// reads + deletes it on launch (see `ipc::batch`).
+/// the WS bridge wrote in the user's runtime dir; the dialog subprocess
+/// reads + deletes it on launch (see `ipc::staged`).
 pub fn spawn_batch_gui(staged_path: &std::path::Path) {
     let p = staged_path.to_string_lossy().to_string();
     evict_and_spawn(

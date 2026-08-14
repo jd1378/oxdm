@@ -59,7 +59,7 @@ fn spawn_workers(
     let _g = rt.enter();
     // Cookies a previous run staged for a batch dialog that never
     // consumed them. Before anything can stage a new one.
-    crate::ipc::batch::sweep_stale();
+    crate::ipc::staged::sweep_stale();
     // Programs an update had to rename aside because they were running
     // at the time. Nothing holds them now.
     if let Ok(exe) = crate::platform::current_exe() {
