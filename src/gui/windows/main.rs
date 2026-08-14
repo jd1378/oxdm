@@ -3844,18 +3844,7 @@ fn statusbar(m: &Main) -> Element<'_, Msg> {
         );
     }
 
-    let proxy = &m.snap.settings.proxy;
-    let proxy_set = matches!(
-        proxy.mode,
-        crate::domain::ProxyMode::Http
-            | crate::domain::ProxyMode::Https
-            | crate::domain::ProxyMode::Socks5
-    ) && !proxy.host.trim().is_empty();
-    let (proxy_icon, proxy_label) = if proxy_set {
-        ("shield", "Proxied")
-    } else {
-        ("globe", "Direct")
-    };
+    let (proxy_icon, proxy_label) = proxy_status(&m.snap.settings.proxy);
     // Free space is reported for the work directory, so the button opens
     // that one: the in-flight `.part` files are what consume it.
     let free = free_disk_str(&m.snap.settings.work_dir);
@@ -3892,6 +3881,24 @@ fn statusbar(m: &Main) -> Element<'_, Msg> {
         ..Default::default()
     })
     .into()
+}
+
+/// `(icon, label)` for the status bar's network button, from the global
+/// proxy setting.
+///
+/// Three outcomes, not two: only `None` is truly direct (odl's
+/// `no_proxy` turns off the configured proxy, the environment's and the
+/// platform's). `System` — and any mode left without a host, which
+/// `global_proxy_url` also declines to build a URL for — hands the
+/// decision to `HTTP_PROXY` and friends, so the app cannot honestly
+/// claim the connection is direct.
+fn proxy_status(p: &crate::domain::ProxyAdv) -> (&'static str, &'static str) {
+    use crate::domain::ProxyMode as M;
+    match p.mode {
+        M::None => ("globe", "Direct"),
+        M::Http | M::Https | M::Socks5 if !p.host.trim().is_empty() => ("shield", "Proxied"),
+        _ => ("shield-question", "System proxy"),
+    }
 }
 
 fn free_disk_str(path: &std::path::Path) -> String {
@@ -4636,5 +4643,50 @@ mod tests {
             targets(&[(Phase::Queued, false), (Phase::Paused, false)]).1,
             vec![0, 1]
         );
+    }
+
+    fn proxy(mode: crate::domain::ProxyMode, host: &str) -> crate::domain::ProxyAdv {
+        crate::domain::ProxyAdv {
+            mode,
+            host: host.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    /// A configured proxy is announced as one.
+    #[test]
+    fn a_configured_proxy_reads_as_proxied() {
+        use crate::domain::ProxyMode as M;
+        for mode in [M::Http, M::Https, M::Socks5] {
+            assert_eq!(proxy_status(&proxy(mode, "127.0.0.1")).1, "Proxied");
+        }
+    }
+
+    /// Only the mode that turns off every proxy — configured,
+    /// environment and platform — may claim the traffic goes direct.
+    #[test]
+    fn only_no_proxy_reads_as_direct() {
+        assert_eq!(
+            proxy_status(&proxy(crate::domain::ProxyMode::None, "")).1,
+            "Direct"
+        );
+    }
+
+    /// System hands the choice to the environment, which may well hold
+    /// a proxy. Saying "Direct" there would be a lie.
+    #[test]
+    fn system_never_claims_to_be_direct() {
+        use crate::domain::ProxyMode as M;
+        assert_eq!(proxy_status(&proxy(M::System, "")).1, "System proxy");
+        assert_eq!(proxy_status(&proxy(M::Inherit, "")).1, "System proxy");
+    }
+
+    /// A mode chosen but left without a host is exactly the case
+    /// `global_proxy_url` declines to build a URL for, so the
+    /// environment decides and the bar says so.
+    #[test]
+    fn a_proxy_without_a_host_falls_back_to_the_environment() {
+        use crate::domain::ProxyMode as M;
+        assert_eq!(proxy_status(&proxy(M::Socks5, "   ")).1, "System proxy");
     }
 }
