@@ -114,6 +114,17 @@ pub fn open_url(url: &str) {
     }
 }
 
+/// The icon name every entry oxdm writes carries, and the Wayland
+/// `app_id` / X11 `WM_CLASS` its windows are given (see
+/// `gui::chrome::window_settings`). One string for all three on
+/// purpose: a launcher resolves the picture by icon name, and a
+/// taskbar finds the same entry by matching `app_id` against the
+/// entry's own basename, so `oxdm.desktop` naming `Icon=oxdm` is what
+/// makes both work. `tools/install.sh` writes the matching
+/// `~/.local/share/icons/hicolor/512x512/apps/oxdm.png`.
+#[cfg(target_os = "linux")]
+const DESKTOP_ICON: &str = "oxdm";
+
 #[cfg(target_os = "linux")]
 pub fn install_desktop_entry() -> Result<std::path::PathBuf, String> {
     use std::io::Write;
@@ -129,9 +140,11 @@ pub fn install_desktop_entry() -> Result<std::path::PathBuf, String> {
          Name=oxdm\n\
          Comment=Cross-platform download manager\n\
          Exec={} %U\n\
+         Icon={DESKTOP_ICON}\n\
          Terminal=false\n\
          Categories=Network;FileTransfer;\n\
-         StartupNotify=true\n",
+         StartupNotify=true\n\
+         StartupWMClass={DESKTOP_ICON}\n",
         desktop_exec_arg(&exe)
     );
     let mut f = std::fs::File::create(&path).map_err(|e| e.to_string())?;
@@ -212,6 +225,7 @@ fn write_xdg_autostart(
          Name=oxdm\n\
          Comment=Cross-platform download manager\n\
          Exec={}\n\
+         Icon={DESKTOP_ICON}\n\
          Terminal=false\n\
          X-GNOME-Autostart-enabled=true\n\
          Categories=Network;FileTransfer;\n",

@@ -141,27 +141,83 @@ pub fn window_icon_data() -> Option<(Vec<u8>, u32, u32)> {
     Some((d.rgba.clone(), d.width, d.height))
 }
 
+/// The sizes a StatusNotifierItem offers the host, smallest first.
+///
+/// `IconPixmap` is an *array* of the same picture at several sizes and
+/// the host picks the one nearest its panel; handing it one 512px image
+/// for a 22px slot leaves the scaling to whatever single-pass filter
+/// the host happens to use, which is where the glyph's thin strokes go
+/// to die. 22/24 are the usual panel heights, the rest cover HiDPI
+/// panels without shipping the full 512 (a megabyte of pixels over
+/// D-Bus on every property read).
 #[cfg(target_os = "linux")]
-pub fn ksni_icon(d: &Decoded) -> ksni::Icon {
-    let mut argb = d.rgba.clone();
-    for px in argb.chunks_exact_mut(4) {
-        px.rotate_right(1);
+const TRAY_PX: [u32; 5] = [22, 24, 32, 48, 64];
+
+/// One [`ksni::Icon`] from `d`, scaled to `px` square.
+///
+/// SNI wants ARGB32 in network byte order, so each pixel's alpha moves
+/// from last to first. Lanczos for the same reason [`image_handle`]
+/// uses it: a clean box of source pixels per destination pixel.
+#[cfg(target_os = "linux")]
+fn ksni_icon_at(d: &Decoded, px: u32) -> Option<ksni::Icon> {
+    let src = image::RgbaImage::from_raw(d.width, d.height, d.rgba.clone())?;
+    let scaled = if d.width == px && d.height == px {
+        src
+    } else {
+        image::imageops::resize(&src, px, px, image::imageops::FilterType::Lanczos3)
+    };
+    let mut argb = scaled.into_raw();
+    for pixel in argb.chunks_exact_mut(4) {
+        pixel.rotate_right(1);
     }
-    ksni::Icon {
-        width: d.width as i32,
-        height: d.height as i32,
+    Some(ksni::Icon {
+        width: px as i32,
+        height: px as i32,
         data: argb,
-    }
+    })
+}
+
+/// The size ladder for one glyph.
+///
+/// Cached: the tray republishes its icon on every job update, and
+/// rescaling 512px five times per update is real work to redo for a
+/// picture that never changes.
+#[cfg(target_os = "linux")]
+fn ksni_ladder(d: &Decoded) -> Vec<ksni::Icon> {
+    TRAY_PX
+        .iter()
+        .filter_map(|&px| ksni_icon_at(d, px))
+        .collect()
 }
 
 #[cfg(target_os = "linux")]
 pub fn ksni_icon_normal(theme: ResolvedTheme) -> Vec<ksni::Icon> {
-    normal(theme).map(ksni_icon).into_iter().collect()
+    static DARK: OnceLock<Vec<ksni::Icon>> = OnceLock::new();
+    static LIGHT: OnceLock<Vec<ksni::Icon>> = OnceLock::new();
+    match theme {
+        ResolvedTheme::Light | ResolvedTheme::Warm => {
+            DARK.get_or_init(|| idle_dark().map(ksni_ladder).unwrap_or_default())
+        }
+        ResolvedTheme::Dark => {
+            LIGHT.get_or_init(|| idle_light().map(ksni_ladder).unwrap_or_default())
+        }
+    }
+    .clone()
 }
 
 #[cfg(target_os = "linux")]
 pub fn ksni_icon_downloading(theme: ResolvedTheme) -> Vec<ksni::Icon> {
-    downloading(theme).map(ksni_icon).into_iter().collect()
+    static DARK: OnceLock<Vec<ksni::Icon>> = OnceLock::new();
+    static LIGHT: OnceLock<Vec<ksni::Icon>> = OnceLock::new();
+    match theme {
+        ResolvedTheme::Light | ResolvedTheme::Warm => {
+            DARK.get_or_init(|| play_dark().map(ksni_ladder).unwrap_or_default())
+        }
+        ResolvedTheme::Dark => {
+            LIGHT.get_or_init(|| play_light().map(ksni_ladder).unwrap_or_default())
+        }
+    }
+    .clone()
 }
 
 #[cfg(not(target_os = "linux"))]
