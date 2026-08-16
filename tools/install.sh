@@ -95,22 +95,12 @@ case "$OS" in
 esac
 info "$OS / $ARCH → $TARGET"
 
-# Linux runtime deps. The UI is software-rendered and links no toolkit,
-# so the only thing worth checking for is D-Bus, which the tray and
-# desktop notifications use. Its absence is a warning, not an error:
-# oxdm runs without them.
-if [ "$OS" = "Linux" ]; then
-  if ! ldconfig -p 2>/dev/null | grep -q "libdbus-1.so.3"; then
-    warn "libdbus-1 not found — the tray icon and desktop notifications will be unavailable."
-    if   [ -f /etc/debian_version ]; then
-      info "Install with: sudo apt install libdbus-1-3"
-    elif [ -f /etc/fedora-release ] || [ -f /etc/redhat-release ]; then
-      info "Install with: sudo dnf install dbus-libs"
-    elif [ -f /etc/arch-release ]; then
-      info "Install with: sudo pacman -S dbus"
-    fi
-  fi
-fi
+# No runtime dependency check: there is nothing to check for. The UI is
+# software-rendered and links no toolkit, and everything that talks to
+# the desktop — tray, notifications, keyring, network and power state —
+# speaks D-Bus through zbus in pure Rust, so `libdbus` is never loaded.
+# This used to warn when `libdbus-1.so.3` was missing, which named a
+# package the user does not need and a failure that does not follow.
 
 step "Resolving release"
 if [ "$VERSION" = latest ]; then
@@ -193,6 +183,12 @@ if [ "$OS" = "Linux" ] && [ -z "${OXDM_NO_DESKTOP:-}" ]; then
     mkdir -p "$ICON_DIR"
     install -m 0644 "$ICON_SRC" "$ICON_DIR/oxdm.png"
     ICON="oxdm"
+    # A stale icon-theme.cache in the theme root hides every icon added
+    # after it was built: readers compare its mtime against the theme
+    # directory, not against the size/context directory the file landed
+    # in, so writing the PNG alone leaves the cache looking current.
+    # Only GTK keeps that cache, and only GTK desktops ship the tool to
+    # rebuild it, so its absence is not worth reporting.
     command -v gtk-update-icon-cache >/dev/null 2>&1 \
       && gtk-update-icon-cache -q -t -f "$HOME/.local/share/icons/hicolor" >/dev/null 2>&1 || true
     ok "icon: $ICON_DIR/oxdm.png"
