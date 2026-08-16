@@ -96,6 +96,10 @@ Notifications. The daemon refuses update requests over its own IPC
 socket too, so nothing left over from a previous install can start a
 self-install behind the package manager's back.
 
+Settings → Advanced drops its "launcher entry" button for the same
+reason: the `.desktop` file and its icon are yours to ship, and a copy
+written to `~/.local/share/applications` would shadow the packaged one.
+
 Leave it unset for anything users install themselves — the tarball, the
 install scripts, a local build.
 
@@ -130,39 +134,28 @@ The companion extension is published for both browsers:
 - [Chrome Web Store](https://chromewebstore.google.com/detail/oxdm-download-manager-int/bfefefnlghppdcgjjimkllklpifkcokj)
 - [Firefox Add-ons](https://addons.mozilla.org/addon/oxdm-download-manager-bridge/)
 
-*Tools → Browser extensions* links to the same pages.
+*Tools → Browser extension* links to the same pages.
 
 The host side is a stable contract (see [`docs/EXTENSION_API.md`](docs/EXTENSION_API.md)), so any extension can use it. Both transports are supported:
 
 - **WebSocket** at `ws://127.0.0.1:<port>`, simplest for development.
 - **Native messaging** via the `oxdm-native-host` shim plus a per-OS manifest.
   oxdm registers the manifest itself: on first run, again whenever it
-  finds one missing or stale, and on demand from *Settings → Browser
-  integration*. `oxdm --install-native-host [--chromium-id ID]` does
-  the same from a terminal.
+  finds one missing or stale, and on demand from *Settings → Browser*.
+  `oxdm --install-native-host [--chromium-id ID]` does the same from a
+  terminal.
 
-The pairing code the extension asks for lives in *Settings → Browser integration*, with Copy and Regenerate buttons. It bundles the port and the auth token in one string.
+The pairing code the extension asks for lives in *Settings → Browser*, with Copy and Regenerate buttons. It bundles the port and the auth token in one string.
 
 ## Configuration
 
 Settings + queue persist in a SQLite DB:
 
-| OS      | path                                                   |
-|---------|--------------------------------------------------------|
-| Linux   | `~/.config/oxdm/oxdm.db`                               |
-| macOS   | `~/Library/Application Support/oxdm/oxdm.db`           |
-| Windows | `%APPDATA%\oxdm\oxdm.db`                               |
-
-Every `odl::config::Config` field is editable from Settings, plus oxdm-only knobs (theme, IPC port, conflict-while-hidden behavior, remove-confirm prompts).
-
-## Architecture
-
-Four-layer clean architecture (`domain` → `data` → `ipc_local` → `gui`):
-`domain` is pure, [`odl`](https://crates.io/crates/odl) types never leak
-past `data`, and the GUI windows are separate processes that talk to the
-daemon over a local socket. Pause/cancel and the update channel sit
-behind traits, so swapping either does not touch the UI. The desktop UI
-is built with [iced](https://iced.rs).
+| OS      | path                                         |
+|---------|----------------------------------------------|
+| Linux   | `~/.local/share/oxdm/oxdm.db`                |
+| macOS   | `~/Library/Application Support/oxdm/oxdm.db` |
+| Windows | `%APPDATA%\oxdm\oxdm.db`                     |
 
 ## License
 
