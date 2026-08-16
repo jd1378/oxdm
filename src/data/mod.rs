@@ -8,6 +8,7 @@
 
 pub mod conditions;
 pub mod crypto;
+pub mod db_location;
 mod events;
 mod file_watch;
 mod hooks;

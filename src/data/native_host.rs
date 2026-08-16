@@ -411,12 +411,19 @@ fn shell_quote(s: &str) -> String {
 /// native messaging looked broken with the daemon plainly running. One
 /// source of truth means that cannot recur.
 fn db_path() -> PathBuf {
-    crate::data::store::default_db_path()
+    crate::data::store::current_db_path()
 }
 
 /// The grants a Flatpak browser needs: the host binary, and the
-/// database's *directory* — SQLite in WAL mode reads `-wal` and `-shm`
-/// sidecars beside the file even when opening read-only.
+/// database's *directory*.
+///
+/// A directory and not the file, because SQLite in WAL mode reads the
+/// `-wal` and `-shm` sidecars beside it even when opening read-only,
+/// and naming those in the grant would bind whichever of them happened
+/// to exist when the sandbox started. That is why the database has a
+/// directory to itself (`db_location::db_dir`): the grant is as wide as
+/// a directory has to be, so the directory is as narrow as it can be.
+/// Read-only throughout — the shim reads two settings and never writes.
 fn flatpak_grant_args(binary: &Path, opts: &Options) -> Vec<String> {
     let db = opts.db_path.clone().unwrap_or_else(db_path);
     let db_dir = db.parent().map(Path::to_path_buf).unwrap_or_default();
@@ -971,13 +978,18 @@ mod tests {
 
     /// The Flatpak wrapper hands this path to the host with
     /// `--db-path`. If it names anywhere but the database the daemon
-    /// actually opens, a sandboxed browser reads a stale file, fails
-    /// auth against a token that is no longer current, and native
-    /// messaging dies with the daemon running. Every other test here
-    /// supplies `db_path` explicitly, so nothing else pins the default.
+    /// actually opens, a sandboxed browser reads a file that is not the
+    /// live one, fails auth and dies with the daemon running. Every
+    /// other test here supplies `db_path` explicitly, so nothing else
+    /// pins the default.
+    ///
+    /// Against `current_db_path` and not the canonical location,
+    /// because on an install whose database has not been moved into
+    /// `db/` yet the live one is still the old one, and the wrapper has
+    /// to name where the database *is*.
     #[test]
     fn the_wrapper_is_pointed_at_the_database_the_daemon_opens() {
-        assert_eq!(db_path(), crate::data::store::default_db_path(),);
+        assert_eq!(db_path(), crate::data::store::current_db_path());
     }
 
     fn ids() -> Ids {

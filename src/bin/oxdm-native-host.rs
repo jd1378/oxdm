@@ -38,9 +38,11 @@
 //!
 //! 2. Auto-discovery: read `ipc_port` + `ext_token` from `oxdm.db`'s
 //!    `settings` table. The DB path defaults to
-//!    `dirs::data_dir()/oxdm/oxdm.db` — `~/.local/share/oxdm/oxdm.db`
-//!    (Linux), `~/Library/Application Support/oxdm/oxdm.db` (macOS),
-//!    `%APPDATA%\oxdm\oxdm.db` (Windows) — overridable via `--db-path`.
+//!    `dirs::data_dir()/oxdm/db/oxdm.db` — `~/.local/share/oxdm/db/`
+//!    (Linux), `~/Library/Application Support/oxdm/db/` (macOS),
+//!    `%APPDATA%\oxdm\db\` (Windows) — overridable via `--db-path`.
+//!    An install the daemon has not started since the database moved
+//!    into `db/` still has it one level up, so that is tried second.
 //!    The query opens the file read-only so a running daemon's
 //!    writers are never blocked.
 //!
@@ -239,7 +241,7 @@ fn resolve_config() -> Result<HostConfig, String> {
         return Ok(HostConfig { port, token });
     }
 
-    let db = db_override.unwrap_or_else(default_db_path);
+    let db = db_override.unwrap_or_else(db_location::current_db_path);
     let (db_port, db_token) = read_db(&db).map_err(|e| {
         format!(
             "no --port/--token flags and could not read {}: {e}",
@@ -278,10 +280,14 @@ fn read_token_from_fd(_fd: i32) -> std::io::Result<String> {
     ))
 }
 
-fn default_db_path() -> PathBuf {
-    let dir = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
-    dir.join("oxdm").join("oxdm.db")
-}
+/// The same source file the app compiles as `data::db_location`,
+/// included rather than linked: this shim is launched by a browser for
+/// every connection and has no business pulling in the whole library to
+/// learn one path. Sharing the source is what stops the two from
+/// disagreeing, which they did once, at the cost of every Flatpak
+/// browser's capture.
+#[path = "../data/db_location.rs"]
+mod db_location;
 
 fn read_db(path: &Path) -> Result<(u16, String), String> {
     use rusqlite::{Connection, OpenFlags};

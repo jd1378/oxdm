@@ -151,11 +151,16 @@ The pairing code the extension asks for lives in *Settings → Browser*, with Co
 
 Settings + queue persist in a SQLite DB:
 
-| OS      | path                                         |
-|---------|----------------------------------------------|
-| Linux   | `~/.local/share/oxdm/oxdm.db`                |
-| macOS   | `~/Library/Application Support/oxdm/oxdm.db` |
-| Windows | `%APPDATA%\oxdm\oxdm.db`                     |
+| OS      | path                                            |
+|---------|-------------------------------------------------|
+| Linux   | `~/.local/share/oxdm/db/oxdm.db`                |
+| macOS   | `~/Library/Application Support/oxdm/db/oxdm.db` |
+| Windows | `%APPDATA%\oxdm\db\oxdm.db`                     |
+
+It has a directory to itself so a sandboxed browser can be granted
+read access to the database without also being given the working and
+update directories beside it. A database from before that change is
+moved into `db/` the next time the daemon starts.
 
 ## License
 

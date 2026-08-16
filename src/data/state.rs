@@ -24,7 +24,7 @@ use crate::data::mapping::settings_to_odl_config;
 use crate::data::pause::{CancelResumeStrategy, DynPauseStrategy, JobHandle, ResumeContext};
 use crate::data::resolvers::{ProbeResolver, Resolution, UiResolver};
 use crate::data::runner::{JobRunner, LiveBridge, PartCounters};
-use crate::data::store::{Store, default_db_path};
+use crate::data::store::Store;
 use crate::data::update_channel::{NoopUpdateChannel, UpdateChannel};
 use crate::domain::{
     CaptureRequest, Category, Job, JobError, JobId, JobStatus, LiveCounters, Phase, Queue, QueueId,
@@ -580,7 +580,7 @@ impl AppState {
     /// an `odl::DownloadManager`. Any I/O failure logs and falls back to
     /// in-memory defaults so the UI still launches.
     pub async fn load() -> Arc<Self> {
-        let (store, db_error) = match Store::open(default_db_path()).await {
+        let (store, db_error) = match Store::open(crate::data::store::open_db_path()).await {
             Ok(s) => (s, None),
             Err(e) => {
                 tracing::error!(error = %e, "failed to open store; running ephemerally");
@@ -2422,7 +2422,7 @@ impl AppState {
         }
 
         let keep_backup = self.db_error().await.is_some();
-        let path = crate::data::store::default_db_path();
+        let path = crate::data::store::current_db_path();
         if path.exists() {
             if keep_backup {
                 let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");

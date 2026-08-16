@@ -1178,11 +1178,69 @@ fn migrate_download_dir(s: &mut Settings, legacy_base: Option<PathBuf>) {
     }
 }
 
-pub fn default_db_path() -> PathBuf {
-    let dir = dirs::data_dir()
-        .or_else(dirs::home_dir)
-        .unwrap_or_else(|| PathBuf::from("."));
-    dir.join("oxdm").join("oxdm.db")
+pub use crate::data::db_location::{current_db_path, db_dir, default_db_path, legacy_db_path};
+
+/// The database to open, having first moved a pre-`db/` one into place.
+///
+/// Called once, by the daemon, before anything opens the store. The
+/// move is best-effort on purpose: a home directory that cannot be
+/// written is a reason to keep running from where the database already
+/// is, not a reason to refuse to start.
+pub fn open_db_path() -> PathBuf {
+    if let Err(e) = migrate_db_location() {
+        tracing::warn!(error = %e, "could not move the database into its own directory");
+    }
+    current_db_path()
+}
+
+/// Move `…/oxdm/oxdm.db` into `…/oxdm/db/`.
+///
+/// The database moved so that the directory holding it holds nothing
+/// else, which is what lets a Flatpak browser be granted read access to
+/// the database without also being handed every partly-downloaded file
+/// and every staged update.
+///
+/// The `-wal` goes first. It carries committed transactions that are
+/// not in the main file yet, so a crash after moving the database but
+/// before its log would lose them; this order leaves the database
+/// discoverable at the old path until its log is already at the new
+/// one, and the whole thing runs again next start. `-shm` is only a
+/// shared-memory index, rebuilt on demand, so it is deleted rather than
+/// carried: a stale one beside a moved log is worse than none.
+fn migrate_db_location() -> Result<(), String> {
+    move_db(&legacy_db_path(), &default_db_path())
+}
+
+/// The body of [`migrate_db_location`] with both paths handed in, so a
+/// test can exercise it without a database in the real home directory.
+fn move_db(legacy: &Path, target: &Path) -> Result<(), String> {
+    if target.exists() {
+        return Ok(());
+    }
+    if !legacy.exists() {
+        return Ok(());
+    }
+    let dir = target
+        .parent()
+        .ok_or_else(|| "the database has no directory".to_string())?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+
+    let sidecar = |p: &Path, ext: &str| {
+        let mut s = p.to_path_buf().into_os_string();
+        s.push(ext);
+        PathBuf::from(s)
+    };
+    let legacy_wal = sidecar(legacy, "-wal");
+    if legacy_wal.exists() {
+        let target_wal = sidecar(target, "-wal");
+        std::fs::rename(&legacy_wal, &target_wal)
+            .map_err(|e| format!("move {}: {e}", legacy_wal.display()))?;
+    }
+    std::fs::rename(legacy, target).map_err(|e| format!("move {}: {e}", legacy.display()))?;
+    let _ = std::fs::remove_file(sidecar(legacy, "-shm"));
+
+    tracing::info!(from = %legacy.display(), to = %target.display(), "database moved");
+    Ok(())
 }
 
 #[allow(dead_code)]
@@ -1196,6 +1254,71 @@ mod tests {
     use crate::domain::{Job, JobId, JobStatus, Phase, Settings};
     use indexmap::IndexMap;
     use std::time::Duration;
+
+    /// The move carries the write-ahead log with it. A `-wal` holds
+    /// transactions that are committed but not yet in the main file, so
+    /// a database that arrived without one would be silently missing
+    /// whatever was in it — most recently, the extension token.
+    #[test]
+    fn the_database_moves_with_its_write_ahead_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join("oxdm.db");
+        let target = dir.path().join("db").join("oxdm.db");
+        std::fs::write(&legacy, b"main").unwrap();
+        std::fs::write(dir.path().join("oxdm.db-wal"), b"log").unwrap();
+        std::fs::write(dir.path().join("oxdm.db-shm"), b"index").unwrap();
+
+        move_db(&legacy, &target).unwrap();
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"main");
+        assert_eq!(
+            std::fs::read(target.with_extension("db-wal")).unwrap(),
+            b"log"
+        );
+        assert!(!legacy.exists(), "the old database is gone");
+        assert!(
+            !dir.path().join("oxdm.db-shm").exists(),
+            "the shared-memory index is rebuilt, not carried"
+        );
+    }
+
+    /// Runs on every start, so it has to be harmless on every start
+    /// after the first. A database already in place is never touched:
+    /// overwriting it with a stale one left beside it would be the
+    /// worst outcome this code could have.
+    #[test]
+    fn moving_again_leaves_the_database_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join("oxdm.db");
+        let target = dir.path().join("db").join("oxdm.db");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, b"current").unwrap();
+        std::fs::write(&legacy, b"stale").unwrap();
+
+        move_db(&legacy, &target).unwrap();
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"current");
+        assert!(legacy.exists(), "the stale file is left where it is");
+    }
+
+    /// A fresh install has nothing to move, and must not be given an
+    /// empty `db/` or an error for it.
+    #[test]
+    fn a_fresh_install_has_nothing_to_move() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("db").join("oxdm.db");
+        move_db(&dir.path().join("oxdm.db"), &target).unwrap();
+        assert!(!target.parent().unwrap().exists());
+    }
+
+    /// The database is what the daemon opens and what the shim is
+    /// pointed at, and those two answers coming from different code is
+    /// what broke Flatpak capture once already.
+    #[test]
+    fn the_database_is_found_in_its_own_directory() {
+        assert_eq!(default_db_path(), db_dir().join("oxdm.db"));
+        assert_eq!(legacy_db_path(), db_dir().parent().unwrap().join("oxdm.db"));
+    }
 
     async fn sample_job(store: &Store, filename: &str, phase: Phase) -> Job {
         let mut headers = IndexMap::new();
