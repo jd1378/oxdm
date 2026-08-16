@@ -124,7 +124,14 @@ $env:OXDM_PURGE = "1"; irm https://raw.githubusercontent.com/jd1378/oxdm/main/to
 
 ## Browser extension
 
-oxdm exposes a stable host-side contract (see [`docs/EXTENSION_API.md`](docs/EXTENSION_API.md)) but does not ship an extension itself. Both transports are supported:
+The companion extension is published for both browsers:
+
+- [Chrome Web Store](https://chromewebstore.google.com/detail/oxdm-download-manager-int/bfefefnlghppdcgjjimkllklpifkcokj)
+- [Firefox Add-ons](https://addons.mozilla.org/addon/oxdm-download-manager-bridge/)
+
+*Tools → Browser extensions* links to the same pages.
+
+The host side is a stable contract (see [`docs/EXTENSION_API.md`](docs/EXTENSION_API.md)), so any extension can use it. Both transports are supported:
 
 - **WebSocket** at `ws://127.0.0.1:<port>`, simplest for development.
 - **Native messaging** via the `oxdm-native-host` shim plus a per-OS manifest.

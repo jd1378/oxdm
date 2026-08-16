@@ -722,12 +722,12 @@ const BROWSER_STORES: [(&str, &str, &str); 2] = [
     (
         "Chrome",
         "Chrome Web Store",
-        "https://chromewebstore.google.com/",
+        "https://chromewebstore.google.com/detail/oxdm-download-manager-int/bfefefnlghppdcgjjimkllklpifkcokj",
     ),
     (
         "Firefox",
         "Firefox Add-ons",
-        "https://addons.mozilla.org/firefox/",
+        "https://addons.mozilla.org/addon/oxdm-download-manager-bridge/",
     ),
 ];
 
