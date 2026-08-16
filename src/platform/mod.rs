@@ -125,8 +125,203 @@ pub fn open_url(url: &str) {
 #[cfg(target_os = "linux")]
 const DESKTOP_ICON: &str = "oxdm";
 
+/// Where the launcher looks for `Icon=oxdm`.
+///
+/// The size directory is the one `tools/install.sh` writes and
+/// `update_install::refresh_icon` replaces, and 512 is the size of the
+/// asset itself — the theme scales down from there.
 #[cfg(target_os = "linux")]
-pub fn install_desktop_entry() -> Result<std::path::PathBuf, String> {
+const ICON_REL_DIR: &str = "icons/hicolor/512x512/apps";
+
+/// What writing a desktop entry ended up doing.
+///
+/// The icon is reported separately because the entry is still worth
+/// having without it: a launcher with the stock download glyph is a
+/// launcher, and telling the user it all worked when half of it did not
+/// is how a bug report becomes "it says it installed".
+#[derive(Debug, Clone)]
+pub struct DesktopEntry {
+    pub path: std::path::PathBuf,
+    pub icon_installed: bool,
+}
+
+/// Write the launcher icon `Icon=oxdm` resolves to.
+///
+/// The same PNG the release archive carries, at the same path
+/// `tools/install.sh` uses, so repairing from inside the app and
+/// installing from the script leave the machine in one state rather
+/// than two that disagree.
+#[cfg(target_os = "linux")]
+fn install_launcher_icon() -> Result<std::path::PathBuf, String> {
+    use std::io::Write;
+    let dir = dirs::data_dir()
+        .ok_or_else(|| "no data dir".to_string())?
+        .join(ICON_REL_DIR);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join("oxdm.png");
+    // Beside the target and renamed into place, so a launcher reading
+    // the directory mid-write never gets half a PNG.
+    let tmp = path.with_extension("oxdm-new");
+    let write = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(crate::gui::app_icon::LAUNCHER_PNG)?;
+        f.sync_all()?;
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perm = f.metadata()?.permissions();
+            perm.set_mode(0o644);
+            f.set_permissions(perm)?;
+        }
+        Ok(())
+    })();
+    if let Err(e) = write {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.to_string());
+    }
+    std::fs::rename(&tmp, &path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        e.to_string()
+    })?;
+    Ok(path)
+}
+
+/// The user's own launcher entry, if there is one.
+///
+/// Only their own: an entry under `/usr/share/applications` belongs to
+/// whatever package manager put it there, and overwriting one from in
+/// here is not oxdm's business.
+#[cfg(target_os = "linux")]
+pub fn desktop_entry_path() -> Option<std::path::PathBuf> {
+    let path = dirs::data_dir()?.join("applications/oxdm.desktop");
+    path.is_file().then_some(path)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn desktop_entry_path() -> Option<std::path::PathBuf> {
+    None
+}
+
+/// Tell the desktop that `apps` and the icon theme changed.
+///
+/// Every one of these is best-effort and none is required: the files
+/// are on disk either way, and a desktop that keeps no cache — or that
+/// notices the write itself, as Plasma and GNOME do for the
+/// applications directory — needs none of them.
+///
+/// What they cover:
+/// - `update-desktop-database` rebuilds `mimeinfo.cache`.
+/// - `kbuildsycoca6`/`5` rebuild KDE's service database.
+/// - `gtk-update-icon-cache` rebuilds GTK's `icon-theme.cache`, which
+///   is the one that can genuinely hide a newly written icon: readers
+///   compare it against the theme root's mtime, not the size directory
+///   the PNG landed in. The tool ships with GTK, so a KDE-only machine
+///   may not have it — and does not need it, since nothing there reads
+///   that cache.
+///
+/// Nothing here can fail in a way the caller has to handle: a missing
+/// tool, one that exits non-zero, and one that hangs are all the same
+/// outcome, which is that a cache somewhere is stale.
+/// How long the reaper waits on all of the cache tools together before
+/// killing what is left.
+///
+/// These finish in well under a second on a normal machine; the budget
+/// is for the one that never finishes. Nothing the user can see is lost
+/// by cutting one short — the entry and its icon are already written,
+/// and the tool only rebuilds a cache that gets rebuilt again on the
+/// desktop's own schedule.
+#[cfg(target_os = "linux")]
+const CACHE_TOOL_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
+#[cfg(target_os = "linux")]
+fn refresh_desktop_caches(apps: &std::path::Path) {
+    use std::ffi::OsStr;
+
+    let mut running: Vec<std::process::Child> = Vec::new();
+    running.extend(run_detached("update-desktop-database", &[apps.as_os_str()]));
+    // 6 before 5, and only one of them: a machine with `kbuildsycoca6`
+    // is on KDE 6, where running the 5 build would rebuild a database
+    // nothing reads.
+    for kde in ["kbuildsycoca6", "kbuildsycoca5"] {
+        if let Some(child) = run_detached(kde, &[OsStr::new("--noincremental")]) {
+            running.push(child);
+            break;
+        }
+    }
+    if let Some(theme) = dirs::data_dir().map(|d| d.join("icons/hicolor")) {
+        running.extend(run_detached(
+            "gtk-update-icon-cache",
+            &[
+                OsStr::new("-q"),
+                OsStr::new("-t"),
+                OsStr::new("-f"),
+                theme.as_os_str(),
+            ],
+        ));
+    }
+
+    if running.is_empty() {
+        return;
+    }
+    // Reaped off-thread, on a deadline. Waiting inline would hand a
+    // tool that blocks — `kbuildsycoca` with no KDE session to talk to,
+    // say — the power to freeze the window that called this, and
+    // dropping a `Child` unwaited leaves a zombie for as long as the
+    // process lives. The budget covers all of them together: past it,
+    // whatever is still running is not going to finish usefully, so it
+    // is killed and reaped rather than left behind.
+    std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + CACHE_TOOL_BUDGET;
+        for mut child in running {
+            loop {
+                match child.try_wait() {
+                    // Exited, or is no longer ours to wait for. Either
+                    // way there is nothing left to reap.
+                    Ok(Some(_)) | Err(_) => break,
+                    Ok(None) if std::time::Instant::now() >= deadline => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break;
+                    }
+                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+                }
+            }
+        }
+    });
+}
+
+/// Start `prog` with its output discarded, or report why it did not
+/// start.
+///
+/// `None` covers both "not installed" and "would not run": these are
+/// conveniences, and the files they describe are already written.
+#[cfg(target_os = "linux")]
+fn run_detached(prog: &str, args: &[&std::ffi::OsStr]) -> Option<std::process::Child> {
+    use std::process::Stdio;
+    match std::process::Command::new(prog)
+        .args(args)
+        // Inherited by default, which would print a tool's chatter into
+        // whatever terminal the app was started from.
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => Some(child),
+        Err(e) => {
+            tracing::debug!(prog, error = %e, "desktop cache tool not started");
+            None
+        }
+    }
+}
+
+/// Write (or overwrite) the launcher entry and the icon it names.
+///
+/// Overwriting on purpose: this is the repair for an entry that is
+/// missing, or one left by an older install pointing at a binary that
+/// has since moved. `Exec=` is taken from the running executable, so
+/// the entry always names the copy the user actually launched.
+#[cfg(target_os = "linux")]
+pub fn install_desktop_entry() -> Result<DesktopEntry, String> {
     use std::io::Write;
     let exe = launch_target()?;
     let dir = dirs::data_dir()
@@ -134,13 +329,27 @@ pub fn install_desktop_entry() -> Result<std::path::PathBuf, String> {
         .join("applications");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join("oxdm.desktop");
+
+    // An icon that could not be written must not leave the entry
+    // naming one: `Icon=` pointing at nothing shows as a blank slot on
+    // some desktops, which is worse than the theme's own download
+    // glyph. Same fallback the install script makes.
+    let icon = install_launcher_icon()
+        .map_err(|e| tracing::warn!(error = %e, "install launcher icon"))
+        .ok();
+    let icon_name = if icon.is_some() {
+        DESKTOP_ICON
+    } else {
+        "folder-download"
+    };
+
     let body = format!(
         "[Desktop Entry]\n\
          Type=Application\n\
          Name=oxdm\n\
          Comment=Cross-platform download manager\n\
          Exec={} %U\n\
-         Icon={DESKTOP_ICON}\n\
+         Icon={icon_name}\n\
          Terminal=false\n\
          Categories=Network;FileTransfer;\n\
          StartupNotify=true\n\
@@ -149,17 +358,19 @@ pub fn install_desktop_entry() -> Result<std::path::PathBuf, String> {
     );
     let mut f = std::fs::File::create(&path).map_err(|e| e.to_string())?;
     f.write_all(body.as_bytes()).map_err(|e| e.to_string())?;
-    // Best-effort xdg refresh; ignore failures.
-    let _ = std::process::Command::new("update-desktop-database")
-        .arg(&dir)
-        .spawn();
-    Ok(path)
+
+    refresh_desktop_caches(&dir);
+
+    Ok(DesktopEntry {
+        path,
+        icon_installed: icon.is_some(),
+    })
 }
 
 #[cfg(not(target_os = "linux"))]
 #[allow(dead_code)]
-pub fn install_desktop_entry() -> Result<std::path::PathBuf, String> {
-    Err("Create Desktop Entry is Linux-only".into())
+pub fn install_desktop_entry() -> Result<DesktopEntry, String> {
+    Err("a desktop entry is a Linux thing".into())
 }
 
 /// The path an autostart entry, launcher or Run key should name.

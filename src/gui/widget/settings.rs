@@ -106,6 +106,25 @@ pub fn set_row_panel<'a, M: 'a>(content: Element<'a, M>) -> Element<'a, M> {
         .into()
 }
 
+/// Content belonging to the row above: the same horizontal grid, and no
+/// top padding of its own, so it reads as part of that row rather than
+/// as another row.
+///
+/// For what an action in a row reported. Put in the row's control
+/// column instead, a sentence of it widens that column and squeezes the
+/// label and hint into a ribbon down the left.
+pub fn set_row_footnote<'a, M: 'a>(content: Element<'a, M>) -> Element<'a, M> {
+    container(content)
+        .width(Length::Fill)
+        .padding(Padding {
+            top: 0.0,
+            right: ROW_PAD_X,
+            bottom: ROW_PAD_Y,
+            left: ROW_PAD_X,
+        })
+        .into()
+}
+
 /// A row that is only prose (footnotes under a group of settings).
 pub fn set_note<'a, M: 'a>(t: &Tokens, note: &str) -> Element<'a, M> {
     container(

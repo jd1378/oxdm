@@ -20,8 +20,8 @@ use crate::gui::shot::Shot;
 use crate::gui::theme::{self, Tokens};
 use crate::gui::widget::{
     Btn, BtnSize, FileInput, PasswordInput, SECTION_GAP, TextInput, combo, hairline,
-    number_stepper, segmented, set_group, set_note, set_row, set_row_panel, set_row_stack,
-    set_section, set_section_danger, toggle,
+    number_stepper, segmented, set_group, set_note, set_row, set_row_footnote, set_row_panel,
+    set_row_stack, set_section, set_section_danger, toggle,
 };
 use crate::ipc_local::Client;
 use crate::ipc_local::protocol::Event;
@@ -70,7 +70,13 @@ impl Section {
             Section::Network => "Connections, bandwidth, proxy, and request identity.",
             Section::Browser => "Pair the browser extension and resolve capture conflicts.",
             Section::Notifications => "What oxdm tells you, and how, for each event.",
-            Section::Advanced => "Reset oxdm to a clean slate.",
+            Section::Advanced => {
+                if desktop_entry_offered() {
+                    "Desktop integration, and resetting oxdm to a clean slate."
+                } else {
+                    "Reset oxdm to a clean slate."
+                }
+            }
         }
     }
 }
@@ -218,6 +224,7 @@ pub enum Msg {
     ShowUpdateDialog(bool),
     NotifyUpdate(bool),
     // Advanced
+    DesktopEntryWrite,
     ResetDbAsk,
     ResetDbCancel,
     ResetDbConfirm,
@@ -296,6 +303,15 @@ pub struct State {
     queues: Vec<Queue>,
     /// Reset-oxdm confirm overlay (Advanced danger section).
     confirm_reset: bool,
+    /// What the last launcher-entry write did, or why it could not.
+    /// Like the browser-bridge fields: an action's outcome, so it never
+    /// counts as a change and never waits for Apply.
+    desktop_entry: Option<Result<crate::platform::DesktopEntry, String>>,
+    /// Whether an entry was already there when the window opened, which
+    /// decides whether the button offers to create one or repair the
+    /// one that exists. Read once: the only thing that changes it from
+    /// under us is the button beside it.
+    desktop_entry_exists: bool,
     /// Why the last Apply was refused, shown in the footer. The daemon
     /// validates too — the window is not its only caller — so a refusal
     /// has to be visible here rather than swallowed.
@@ -656,6 +672,8 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 host_error: None,
                 host_grants: text_editor::Content::new(),
                 host_grants_copied: false,
+                desktop_entry: None,
+                desktop_entry_exists: crate::platform::desktop_entry_path().is_some(),
                 s: settings,
                 work_dir: String::new(),
                 save_error: None,
@@ -1127,6 +1145,15 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
             if v {
                 st.s.show_update_dialog = false;
             }
+            Task::none()
+        }
+        // Two small local files: done inline rather than through a
+        // Task, which would only add a second message to say it
+        // finished before the frame that showed it started.
+        Msg::DesktopEntryWrite => {
+            let done = crate::platform::install_desktop_entry();
+            st.desktop_entry_exists |= done.is_ok();
+            st.desktop_entry = Some(done);
             Task::none()
         }
         Msg::ResetDbAsk => {
@@ -2839,7 +2866,110 @@ fn update_rows(st: &State) -> Vec<Element<'_, Msg>> {
 
 fn advanced_section(st: &State) -> Element<'_, Msg> {
     let t = &st.tokens;
-    pane(t, Section::Advanced, danger_section(st))
+    let mut body: Vec<Element<'_, Msg>> = Vec::new();
+    if desktop_entry_offered() {
+        body.push(desktop_entry_section(st));
+    }
+    body.push(danger_section(st));
+    pane(
+        t,
+        Section::Advanced,
+        column(body).spacing(SECTION_GAP).into(),
+    )
+}
+
+/// Whether to offer writing a launcher entry.
+///
+/// Linux only — nothing else has one — and only where oxdm updates
+/// itself. A packaged build's entry belongs to dpkg, rpm or Flatpak,
+/// and a copy of our own under `~/.local/share/applications` would
+/// shadow it by XDG precedence: the package's entry would keep being
+/// maintained and stop being the one the user sees.
+fn desktop_entry_offered() -> bool {
+    cfg!(target_os = "linux") && crate::domain::SELF_UPDATE
+}
+
+/// The launcher-entry button, plus what the last press did.
+///
+/// One button for both jobs the user might want — there is no entry, or
+/// there is a stale one naming a binary that has moved — because the
+/// write is the same either way. Only the wording changes: an entry
+/// that already exists makes "Create" a lie about what pressing it
+/// does, and hides the one case a user with a broken launcher is
+/// looking for.
+fn desktop_entry_section(st: &State) -> Element<'_, Msg> {
+    let t = &st.tokens;
+    let button = Btn::new(if st.desktop_entry_exists {
+        "Repair desktop entry"
+    } else {
+        "Create desktop entry"
+    })
+    .secondary()
+    .icon(if st.desktop_entry_exists {
+        "rotate-cw"
+    } else {
+        "plus"
+    })
+    .on_press(Msg::DesktopEntryWrite)
+    .view(t);
+
+    let mut notes: Vec<Element<'_, Msg>> = Vec::new();
+    match &st.desktop_entry {
+        None => {}
+        Some(Ok(entry)) => {
+            notes.push(note_line(
+                "check",
+                t.status_success,
+                entry.path.display().to_string(),
+            ));
+            if !entry.icon_installed {
+                notes.push(note_line(
+                    "triangle-alert",
+                    t.status_warning,
+                    "The icon could not be written, so the entry uses the \
+                     desktop's own download icon."
+                        .to_owned(),
+                ));
+            }
+        }
+        Some(Err(e)) => notes.push(note_line("triangle-alert", t.status_danger, e.clone())),
+    }
+
+    // The result goes under the whole row, not in the button's column:
+    // a path is long, and one in that column pushes the label and hint
+    // into a narrow strip.
+    let mut stack = column![set_row(
+        t,
+        "Launcher entry",
+        Some(if st.desktop_entry_exists {
+            "Rewrites the entry in your applications menu, and the icon it \
+             names, pointing it at the copy of oxdm you are running. For a \
+             launcher showing no icon, or one that stopped opening oxdm \
+             after it moved."
+        } else {
+            "Adds oxdm to your applications menu, with its icon, pointing \
+             the entry at the copy of oxdm you are running."
+        }),
+        button,
+    )];
+    if !notes.is_empty() {
+        stack = stack.push(set_row_footnote(
+            column(notes).spacing(theme::space::S1).into(),
+        ));
+    }
+
+    set_section(t, "Desktop integration", vec![stack.into()])
+}
+
+/// A small status line under an action: icon, then one tinted sentence.
+fn note_line<'a>(icon: &'a str, tint: iced::Color, body: String) -> Element<'a, Msg> {
+    row![
+        icons::icon(icon, 11.0, tint),
+        text(body).font(theme::BODY).size(11.0).color(tint),
+    ]
+    .spacing(4.0)
+    .align_y(Alignment::Center)
+    .into()
 }
 
 /// Rust-headed danger block (design §3.7 Advanced: own Reset section;

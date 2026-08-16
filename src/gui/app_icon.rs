@@ -15,6 +15,12 @@ const PLAY_DARK_PNG: &[u8] = include_bytes!("../../assets/oxdm_play_dark.png");
 const ABOUT_LIGHT_PNG: &[u8] = include_bytes!("../../assets/oxdm_about_light.png");
 const ABOUT_DARK_PNG: &[u8] = include_bytes!("../../assets/oxdm_about_dark.png");
 
+/// The launcher icon, undecoded, for `platform::install_desktop_entry`
+/// to write into the user's icon theme. The opaque variant for the same
+/// reason [`window_icon_data`] uses it: the desktop draws this one on a
+/// background oxdm neither picks nor can read.
+pub const LAUNCHER_PNG: &[u8] = IDLE_LIGHT_PNG;
+
 pub struct Decoded {
     pub rgba: Vec<u8>,
     pub width: u32,
