@@ -119,26 +119,55 @@ async fn main() {
         // Dropping tx signals stdin EOF to the async loop.
     });
 
+    // Which side ended the session. The browser owns the lifetime: it
+    // closes the port, stdin reaches EOF, and that is the one ordinary
+    // way to finish. The socket going first is a failure every time,
+    // and it used to be a silent one — status 0, empty stderr — so a
+    // rejected token and a healthy shutdown were the same event from
+    // the outside, and the extension could only report "native host
+    // disconnected".
+    let mut browser_hung_up = false;
+    let mut why: Option<String> = None;
     loop {
         tokio::select! {
             maybe_frame = rx.recv() => match maybe_frame {
                 Some(text) => {
-                    if ws.send(Message::text(text)).await.is_err() {
+                    if let Err(e) = ws.send(Message::text(text)).await {
+                        why = Some(format!("sending to oxdm failed: {e}"));
                         break;
                     }
                 }
                 None => {
                     let _ = ws.close(None).await;
+                    browser_hung_up = true;
                     break;
                 }
             },
             maybe_msg = ws.next() => match maybe_msg {
                 Some(Ok(Message::Text(t))) => write_framed(&t),
-                Some(Ok(Message::Close(_))) | None => break,
+                Some(Ok(Message::Close(frame))) => {
+                    why = Some(close_reason(frame));
+                    break;
+                }
+                None => {
+                    why = Some("oxdm closed the connection".to_owned());
+                    break;
+                }
                 Some(Ok(_)) => {}
-                Some(Err(_)) => break,
+                Some(Err(e)) => {
+                    why = Some(format!("connection to oxdm failed: {e}"));
+                    break;
+                }
             },
         }
+    }
+
+    if !browser_hung_up {
+        eprintln!(
+            "oxdm-native-host: {}",
+            why.unwrap_or_else(|| "oxdm closed the connection".to_owned())
+        );
+        std::process::exit(1);
     }
 
     // Drain any remaining ws frames the bridge already queued before
@@ -146,6 +175,18 @@ async fn main() {
     // immediately after the final request.
     while let Some(Ok(Message::Text(t))) = ws.next().await {
         write_framed(&t);
+    }
+}
+
+/// What a close frame says, for stderr.
+///
+/// The daemon names the cause ("auth rejected") precisely so this line
+/// can carry it. A close with no reason still gets a sentence, because
+/// the alternative is the silence this exists to end.
+fn close_reason(frame: Option<tokio_tungstenite::tungstenite::protocol::CloseFrame>) -> String {
+    match frame {
+        Some(f) if !f.reason.is_empty() => format!("oxdm closed the connection: {}", f.reason),
+        _ => "oxdm closed the connection".to_owned(),
     }
 }
 

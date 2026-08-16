@@ -55,7 +55,7 @@ pub struct Options {
     /// the running binary.
     pub host_binary: Option<PathBuf>,
     /// The `oxdm.db` a sandboxed host should read port and token from.
-    /// Defaults to this user's config directory.
+    /// Defaults to the one the daemon opens.
     pub db_path: Option<PathBuf>,
     /// Hand the extension token to the host on file descriptor 3
     /// instead of letting it read the database. A wrapper script does
@@ -375,7 +375,7 @@ fn flatpak_wrapper(
     };
     let db = match &opts.db_path {
         Some(p) => p.clone(),
-        None => db_path()?,
+        None => db_path(),
     };
     let body = format!(
         "#!/bin/sh\n\
@@ -402,23 +402,24 @@ fn shell_quote(s: &str) -> String {
 
 /// Where the daemon keeps its database. The wrapper hands this to the
 /// host so a sandboxed browser's `$HOME` cannot misdirect it.
-fn db_path() -> Result<PathBuf, String> {
-    dirs::config_dir()
-        .map(|d| d.join("oxdm").join("oxdm.db"))
-        .ok_or_else(|| "no config directory".to_string())
+///
+/// Delegates rather than recomputing. This held its own `config_dir()`
+/// copy from the day it was written, while the store has opened
+/// `data_dir()` since the first commit, so Flatpak browsers were
+/// pointed at a `~/.config/oxdm/oxdm.db` that in a normal install does
+/// not exist: the shim found no token, failed auth and exited, and
+/// native messaging looked broken with the daemon plainly running. One
+/// source of truth means that cannot recur.
+fn db_path() -> PathBuf {
+    crate::data::store::default_db_path()
 }
 
 /// The grants a Flatpak browser needs: the host binary, and the
 /// database's *directory* — SQLite in WAL mode reads `-wal` and `-shm`
 /// sidecars beside the file even when opening read-only.
 fn flatpak_grant_args(binary: &Path, opts: &Options) -> Vec<String> {
-    let db = match &opts.db_path {
-        Some(p) => Some(p.clone()),
-        None => db_path().ok(),
-    };
-    let db_dir = db
-        .and_then(|p| p.parent().map(Path::to_path_buf))
-        .unwrap_or_default();
+    let db = opts.db_path.clone().unwrap_or_else(db_path);
+    let db_dir = db.parent().map(Path::to_path_buf).unwrap_or_default();
     let mut args = vec![
         format!("--filesystem={}:ro", binary.display()),
         format!("--filesystem={}:ro", db_dir.display()),
@@ -967,6 +968,17 @@ mod windows_registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Flatpak wrapper hands this path to the host with
+    /// `--db-path`. If it names anywhere but the database the daemon
+    /// actually opens, a sandboxed browser reads a stale file, fails
+    /// auth against a token that is no longer current, and native
+    /// messaging dies with the daemon running. Every other test here
+    /// supplies `db_path` explicitly, so nothing else pins the default.
+    #[test]
+    fn the_wrapper_is_pointed_at_the_database_the_daemon_opens() {
+        assert_eq!(db_path(), crate::data::store::default_db_path(),);
+    }
 
     fn ids() -> Ids {
         Ids {

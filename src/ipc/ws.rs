@@ -26,6 +26,19 @@ use crate::domain::CaptureRequest;
 use crate::domain::capture::{CaptureResponse, CaptureRules, IpcRequest, QueueSummary};
 use crate::ipc::IpcError;
 
+/// A close frame that names the reason, so the peer can repeat it to
+/// whoever is trying to debug the connection.
+///
+/// `Policy` rather than `Protocol`: the frame was well formed, it was
+/// the credentials or the timing that were not.
+fn close_reason(why: &'static str) -> tokio_tungstenite::tungstenite::protocol::CloseFrame {
+    use tokio_tungstenite::tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};
+    CloseFrame {
+        code: CloseCode::Policy,
+        reason: why.into(),
+    }
+}
+
 pub async fn run(state: Arc<AppState>, port: u16) -> Result<(), IpcError> {
     let addr = format!("127.0.0.1:{port}");
     let listener = TcpListener::bind(&addr).await?;
@@ -121,7 +134,7 @@ async fn handle(state: Arc<AppState>, stream: tokio::net::TcpStream) -> Result<(
         Ok(Some(Ok(Message::Text(t)))) => t,
         Ok(_) => return Err(IpcError::Other("missing auth frame".into())),
         Err(_) => {
-            let _ = ws.close(None).await;
+            let _ = ws.close(Some(close_reason("auth frame timed out"))).await;
             return Err(IpcError::Other("auth frame timed out".into()));
         }
     };
@@ -138,7 +151,14 @@ async fn handle(state: Arc<AppState>, stream: tokio::net::TcpStream) -> Result<(
     // exactly backwards: no token means nothing has been paired yet, so
     // there is nobody to let in.
     if expected.is_empty() || !crate::ipc_local::auth::token_matches(&expected, &presented) {
-        let _ = ws.close(None).await;
+        // Say why, in the close frame. A bare close is indistinguishable
+        // from the daemon going away or from an ordinary end of session,
+        // so the native-messaging shim had nothing to report and the
+        // extension could only say "disconnected". Telling an
+        // unauthenticated peer that its token was wrong gives away
+        // nothing: it already knows the connection did not survive, and
+        // the socket is bound to loopback.
+        let _ = ws.close(Some(close_reason("auth rejected"))).await;
         return Err(IpcError::Other("auth rejected".into()));
     }
 
