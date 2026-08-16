@@ -15,6 +15,7 @@ One binary, no runtime to install.</p>
   <a href="https://github.com/jd1378/oxdm/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/jd1378/oxdm/ci.yml?branch=main&style=flat-square&label=CI"></a>
   <a href="LICENSE"><img alt="License: AGPL-3.0" src="https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square"></a>
   <img alt="Platforms" src="https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-555?style=flat-square">
+  <a href="https://github.com/sponsors/jd1378"><img alt="Sponsor" src="https://img.shields.io/badge/sponsor-%E2%99%A5-e07a5f?style=flat-square"></a>
 </p>
 
 <picture>
