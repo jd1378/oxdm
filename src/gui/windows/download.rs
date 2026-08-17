@@ -482,6 +482,34 @@ impl State {
         self.entry.counters.phase
     }
 
+    /// Drop retry deadlines that events have already overtaken.
+    ///
+    /// `RetryScheduled` is the only thing that writes this map, and odl
+    /// has no matching "that wait is over": the part resumes, or it
+    /// finishes before the deadline. Left alone the entries accumulate
+    /// for the life of the window and keep counting down against parts
+    /// that are done.
+    ///
+    /// Past the transfer there is nothing to retry at all, so the whole
+    /// map goes — including the probe's entry, which is keyed `None`
+    /// and belongs to no part.
+    fn forget_stale_retries(&mut self) {
+        if !matches!(self.phase(), Phase::Downloading | Phase::Reconnecting) {
+            self.retries.clear();
+            return;
+        }
+        let done: std::collections::HashSet<&str> = self
+            .entry
+            .counters
+            .parts
+            .iter()
+            .filter(|p| p.finished)
+            .map(|p| p.ulid.as_str())
+            .collect();
+        self.retries
+            .retain(|ulid, _| !ulid.as_deref().is_some_and(|u| done.contains(u)));
+    }
+
     /// How far the work *after* the transfer has got: bytes written of
     /// the final file while it is assembled, bytes read back while it
     /// is hashed.
@@ -912,6 +940,7 @@ fn update_state(st: &mut State, msg: Msg) -> Task<Msg> {
     match msg {
         Msg::Entry(e) => {
             st.entry = *e;
+            st.forget_stale_retries();
             Task::none()
         }
         Msg::Daemon(DaemonSignal::Lost) => iced::exit(),
@@ -919,6 +948,7 @@ fn update_state(st: &mut State, msg: Msg) -> Task<Msg> {
             Event::Counters(list) => {
                 if let Some(c) = list.into_iter().find(|c| c.id == st.id) {
                     st.entry.counters = c;
+                    st.forget_stale_retries();
                 }
                 Task::none()
             }
@@ -2057,10 +2087,21 @@ fn info_tab(st: &State) -> Element<'_, Msg> {
             } else {
                 0.0
             };
-            let waiting = st
-                .retries
-                .get(&Some(p.ulid.clone()))
-                .and_then(|r| r.secs_left().map(|s| (r, s)));
+            // A part that has finished is not waiting for anything,
+            // whatever deadline is still on the clock. odl announces a
+            // retry when the wait starts and nothing when the wait
+            // stops being relevant — the part simply resumes, or
+            // finishes first — so a deadline outlives its meaning, and
+            // this row was showing "retry in 20s · attempt 2/5" beside
+            // the word "Complete" while the job was already assembling
+            // or verifying.
+            let waiting = (!p.finished)
+                .then(|| {
+                    st.retries
+                        .get(&Some(p.ulid.clone()))
+                        .and_then(|r| r.secs_left().map(|s| (r, s)))
+                })
+                .flatten();
             let (dot_color, label_color, label) = seg_state(t, p, st.phase(), waiting.is_some());
             // A waiting segment says when it resumes, in place of a bar
             // that would sit still and look like a hang.
