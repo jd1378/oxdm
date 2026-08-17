@@ -7,8 +7,7 @@
 
 <h1>oxdm</h1>
 
-<p>Download manager for Linux, macOS and Windows.<br>
-One binary, no runtime to install.</p>
+<p>Download manager for Linux, macOS and Windows.</p>
 
 <p>
   <a href="https://github.com/jd1378/oxdm/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/jd1378/oxdm?style=flat-square&color=e07a5f"></a>
