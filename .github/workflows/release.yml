@@ -42,6 +42,7 @@ jobs:
       - tests
       - cargo-audit
       - build
+      - publish
     steps:
       - run: jq --exit-status 'all(.result == "success")' <<< '${{ toJson(needs) }}'
 
@@ -151,8 +152,6 @@ jobs:
       - run: cargo audit
 
   build:
-    permissions:
-      contents: write
     name: ${{ matrix.job.target }} (${{ matrix.job.os }})
     runs-on: ${{ matrix.job.os }}
     needs: crate_metadata
@@ -298,7 +297,7 @@ jobs:
         echo "PKG_PATH=${PKG_STAGING}/${PKG_NAME}" >> $GITHUB_OUTPUT
 
     - name: Stage the updatable artifact, checksums and update feed
-      id: publish
+      id: stage
       shell: bash
       run: |
         set -euo pipefail
@@ -348,9 +347,11 @@ jobs:
         }
         write_feed "update-${TARGET}.json" "$SINGLE_NAME" "$SINGLE_SHA"
 
-        echo "ARTIFACTS=${STAGING}/*" >> $GITHUB_OUTPUT
         echo "STAGING=${STAGING}" >> $GITHUB_OUTPUT
 
+    # Where a build's output waits for the `publish` job. Nothing
+    # reaches the release from this job.
+    #
     # v7 rather than v5: v5 still declares `runs.using: node20`, so it
     # would keep the deprecation warning. v6 is the runtime bump to
     # node24 and v7 only adds inputs (`archive`, defaulting to the old
@@ -359,7 +360,38 @@ jobs:
       uses: actions/upload-artifact@v7
       with:
         name: ${{ matrix.job.target }}
-        path: ${{ steps.publish.outputs.STAGING }}/*
+        path: ${{ steps.stage.outputs.STAGING }}/*
+
+  # One upload, after every build has one.
+  #
+  # Each build used to publish its own assets as it finished. Six
+  # writers to one release means six chances to half-publish it, and
+  # that is not theoretical: a GitHub 503 on one runner left v0.12.2
+  # with every platform except x86_64 Windows, and both the installer
+  # and the updater resolve `releases/latest`, so the missing one broke
+  # every 64-bit Windows install until it was noticed. A release with
+  # five platforms of six looks finished from the outside.
+  #
+  # `needs: build` also means a build that fails publishes nothing at
+  # all, rather than leaving whichever targets happened to finish
+  # first.
+  publish:
+    name: Publish the release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    needs:
+      - crate_metadata
+      - build
+    steps:
+    # No `merge-multiple`: each artifact lands in its own directory,
+    # which the glob below flattens. The names never collide anyway
+    # (every file carries its target), so this is only about not
+    # depending on the merge behaviour to keep them apart.
+    - name: Collect every build's assets
+      uses: actions/download-artifact@v7
+      with:
+        path: _cicd-artifacts
 
     - name: Publish archives and packages
       uses: ncipollo/release-action@v1
@@ -376,4 +408,4 @@ jobs:
         omitPrereleaseDuringUpdate: true
         replacesArtifacts: true
         updateOnlyUnreleased: false
-        artifacts: ${{ steps.publish.outputs.ARTIFACTS }}
+        artifacts: _cicd-artifacts/*/*
