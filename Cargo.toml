@@ -4,7 +4,7 @@ members = ["testserver"]
 [package]
 name = "oxdm"
 description = "a download manager using odl"
-version = "0.12.0"
+version = "0.12.1"
 edition = "2024"
 repository = "https://github.com/jd1378/oxdm"
 homepage = "https://github.com/jd1378/oxdm"
