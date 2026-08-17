@@ -100,6 +100,9 @@ raw-window-handle = "0.6"
 windows = { version = "0.62", features = [
     "Networking_Connectivity",
     "Win32_System_Com",
+    # `SHOpenFolderAndSelectItems`: reveal a file without spawning a
+    # second Explorer window for a folder that is already open.
+    "Win32_UI_Shell",
 ] }
 
 [dev-dependencies]

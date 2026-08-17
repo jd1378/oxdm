@@ -44,9 +44,24 @@ pub fn reveal_label() -> &'static str {
 pub fn reveal_in_folder(path: &std::path::Path) {
     #[cfg(target_os = "windows")]
     {
-        let arg = format!("/select,{}", path.display());
-        if let Err(e) = std::process::Command::new("explorer").arg(arg).spawn() {
-            tracing::warn!(path = %path.display(), error = %e, "explorer reveal failed");
+        // The shell's own verb first. `explorer /select,` spawns a
+        // fresh window every time, even when the folder is already
+        // open, and leaves it behind whichever window had focus;
+        // `SHOpenFolderAndSelectItems` reuses a window already showing
+        // the folder, selects the item in it, and brings it forward.
+        if let Err(e) = shell_reveal(path) {
+            tracing::debug!(path = %path.display(), error = %e, "shell reveal failed; falling back");
+            // Quoting is the whole reason this is `raw_arg`. Rust
+            // quotes an argument containing spaces as a unit, so a path
+            // with a space became `"/select,C:\a b\f.zip"`, which
+            // explorer does not parse: it ignored the switch and opened
+            // the default folder with nothing selected. The quotes have
+            // to sit around the path alone.
+            use std::os::windows::process::CommandExt;
+            let arg = format!("/select,\"{}\"", path.display());
+            if let Err(e) = std::process::Command::new("explorer").raw_arg(arg).spawn() {
+                tracing::warn!(path = %path.display(), error = %e, "explorer reveal failed");
+            }
         }
         return;
     }
@@ -95,6 +110,66 @@ pub fn reveal_in_folder(path: &std::path::Path) {
         if let Err(e) = std::process::Command::new("xdg-open").arg(target).spawn() {
             tracing::warn!(path = %target.display(), error = %e, "xdg-open reveal failed");
         }
+    }
+}
+
+/// Select `path` in Explorer through the shell, rather than by asking
+/// `explorer.exe` to do it on a command line.
+///
+/// Passing the file's own item id as the *folder* with no selection
+/// list is the documented way to say "show me this one thing": the
+/// shell opens its parent, reuses a window already displaying that
+/// folder instead of adding another, selects the item, and activates
+/// the window.
+///
+/// COM is initialised per call and never uninitialised. This runs on
+/// whichever thread the UI happens to call it from, and that thread
+/// keeps running afterwards; tearing the apartment down under it would
+/// break any other shell call it makes later. A second init on an
+/// already-initialised thread returns `RPC_E_CHANGED_MODE`, which is
+/// not fatal here and is why the result is ignored.
+#[cfg(target_os = "windows")]
+fn shell_reveal(path: &std::path::Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows::Win32::System::Com::{
+        COINIT_APARTMENTTHREADED, CoInitializeEx, CoTaskMemFree, IBindCtx,
+    };
+    use windows::Win32::UI::Shell::{SHOpenFolderAndSelectItems, SHParseDisplayName};
+    use windows::core::PCWSTR;
+
+    // Explorer will not select something it cannot address. A relative
+    // path resolves against Explorer's idea of the current directory,
+    // not ours.
+    let full = path
+        .canonicalize()
+        .map_err(|e| format!("resolve {}: {e}", path.display()))?;
+    // `canonicalize` hands back a `\\?\` extended-length path, which
+    // the shell namespace does not parse.
+    let display = full.to_string_lossy();
+    let plain = display.strip_prefix(r"\\?\").unwrap_or(&display);
+    let wide: Vec<u16> = std::ffi::OsStr::new(plain)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let mut pidl = std::ptr::null_mut();
+        // Spelled out rather than a bare `None`: the parameter is
+        // generic over anything convertible to an `IBindCtx`, so the
+        // literal alone gives inference nothing to work with.
+        SHParseDisplayName(
+            PCWSTR(wide.as_ptr()),
+            Option::<&IBindCtx>::None,
+            &mut pidl,
+            0,
+            None,
+        )
+        .map_err(|e| format!("parse {plain}: {e}"))?;
+        let opened = SHOpenFolderAndSelectItems(pidl, None, 0);
+        CoTaskMemFree(Some(pidl as *const std::ffi::c_void));
+        opened.map_err(|e| e.to_string())
     }
 }
 
