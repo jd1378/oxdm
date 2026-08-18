@@ -1093,7 +1093,20 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             Task::none()
         }
         Msg::OpenFolder => {
-            crate::platform::open_path(&st.entry.job.save_dir);
+            // Reveal the file rather than open the folder around it,
+            // and fall back to the folder only when there is nothing on
+            // disk to point at yet.
+            let file = st.entry.job.status.final_path.clone().unwrap_or_else(|| {
+                st.entry
+                    .job
+                    .save_dir
+                    .join(st.entry.job.filename.as_deref().unwrap_or(""))
+            });
+            if file.is_file() {
+                crate::platform::reveal_in_folder(&file);
+            } else {
+                crate::platform::open_path(&st.entry.job.save_dir);
+            }
             Task::none()
         }
         Msg::CloseWin => iced::exit(),
@@ -1684,7 +1697,7 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
 
     let footer_el = footer(
         t,
-        Btn::new("Open Containing Folder")
+        Btn::new(crate::platform::reveal_label())
             .toolbar()
             .icon("folder")
             .on_press(Msg::OpenFolder)

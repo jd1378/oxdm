@@ -2210,11 +2210,28 @@ fn context_action(m: &mut Main, action: ContextAction) -> Task<Msg> {
         ContextAction::Open | ContextAction::OpenFolder => {
             for id in &ids {
                 if let Some(job) = m.snap.jobs.iter().find(|j| j.id == *id) {
-                    let path = match action {
-                        ContextAction::Open => saved_file(job),
-                        _ => job.save_dir.clone(),
-                    };
-                    crate::platform::open_path(&path);
+                    if matches!(action, ContextAction::Open) {
+                        crate::platform::open_path(&saved_file(job));
+                        continue;
+                    }
+                    // Reveal, not open. This opened the folder and left
+                    // the user to find the file in it, which is the one
+                    // thing the menu item is for. `reveal_in_folder`
+                    // selects it: through the shell on Windows, the
+                    // file manager's own `ShowItems` on Linux, `open
+                    // -R` on macOS.
+                    //
+                    // Only when there is a file to point at. A job that
+                    // has not finished has a name but nothing on disk
+                    // under it, and asking a file manager to select
+                    // something that is not there lands the user in
+                    // whatever folder it falls back to.
+                    let file = saved_file(job);
+                    if file.is_file() {
+                        crate::platform::reveal_in_folder(&file);
+                    } else {
+                        crate::platform::open_path(&job.save_dir);
+                    }
                 }
             }
             Task::none()
@@ -4285,7 +4302,7 @@ fn context_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>, id: JobId) -> E
             )),
             plain(item(
                 "folder",
-                "Open Containing Folder",
+                crate::platform::reveal_label(),
                 None,
                 true,
                 Msg::Context(ContextAction::OpenFolder)
