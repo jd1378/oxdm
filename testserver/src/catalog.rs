@@ -111,6 +111,16 @@ pub const ENDPOINTS: &[Endpoint] = &[
         checksums: Checksums::None,
     },
     Endpoint {
+        path: "/ubuntu-24.04.2-desktop-amd64-with-language-packs-restricted-extra-codecs-and-firmware-2026-08-20.iso",
+        blurb: "ordinary resumable download under a 100-character file \
+                name — nothing in a window that shows it may widen, \
+                wrap, or push the progress out of sight.",
+        fill: 0x00,
+        ranges: Ranges::Honour,
+        length_known: true,
+        checksums: Checksums::None,
+    },
+    Endpoint {
         path: "/zeros-1g-fake-range.bin",
         blurb: "claims Accept-Ranges, then answers every Range with a \
                 200 from byte zero — a resume silently restarts.",

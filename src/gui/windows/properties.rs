@@ -1899,18 +1899,17 @@ fn general_tab(st: &State) -> Element<'_, Msg> {
                 },
                 ..Default::default()
             }),
+            // Fill + ellipsis, so a long name shortens instead of
+            // wrapping and shoving the status chip off the card.
             column![
-                text(name.clone())
-                    .font(theme::BODY_BOLD)
-                    .size(14.0)
-                    .color(t.fg_1),
+                crate::gui::widget::ellipsized(name.clone(), theme::BODY_BOLD, 14.0, t.fg_1),
                 text(total.map(format_bytes_2).unwrap_or_else(|| "—".into()))
                     .font(theme::MONO)
                     .size(11.0)
                     .color(t.fg_3),
             ]
-            .spacing(4.0),
-            iced::widget::Space::new().width(Length::Fill),
+            .spacing(4.0)
+            .width(Length::Fill),
             container(
                 row![
                     crate::gui::widget::dot(6.0, phase_color),

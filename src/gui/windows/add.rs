@@ -1424,11 +1424,14 @@ fn save_field(st: &AddState) -> Element<'_, Msg> {
 /// so re-parenting the input would reset it, focus and cursor included,
 /// on the very keystroke that produced the note.
 fn save_note_line<'a>(t: &Tokens, n: crate::gui::save_path::Note) -> Element<'a, Msg> {
+    // Wraps rather than running past the window: this line can name
+    // two files at once ("<raw> is already in the list. This one is
+    // <name>"), and a 100-character name puts the half that matters
+    // past the right edge.
     text(n.text)
         .font(theme::MONO)
         .size(11.0)
         .color(if n.warning { t.status_warning } else { t.fg_2 })
-        .wrapping(iced::widget::text::Wrapping::None)
         .into()
 }
 

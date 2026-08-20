@@ -1527,8 +1527,12 @@ fn header_card(st: &State) -> Element<'_, Msg> {
     container(
         row![
             tile,
+            // The name column takes what the percentage leaves, and
+            // ellipsises inside it: a 100-character filename otherwise
+            // wraps to two lines and pushes the number off the window,
+            // which is the one thing this card exists to show.
             column![
-                text(name).font(theme::BODY_BOLD).size(14.0).color(t.fg_1),
+                crate::gui::widget::ellipsized(name, theme::BODY_BOLD, 14.0, t.fg_1),
                 row![
                     text(host).font(theme::MONO).size(11.0).color(t.fg_3),
                     dotsep(),
@@ -1540,8 +1544,8 @@ fn header_card(st: &State) -> Element<'_, Msg> {
                 .spacing(6.0)
                 .align_y(Alignment::Center),
             ]
-            .spacing(4.0),
-            iced::widget::Space::new().width(Length::Fill),
+            .spacing(4.0)
+            .width(Length::Fill),
             text(pct).font(theme::DISPLAY).size(28.0).color(t.fg_1),
         ]
         .spacing(theme::space::S3)
