@@ -173,7 +173,7 @@ fn ksni_icon_at(d: &Decoded, px: u32) -> Option<ksni::Icon> {
         image::imageops::resize(&src, px, px, image::imageops::FilterType::Lanczos3)
     };
     let mut argb = scaled.into_raw();
-    for pixel in argb.chunks_exact_mut(4) {
+    for pixel in argb.as_chunks_mut::<4>().0 {
         pixel.rotate_right(1);
     }
     Some(ksni::Icon {
