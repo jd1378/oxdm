@@ -866,12 +866,18 @@ impl AppState {
         if queue.id == self.main_queue_id {
             queue.builtin = true;
         }
+        let id = queue.id;
         self.store
             .upsert_queue(&queue)
             .await
             .map_err(|e| e.to_string())?;
-        self.queues.write().await.insert(queue.id, queue);
+        self.queues.write().await.insert(id, queue);
         let _ = self.events.send(DomainEvent::QueuesChanged);
+        // A concurrency cap is not only a rule about what starts next.
+        // A queue already running more than the new number allows has
+        // to come back down to it, or lowering the limit would change
+        // nothing until everything already going had finished.
+        self.trim_to_queue_cap(id).await;
         Ok(())
     }
 
@@ -1264,6 +1270,56 @@ impl AppState {
                 }
             }
         })
+    }
+
+    /// Bring a running queue back under its concurrency cap.
+    ///
+    /// Called whenever a queue is saved: the number the user just
+    /// lowered describes the queue as it is right now, not only the
+    /// starts still to come.
+    ///
+    /// The excess comes off the back of the pending order. What is
+    /// nearest the front is what the queue would pick next anyway, so
+    /// stopping the tail is the only trim that does not hand a
+    /// download's turn to the one behind it. The stopped ones keep
+    /// their place, which is why this uses `pause_in_place`: they are
+    /// still next in line, and `fill_queue_slots` picks a paused job in
+    /// a running queue back up as slots free.
+    ///
+    /// Re-counted every pass, because a download finishing while this
+    /// walks the list frees the very slot the next one would have been
+    /// stopped for — that transfer is inside the limit now, and it
+    /// carries on.
+    async fn trim_to_queue_cap(self: &Arc<Self>, id: QueueId) {
+        // Only a queue that is actually running. A download going in a
+        // queue nobody started is not what this number governs, and
+        // stopping it would strand it: the queue filler serves a queue
+        // the user started, so nothing would come back for it.
+        if !self.is_queue_active(id).await {
+            return;
+        }
+        let Some(queue) = self.queue(id).await else {
+            return;
+        };
+        let global = self.settings().await.max_concurrent_downloads;
+        let cap = queue.max_concurrent.unwrap_or(global).max(1);
+        // A download that will not stop — one that reached assembly
+        // between the two reads — must not be offered again, or the
+        // loop never ends.
+        let mut tried: std::collections::HashSet<JobId> = std::collections::HashSet::new();
+        loop {
+            let next = {
+                let jobs = self.jobs.read().await;
+                next_over_cap(&jobs, id, cap, &tried)
+            };
+            let Some(jid) = next else {
+                return;
+            };
+            tried.insert(jid);
+            if let Err(e) = self.pause_in_place(jid).await {
+                tracing::info!(id = %jid, error = %e, "over the queue's limit but could not be stopped");
+            }
+        }
     }
 
     /// Watcher: after a job leaves running state, if its queue has no
@@ -4230,6 +4286,27 @@ impl AppState {
     }
 
     pub async fn pause(self: &Arc<Self>, id: JobId) -> Result<(), JobError> {
+        let res = self.pause_in_place(id).await;
+        // Whoever else is waiting in this queue should not be waiting on
+        // a download the user has just stopped. It keeps its place in
+        // line — at the back of it. Nothing was stopped if the pause was
+        // refused, so there is no turn to give up either.
+        if res.is_ok() {
+            self.move_to_queue_end(id).await;
+        }
+        res
+    }
+
+    /// Stop the transfer and pin the job at Paused, leaving its place
+    /// in the queue exactly as it was.
+    ///
+    /// The half of [`Self::pause`] that is about the download itself.
+    /// Who gets its turn is a separate question, and the two callers
+    /// answer it differently: a user's Pause gives the turn up, a
+    /// download stopped for being over its queue's limit does not —
+    /// it is still next in line, and `fill_queue_slots` treats a
+    /// paused job in a running queue as work to come back to.
+    async fn pause_in_place(self: &Arc<Self>, id: JobId) -> Result<(), JobError> {
         let entry = self
             .job_entry(id)
             .await
@@ -4255,10 +4332,6 @@ impl AppState {
         // the speed/ETA cells switch the moment the user clicks Pause.
         entry.set_phase(Phase::Paused);
         entry.reset_live_speed();
-        // Whoever else is waiting in this queue should not be waiting on
-        // a download the user has just stopped. It keeps its place in
-        // line — at the back of it.
-        self.move_to_queue_end(id).await;
         self.persist_job(id).await;
         let _ = self.events.send(DomainEvent::JobUpdated {
             id,
@@ -5371,6 +5444,40 @@ fn queue_stop_targets(jobs: &IndexMap<JobId, Arc<JobEntry>>, queue: QueueId) -> 
         .collect()
 }
 
+/// The download a queue should stop first to come back under `cap`, or
+/// `None` when it is already inside it.
+///
+/// Taken from the back of the queue's order, so the trim never
+/// reshuffles what is at the front. The count is every run the queue is
+/// carrying — a hand-started download fills a slot like any other — but
+/// only the queue's own runs may be stopped, the same line
+/// [`queue_stop_targets`] draws. Assembling is past the point of
+/// stopping, and `skip` holds whatever this pass has already picked up.
+fn next_over_cap(
+    jobs: &IndexMap<JobId, Arc<JobEntry>>,
+    queue: QueueId,
+    cap: usize,
+    skip: &std::collections::HashSet<JobId>,
+) -> Option<JobId> {
+    let running = jobs
+        .values()
+        .filter(|e| e.job.queue_id == queue && e.phase().is_running())
+        .count();
+    if running <= cap.max(1) {
+        return None;
+    }
+    jobs.values()
+        .rev()
+        .find(|e| {
+            e.job.queue_id == queue
+                && e.phase().is_running()
+                && e.phase() != Phase::Assembling
+                && !e.manual_run.load(Ordering::Acquire)
+                && !skip.contains(&e.job.id)
+        })
+        .map(|e| e.job.id)
+}
+
 /// `name`, or the numbered variant of it that no other job holds.
 fn free_name(jobs: &IndexMap<JobId, Arc<JobEntry>>, name: &str, except: Option<JobId>) -> String {
     crate::domain::unique_name(name, |candidate| name_is_taken(jobs, candidate, except))
@@ -6293,6 +6400,103 @@ mod tests {
         assert!(!targets.contains(&by_hand), "the user asked for this one");
         assert!(!targets.contains(&assembling), "not a transfer to stop");
         assert!(!targets.contains(&paused), "nothing to stop");
+    }
+
+    /// Lowering a running queue's limit trims from the back: what is
+    /// nearest the front is what the queue would have picked next
+    /// anyway, so stopping the tail is the only choice that does not
+    /// give a download's turn away.
+    #[test]
+    fn a_smaller_cap_stops_the_last_download_first() {
+        let queue = crate::domain::QueueId::new();
+        let mut jobs: IndexMap<JobId, Arc<JobEntry>> = IndexMap::new();
+        let mut add = |phase: Phase| -> JobId {
+            let mut entry = entry_in(phase);
+            entry.job.queue_id = queue;
+            let id = entry.job.id;
+            jobs.insert(id, Arc::new(entry));
+            id
+        };
+        let first = add(Phase::Downloading);
+        let second = add(Phase::Downloading);
+        let third = add(Phase::Downloading);
+        add(Phase::Queued);
+
+        let tried = std::collections::HashSet::new();
+        // Three running against one slot: back to front, one at a time.
+        assert_eq!(next_over_cap(&jobs, queue, 1, &tried), Some(third));
+        jobs[&third].set_phase(Phase::Paused);
+        assert_eq!(next_over_cap(&jobs, queue, 1, &tried), Some(second));
+        jobs[&second].set_phase(Phase::Paused);
+        // Down to the limit; the front one keeps going, and what was
+        // only waiting was never a run to stop.
+        assert_eq!(next_over_cap(&jobs, queue, 1, &tried), None);
+        assert!(jobs[&first].phase().is_running());
+
+        // A limit nothing is over asks for nothing.
+        assert_eq!(next_over_cap(&jobs, queue, 3, &tried), None);
+        // Another queue's runs are not this queue's business.
+        assert_eq!(
+            next_over_cap(&jobs, crate::domain::QueueId::new(), 1, &tried),
+            None
+        );
+    }
+
+    /// The trim is not a plan made up front: a download finishing while
+    /// it walks the list frees the slot the next one would have been
+    /// stopped for, and that transfer is now inside the limit.
+    #[test]
+    fn a_download_that_finishes_mid_trim_spares_the_next_one() {
+        let queue = crate::domain::QueueId::new();
+        let mut jobs: IndexMap<JobId, Arc<JobEntry>> = IndexMap::new();
+        let mut add = || -> JobId {
+            let mut entry = entry_in(Phase::Downloading);
+            entry.job.queue_id = queue;
+            let id = entry.job.id;
+            jobs.insert(id, Arc::new(entry));
+            id
+        };
+        let first = add();
+        let second = add();
+        let third = add();
+
+        let mut tried = std::collections::HashSet::new();
+        assert_eq!(next_over_cap(&jobs, queue, 1, &tried), Some(third));
+        tried.insert(third);
+        jobs[&third].set_phase(Phase::Paused);
+        // The front download finished on its own before the next stop.
+        jobs[&first].set_phase(Phase::Completed);
+        assert_eq!(next_over_cap(&jobs, queue, 1, &tried), None);
+        assert!(jobs[&second].phase().is_running(), "it has the slot now");
+    }
+
+    /// A hand-started download fills a slot like any other, but the
+    /// queue's limit is not what stops it — the same line Stop queue
+    /// draws. Nor is a job past the last byte, which finishes on its own.
+    #[test]
+    fn the_trim_leaves_hand_started_and_assembling_downloads_alone() {
+        let queue = crate::domain::QueueId::new();
+        let mut jobs: IndexMap<JobId, Arc<JobEntry>> = IndexMap::new();
+        let mut add = |phase: Phase, manual: bool| -> JobId {
+            let mut entry = entry_in(phase);
+            entry.job.queue_id = queue;
+            entry.manual_run.store(manual, Ordering::Release);
+            let id = entry.job.id;
+            jobs.insert(id, Arc::new(entry));
+            id
+        };
+        let by_queue = add(Phase::Downloading, false);
+        add(Phase::Assembling, false);
+        let by_hand = add(Phase::Downloading, true);
+
+        let tried = std::collections::HashSet::new();
+        // Three runs against one slot, and only one of them is the
+        // queue's to stop.
+        assert_eq!(next_over_cap(&jobs, queue, 1, &tried), Some(by_queue));
+        jobs[&by_queue].set_phase(Phase::Paused);
+        // Still over the limit, and nothing left that may be stopped.
+        assert_eq!(next_over_cap(&jobs, queue, 1, &tried), None);
+        assert!(jobs[&by_hand].phase().is_running());
     }
 
     /// A stale Settings window used to write back its whole page,
