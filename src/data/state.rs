@@ -1040,12 +1040,18 @@ impl AppState {
         let was_running = {
             let mut active = self.active_queues.write().await;
             match active.get_mut(&id) {
-                Some(tally) if tally.queue_run => true,
+                Some(tally) if tally.queue_run => {
+                    // Start on a run Pause all had suspended is the
+                    // user asking for it back.
+                    tally.paused = false;
+                    true
+                }
                 // A hand-started download in this queue may have opened
                 // a tally already; this run takes it over rather than
                 // dropping the outcome it is holding.
                 Some(tally) => {
                     tally.queue_run = true;
+                    tally.paused = false;
                     false
                 }
                 None => {
@@ -1117,16 +1123,30 @@ impl AppState {
             .is_some_and(|t| t.queue_run)
     }
 
-    /// Is this queue's run switched off while its tally is still
-    /// open? That happens when Stop queue leaves a hand-started
-    /// download running: the entry survives to count that download's
-    /// outcome, but the queue is not running any more.
-    async fn queue_stopped(&self, id: QueueId) -> bool {
+    /// Has this queue's run stopped feeding itself while its tally is
+    /// still open? Two ways: Stop queue left a hand-started download
+    /// running, so the entry survives to count that download's outcome
+    /// but the queue is not running any more; or Pause all suspended
+    /// the run.
+    ///
+    /// A queue with no tally at all is not covered — nothing there was
+    /// ever a queue run, and a hand-started download waiting on the cap
+    /// still gets the next free slot.
+    async fn queue_halted(&self, id: QueueId) -> bool {
         self.active_queues
             .read()
             .await
             .get(&id)
-            .is_some_and(|t| !t.queue_run)
+            .is_some_and(|t| !t.feeds_itself())
+    }
+
+    /// May the queue start the next download in its list by itself?
+    async fn queue_feeds_itself(&self, id: QueueId) -> bool {
+        self.active_queues
+            .read()
+            .await
+            .get(&id)
+            .is_some_and(QueueRunTally::feeds_itself)
     }
 
     /// Snapshot of currently running queues. Same rule as
@@ -1144,32 +1164,68 @@ impl AppState {
     /// End the queue's run: pause what the queue started, and leave
     /// what the user started alone.
     pub async fn stop_queue(self: &Arc<Self>, id: QueueId) -> Result<(), String> {
-        let ids = queue_stop_targets(&*self.jobs.read().await, id);
-        for jid in ids {
-            let _ = self.pause(jid).await;
+        // The run is switched off before anything is paused — the same
+        // order [`Self::stop_all`] takes, and for the same reason. While
+        // the queue is still marked as running it is a thing that starts
+        // downloads: every pause below frees a slot and wakes the slot
+        // filler, so pausing first left a window in which the queue put
+        // back what had just been stopped, one job per freed slot. The
+        // user pressed Stop and watched the queue download its way
+        // through the rest of the list.
+        //
+        // A queue with no tally was not running as a queue. It can
+        // still hold downloads something else started automatically —
+        // Resume all opens no tally — and Stop means those too, so the
+        // sweep below runs either way; only the run itself is not there
+        // to end.
+        let was_active = {
+            let mut active = self.active_queues.write().await;
+            match active.get_mut(&id) {
+                Some(tally) => {
+                    tally.queue_run = false;
+                    true
+                }
+                None => false,
+            }
+        };
+        // Stopping pauses what is running; a job the cap sent back to
+        // the queue is not running, so the sweep below never touches it.
+        // Left marked, the deferral filler would start it the moment any
+        // slot anywhere freed — and the queue the user just stopped
+        // would carry on downloading by itself. Cleared before the
+        // pauses for the same reason the run flag is.
+        clear_queue_deferrals(&*self.jobs.read().await, id);
+        // Swept until a pass turns up nothing new. A slot filler that
+        // read the run flag just before it was cleared can still be
+        // inside `start_job`, and the download it claims would otherwise
+        // outlive the stop. `tried` is what makes this terminate: a job
+        // that will not pause is offered once and then left alone.
+        let mut tried: std::collections::HashSet<JobId> = std::collections::HashSet::new();
+        loop {
+            let targets: Vec<JobId> = queue_stop_targets(&*self.jobs.read().await, id)
+                .into_iter()
+                .filter(|jid| tried.insert(*jid))
+                .collect();
+            if targets.is_empty() {
+                break;
+            }
+            for jid in targets {
+                let _ = self.pause(jid).await;
+            }
         }
-        // The run ends, but the tally entry stays as long as a
-        // hand-started download in this queue is still going: it is
-        // what counts that download's outcome and, once it ends, lets
-        // the finish watcher close the entry.
+        if !was_active {
+            return Ok(());
+        }
+        // The tally entry stays as long as a hand-started download in
+        // this queue is still going: it is what counts that download's
+        // outcome and, once it ends, lets the finish watcher close the
+        // entry.
         let manual_running = self.jobs.read().await.values().any(|e| {
             e.job.queue_id == id && e.phase().is_running() && e.manual_run.load(Ordering::Acquire)
         });
-        let mut active = self.active_queues.write().await;
-        match active.get_mut(&id) {
-            Some(tally) if manual_running => tally.queue_run = false,
-            Some(_) => {
-                active.remove(&id);
-            }
-            None => return Ok(()),
+        if !manual_running {
+            self.active_queues.write().await.remove(&id);
         }
-        drop(active);
-        // Stopping pauses what is running; a job the cap sent back to
-        // the queue is not running, so nothing above touches it. Left
-        // marked, the deferral filler would start it the moment any
-        // slot anywhere freed — and the queue the user just stopped
-        // would carry on downloading by itself.
-        clear_queue_deferrals(&*self.jobs.read().await, id);
         // Stopped, not finished: on-finish hooks belong to a queue that
         // ran out of work, and arming a shutdown because someone
         // pressed Stop queue is a decision oxdm does not get to make.
@@ -1204,14 +1260,14 @@ impl AppState {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
         let state = Arc::clone(self);
         Box::pin(async move {
-            let (queue_run, failed_now) = {
+            let (feeds, failed_now) = {
                 let active = state.active_queues.read().await;
                 match active.get(&queue_id) {
-                    Some(t) => (t.queue_run, t.failed_now.clone()),
+                    Some(t) => (t.feeds_itself(), t.failed_now.clone()),
                     None => (false, std::collections::HashSet::new()),
                 }
             };
-            if state.is_exiting() || !queue_run {
+            if state.is_exiting() || !feeds {
                 return;
             }
             let global_cap = state.settings().await.max_concurrent_downloads.max(1);
@@ -1226,6 +1282,15 @@ impl AppState {
             // picking the same one.
             let mut tried: std::collections::HashSet<JobId> = just_ended.into_iter().collect();
             loop {
+                // Re-asked every pass, not only on the way in: each
+                // start awaits a settings read, a free-space check and
+                // the admission lock, which is long enough for Stop
+                // queue to land in between. Without this the filler
+                // would hand the rest of its pass to a queue that is no
+                // longer running.
+                if !state.queue_feeds_itself(queue_id).await {
+                    return;
+                }
                 let next = {
                     let jobs = state.jobs.read().await;
                     let running_global = jobs.values().filter(|e| e.phase().is_running()).count();
@@ -3715,9 +3780,10 @@ impl AppState {
             }
             // A queue that was stopped while one of its hand-started
             // downloads is still going keeps its tally, with the run
-            // switched off. Its queued work is not waiting for a slot
-            // any more — it was stopped.
-            if self.queue_stopped(queue).await {
+            // switched off; Pause all suspends a run the same way. Its
+            // queued work is not waiting for a slot any more — it was
+            // stopped.
+            if self.queue_halted(queue).await {
                 continue;
             }
             self.mark_run_intent(id, false).await;
@@ -4674,20 +4740,41 @@ impl AppState {
     }
 
     pub async fn pause_all(self: &Arc<Self>) {
+        // Before a single transfer is stopped, and for the reason
+        // [`Self::stop_queue`] spells out: a pause frees a slot, and a
+        // queue still feeding itself answers that by starting the next
+        // download in its list — so Pause all ended with the queue
+        // working through the rest of the queue instead of stopping.
+        // The runs stay open (this is Pause, not Stop); `resume_all`
+        // lifts the suspension.
+        for tally in self.active_queues.write().await.values_mut() {
+            tally.paused = true;
+        }
         self.clear_deferrals().await;
+        // Swept until a pass turns up nothing new, for the reason
+        // [`Self::stop_queue`] gives: a slot filler that read the flag
+        // just before it was set can still be inside `start_job`.
+        //
         // A job writing its final file is left alone: `pause` refuses
         // it anyway, and asking is how a shutdown ends up logging an
         // error for doing the right thing.
-        let ids: Vec<JobId> = self
-            .jobs
-            .read()
-            .await
-            .values()
-            .filter(|e| e.running.load(Ordering::Acquire) && e.phase() != Phase::Assembling)
-            .map(|e| e.job.id)
-            .collect();
-        for id in ids {
-            let _ = self.pause(id).await;
+        let mut tried: std::collections::HashSet<JobId> = std::collections::HashSet::new();
+        loop {
+            let ids: Vec<JobId> = self
+                .jobs
+                .read()
+                .await
+                .values()
+                .filter(|e| e.running.load(Ordering::Acquire) && e.phase() != Phase::Assembling)
+                .map(|e| e.job.id)
+                .filter(|id| tried.insert(*id))
+                .collect();
+            if ids.is_empty() {
+                return;
+            }
+            for id in ids {
+                let _ = self.pause(id).await;
+            }
         }
     }
 
@@ -4728,6 +4815,9 @@ impl AppState {
     /// ones included, same rule as `start_queue`: "resume everything"
     /// that silently skips the failures is not what it says.
     pub async fn resume_all(self: &Arc<Self>) {
+        for tally in self.active_queues.write().await.values_mut() {
+            tally.paused = false;
+        }
         // A download whose checksum failed is skipped: it has every
         // byte already, so "resume" would silently fetch the whole file
         // again — a decision the user makes with Restart, not one a
@@ -5645,6 +5735,22 @@ struct QueueRunTally {
     /// hand asked for that download, and answering by starting the
     /// other forty behind it would be oxdm deciding for them.
     queue_run: bool,
+    /// Pause all reached this run. The run is still the user's — the
+    /// toolbar goes on offering Stop queue, and Resume all picks it
+    /// back up — but it must not feed itself in the meantime: pausing
+    /// a download frees a slot, and a queue that answers that by
+    /// starting the next one turns Pause all into a reshuffle.
+    paused: bool,
+}
+
+impl QueueRunTally {
+    /// May the queue start the next download in its list by itself?
+    /// A run someone started and has not stopped or paused, and only
+    /// that: a tally opened by a hand-started download is a place to
+    /// record an outcome, not a queue working through a list.
+    fn feeds_itself(&self) -> bool {
+        self.queue_run && !self.paused
+    }
 }
 
 /// Did the run stop on a question the user can settle, rather than on
@@ -6359,6 +6465,38 @@ mod tests {
         );
         // And it is not picked up again by the filler.
         assert_eq!(next_deferred(&jobs, &Default::default()), Some(elsewhere));
+    }
+
+    /// Pausing a download frees a slot, and the slot filler is what
+    /// answers a freed slot. Both Stop queue and Pause all therefore
+    /// have to take the queue out of the feeding state *before* they
+    /// pause anything, or the queue starts the next download in its
+    /// list — which is what the user just said they did not want.
+    #[test]
+    fn a_stopped_or_paused_run_does_not_start_the_next_download() {
+        let running = QueueRunTally {
+            queue_run: true,
+            ..QueueRunTally::default()
+        };
+        assert!(running.feeds_itself());
+
+        let paused = QueueRunTally {
+            paused: true,
+            ..running.clone()
+        };
+        assert!(!paused.feeds_itself(), "Pause all suspends the run");
+
+        let stopped = QueueRunTally {
+            queue_run: false,
+            ..running.clone()
+        };
+        assert!(
+            !stopped.feeds_itself(),
+            "Stop queue left this open only to count a hand-started download"
+        );
+
+        // A tally a hand-started download opened is not a queue run.
+        assert!(!QueueRunTally::default().feeds_itself());
     }
 
     /// One name, one download — whatever folder each saves into and
