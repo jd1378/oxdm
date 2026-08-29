@@ -65,7 +65,8 @@ pub fn settings_to_download_options(
         .dynamic_split(s.dynamic_split)
         .accept_invalid_certs(s.accept_invalid_certs)
         .speed_limit(s.speed_limit)
-        .connect_timeout(s.connect_timeout);
+        .connect_timeout(s.connect_timeout)
+        .read_timeout(s.read_timeout);
     if !s.headers.is_empty() {
         b.headers(Some(s.headers.clone()));
     }

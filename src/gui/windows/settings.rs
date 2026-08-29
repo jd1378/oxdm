@@ -186,6 +186,7 @@ pub enum Msg {
     ProxyUser(String),
     ProxyPass(String),
     ConnectTimeout(String),
+    ReadTimeout(String),
     InvalidCerts(bool),
     UserAgent(String),
     RandomUa(bool),
@@ -287,6 +288,7 @@ pub struct State {
     /// A password is stored for the proxy (shown as a placeholder).
     has_stored_proxy_pass: bool,
     connect_timeout: String,
+    read_timeout: String,
     user_agent: String,
     ipc_port: String,
     cat_exts: Vec<(Category, String)>,
@@ -407,6 +409,7 @@ fn pending_settings(st: &State) -> Settings {
         ..s.proxy.clone()
     };
     s.connect_timeout = humantime::parse_duration(st.connect_timeout.trim()).ok();
+    s.read_timeout = humantime::parse_duration(st.read_timeout.trim()).ok();
     s.user_agent = (!st.user_agent.trim().is_empty()).then(|| st.user_agent.trim().to_owned());
     if let Ok(v) = st.ipc_port.trim().parse() {
         s.ipc_port = v;
@@ -487,6 +490,7 @@ fn copy_section(dst: &mut Settings, src: &Settings, section: Section) {
             dst.speed_limit = src.speed_limit;
             dst.proxy = src.proxy.clone();
             dst.connect_timeout = src.connect_timeout;
+            dst.read_timeout = src.read_timeout;
             dst.accept_invalid_certs = src.accept_invalid_certs;
             dst.user_agent = src.user_agent.clone();
             dst.randomize_user_agent = src.randomize_user_agent;
@@ -580,6 +584,10 @@ fn mirror(st: &mut State) {
     st.proxy_pass_edited = false;
     st.connect_timeout = s
         .connect_timeout
+        .map(|d| humantime::format_duration(d).to_string())
+        .unwrap_or_default();
+    st.read_timeout = s
+        .read_timeout
         .map(|d| humantime::format_duration(d).to_string())
         .unwrap_or_default();
     st.user_agent = s.user_agent.clone().unwrap_or_default();
@@ -694,6 +702,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 proxy_pass_edited: false,
                 has_stored_proxy_pass: false,
                 connect_timeout: String::new(),
+                read_timeout: String::new(),
                 user_agent: String::new(),
                 ipc_port: String::new(),
                 cat_exts: Vec::new(),
@@ -977,6 +986,10 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
         }
         Msg::ConnectTimeout(v) => {
             st.connect_timeout = v;
+            Task::none()
+        }
+        Msg::ReadTimeout(v) => {
+            st.read_timeout = v;
             Task::none()
         }
         Msg::InvalidCerts(v) => {
@@ -2453,6 +2466,19 @@ fn network_section(st: &State) -> Element<'_, Msg> {
                         TextInput::new(&st.connect_timeout)
                             .width(Length::Fixed(100.0))
                             .on_input(Msg::ConnectTimeout)
+                            .view(t)
+                    ),
+                    set_row(
+                        t,
+                        "Read timeout",
+                        Some(
+                            "How long a connected download may send nothing before it is \
+                             dropped and retried. The clock restarts on every byte, so a \
+                             slow download is never cut off. Empty waits forever."
+                        ),
+                        TextInput::new(&st.read_timeout)
+                            .width(Length::Fixed(100.0))
+                            .on_input(Msg::ReadTimeout)
                             .view(t)
                     ),
                 ]

@@ -58,6 +58,12 @@ pub struct Settings {
     pub speed_limit: Option<u64>,
     #[serde(with = "humantime_serde")]
     pub connect_timeout: Option<Duration>,
+    /// How long a request may go silent before it is abandoned. Resets
+    /// on every byte, so it bounds a stalled connection rather than a
+    /// slow one; `None` waits forever, which is what a server that
+    /// accepts a connection and then says nothing relies on.
+    #[serde(default = "default_read_timeout", with = "humantime_serde")]
+    pub read_timeout: Option<Duration>,
     pub headers: IndexMap<String, String>,
 
     // ── oxdm-only ──────────────────────────────────────────────────
@@ -404,6 +410,12 @@ fn default_proxy() -> ProxyAdv {
     }
 }
 
+/// odl's own default, restated so an older config file that predates
+/// the setting loads with the guard on instead of off.
+fn default_read_timeout() -> Option<Duration> {
+    Some(Duration::from_secs(10))
+}
+
 fn yes_default() -> bool {
     true
 }
@@ -492,6 +504,7 @@ impl Default for Settings {
             accept_invalid_certs: false,
             speed_limit: None,
             connect_timeout: Some(Duration::from_secs(5)),
+            read_timeout: default_read_timeout(),
             headers: IndexMap::new(),
             ipc_port: 27812,
             ext_token: String::new(),
@@ -550,6 +563,18 @@ mod tests {
             default_category_folder(base, Category::Videos),
             PathBuf::from("/home/u/Downloads/Videos")
         );
+    }
+
+    /// A settings file written before the setting existed must not
+    /// read as "wait forever" — the missing key means the user never
+    /// had an opinion, and the guard is the safer of the two answers.
+    #[test]
+    fn a_config_without_read_timeout_loads_with_the_guard_on() {
+        let mut json = serde_json::to_value(Settings::default()).unwrap();
+        json.as_object_mut().unwrap().remove("read_timeout");
+
+        let loaded: Settings = serde_json::from_value(json).unwrap();
+        assert_eq!(loaded.read_timeout, Some(Duration::from_secs(10)));
     }
 
     /// A build a package manager owns announces nothing, whatever the
