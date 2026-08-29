@@ -1700,7 +1700,7 @@ fn running_view(st: &State) -> Element<'_, Msg> {
     // over the progress bar is noise.
     let mut hero = column![sibling(header_card(st))].spacing(theme::space::S3);
     if let Some(b) = nonresume_banner(st) {
-        hero = hero.push(b);
+        hero = hero.push(sibling(b));
     }
     hero = hero
         .push(sibling(striped_progress_hatched(
