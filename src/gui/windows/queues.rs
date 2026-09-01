@@ -109,6 +109,39 @@ pub enum CalField {
     Stop,
 }
 
+/// Which time input the clock popup is filling in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeField {
+    SchedStart,
+    SchedStop,
+    OnceStart,
+    OnceStop,
+}
+
+impl TimeField {
+    /// The popup names the field it is filling in — four clock buttons
+    /// on one card, and the popup covers the row it came from.
+    fn label(self) -> &'static str {
+        match self {
+            Self::SchedStart => "Start time",
+            Self::SchedStop => "Stop time",
+            Self::OnceStart => "Start at",
+            Self::OnceStop => "Stop at",
+        }
+    }
+
+    /// The start of the pair this field belongs to. A blank stop opens
+    /// the popup on the run's start rather than on midnight, which is
+    /// the half of the choice the user has already made.
+    fn pair_start(self) -> Self {
+        match self {
+            Self::SchedStop => Self::SchedStart,
+            Self::OnceStop => Self::OnceStart,
+            other => other,
+        }
+    }
+}
+
 /// Condition-builder geometry (design `.cond-builder` family,
 /// styles.css:2111-2192). Cards: radius 8, head padding 10/12 gap 11;
 /// 30px icon tile radius 7; params rows indent to the text column
@@ -146,11 +179,21 @@ const ONCE_TIME_W: f32 = 100.0;
 /// line up if the labels reserve the same width.
 const ONCE_LABEL_W: f32 = 52.0;
 /// Recurring times, narrower than the one-off's: `HH:MM` and nothing
-/// else goes in them.
+/// else goes in them. Start and stop sit on rows of their own, so their
+/// labels reserve a shared width to keep the inputs in line.
 const SCHED_TIME_W: f32 = 90.0;
+const SCHED_LABEL_W: f32 = 72.0;
 const CAL_CELL: f32 = 32.0;
 const CAL_GAP: f32 = 2.0;
 const CAL_PAD: f32 = 12.0;
+
+/// Clock popup: one row per value in two columns, four rows deep —
+/// enough of the hour to choose within, short enough to sit inside the
+/// window next to the calendar it shares its chrome with.
+const TIME_CELL_H: f32 = 28.0;
+const TIME_CELL_W: f32 = 64.0;
+const TIME_ROWS_VISIBLE: f32 = 4.0;
+const TIME_LIST_H: f32 = TIME_CELL_H * TIME_ROWS_VISIBLE + CAL_GAP * (TIME_ROWS_VISIBLE - 1.0);
 
 fn parse_ymd(s: &str) -> Option<chrono::NaiveDate> {
     chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").ok()
@@ -355,6 +398,10 @@ pub enum Msg {
     /// Shift the calendar's displayed month by ±1.
     CalMonth(i32),
     CalPick(chrono::NaiveDate),
+    TimeToggle(TimeField),
+    TimeClose,
+    TimeSetHour(u32),
+    TimeSetMinute(u32),
     CondToggle(CondKind),
     CondCombine(CondCombine),
     CondIdleMin(String),
@@ -451,6 +498,8 @@ pub struct State {
     once_stop_time: String,
     /// Which date the calendar popup is filling in, while it is open.
     cal_field: Option<CalField>,
+    /// Which time the clock popup is filling in, while it is open.
+    time_field: Option<TimeField>,
     /// Month the calendar popup is showing: (year, month 1-12).
     cal_ym: (i32, u32),
     finish: FinishKind,
@@ -662,6 +711,7 @@ impl State {
             .map(|s| s.format("%H:%M").to_string())
             .unwrap_or_default();
         self.cal_field = None;
+        self.time_field = None;
         self.cal_ym = (
             chrono::Datelike::year(&once_start),
             chrono::Datelike::month(&once_start),
@@ -779,6 +829,35 @@ impl State {
             CalField::Start => &mut self.once_date,
             CalField::Stop => &mut self.once_stop_date,
         }
+    }
+
+    /// The time input the clock popup is bound to.
+    fn time_text(&self, field: TimeField) -> &str {
+        match field {
+            TimeField::SchedStart => &self.sched_start,
+            TimeField::SchedStop => &self.sched_stop,
+            TimeField::OnceStart => &self.once_time,
+            TimeField::OnceStop => &self.once_stop_time,
+        }
+    }
+
+    fn time_text_mut(&mut self, field: TimeField) -> &mut String {
+        match field {
+            TimeField::SchedStart => &mut self.sched_start,
+            TimeField::SchedStop => &mut self.sched_stop,
+            TimeField::OnceStart => &mut self.once_time,
+            TimeField::OnceStop => &mut self.once_stop_time,
+        }
+    }
+
+    /// What the popup opens on: the field's own value, else the start
+    /// of its pair, else the same 09:00 the fields hint at. A blank
+    /// stop is the common case, and it is not a blank choice.
+    fn time_value(&self, field: TimeField) -> chrono::NaiveTime {
+        parse_hhmm(self.time_text(field))
+            .or_else(|| parse_hhmm(self.time_text(field.pair_start())))
+            .or_else(|| parse_hhmm(DEFAULT_SCHED_START))
+            .unwrap_or_default()
     }
 
     fn build_queue(&self) -> Option<Queue> {
@@ -933,6 +1012,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 once_stop_date: String::new(),
                 once_stop_time: String::new(),
                 cal_field: None,
+                time_field: None,
                 cal_ym: (2026, 1),
                 finish: FinishKind::Nothing,
                 finish_cmd: String::new(),
@@ -979,6 +1059,19 @@ fn refresh_dirty(st: &mut State) {
         (Some(saved), Some(edited)) => crate::gui::diff::count_changes(saved, &edited),
         _ => 0,
     };
+}
+
+/// Write one half of the clock popup's choice back into its field.
+/// Either half alone is a complete time — the other keeps the value
+/// the popup opened on, so one click fills a blank field.
+fn set_time_part(st: &mut State, hour: Option<u32>, minute: Option<u32>) {
+    let Some(field) = st.time_field else {
+        return;
+    };
+    let v = st.time_value(field);
+    let h = hour.unwrap_or_else(|| chrono::Timelike::hour(&v));
+    let m = minute.unwrap_or_else(|| chrono::Timelike::minute(&v));
+    *st.time_text_mut(field) = format!("{h:02}:{m:02}");
 }
 
 fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
@@ -1303,6 +1396,33 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
             st.cal_field = None;
             Task::none()
         }
+        Msg::TimeToggle(field) => {
+            if st.time_field == Some(field) {
+                st.time_field = None;
+                return Task::none();
+            }
+            st.time_field = Some(field);
+            // Opening on 00:00 with the value 45 rows below is a list
+            // the user has to hunt through before they can choose.
+            let v = st.time_value(field);
+            use chrono::Timelike;
+            Task::batch([
+                iced::widget::operation::scroll_to(hour_scroll_id(), centred_on(v.hour())),
+                iced::widget::operation::scroll_to(minute_scroll_id(), centred_on(v.minute())),
+            ])
+        }
+        Msg::TimeClose => {
+            st.time_field = None;
+            Task::none()
+        }
+        Msg::TimeSetHour(h) => {
+            set_time_part(st, Some(h), None);
+            Task::none()
+        }
+        Msg::TimeSetMinute(m) => {
+            set_time_part(st, None, Some(m));
+            Task::none()
+        }
         Msg::CondToggle(kind) => {
             match kind {
                 CondKind::JobAdded => st.cond_job_added = !st.cond_job_added,
@@ -1392,6 +1512,10 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
                 && matches!(key.as_ref(), iced::keyboard::Key::Named(Named::Escape))
             {
                 return update_ready(st, Msg::CalClose);
+            } else if st.time_field.is_some()
+                && matches!(key.as_ref(), iced::keyboard::Key::Named(Named::Escape))
+            {
+                return update_ready(st, Msg::TimeClose);
             } else if !captured
                 && matches!(key.as_ref(), iced::keyboard::Key::Named(Named::Delete))
                 && st.selected_queue().is_some_and(|q| !q.builtin)
@@ -1652,6 +1776,8 @@ struct WhenRow<'a> {
     time: &'a str,
     time_hint: &'a str,
     on_time: fn(String) -> Msg,
+    /// Which time the row's clock button fills in.
+    time_field: TimeField,
 }
 
 fn when_row<'a>(t: &Tokens, r: WhenRow<'a>) -> Element<'a, Msg> {
@@ -1678,6 +1804,41 @@ fn when_row<'a>(t: &Tokens, r: WhenRow<'a>) -> Element<'a, Msg> {
             .mono()
             .width(Length::Fixed(ONCE_TIME_W))
             .on_input(r.on_time)
+            .view(t),
+        Btn::new("")
+            .icon_only("clock")
+            .on_press(Msg::TimeToggle(r.time_field))
+            .view(t),
+    ]
+    .spacing(theme::space::S2)
+    .align_y(Alignment::Center)
+    .into()
+}
+
+/// One time row of the recurring card: label, input, clock button.
+fn sched_time_row<'a>(
+    t: &Tokens,
+    label: &'a str,
+    value: &'a str,
+    hint: &'a str,
+    on_input: fn(String) -> Msg,
+    field: TimeField,
+) -> Element<'a, Msg> {
+    row![
+        text(label)
+            .font(theme::BODY)
+            .size(13.0)
+            .color(t.fg_2)
+            .width(Length::Fixed(SCHED_LABEL_W)),
+        TextInput::new(value)
+            .hint(hint)
+            .mono()
+            .width(Length::Fixed(SCHED_TIME_W))
+            .on_input(on_input)
+            .view(t),
+        Btn::new("")
+            .icon_only("clock")
+            .on_press(Msg::TimeToggle(field))
             .view(t),
     ]
     .spacing(theme::space::S2)
@@ -2343,32 +2504,25 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
                 let on = st.sched_days.0 & (1 << bit) != 0;
                 days = days.push(day_square(t, label, on, Msg::SchedDay(bit, !on)));
             }
+            // A row each, so it is plain which clock button fills in
+            // which field.
             sched_col = sched_col
-                .push(
-                    row![
-                        text("Start time")
-                            .font(theme::BODY)
-                            .size(13.0)
-                            .color(t.fg_2),
-                        TextInput::new(&st.sched_start)
-                            .hint("09:00")
-                            .mono()
-                            .width(Length::Fixed(SCHED_TIME_W))
-                            .on_input(Msg::SchedStart)
-                            .view(t),
-                        text("Stop time").font(theme::BODY).size(13.0).color(t.fg_2),
-                        TextInput::new(&st.sched_stop)
-                            .hint("no end")
-                            .mono()
-                            .width(Length::Fixed(SCHED_TIME_W))
-                            .on_input(Msg::SchedStop)
-                            .view(t),
-                    ]
-                    .spacing(theme::space::S2)
-                    .align_y(Alignment::Center)
-                    .wrap()
-                    .vertical_spacing(PILL_WRAP_GAP),
-                )
+                .push(sched_time_row(
+                    t,
+                    "Start time",
+                    &st.sched_start,
+                    "09:00",
+                    Msg::SchedStart,
+                    TimeField::SchedStart,
+                ))
+                .push(sched_time_row(
+                    t,
+                    "Stop time",
+                    &st.sched_stop,
+                    "no end",
+                    Msg::SchedStop,
+                    TimeField::SchedStop,
+                ))
                 .push(no_end_caption(t))
                 .push(days);
             if let Err(complaint) = st.recurring_window() {
@@ -2390,6 +2544,7 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
                         time: &st.once_time,
                         time_hint: "09:00",
                         on_time: Msg::OnceTime,
+                        time_field: TimeField::OnceStart,
                     },
                 ))
                 .push(when_row(
@@ -2403,6 +2558,7 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
                         time: &st.once_stop_time,
                         time_hint: "no end",
                         on_time: Msg::OnceStopTime,
+                        time_field: TimeField::OnceStop,
                     },
                 ))
                 .push(no_end_caption(t));
@@ -2566,6 +2722,8 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
         color_pop_overlay(st, body)
     } else if st.cal_field.is_some() {
         calendar_overlay(st, body)
+    } else if let Some(field) = st.time_field {
+        time_overlay(st, field, body)
     } else {
         // Above the page, below the titlebar: the ghost follows the
         // pointer over whatever it is dragged across.
@@ -2729,6 +2887,175 @@ fn color_pop_overlay<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a, M
             top,
             ..Default::default()
         }),
+    ]
+    .into()
+}
+
+fn hour_scroll_id() -> iced::advanced::widget::Id {
+    static ID: std::sync::OnceLock<iced::advanced::widget::Id> = std::sync::OnceLock::new();
+    ID.get_or_init(|| iced::advanced::widget::Id::new("time-hours"))
+        .clone()
+}
+
+fn minute_scroll_id() -> iced::advanced::widget::Id {
+    static ID: std::sync::OnceLock<iced::advanced::widget::Id> = std::sync::OnceLock::new();
+    ID.get_or_init(|| iced::advanced::widget::Id::new("time-minutes"))
+        .clone()
+}
+
+/// Scroll offset that puts a value in the middle of its column: the
+/// values on either side are what the choice is being made between.
+fn centred_on(value: u32) -> iced::widget::scrollable::AbsoluteOffset {
+    let y = value as f32 * (TIME_CELL_H + CAL_GAP) - (TIME_LIST_H - TIME_CELL_H) / 2.0;
+    iced::widget::scrollable::AbsoluteOffset {
+        x: 0.0,
+        y: y.max(0.0),
+    }
+}
+
+/// One column of the clock popup: every value it can take, the current
+/// one filled in.
+fn time_column<'a>(
+    t: &Tokens,
+    caption: &'a str,
+    count: u32,
+    selected: u32,
+    on_pick: fn(u32) -> Msg,
+    id: iced::advanced::widget::Id,
+) -> Element<'a, Msg> {
+    let t2 = *t;
+    let mut list = column![].spacing(CAL_GAP);
+    for v in 0..count {
+        let is_sel = v == selected;
+        list = list.push(
+            button(
+                container(text(format!("{v:02}")).font(theme::MONO).size(13.0))
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .align_x(Alignment::Center)
+                    .align_y(Alignment::Center),
+            )
+            .width(Length::Fill)
+            .height(Length::Fixed(TIME_CELL_H))
+            .padding(0.0)
+            .on_press(on_pick(v))
+            .style(move |_th, status| {
+                let hovered = matches!(status, iced::widget::button::Status::Hovered);
+                iced::widget::button::Style {
+                    background: Some(
+                        if is_sel {
+                            t2.action_primary
+                        } else if hovered {
+                            t2.bg_sunken_hover
+                        } else {
+                            iced::Color::TRANSPARENT
+                        }
+                        .into(),
+                    ),
+                    text_color: if is_sel {
+                        t2.action_primary_fg
+                    } else {
+                        t2.fg_1
+                    },
+                    border: iced::Border {
+                        radius: theme::radius::XS.into(),
+                        ..Default::default()
+                    },
+                    shadow: iced::Shadow::default(),
+                    ..Default::default()
+                }
+            }),
+        );
+    }
+    column![
+        text(caption).font(theme::BODY).size(11.0).color(t.fg_3),
+        crate::gui::widget::vscroll(list)
+            .id(id)
+            .width(Length::Fixed(TIME_CELL_W))
+            .height(Length::Fixed(TIME_LIST_H)),
+    ]
+    .spacing(theme::space::S1)
+    .align_x(Alignment::Center)
+    .into()
+}
+
+/// Centered hour/minute popup for the schedule's time inputs — the
+/// clock button beside each one, for a keyboard the user would rather
+/// not reach for. Centered for the same reason as the calendar.
+fn time_overlay<'a>(st: &'a State, field: TimeField, base: Element<'a, Msg>) -> Element<'a, Msg> {
+    let t = &st.tokens;
+    let t2 = *t;
+    let v = st.time_value(field);
+    let (hour, minute) = (chrono::Timelike::hour(&v), chrono::Timelike::minute(&v));
+
+    let head = row![
+        text(field.label())
+            .font(theme::BODY_BOLD)
+            .size(13.0)
+            .color(t.fg_1)
+            .width(Length::Fill),
+        text(format!("{hour:02}:{minute:02}"))
+            .font(theme::MONO)
+            .size(13.0)
+            .color(t.fg_2),
+    ]
+    .spacing(theme::space::S2)
+    .align_y(Alignment::Center);
+
+    let card = container(
+        column![
+            head,
+            row![
+                time_column(t, "Hour", 24, hour, Msg::TimeSetHour, hour_scroll_id()),
+                time_column(
+                    t,
+                    "Minute",
+                    60,
+                    minute,
+                    Msg::TimeSetMinute,
+                    minute_scroll_id()
+                ),
+            ]
+            .spacing(theme::space::S2),
+            container(Btn::new("Done").primary().on_press(Msg::TimeClose).view(t))
+                .width(Length::Fill)
+                .align_x(Alignment::End),
+        ]
+        .spacing(theme::space::S2)
+        .width(Length::Shrink),
+    )
+    .padding(CAL_PAD)
+    .style(move |_| container::Style {
+        background: Some(t2.bg_surface.into()),
+        border: iced::Border {
+            color: t2.border_default,
+            width: 1.0,
+            radius: theme::radius::SM.into(),
+        },
+        shadow: iced::Shadow {
+            color: color::with_alpha(iced::Color::BLACK, 80.0 / 255.0),
+            offset: iced::Vector::new(0.0, 4.0),
+            blur_radius: 16.0,
+        },
+        ..Default::default()
+    });
+
+    let scrim = mouse_area(
+        container(iced::widget::Space::new())
+            .width(Length::Fill)
+            .height(Length::Fill),
+    )
+    .on_press(Msg::TimeClose)
+    .on_right_press(Msg::TimeClose);
+
+    iced::widget::stack![
+        base,
+        scrim,
+        container(iced::widget::opaque(card))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center),
     ]
     .into()
 }
