@@ -22,7 +22,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use chrono::{Datelike, Local, NaiveTime, Timelike};
+use chrono::{Datelike, Local, NaiveTime};
 
 use crate::data::conditions::{self, CondSnapshot};
 use crate::data::state::AppState;
@@ -230,26 +230,11 @@ fn verdict(
 ) -> bool {
     match &q.schedule {
         QueueSchedule::Manual => false,
-        QueueSchedule::Daily { start, stop, days } => match stop {
-            // With an end time the schedule is a window: inside it the
-            // queue runs, leaving it stops.
-            Some(stop) => {
-                if !days.contains(now.weekday()) {
-                    return false;
-                }
-                let n = current_naive_time(now);
-                if stop > start {
-                    n >= *start && n < *stop
-                } else {
-                    n >= *start || n < *stop // wraps midnight
-                }
-            }
-            // Without one it is a moment, and the run it starts lasts
-            // until the queue has nothing left — so a queue already
-            // running is never stopped from here, and one that is not
-            // waits for the next occurrence.
-            None => running || daily_due(*start, *days, now),
-        },
+        // Without a stop time the run lasts until the queue has
+        // nothing left, so a queue already running is never stopped
+        // from here.
+        QueueSchedule::Daily { stop: None, .. } if running => true,
+        QueueSchedule::Daily { start, stop, days } => daily_due(*start, *stop, *days, now),
         QueueSchedule::Once { start, stop } => {
             if now < *start {
                 return false;
@@ -262,13 +247,15 @@ fn verdict(
                 // one-shot option dead — the queue never ran, and
                 // nothing said why.
                 //
-                // Bounded by a window rather than open-ended, because
-                // the scheduler cannot remember across restarts that it
+                // *Starting* is bounded by a window, because the
+                // scheduler cannot remember across restarts that it
                 // already fired: without it, every launch weeks later
                 // would start a queue that was scheduled for one
                 // afternoon. The window is wide enough to cover a
-                // machine that was asleep when the time came.
-                None => now < *start + chrono::Duration::hours(ONESHOT_WINDOW_HOURS),
+                // machine that was asleep when the time came. It is
+                // not a deadline for the run it began — that ends when
+                // the queue drains.
+                None => running || now < *start + chrono::Duration::hours(ONESHOT_WINDOW_HOURS),
             }
         }
         QueueSchedule::Condition(set) => set.holds(available, |kind| match kind {
@@ -288,36 +275,51 @@ fn verdict(
     }
 }
 
-/// Has a recurring occurrence just come due?
+/// Is a recurring occurrence due right now?
 ///
-/// A start time with no end time names a moment, not everything after
-/// it: 02:00 means the queue begins when the clock reaches 02:00. Read
-/// as "at or after 02:00" it made a queue set for the small hours start
-/// downloading the moment it was configured, at nine in the evening.
+/// An occurrence belongs to the day it starts on and lasts until its
+/// stop time. With no stop time it is a moment rather than everything
+/// after it: 02:00 means the queue begins when the clock reaches
+/// 02:00, and reading it as "at or after 02:00" made a queue set for
+/// the small hours start downloading the moment it was configured, at
+/// nine in the evening. The short grace covers a tick that lands late;
+/// a machine that slept through it runs the next occurrence instead.
 ///
-/// A machine that slept through the grace runs the next occurrence
-/// rather than the one it missed: the point of picking an hour is that
-/// the download happens then, and firing it on wake at noon is the
-/// behaviour this whole function exists to remove.
-fn daily_due(start: NaiveTime, days: WeekDayMask, now: chrono::DateTime<Local>) -> bool {
+/// Yesterday is scanned as well, so a window (or a grace) that reaches
+/// past midnight is still the previous day's run: 23:00–02:00 on a
+/// Sunday-only schedule is running at one on Monday morning, and a
+/// Monday-only one is not.
+fn daily_due(
+    start: NaiveTime,
+    stop: Option<NaiveTime>,
+    days: WeekDayMask,
+    now: chrono::DateTime<Local>,
+) -> bool {
+    let len = match stop {
+        Some(stop) => {
+            let span = stop.signed_duration_since(start);
+            // Negative wraps past midnight; zero is a stop time equal
+            // to the start, which reads as the whole day rather than
+            // as no time at all.
+            if span > chrono::Duration::zero() {
+                span
+            } else {
+                span + chrono::Duration::days(1)
+            }
+        }
+        None => chrono::Duration::minutes(DAILY_GRACE_MINUTES),
+    };
     let n = now.naive_local();
-    let grace = chrono::Duration::minutes(DAILY_GRACE_MINUTES);
     let today = now.date_naive();
-    // Yesterday's occurrence as well, so grace that runs past midnight
-    // still belongs to the day the occurrence started on.
     [today.pred_opt(), Some(today)]
         .into_iter()
         .flatten()
         .any(|d| {
             days.contains(d.weekday()) && {
                 let occ = d.and_time(start);
-                n >= occ && n < occ + grace
+                n >= occ && n < occ + len
             }
         })
-}
-
-fn current_naive_time(now: chrono::DateTime<Local>) -> NaiveTime {
-    NaiveTime::from_hms_opt(now.hour(), now.minute(), now.second()).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -392,13 +394,10 @@ mod tests {
 
     #[test]
     fn a_daily_window_runs_on_its_days_and_hours() {
-        let base = Local::now()
-            .with_hour(10)
-            .unwrap()
-            .with_minute(0)
-            .unwrap()
-            .with_second(0)
-            .unwrap();
+        // A fixed date: "today at 02:00" is the hour the clocks skip
+        // over in spring, and the test would stop existing twice a year.
+        let at = |h, m| Local.with_ymd_and_hms(2026, 6, 8, h, m, 0).unwrap();
+        let base = at(10, 0);
         let every_day = crate::domain::WeekDayMask::ALL;
         let q = queue_with(QueueSchedule::Daily {
             start: NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
@@ -407,7 +406,7 @@ mod tests {
         });
         assert!(should_run(&q, base, ALL, &snap(true, true, 0), None));
 
-        let before = base.with_hour(8).unwrap();
+        let before = at(8, 0);
         assert!(!should_run(&q, before, ALL, &snap(true, true, 0), None));
 
         // A window that wraps past midnight is inside at 23:30.
@@ -416,7 +415,7 @@ mod tests {
             stop: Some(NaiveTime::from_hms_opt(2, 0, 0).unwrap()),
             days: every_day,
         });
-        let late = base.with_hour(23).unwrap().with_minute(30).unwrap();
+        let late = at(23, 30);
         assert!(should_run(
             &overnight,
             late,
@@ -509,6 +508,75 @@ mod tests {
             &s,
             None
         ));
+    }
+
+    /// A stop time ends the run: the queue is started at 02:00 and
+    /// stopped at 04:00 whether or not it has finished, which is the
+    /// whole reason for offering one.
+    #[test]
+    fn a_recurring_stop_time_ends_the_run() {
+        let q = queue_with(QueueSchedule::Daily {
+            start: NaiveTime::from_hms_opt(2, 0, 0).unwrap(),
+            stop: Some(NaiveTime::from_hms_opt(4, 0, 0).unwrap()),
+            days: crate::domain::WeekDayMask::ALL,
+        });
+        let s = snap(true, true, 0);
+        let at = |h, m| Local.with_ymd_and_hms(2026, 6, 8, h, m, 0).unwrap();
+
+        assert!(!should_run(&q, at(1, 59), ALL, &s, None));
+        assert!(should_run(&q, at(2, 0), ALL, &s, None));
+        // Unlike a schedule with no end time, the whole window is due:
+        // a daemon started at 03:00 joins the run it names.
+        assert!(should_run(&q, at(3, 0), ALL, &s, None));
+        assert!(!may_continue(&q, at(4, 0), ALL, &s, None));
+        assert!(!should_run(&q, at(21, 0), ALL, &s, None));
+    }
+
+    /// A window that reaches past midnight belongs to the day it
+    /// started on, not to the day it ends in.
+    #[test]
+    fn an_overnight_window_belongs_to_the_day_it_started_on() {
+        let mut mon = crate::domain::WeekDayMask(0);
+        mon.set(chrono::Weekday::Mon, true);
+        let q = queue_with(QueueSchedule::Daily {
+            start: NaiveTime::from_hms_opt(23, 0, 0).unwrap(),
+            stop: Some(NaiveTime::from_hms_opt(2, 0, 0).unwrap()),
+            days: mon,
+        });
+        let s = snap(true, true, 0);
+        // 2026-06-08 is a Monday.
+        let at = |d, h, m| Local.with_ymd_and_hms(2026, 6, d, h, m, 0).unwrap();
+
+        assert!(should_run(&q, at(8, 23, 30), ALL, &s, None));
+        assert!(should_run(&q, at(9, 1, 30), ALL, &s, None)); // Tuesday, 01:30
+        assert!(!should_run(&q, at(9, 2, 0), ALL, &s, None)); // window closed
+        assert!(!should_run(&q, at(9, 23, 30), ALL, &s, None)); // Tuesday night
+    }
+
+    /// The one-off's window bounds *starting*, not the run it began: a
+    /// download still going twelve hours later is not pulled out from
+    /// under the user by a schedule that named no end.
+    #[test]
+    fn a_one_off_with_no_end_time_is_never_stopped_by_the_clock() {
+        let now = Local::now();
+        let q = queue_with(QueueSchedule::Once {
+            start: now - chrono::Duration::hours(ONESHOT_WINDOW_HOURS + 8),
+            stop: None,
+        });
+        let s = snap(true, true, 0);
+        assert!(!should_run(&q, now, ALL, &s, None));
+        assert!(may_continue(&q, now, ALL, &s, None));
+    }
+
+    #[test]
+    fn a_one_off_stop_time_ends_the_run() {
+        let now = Local::now();
+        let q = queue_with(QueueSchedule::Once {
+            start: now - chrono::Duration::hours(2),
+            stop: Some(now - chrono::Duration::minutes(1)),
+        });
+        let s = snap(true, true, 0);
+        assert!(!may_continue(&q, now, ALL, &s, None));
     }
 
     #[test]

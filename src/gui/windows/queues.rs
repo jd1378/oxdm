@@ -102,6 +102,13 @@ pub enum SchedKind {
     Condition,
 }
 
+/// Which of the one-off's two dates the calendar popup is filling in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CalField {
+    Start,
+    Stop,
+}
+
 /// Condition-builder geometry (design `.cond-builder` family,
 /// styles.css:2111-2192). Cards: radius 8, head padding 10/12 gap 11;
 /// 30px icon tile radius 7; params rows indent to the text column
@@ -135,17 +142,83 @@ const DEFAULT_CMD_INTERVAL: u32 = 60;
 /// calendar popup: 32px day cells, 7 columns.
 const ONCE_DATE_W: f32 = 160.0;
 const ONCE_TIME_W: f32 = 100.0;
+/// Both one-off rows carry a label of their own, so the inputs only
+/// line up if the labels reserve the same width.
+const ONCE_LABEL_W: f32 = 52.0;
+/// Recurring times, narrower than the one-off's: `HH:MM` and nothing
+/// else goes in them.
+const SCHED_TIME_W: f32 = 90.0;
 const CAL_CELL: f32 = 32.0;
 const CAL_GAP: f32 = 2.0;
 const CAL_PAD: f32 = 12.0;
 
-fn parse_once_date(s: &str) -> Option<chrono::NaiveDate> {
+fn parse_ymd(s: &str) -> Option<chrono::NaiveDate> {
     chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").ok()
 }
 
-fn parse_once_time(s: &str) -> Option<chrono::NaiveTime> {
+fn parse_hhmm(s: &str) -> Option<chrono::NaiveTime> {
     chrono::NaiveTime::parse_from_str(s.trim(), "%H:%M").ok()
 }
+
+/// The one-off's end, if its stop fields describe one.
+///
+/// `Ok(None)` is a run with no end: both fields blank. A blank date
+/// with a time in it is `start_date`, the day the run starts on, which
+/// is what "stop at 04:00" nearly always means — and a stop landing
+/// before the start says so rather than being rolled silently into the
+/// next day.
+///
+/// `Err` carries the note shown under the row; Apply reads the same
+/// verdict.
+fn once_stop_instant(
+    date: &str,
+    time: &str,
+    start_date: &str,
+    start: Option<chrono::DateTime<chrono::Local>>,
+) -> Result<Option<chrono::DateTime<chrono::Local>>, &'static str> {
+    const UNREADABLE: &str = "Invalid stop date (YYYY-MM-DD) or time (HH:MM).";
+    let (date, time) = (date.trim(), time.trim());
+    if date.is_empty() && time.is_empty() {
+        return Ok(None);
+    }
+    let t = parse_hhmm(time).ok_or(UNREADABLE)?;
+    let d = parse_ymd(if date.is_empty() { start_date } else { date }).ok_or(UNREADABLE)?;
+    let stop = d
+        .and_time(t)
+        // `earliest`, for the same reason `once_instant` uses it.
+        .and_local_timezone(chrono::Local)
+        .earliest()
+        .ok_or(UNREADABLE)?;
+    match start {
+        Some(start) if stop <= start => Err("The stop time must be after the start time."),
+        _ => Ok(Some(stop)),
+    }
+}
+
+/// The recurring window the schedule fields describe, or the note that
+/// keeps it from being saved. A blank stop is a run with no end, which
+/// lasts until the queue has nothing left.
+fn recurring_window(
+    start: &str,
+    stop: &str,
+) -> Result<(chrono::NaiveTime, Option<chrono::NaiveTime>), &'static str> {
+    let start = parse_hhmm(start).ok_or("Invalid start time: use HH:MM.")?;
+    let stop = stop.trim();
+    if stop.is_empty() {
+        return Ok((start, None));
+    }
+    let stop = parse_hhmm(stop).ok_or("Invalid stop time: use HH:MM.")?;
+    // Equal times read as a whole day to the scheduler, which is not
+    // what anyone typing the same number twice means.
+    if stop == start {
+        return Err("The stop time must differ from the start time.");
+    }
+    Ok((start, Some(stop)))
+}
+
+/// Proposed when the recurring card is opened with no readable start
+/// time — the same 09:00 the field hints at.
+const DEFAULT_SCHED_START: &str = "09:00";
 
 /// How far ahead a fresh one-off is proposed.
 ///
@@ -271,10 +344,13 @@ pub enum Msg {
     Concurrency(usize),
     Sched(SchedKind),
     SchedStart(String),
+    SchedStop(String),
     SchedDay(u8, bool),
     OnceDate(String),
     OnceTime(String),
-    CalToggle,
+    OnceStopDate(String),
+    OnceStopTime(String),
+    CalToggle(CalField),
     CalClose,
     /// Shift the calendar's displayed month by ±1.
     CalMonth(i32),
@@ -348,6 +424,9 @@ pub struct State {
     conc_inherited: bool,
     sched: SchedKind,
     sched_start: String,
+    /// Blank when the recurring run has no end, in which case it lasts
+    /// until the queue has nothing left to download.
+    sched_stop: String,
     sched_days: WeekDayMask,
     cond_combine: CondCombine,
     cond_job_added: bool,
@@ -364,10 +443,14 @@ pub struct State {
     /// cards outside this set are hidden and don't participate.
     cond_avail: Vec<CondKind>,
     /// One-off date/time buffers, validated on change (`YYYY-MM-DD`,
-    /// `HH:MM`).
+    /// `HH:MM`). The stop pair is blank when the run has no end; a
+    /// blank stop *date* alone means the day the run starts on.
     once_date: String,
     once_time: String,
-    cal_open: bool,
+    once_stop_date: String,
+    once_stop_time: String,
+    /// Which date the calendar popup is filling in, while it is open.
+    cal_field: Option<CalField>,
     /// Month the calendar popup is showing: (year, month 1-12).
     cal_ym: (i32, u32),
     finish: FinishKind,
@@ -554,13 +637,31 @@ impl State {
             QueueSchedule::Daily { start, .. } => start.format("%H:%M").to_string(),
             _ => String::new(),
         };
+        self.sched_stop = match q.schedule {
+            QueueSchedule::Daily {
+                stop: Some(stop), ..
+            } => stop.format("%H:%M").to_string(),
+            _ => String::new(),
+        };
         let once_start = match q.schedule {
             QueueSchedule::Once { start, .. } => start.naive_local(),
             _ => suggested_once(),
         };
         self.once_date = once_start.format("%Y-%m-%d").to_string();
         self.once_time = once_start.format("%H:%M").to_string();
-        self.cal_open = false;
+        let once_stop = match q.schedule {
+            QueueSchedule::Once {
+                stop: Some(stop), ..
+            } => Some(stop.naive_local()),
+            _ => None,
+        };
+        self.once_stop_date = once_stop
+            .map(|s| s.format("%Y-%m-%d").to_string())
+            .unwrap_or_default();
+        self.once_stop_time = once_stop
+            .map(|s| s.format("%H:%M").to_string())
+            .unwrap_or_default();
+        self.cal_field = None;
         self.cal_ym = (
             chrono::Datelike::year(&once_start),
             chrono::Datelike::month(&once_start),
@@ -620,8 +721,8 @@ impl State {
     /// `None` for text that does not parse, and for a local time that
     /// does not exist — the hour the clocks skip forward over.
     fn once_instant(&self) -> Option<chrono::DateTime<chrono::Local>> {
-        parse_once_date(&self.once_date)
-            .zip(parse_once_time(&self.once_time))
+        parse_ymd(&self.once_date)
+            .zip(parse_hhmm(&self.once_time))
             .map(|(d, t)| d.and_time(t))
             // `earliest`, not `single`: on the night the clocks go
             // back a local time happens twice, and `single` is `None`
@@ -629,17 +730,55 @@ impl State {
             .and_then(|n| n.and_local_timezone(chrono::Local).earliest())
     }
 
+    /// Is the one-off's start a moment still to come?
+    fn once_start_ok(&self) -> bool {
+        self.once_instant()
+            .is_some_and(|t| t > chrono::Local::now())
+    }
+
+    fn once_stop_instant(&self) -> Result<Option<chrono::DateTime<chrono::Local>>, &'static str> {
+        once_stop_instant(
+            &self.once_stop_date,
+            &self.once_stop_time,
+            &self.once_date,
+            self.once_instant(),
+        )
+    }
+
+    fn recurring_window(
+        &self,
+    ) -> Result<(chrono::NaiveTime, Option<chrono::NaiveTime>), &'static str> {
+        recurring_window(&self.sched_start, &self.sched_stop)
+    }
+
     /// Can the schedule on screen be saved?
     ///
-    /// Only the one-off can fail: a date already past describes a run
-    /// that cannot happen, and saving it would leave the queue holding
-    /// a booking the scheduler will never honour. The other kinds are
-    /// either standing arrangements or nothing at all.
+    /// A one-off dated in the past describes a run that cannot happen,
+    /// and saving it would leave the queue holding a booking the
+    /// scheduler will never honour. Either clock schedule can also
+    /// carry a time that does not parse, or a stop that does not sit
+    /// after its start. Manual and Condition cannot fail.
     fn sched_ok(&self) -> bool {
-        self.sched != SchedKind::OneOff
-            || self
-                .once_instant()
-                .is_some_and(|t| t > chrono::Local::now())
+        match self.sched {
+            SchedKind::Recurring => self.recurring_window().is_ok(),
+            SchedKind::OneOff => self.once_start_ok() && self.once_stop_instant().is_ok(),
+            SchedKind::Manual | SchedKind::Condition => true,
+        }
+    }
+
+    /// The one-off date the calendar popup is bound to.
+    fn cal_text(&self, field: CalField) -> &str {
+        match field {
+            CalField::Start => &self.once_date,
+            CalField::Stop => &self.once_stop_date,
+        }
+    }
+
+    fn cal_text_mut(&mut self, field: CalField) -> &mut String {
+        match field {
+            CalField::Start => &mut self.once_date,
+            CalField::Stop => &mut self.once_stop_date,
+        }
     }
 
     fn build_queue(&self) -> Option<Queue> {
@@ -676,17 +815,19 @@ impl State {
                         .clamp(*CMD_INTERVAL_RANGE.start(), *CMD_INTERVAL_RANGE.end()),
                 }),
             }),
-            SchedKind::Recurring => QueueSchedule::Daily {
-                start: chrono::NaiveTime::parse_from_str(self.sched_start.trim(), "%H:%M")
-                    .unwrap_or_else(|_| chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap()),
-                stop: None,
-                days: self.sched_days,
-            },
-            // `sched_ok` above has already refused anything this
+            // `sched_ok` above has already refused anything these
             // cannot resolve, so the fields are known good here.
+            SchedKind::Recurring => {
+                let (start, stop) = self.recurring_window().ok()?;
+                QueueSchedule::Daily {
+                    start,
+                    stop,
+                    days: self.sched_days,
+                }
+            }
             SchedKind::OneOff => QueueSchedule::Once {
                 start: self.once_instant()?,
-                stop: None,
+                stop: self.once_stop_instant().ok()?,
             },
         };
         // The editor picks a *kind*; the saved hook carries more than
@@ -775,6 +916,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 conc_inherited: false,
                 sched: SchedKind::Manual,
                 sched_start: String::new(),
+                sched_stop: String::new(),
                 sched_days: WeekDayMask(0x7F),
                 cond_combine: CondCombine::default(),
                 cond_job_added: false,
@@ -788,7 +930,9 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 cond_avail,
                 once_date: String::new(),
                 once_time: String::new(),
-                cal_open: false,
+                once_stop_date: String::new(),
+                once_stop_time: String::new(),
+                cal_field: None,
                 cal_ym: (2026, 1),
                 finish: FinishKind::Nothing,
                 finish_cmd: String::new(),
@@ -1083,16 +1227,26 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
             // booking has since passed — proposes a time a few hours
             // out. A future time already on screen is the user's and
             // is left alone.
-            if k == SchedKind::OneOff && !st.sched_ok() {
+            if k == SchedKind::OneOff && !st.once_start_ok() {
                 let s = suggested_once();
                 st.once_date = s.format("%Y-%m-%d").to_string();
                 st.once_time = s.format("%H:%M").to_string();
                 st.cal_ym = (chrono::Datelike::year(&s), chrono::Datelike::month(&s));
             }
+            // Same idea for the recurring start: arriving with nothing
+            // readable in the field would otherwise refuse Apply for a
+            // schedule the user has not been given a chance to fill in.
+            if k == SchedKind::Recurring && parse_hhmm(&st.sched_start).is_none() {
+                st.sched_start = DEFAULT_SCHED_START.to_owned();
+            }
             Task::none()
         }
         Msg::SchedStart(v) => {
             st.sched_start = v;
+            Task::none()
+        }
+        Msg::SchedStop(v) => {
+            st.sched_stop = v;
             Task::none()
         }
         Msg::SchedDay(bit, on) => {
@@ -1111,17 +1265,29 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
             st.once_time = v;
             Task::none()
         }
-        Msg::CalToggle => {
-            st.cal_open = !st.cal_open;
-            if st.cal_open
-                && let Some(d) = parse_once_date(&st.once_date)
+        Msg::OnceStopDate(v) => {
+            st.once_stop_date = v;
+            Task::none()
+        }
+        Msg::OnceStopTime(v) => {
+            st.once_stop_time = v;
+            Task::none()
+        }
+        Msg::CalToggle(field) => {
+            // The same button closes its own popup; the other one's
+            // button moves the popup rather than stacking a second.
+            st.cal_field = (st.cal_field != Some(field)).then_some(field);
+            if let Some(field) = st.cal_field
+                // A blank stop date opens on the month the run starts
+                // in, which is the month the user is choosing within.
+                && let Some(d) = parse_ymd(st.cal_text(field)).or_else(|| parse_ymd(&st.once_date))
             {
                 st.cal_ym = (chrono::Datelike::year(&d), chrono::Datelike::month(&d));
             }
             Task::none()
         }
         Msg::CalClose => {
-            st.cal_open = false;
+            st.cal_field = None;
             Task::none()
         }
         Msg::CalMonth(delta) => {
@@ -1131,8 +1297,10 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
             Task::none()
         }
         Msg::CalPick(d) => {
-            st.once_date = d.format("%Y-%m-%d").to_string();
-            st.cal_open = false;
+            if let Some(field) = st.cal_field {
+                *st.cal_text_mut(field) = d.format("%Y-%m-%d").to_string();
+            }
+            st.cal_field = None;
             Task::none()
         }
         Msg::CondToggle(kind) => {
@@ -1220,7 +1388,7 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
                 && matches!(key.as_ref(), iced::keyboard::Key::Named(Named::Escape))
             {
                 return update_ready(st, Msg::ColorClose);
-            } else if st.cal_open
+            } else if st.cal_field.is_some()
                 && matches!(key.as_ref(), iced::keyboard::Key::Named(Named::Escape))
             {
                 return update_ready(st, Msg::CalClose);
@@ -1445,6 +1613,76 @@ fn radio_pill<'a>(
             }
         })
         .into()
+}
+
+/// Says what a blank stop field means, under the rows that offer one.
+/// Without it "no end" is a hint the user has to guess the effect of.
+fn no_end_caption<'a>(t: &Tokens) -> Element<'a, Msg> {
+    text("Leave the stop time blank to run until the queue is empty.")
+        .font(theme::BODY)
+        .size(11.0)
+        .color(t.fg_3)
+        .into()
+}
+
+/// Why the schedule on screen cannot be saved. One voice for both
+/// clock schedules, in the place Apply's disabled state points at.
+fn sched_complaint<'a>(t: &Tokens, msg: String) -> Element<'a, Msg> {
+    row![
+        icons::icon("triangle-alert", 12.0, t.status_danger),
+        text(msg)
+            .font(theme::BODY)
+            .size(11.0)
+            .color(t.status_danger),
+    ]
+    .spacing(theme::space::S1)
+    .align_y(Alignment::Center)
+    .into()
+}
+
+/// One "when" row of the one-off card. Start and stop are the same
+/// row twice over, differing only in their hints and their messages.
+struct WhenRow<'a> {
+    label: &'a str,
+    date: &'a str,
+    date_hint: &'a str,
+    on_date: fn(String) -> Msg,
+    /// Which date the row's calendar button fills in.
+    field: CalField,
+    time: &'a str,
+    time_hint: &'a str,
+    on_time: fn(String) -> Msg,
+}
+
+fn when_row<'a>(t: &Tokens, r: WhenRow<'a>) -> Element<'a, Msg> {
+    row![
+        text(r.label)
+            .font(theme::BODY)
+            .size(13.0)
+            .color(t.fg_2)
+            // Both rows carry a label, and unequal labels would step
+            // their inputs out of line with each other.
+            .width(Length::Fixed(ONCE_LABEL_W)),
+        TextInput::new(r.date)
+            .hint(r.date_hint)
+            .mono()
+            .width(Length::Fixed(ONCE_DATE_W))
+            .on_input(r.on_date)
+            .view(t),
+        Btn::new("")
+            .icon_only("calendar")
+            .on_press(Msg::CalToggle(r.field))
+            .view(t),
+        TextInput::new(r.time)
+            .hint(r.time_hint)
+            .mono()
+            .width(Length::Fixed(ONCE_TIME_W))
+            .on_input(r.on_time)
+            .view(t),
+    ]
+    .spacing(theme::space::S2)
+    .align_y(Alignment::Center)
+    .into()
 }
 
 /// One square of the recurring-schedule day grid: a ~28px toggle
@@ -2115,69 +2353,78 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
                         TextInput::new(&st.sched_start)
                             .hint("09:00")
                             .mono()
-                            .width(Length::Fixed(90.0))
+                            .width(Length::Fixed(SCHED_TIME_W))
                             .on_input(Msg::SchedStart)
+                            .view(t),
+                        text("Stop time").font(theme::BODY).size(13.0).color(t.fg_2),
+                        TextInput::new(&st.sched_stop)
+                            .hint("no end")
+                            .mono()
+                            .width(Length::Fixed(SCHED_TIME_W))
+                            .on_input(Msg::SchedStop)
                             .view(t),
                     ]
                     .spacing(theme::space::S2)
-                    .align_y(Alignment::Center),
+                    .align_y(Alignment::Center)
+                    .wrap()
+                    .vertical_spacing(PILL_WRAP_GAP),
                 )
+                .push(no_end_caption(t))
                 .push(days);
+            if let Err(complaint) = st.recurring_window() {
+                sched_col = sched_col.push(sched_complaint(t, complaint.to_owned()));
+            }
         }
         SchedKind::OneOff => {
-            let date_ok = parse_once_date(&st.once_date).is_some();
-            let time_ok = parse_once_time(&st.once_time).is_some();
-            sched_col = sched_col.push(
-                row![
-                    text("Start at").font(theme::BODY).size(13.0).color(t.fg_2),
-                    TextInput::new(&st.once_date)
-                        .hint("2026-06-11")
-                        .mono()
-                        .width(Length::Fixed(ONCE_DATE_W))
-                        .on_input(Msg::OnceDate)
-                        .view(t),
-                    Btn::new("")
-                        .icon_only("calendar")
-                        .on_press(Msg::CalToggle)
-                        .view(t),
-                    TextInput::new(&st.once_time)
-                        .hint("09:00")
-                        .mono()
-                        .width(Length::Fixed(ONCE_TIME_W))
-                        .on_input(Msg::OnceTime)
-                        .view(t),
-                ]
-                .spacing(theme::space::S2)
-                .align_y(Alignment::Center),
-            );
+            let date_ok = parse_ymd(&st.once_date).is_some();
+            let time_ok = parse_hhmm(&st.once_time).is_some();
+            sched_col = sched_col
+                .push(when_row(
+                    t,
+                    WhenRow {
+                        label: "Start at",
+                        date: &st.once_date,
+                        date_hint: "2026-06-11",
+                        on_date: Msg::OnceDate,
+                        field: CalField::Start,
+                        time: &st.once_time,
+                        time_hint: "09:00",
+                        on_time: Msg::OnceTime,
+                    },
+                ))
+                .push(when_row(
+                    t,
+                    WhenRow {
+                        label: "Stop at",
+                        date: &st.once_stop_date,
+                        date_hint: "same day",
+                        on_date: Msg::OnceStopDate,
+                        field: CalField::Stop,
+                        time: &st.once_stop_time,
+                        time_hint: "no end",
+                        on_time: Msg::OnceStopTime,
+                    },
+                ))
+                .push(no_end_caption(t));
             // One note, whichever way the fields are unusable: a
-            // format the parser cannot read, or a moment that has
-            // already been. Both refuse Apply, so both are said in the
-            // same place and the same voice.
+            // format the parser cannot read, a moment that has already
+            // been, or an end that does not follow its start. All
+            // three refuse Apply, so all three are said in the same
+            // place and the same voice.
             let complaint = if !date_ok || !time_ok {
                 let what = match (date_ok, time_ok) {
                     (false, false) => "date (YYYY-MM-DD) and time (HH:MM)",
                     (false, true) => "date: use YYYY-MM-DD",
                     _ => "time: use HH:MM",
                 };
-                Some(format!("Invalid {what}."))
-            } else if !st.sched_ok() {
+                Some(format!("Invalid start {what}."))
+            } else if !st.once_start_ok() {
                 Some("That time has already passed. Pick one in the future.".to_owned())
             } else {
-                None
+                st.once_stop_instant().err().map(str::to_owned)
             };
             if let Some(complaint) = complaint {
-                sched_col = sched_col.push(
-                    row![
-                        icons::icon("triangle-alert", 12.0, t.status_danger),
-                        text(complaint)
-                            .font(theme::BODY)
-                            .size(11.0)
-                            .color(t.status_danger),
-                    ]
-                    .spacing(theme::space::S1)
-                    .align_y(Alignment::Center),
-                );
+                sched_col = sched_col.push(sched_complaint(t, complaint));
             }
         }
         SchedKind::Condition => {
@@ -2317,7 +2564,7 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
         delete_overlay(st, body)
     } else if st.color_open {
         color_pop_overlay(st, body)
-    } else if st.cal_open {
+    } else if st.cal_field.is_some() {
         calendar_overlay(st, body)
     } else {
         // Above the page, below the titlebar: the ghost follows the
@@ -2494,7 +2741,7 @@ fn calendar_overlay<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a, Ms
     let t = &st.tokens;
     let t2 = *t;
     let (year, month) = st.cal_ym;
-    let selected = parse_once_date(&st.once_date);
+    let selected = st.cal_field.and_then(|f| parse_ymd(st.cal_text(f)));
     let today = chrono::Local::now().date_naive();
 
     let nav = |icon_name: &'static str, delta: i32| {
@@ -3143,4 +3390,68 @@ fn move_btn<'a>(t: &Tokens, icon: &'a str, enabled: bool, whence: MoveWhere) -> 
         .enabled(enabled)
         .on_press(Msg::Move(whence))
         .view(t)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(y: i32, m: u32, d: u32, h: u32, min: u32) -> chrono::DateTime<chrono::Local> {
+        use chrono::TimeZone;
+        chrono::Local.with_ymd_and_hms(y, m, d, h, min, 0).unwrap()
+    }
+
+    /// A blank stop is the whole point of the field being optional: the
+    /// run lasts until the queue is empty.
+    #[test]
+    fn a_blank_stop_is_a_run_with_no_end() {
+        assert_eq!(
+            recurring_window("02:00", ""),
+            Ok((parse_hhmm("02:00").unwrap(), None))
+        );
+        assert_eq!(
+            recurring_window("02:00", "   "),
+            Ok((parse_hhmm("02:00").unwrap(), None))
+        );
+        assert_eq!(once_stop_instant("", "", "2026-06-11", None), Ok(None));
+    }
+
+    #[test]
+    fn a_recurring_stop_must_be_readable_and_not_the_start() {
+        assert!(recurring_window("02:00", "04:00").is_ok());
+        // Wrapping past midnight is a window, not a mistake.
+        assert!(recurring_window("23:00", "02:00").is_ok());
+        assert!(recurring_window("nonsense", "").is_err());
+        assert!(recurring_window("02:00", "4pm").is_err());
+        assert!(recurring_window("02:00", "02:00").is_err());
+    }
+
+    /// Typing only a time means the day the run starts on, so the
+    /// common case — start tonight at 22:00, stop at 23:30 — needs the
+    /// date once rather than twice.
+    #[test]
+    fn a_stop_time_alone_lands_on_the_day_the_run_starts() {
+        let start = at(2026, 6, 11, 22, 0);
+        assert_eq!(
+            once_stop_instant("", "23:30", "2026-06-11", Some(start)),
+            Ok(Some(at(2026, 6, 11, 23, 30)))
+        );
+        // ...and the next day has to be said out loud, not guessed at.
+        assert!(once_stop_instant("", "01:00", "2026-06-11", Some(start)).is_err());
+        assert_eq!(
+            once_stop_instant("2026-06-12", "01:00", "2026-06-11", Some(start)),
+            Ok(Some(at(2026, 6, 12, 1, 0)))
+        );
+    }
+
+    #[test]
+    fn a_one_off_stop_is_refused_when_it_cannot_be_honoured() {
+        let start = at(2026, 6, 11, 22, 0);
+        assert!(once_stop_instant("2026-06-11", "22:00", "2026-06-11", Some(start)).is_err());
+        assert!(once_stop_instant("11/06/2026", "23:00", "2026-06-11", Some(start)).is_err());
+        assert!(once_stop_instant("", "23:00", "not a date", Some(start)).is_err());
+        // A stop given while the start itself is unreadable is judged
+        // on its own: the start's own note is the one that shows.
+        assert!(once_stop_instant("2026-06-11", "23:00", "", None).is_ok());
+    }
 }
