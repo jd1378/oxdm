@@ -626,9 +626,13 @@ impl Client {
         })
         .await
     }
-    pub async fn open_queues_window(&self) -> Result<(), String> {
-        crate::platform::allow_foreground_handoff();
-        self.expect_ok(Request::OpenQueuesWindow).await
+    pub async fn open_queues_window(
+        &self,
+        select: Option<QueueId>,
+        delete: bool,
+    ) -> Result<(), String> {
+        self.expect_ok(Request::OpenQueuesWindow { select, delete })
+            .await
     }
     pub async fn open_about_window(&self) -> Result<(), String> {
         crate::platform::allow_foreground_handoff();

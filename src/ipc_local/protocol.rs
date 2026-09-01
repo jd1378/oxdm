@@ -285,8 +285,15 @@ pub enum Request {
         tab: Option<String>,
         highlight_proxy: bool,
     },
-    /// Open or focus the Queues & scheduling window.
-    OpenQueuesWindow,
+    /// Open or focus the Queues & scheduling window. `select` picks
+    /// the queue it opens on; `delete` asks it for that queue's delete
+    /// confirmation, so the main window's queue menu hands the
+    /// destructive step to the dialog that already owns it rather than
+    /// keeping a second one in step.
+    OpenQueuesWindow {
+        select: Option<QueueId>,
+        delete: bool,
+    },
     /// Open or focus the About window.
     OpenAboutWindow,
     /// This connection's window gained or lost keyboard focus. Lets the

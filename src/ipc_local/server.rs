@@ -995,8 +995,8 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
             crate::daemon::tray::spawn_settings_gui(tab.as_deref(), highlight_proxy);
             Reply::Ok
         }
-        Request::OpenQueuesWindow => {
-            crate::daemon::tray::spawn_queues_gui();
+        Request::OpenQueuesWindow { select, delete } => {
+            crate::daemon::tray::spawn_queues_gui(select, delete);
             Reply::Ok
         }
         // Handled before dispatch (it needs the connection's kind);

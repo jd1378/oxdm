@@ -65,6 +65,13 @@ const MENU_ITEMS: f32 = 9.0;
 const MENU_SEPS: f32 = 3.0;
 const MENU_PAD: f32 = theme::space::S1;
 const MENU_W: f32 = 260.0;
+/// The sidebar's queue menu: a title, three rows, and the rules under
+/// the title and above the destructive row. Counted for the same
+/// reason as the row menu's — a menu measured short opens with its
+/// tail off the bottom edge.
+const QUEUE_MENU_TITLE_H: f32 = 22.0;
+const QUEUE_MENU_ITEMS: f32 = 3.0;
+const QUEUE_MENU_SEPS: f32 = 2.0;
 /// Card width including its border — what the layout has to fit.
 const MENU_BOX_W: f32 = MENU_W + MENU_PAD * 2.0 + 2.0;
 
@@ -221,6 +228,8 @@ pub enum Msg {
     RemoveAs(RemoveKind),
     RemoveDeleteOnDisk(bool),
     RemoveDontAsk(bool),
+    QueueRightClick(QueueId),
+    QueueMenu(QueueAction),
     RemoveConfirm,
     /// The restart confirmation was accepted.
     RestartConfirmed,
@@ -292,6 +301,16 @@ pub enum ToolbarAction {
     StopAll,
     Clean,
     Schedule,
+}
+
+/// What the sidebar's queue menu can do. Starting and stopping happen
+/// here; editing and deleting are handed to the Queues window, which
+/// owns the schedule form and the delete confirmation already.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueAction {
+    ToggleRun,
+    Edit,
+    Delete,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -420,6 +439,8 @@ pub struct Main {
     pub collapsed_sections: HashSet<u8>,
     pub maximized: bool,
     pub context_menu: Option<JobId>,
+    /// Right-clicked queue in the sidebar, if its menu is open.
+    pub queue_menu: Option<QueueId>,
     /// Which "Move to…" list the context menu has open, how far it is
     /// scrolled, and which scroll strip the pointer is resting on
     /// (`-1` up, `1` down, `0` neither).
@@ -558,6 +579,7 @@ impl Main {
             collapsed_sections: HashSet::new(),
             maximized: false,
             context_menu: None,
+            queue_menu: None,
             submenu: None,
             submenu_first: 0,
             submenu_edge: 0,
@@ -1608,6 +1630,36 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             }
             Task::none()
         }
+        Msg::QueueRightClick(id) => {
+            m.queue_menu = Some(id);
+            m.menu_anchor = m.cursor;
+            Task::none()
+        }
+        Msg::QueueMenu(action) => {
+            let Some(id) = m.queue_menu else {
+                return Task::none();
+            };
+            close_context_menu(m);
+            let client = m.client.clone();
+            match action {
+                // Direction re-derived at press time, like the
+                // toolbar's: the queue can start or finish between the
+                // paint that drew the row and the click on it.
+                QueueAction::ToggleRun => {
+                    if m.snap.active_queues.contains(&id) {
+                        act(async move { client.stop_queue(id).await })
+                    } else {
+                        act_reporting(async move { client.start_queue(id).await })
+                    }
+                }
+                QueueAction::Edit => {
+                    act(async move { client.open_queues_window(Some(id), false).await })
+                }
+                QueueAction::Delete => {
+                    act(async move { client.open_queues_window(Some(id), true).await })
+                }
+            }
+        }
         Msg::RemoveConfirm => {
             m.overlay = Overlay::None;
             let Some(r) = m.remove.take() else {
@@ -1954,13 +2006,17 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                 }
                 ToolbarAction::StopAll => act(async move { client.stop_all().await }),
                 ToolbarAction::Clean => request_clean(m),
-                ToolbarAction::Schedule => act(async move { client.open_queues_window().await }),
+                ToolbarAction::Schedule => {
+                    act(async move { client.open_queues_window(None, false).await })
+                }
             }
         }
         Msg::Tool(tool) => {
             let client = m.client.clone();
             match tool {
-                ToolAction::Scheduler => act(async move { client.open_queues_window().await }),
+                ToolAction::Scheduler => {
+                    act(async move { client.open_queues_window(None, false).await })
+                }
                 ToolAction::Settings => {
                     act(async move { client.open_settings_window(None, false).await })
                 }
@@ -2152,6 +2208,7 @@ fn request_remove(m: &mut Main, kind: RemoveKind) -> Task<Msg> {
 /// one was left.
 fn close_context_menu(m: &mut Main) {
     m.context_menu = None;
+    m.queue_menu = None;
     m.submenu = None;
     m.submenu_first = 0;
     m.submenu_edge = 0;
@@ -2473,6 +2530,8 @@ fn main_view(m: &Main) -> Element<'_, Msg> {
 
     let overlaid: Element<'_, Msg> = if let Some(id) = m.context_menu {
         context_menu_overlay(m, base, id)
+    } else if let Some(id) = m.queue_menu {
+        queue_menu_overlay(m, base, id)
     } else if m.columns_menu {
         columns_menu_overlay(m, base)
     } else if m.snap.conflict_head.is_some()
@@ -2910,17 +2969,23 @@ fn sidebar(m: &Main) -> Element<'_, Msg> {
             let live_dot: Option<Element<'_, Msg>> = live
                 .contains(&q.id)
                 .then(|| crate::gui::widget::pulse_dot(LIVE_DOT_SIZE, color::moss::M400, pulse));
-            col = col.push(sidebar_row(
-                t,
-                chip.into(),
-                &q.name,
-                live_dot,
-                Some(count),
-                active,
-                rh,
-                false,
-                Msg::SetFilter(SidebarFilter::Queue(q.id)),
-            ));
+            let id = q.id;
+            col = col.push(
+                mouse_area(sidebar_row(
+                    t,
+                    chip.into(),
+                    &q.name,
+                    live_dot,
+                    Some(count),
+                    active,
+                    rh,
+                    false,
+                    Msg::SetFilter(SidebarFilter::Queue(id)),
+                ))
+                // Right-click opens the menu without moving the filter:
+                // asking what a queue can do is not asking to look at it.
+                .on_right_press(Msg::QueueRightClick(id)),
+            );
         }
     }
 
@@ -2976,9 +3041,11 @@ fn toolbar(m: &Main) -> Element<'_, Msg> {
     let t = &m.tokens;
     // Start/Stop toggle (design §3.1): label/icon follow the action the
     // press would take — queue scope keys off `active_queues`
-    // membership, other scopes off "anything running".
+    // membership, other scopes off "anything running". A queue is
+    // started or stopped, never paused: `stop_queue` is the only thing
+    // the press can call, and "Pause queue" said otherwise.
     let (toggle_label, toggle_icon) = match m.filter {
-        SidebarFilter::Queue(q) if m.snap.active_queues.contains(&q) => ("Pause queue", "pause"),
+        SidebarFilter::Queue(q) if m.snap.active_queues.contains(&q) => ("Stop queue", "octagon-x"),
         SidebarFilter::Queue(_) => ("Start queue", "play"),
         _ if m.any_running() => ("Pause all", "pause"),
         _ => ("Resume all", "play"),
@@ -4074,62 +4141,191 @@ fn pause_resume_rule(phase: Phase, integrity_failed: bool) -> (bool, bool) {
     (running, enabled)
 }
 
+/// One row of a menu: icon, label, optional shortcut. Disabled rows
+/// keep their place and lose their press, so a menu does not change
+/// shape with the state of what it acts on.
+fn menu_item<'a>(
+    t: &Tokens,
+    icon: &'a str,
+    label: &'a str,
+    kbd: Option<&'a str>,
+    enabled: bool,
+    msg: Msg,
+) -> Element<'a, Msg> {
+    let t2 = *t;
+    let fg = if enabled { t2.fg_1 } else { t2.fg_4 };
+    let mut r = row![
+        icons::icon(icon, 15.0, fg),
+        text(label).font(theme::BODY).size(13.0).color(fg),
+    ]
+    .spacing(theme::space::S2)
+    .align_y(Alignment::Center);
+    if let Some(kbd) = kbd {
+        r = r.push(iced::widget::Space::new().width(Length::Fill)).push(
+            text(kbd)
+                .font(theme::MONO)
+                .size(11.0)
+                .color(if enabled { t2.fg_3 } else { t2.fg_4 }),
+        );
+    }
+    let inner = container(r)
+        .width(Length::Fill)
+        .height(Length::Fixed(MENU_ITEM_H))
+        .align_y(Alignment::Center)
+        .padding([0.0, theme::space::S2]);
+    if enabled {
+        iced::widget::button(inner)
+            .padding(0)
+            .width(Length::Fill)
+            .style(move |_th, status| iced::widget::button::Style {
+                background: matches!(
+                    status,
+                    iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed
+                )
+                .then(|| t2.bg_sunken.into()),
+                text_color: fg,
+                border: iced::Border {
+                    radius: theme::radius::XS.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .on_press(msg)
+            .into()
+    } else {
+        Element::from(inner)
+    }
+}
+
+fn menu_separator<'a>(t: &Tokens) -> iced::widget::Container<'a, Msg> {
+    container(hairline(t.border_subtle))
+        .padding([theme::space::S0, 0.0])
+        .width(Length::Fill)
+}
+
+/// The raised, bordered box every menu is drawn in.
+fn menu_card<'a>(t: &Tokens, body: Element<'a, Msg>) -> iced::widget::Container<'a, Msg> {
+    let t2 = *t;
+    container(body)
+        .padding(MENU_PAD)
+        .style(move |_| container::Style {
+            background: Some(t2.bg_raised.into()),
+            border: iced::Border {
+                color: t2.border_default,
+                width: 1.0,
+                radius: theme::radius::SM.into(),
+            },
+            shadow: iced::Shadow {
+                color: color::with_alpha(iced::Color::BLACK, 80.0 / 255.0),
+                offset: iced::Vector::new(0.0, 4.0),
+                blur_radius: 16.0,
+            },
+            ..Default::default()
+        })
+}
+
+/// The sidebar's queue menu. Starting and stopping happen here;
+/// editing and deleting open the Queues window on this queue, which
+/// already owns the schedule form and the delete confirmation — a
+/// second copy of either would be one more thing to keep in step.
+fn queue_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>, id: QueueId) -> Element<'a, Msg> {
+    let t = &m.tokens;
+    let running = m.snap.active_queues.contains(&id);
+    // The built-in queue cannot be deleted; the row stays, greyed, so
+    // the menu keeps its shape from queue to queue.
+    let deletable = m.snap.queues.iter().any(|q| q.id == id && !q.builtin);
+    // The scrim takes the pointer the moment the menu opens, so the row
+    // it came from loses its hover and nothing else says which queue
+    // this is about. The name does.
+    let title = container(
+        text(
+            m.snap
+                .queues
+                .iter()
+                .find(|q| q.id == id)
+                .map(|q| q.name.clone())
+                .unwrap_or_default(),
+        )
+        .font(theme::BODY_BOLD)
+        .size(12.0)
+        .color(t.fg_2),
+    )
+    .height(Length::Fixed(QUEUE_MENU_TITLE_H))
+    .align_y(Alignment::Center)
+    .padding([0.0, theme::space::S2]);
+    let menu = menu_card(
+        t,
+        column![
+            title,
+            menu_separator(t),
+            menu_item(
+                t,
+                if running { "octagon-x" } else { "play" },
+                if running { "Stop queue" } else { "Start queue" },
+                None,
+                true,
+                Msg::QueueMenu(QueueAction::ToggleRun),
+            ),
+            menu_item(
+                t,
+                "calendar",
+                "Edit schedule\u{2026}",
+                None,
+                true,
+                Msg::QueueMenu(QueueAction::Edit),
+            ),
+            menu_separator(t),
+            menu_item(
+                t,
+                "trash-2",
+                "Delete queue\u{2026}",
+                None,
+                deletable,
+                Msg::QueueMenu(QueueAction::Delete),
+            ),
+        ]
+        .width(Length::Fixed(MENU_W))
+        .into(),
+    );
+
+    let scrim = mouse_area(
+        container(iced::widget::Space::new())
+            .width(Length::Fill)
+            .height(Length::Fill),
+    )
+    .on_press(Msg::CloseOverlay)
+    .on_right_press(Msg::CloseOverlay);
+
+    let (ww, wh) = if m.win_size.0 > 0.0 {
+        (m.win_size.0, m.win_size.1 - titlebar::chrome_h())
+    } else {
+        (1240.0, 760.0)
+    };
+    let mh = MENU_PAD * 2.0
+        + QUEUE_MENU_TITLE_H
+        + MENU_ITEM_H * QUEUE_MENU_ITEMS
+        + MENU_SEP_H * QUEUE_MENU_SEPS;
+    let (cx, cy) = m.menu_anchor;
+    let at =
+        crate::gui::widget::anchored((cx, cy - titlebar::chrome_h()), (MENU_BOX_W, mh), (ww, wh));
+
+    iced::widget::stack![
+        base,
+        scrim,
+        container(iced::widget::opaque(menu)).padding(at)
+    ]
+    .into()
+}
+
 fn context_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>, id: JobId) -> Element<'a, Msg> {
     let t = &m.tokens;
     let phase = m.phase(id);
     let t2 = *t;
 
     let item = |icon: &'a str, label: &'a str, kbd: Option<&'a str>, enabled: bool, msg: Msg| {
-        let fg = if enabled { t2.fg_1 } else { t2.fg_4 };
-        let mut r = row![
-            icons::icon(icon, 15.0, fg),
-            text(label).font(theme::BODY).size(13.0).color(fg),
-        ]
-        .spacing(theme::space::S2)
-        .align_y(Alignment::Center);
-        if let Some(kbd) = kbd {
-            r = r.push(iced::widget::Space::new().width(Length::Fill)).push(
-                text(kbd).font(theme::MONO).size(11.0).color(if enabled {
-                    t2.fg_3
-                } else {
-                    t2.fg_4
-                }),
-            );
-        }
-        let inner = container(r)
-            .width(Length::Fill)
-            .height(Length::Fixed(28.0))
-            .align_y(Alignment::Center)
-            .padding([0.0, theme::space::S2]);
-        if enabled {
-            iced::widget::button(inner)
-                .padding(0)
-                .width(Length::Fill)
-                .style(move |_th, status| iced::widget::button::Style {
-                    background: matches!(
-                        status,
-                        iced::widget::button::Status::Hovered
-                            | iced::widget::button::Status::Pressed
-                    )
-                    .then(|| t2.bg_sunken.into()),
-                    text_color: fg,
-                    border: iced::Border {
-                        radius: theme::radius::XS.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                })
-                .on_press(msg)
-                .into()
-        } else {
-            Element::from(inner)
-        }
+        menu_item(t, icon, label, kbd, enabled, msg)
     };
-    let separator = || {
-        container(hairline(t2.border_subtle))
-            .padding([theme::space::S0, 0.0])
-            .width(Length::Fill)
-    };
+    let separator = || menu_separator(t);
     // Moving onto a plain entry shuts whatever list was open, the way
     // every other menu behaves — otherwise a submenu opened by a graze
     // stays over the entries below it.
@@ -4262,7 +4458,8 @@ fn context_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>, id: JobId) -> E
             .into()
     };
 
-    let menu = container(
+    let menu = menu_card(
+        t,
         column![
             // The action most often wanted sits under the cursor.
             plain(item(
@@ -4334,23 +4531,9 @@ fn context_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>, id: JobId) -> E
                 Msg::Context(ContextAction::Properties)
             )),
         ]
-        .width(Length::Fixed(MENU_W)),
-    )
-    .padding(MENU_PAD)
-    .style(move |_| container::Style {
-        background: Some(t2.bg_raised.into()),
-        border: iced::Border {
-            color: t2.border_default,
-            width: 1.0,
-            radius: theme::radius::SM.into(),
-        },
-        shadow: iced::Shadow {
-            color: color::with_alpha(iced::Color::BLACK, 80.0 / 255.0),
-            offset: iced::Vector::new(0.0, 4.0),
-            blur_radius: 16.0,
-        },
-        ..Default::default()
-    });
+        .width(Length::Fixed(MENU_W))
+        .into(),
+    );
 
     let scrim = mouse_area(
         container(iced::widget::Space::new())

@@ -26,6 +26,13 @@ impl Default for QueueId {
     }
 }
 
+impl std::str::FromStr for QueueId {
+    type Err = uuid::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Uuid::parse_str(s).map(QueueId)
+    }
+}
+
 impl std::fmt::Display for QueueId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)

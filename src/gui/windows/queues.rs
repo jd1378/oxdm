@@ -999,6 +999,23 @@ impl State {
     }
 }
 
+/// `--queue <id> [--delete]`, the way the Settings window re-reads its
+/// own `--tab`. The main window's queue menu sends the destructive step
+/// here rather than keeping a second delete dialog in step with this
+/// one.
+fn launch_args() -> (Option<QueueId>, bool) {
+    let mut args = std::env::args().skip(3);
+    let (mut select, mut delete) = (None, false);
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--queue" => select = args.next().and_then(|v| v.parse().ok()),
+            "--delete" => delete = true,
+            _ => {}
+        }
+    }
+    (select, delete)
+}
+
 pub fn boot() -> (App, Task<Msg>) {
     (
         App::Connecting,
@@ -1037,10 +1054,18 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 cond_avail,
                 jobs,
             } = *boot;
+            let (asked_for, delete_asked) = launch_args();
+            // Only a queue that exists and can be deleted: the built-in
+            // one has no delete, and a stale id would open a dialog
+            // about nothing.
+            let confirm_delete = delete_asked
+                && asked_for.is_some_and(|id| queues.iter().any(|q| q.id == id && !q.builtin));
             let mut st = State {
                 error: None,
                 tokens: Tokens::from_settings(&settings),
-                selected: queues.first().map(|q| q.id),
+                selected: asked_for
+                    .filter(|id| queues.iter().any(|q| q.id == *id))
+                    .or_else(|| queues.first().map(|q| q.id)),
                 queues,
                 name: String::new(),
                 max_concurrent: CONC_FALLBACK,
@@ -1082,7 +1107,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 order_scroll: (0.0, 0.0),
                 order_preview: None,
                 order_edge: None,
-                confirm_delete: false,
+                confirm_delete,
                 shot: Shot::from_env(),
                 dirty: 0,
                 client,

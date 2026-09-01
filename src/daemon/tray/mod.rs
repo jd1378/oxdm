@@ -279,11 +279,16 @@ pub fn spawn_settings_gui(tab: Option<&str>, highlight_proxy: bool) {
 }
 
 /// Queues & scheduling window.
-pub fn spawn_queues_gui() {
-    evict_and_spawn(
-        crate::ipc_local::protocol::GuiKind::Queues,
-        &["gui", "queues"],
-    );
+pub fn spawn_queues_gui(select: Option<crate::domain::QueueId>, delete: bool) {
+    let id = select.map(|id| id.to_string()).unwrap_or_default();
+    let mut args = vec!["gui", "queues"];
+    if select.is_some() {
+        args.extend(["--queue", id.as_str()]);
+    }
+    if delete {
+        args.push("--delete");
+    }
+    evict_and_spawn(crate::ipc_local::protocol::GuiKind::Queues, &args);
 }
 
 /// About window.
