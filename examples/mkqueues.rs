@@ -17,7 +17,6 @@ async fn main() {
             id: oxdm::domain::QueueId::new(),
             name: format!("Queue {i}"),
             builtin: false,
-            job_ids: Vec::new(),
             schedule: Default::default(),
             on_start: Vec::new(),
             on_finish: Vec::new(),

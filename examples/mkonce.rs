@@ -17,7 +17,6 @@ async fn main() {
         id: oxdm::domain::QueueId::new(),
         name,
         builtin: false,
-        job_ids: Vec::new(),
         schedule: oxdm::domain::QueueSchedule::Once {
             start: chrono::Local::now() + chrono::Duration::hours(hours),
             stop: None,

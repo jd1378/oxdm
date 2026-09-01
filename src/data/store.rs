@@ -356,38 +356,7 @@ impl Store {
             .await
             .map_err(StoreError::Sql)?;
 
-        // job_ids are filled in by a follow-up query. Doing a JOIN +
-        // GROUP_CONCAT in SQLite would keep this in one statement but
-        // costs us schema clarity; queue counts are small.
-        let job_map = self.jobs_by_queue().await?;
-        rows.into_iter().map(|r| r.into_queue(&job_map)).collect()
-    }
-
-    async fn jobs_by_queue(
-        &self,
-    ) -> Result<std::collections::HashMap<String, Vec<JobId>>, StoreError> {
-        let pairs: Vec<(String, String)> = self
-            .with_conn(|conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT queue_id, id FROM jobs \
-                     ORDER BY queue_position ASC, created_at ASC",
-                )?;
-                let iter = stmt.query_map([], |row| {
-                    let q: String = row.get(0)?;
-                    let j: String = row.get(1)?;
-                    Ok((q, j))
-                })?;
-                iter.collect::<Result<Vec<_>, _>>()
-            })
-            .await
-            .map_err(StoreError::Sql)?;
-        let mut out: std::collections::HashMap<String, Vec<JobId>> =
-            std::collections::HashMap::new();
-        for (q, j) in pairs {
-            let id = uuid::Uuid::parse_str(&j).map_err(|e| StoreError::Other(e.to_string()))?;
-            out.entry(q).or_default().push(JobId(id));
-        }
-        Ok(out)
+        rows.into_iter().map(QueueRow::into_queue).collect()
     }
 
     pub async fn upsert_queue(&self, queue: &Queue) -> Result<(), StoreError> {
@@ -919,10 +888,7 @@ impl QueueRow {
         })
     }
 
-    fn into_queue(
-        self,
-        job_map: &std::collections::HashMap<String, Vec<JobId>>,
-    ) -> Result<Queue, StoreError> {
+    fn into_queue(self) -> Result<Queue, StoreError> {
         let id = uuid::Uuid::parse_str(&self.id).map_err(|e| StoreError::Other(e.to_string()))?;
         let schedule: QueueSchedule = serde_json::from_str(&self.schedule_json)
             .map_err(|e| StoreError::Other(e.to_string()))?;
@@ -930,12 +896,10 @@ impl QueueRow {
             .map_err(|e| StoreError::Other(e.to_string()))?;
         let on_finish: Vec<QueueHook> = serde_json::from_str(&self.on_finish_json)
             .map_err(|e| StoreError::Other(e.to_string()))?;
-        let job_ids = job_map.get(&self.id).cloned().unwrap_or_default();
         Ok(Queue {
             id: QueueId(id),
             name: self.name,
             builtin: self.builtin,
-            job_ids,
             schedule,
             on_start,
             on_finish,

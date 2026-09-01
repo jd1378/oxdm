@@ -3331,16 +3331,29 @@ fn delete_overlay<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a, Msg>
         .selected_queue()
         .map(|q| q.name.clone())
         .unwrap_or_default();
-    let n_jobs = st.selected_queue().map(|q| q.job_ids.len()).unwrap_or(0);
+    // Counted from the jobs themselves: a job's queue is a field on the
+    // job, and every one of them moves rather than being orphaned —
+    // `AppState::delete_queue` reassigns them before the queue goes.
+    let moving = st
+        .selected
+        .map_or(0, |id| st.jobs.iter().filter(|j| j.queue_id == id).count());
+    let home = st
+        .queues
+        .iter()
+        .find(|q| q.builtin)
+        .map(|q| q.name.as_str())
+        .unwrap_or(Queue::MAIN_NAME);
     let card = container(
         column![
             text(format!("Delete queue \"{name}\"?"))
                 .font(theme::BODY_BOLD)
                 .size(14.0)
                 .color(t.fg_1),
-            text(format!(
-                "{n_jobs} job(s) will become queueless. Files on disk are not touched."
-            ))
+            text(match moving {
+                0 => "It holds no downloads.".to_owned(),
+                1 => format!("Its download moves to {home}. Files on disk are not touched."),
+                n => format!("Its {n} downloads move to {home}. Files on disk are not touched."),
+            })
             .font(theme::BODY)
             .size(12.0)
             .color(t.fg_2),

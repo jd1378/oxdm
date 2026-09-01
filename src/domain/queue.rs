@@ -9,7 +9,7 @@ use chrono::{DateTime, Local, NaiveTime};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::domain::{JobId, ShutdownAction};
+use crate::domain::ShutdownAction;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct QueueId(pub Uuid);
@@ -46,8 +46,6 @@ pub struct Queue {
     /// `true` for the built-in Main queue. UI hides delete affordance.
     #[serde(default)]
     pub builtin: bool,
-    /// Ordered list of jobs assigned to this queue.
-    pub job_ids: Vec<JobId>,
     pub schedule: QueueSchedule,
     pub on_start: Vec<QueueHook>,
     pub on_finish: Vec<QueueHook>,
@@ -89,7 +87,6 @@ impl Queue {
             id: QueueId::new(),
             name: Self::MAIN_NAME.into(),
             builtin: true,
-            job_ids: Vec::new(),
             schedule: QueueSchedule::Manual,
             on_start: Vec::new(),
             // Telling the user their queue is done is the useful
