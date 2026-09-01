@@ -26,7 +26,7 @@ use chrono::{Datelike, Local, NaiveTime, Timelike};
 
 use crate::data::conditions::{self, CondSnapshot};
 use crate::data::state::AppState;
-use crate::domain::{CondKind, Queue, QueueId, QueueSchedule};
+use crate::domain::{CondKind, Queue, QueueId, QueueSchedule, WeekDayMask};
 
 const TICK: Duration = Duration::from_secs(30);
 
@@ -35,6 +35,12 @@ const TICK: Duration = Duration::from_secs(30);
 /// runs the queue when it wakes; short enough that a launch days later
 /// does not resurrect it.
 const ONESHOT_WINDOW_HOURS: i64 = 12;
+
+/// How long a recurring occurrence stays due after the moment it names.
+/// Wide enough for a tick that lands late and for a daemon restarted
+/// just after the hour; narrow enough that the queue is starting at the
+/// time the user picked and not merely some time afterwards.
+const DAILY_GRACE_MINUTES: i64 = 15;
 
 /// Cached verdict of one queue's condition command.
 struct CmdPoll {
@@ -160,13 +166,17 @@ async fn poll_due_commands(queues: &[Queue], polls: &mut HashMap<QueueId, CmdPol
     }
 }
 
-/// Is a clock-scheduled queue inside its window right now?
+/// Is a clock-scheduled queue due right now?
 ///
 /// Asked by the state layer when a download lands in a queue that is
 /// not running: a job added at 02:15 to a queue scheduled 02:00–04:00
 /// belongs to the run that is already meant to be happening, and
 /// waiting for the next tick — or, if the run had already started and
 /// finished its work, for tomorrow — is not what the schedule says.
+///
+/// A recurring schedule with no end time is due only around the moment
+/// it names, so a job added at nine in the evening to a queue set for
+/// 02:00 waits for 02:00, which is the whole point of setting it.
 pub fn within_window(q: &Queue, now: chrono::DateTime<Local>) -> bool {
     match &q.schedule {
         QueueSchedule::Daily { .. } | QueueSchedule::Once { .. } => {
@@ -191,9 +201,11 @@ fn should_run(
 
 /// May a queue that is *already running* keep going?
 ///
-/// The same conditions, except that "a download was added" counts as
-/// satisfied: it fired when the queue started, and a moment that has
-/// passed cannot be re-observed. Without this, a queue combining
+/// The same conditions, read as a running queue sees them: a moment
+/// that has already passed — "a download was added", "the clock
+/// reached 02:00" — counts as satisfied, because it fired when the
+/// queue started and cannot be re-observed. Without this, a queue
+/// combining
 /// `JobAdded` with `All` was never running as far as the tick was
 /// concerned, so nothing ever stopped it — it kept downloading after
 /// the link went metered or the machine went back on battery, which is
@@ -214,21 +226,30 @@ fn verdict(
     available: &[CondKind],
     conds: &CondSnapshot,
     cmd_ok: Option<bool>,
-    job_added_holds: bool,
+    running: bool,
 ) -> bool {
     match &q.schedule {
         QueueSchedule::Manual => false,
-        QueueSchedule::Daily { start, stop, days } => {
-            if !days.contains(now.weekday()) {
-                return false;
+        QueueSchedule::Daily { start, stop, days } => match stop {
+            // With an end time the schedule is a window: inside it the
+            // queue runs, leaving it stops.
+            Some(stop) => {
+                if !days.contains(now.weekday()) {
+                    return false;
+                }
+                let n = current_naive_time(now);
+                if stop > start {
+                    n >= *start && n < *stop
+                } else {
+                    n >= *start || n < *stop // wraps midnight
+                }
             }
-            let n = current_naive_time(now);
-            match stop {
-                Some(stop) if stop > start => n >= *start && n < *stop,
-                Some(stop) => n >= *start || n < *stop, // wraps midnight
-                None => n >= *start,
-            }
-        }
+            // Without one it is a moment, and the run it starts lasts
+            // until the queue has nothing left — so a queue already
+            // running is never stopped from here, and one that is not
+            // waits for the next occurrence.
+            None => running || daily_due(*start, *days, now),
+        },
         QueueSchedule::Once { start, stop } => {
             if now < *start {
                 return false;
@@ -258,13 +279,41 @@ fn verdict(
             // what stops the tick from starting a queue whose trigger
             // has not fired. `may_continue` passes true instead, so
             // the other conditions can still stop a running queue.
-            CondKind::JobAdded => job_added_holds,
+            CondKind::JobAdded => running,
             CondKind::Unmetered => conds.unmetered(),
             CondKind::AcPower => conds.on_ac(),
             CondKind::Idle => conds.idle_at_least(set.idle_minutes.unwrap_or(u16::MAX)),
             CondKind::Command => cmd_ok.unwrap_or(false),
         }),
     }
+}
+
+/// Has a recurring occurrence just come due?
+///
+/// A start time with no end time names a moment, not everything after
+/// it: 02:00 means the queue begins when the clock reaches 02:00. Read
+/// as "at or after 02:00" it made a queue set for the small hours start
+/// downloading the moment it was configured, at nine in the evening.
+///
+/// A machine that slept through the grace runs the next occurrence
+/// rather than the one it missed: the point of picking an hour is that
+/// the download happens then, and firing it on wake at noon is the
+/// behaviour this whole function exists to remove.
+fn daily_due(start: NaiveTime, days: WeekDayMask, now: chrono::DateTime<Local>) -> bool {
+    let n = now.naive_local();
+    let grace = chrono::Duration::minutes(DAILY_GRACE_MINUTES);
+    let today = now.date_naive();
+    // Yesterday's occurrence as well, so grace that runs past midnight
+    // still belongs to the day the occurrence started on.
+    [today.pred_opt(), Some(today)]
+        .into_iter()
+        .flatten()
+        .any(|d| {
+            days.contains(d.weekday()) && {
+                let occ = d.and_time(start);
+                n >= occ && n < occ + grace
+            }
+        })
 }
 
 fn current_naive_time(now: chrono::DateTime<Local>) -> NaiveTime {
@@ -274,6 +323,8 @@ fn current_naive_time(now: chrono::DateTime<Local>) -> NaiveTime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
+
     use crate::domain::{CondCombine, CondCommand, CondSet};
 
     fn queue_with(schedule: QueueSchedule) -> Queue {
@@ -378,6 +429,84 @@ mod tests {
             base,
             ALL,
             &snap(true, true, 0),
+            None
+        ));
+    }
+
+    /// The reported bug: a queue set to run at 02:00 started
+    /// downloading the moment it was saved at nine in the evening,
+    /// because "no end time" was read as "every moment after 02:00".
+    #[test]
+    fn a_recurring_start_time_is_a_moment_not_the_rest_of_the_day() {
+        let q = queue_with(QueueSchedule::Daily {
+            start: NaiveTime::from_hms_opt(2, 0, 0).unwrap(),
+            stop: None,
+            days: crate::domain::WeekDayMask::ALL,
+        });
+        let s = snap(true, true, 0);
+        // A fixed date, not "today": 02:00 is the hour the clocks skip
+        // over, and the test would stop existing twice a year.
+        let at = |h, m| Local.with_ymd_and_hms(2026, 6, 8, h, m, 0).unwrap();
+
+        assert!(should_run(&q, at(2, 0), ALL, &s, None));
+        assert!(should_run(&q, at(2, 14), ALL, &s, None)); // late tick
+        assert!(!should_run(&q, at(1, 59), ALL, &s, None));
+        assert!(!should_run(&q, at(2, 16), ALL, &s, None));
+        assert!(!should_run(&q, at(21, 0), ALL, &s, None));
+
+        // Nor does the state layer start it for an arriving download.
+        assert!(!within_window(&q, at(21, 0)));
+        assert!(within_window(&q, at(2, 5)));
+    }
+
+    /// Having started, the run lasts until the queue has nothing left:
+    /// the schedule named a start, not a deadline, so the tick after
+    /// the grace closes must not pull the downloads out from under it.
+    #[test]
+    fn a_recurring_run_with_no_end_time_is_never_stopped_by_the_clock() {
+        let q = queue_with(QueueSchedule::Daily {
+            start: NaiveTime::from_hms_opt(2, 0, 0).unwrap(),
+            stop: None,
+            days: crate::domain::WeekDayMask::ALL,
+        });
+        let s = snap(true, true, 0);
+        assert!(may_continue(&q, Local::now(), ALL, &s, None));
+    }
+
+    /// A day the schedule does not name never comes due, and grace
+    /// that runs past midnight still belongs to the day it started on.
+    #[test]
+    fn recurring_grace_belongs_to_the_day_the_occurrence_started() {
+        let mask = |d: chrono::Weekday| {
+            let mut m = crate::domain::WeekDayMask(0);
+            m.set(d, true);
+            m
+        };
+        // Anchor on a known weekday rather than "today".
+        let base = Local
+            .with_ymd_and_hms(2026, 6, 8, 23, 55, 0) // a Monday
+            .unwrap();
+        let monday_night = queue_with(QueueSchedule::Daily {
+            start: NaiveTime::from_hms_opt(23, 55, 0).unwrap(),
+            stop: None,
+            days: mask(chrono::Weekday::Mon),
+        });
+        let s = snap(true, true, 0);
+        assert!(should_run(&monday_night, base, ALL, &s, None));
+        // 00:05 on Tuesday is still Monday's occurrence.
+        assert!(should_run(
+            &monday_night,
+            base + chrono::Duration::minutes(10),
+            ALL,
+            &s,
+            None
+        ));
+        // Tuesday's own 23:55 is not on the schedule.
+        assert!(!should_run(
+            &monday_night,
+            base + chrono::Duration::days(1),
+            ALL,
+            &s,
             None
         ));
     }
