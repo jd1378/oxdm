@@ -186,6 +186,21 @@ const SCHED_LABEL_W: f32 = 72.0;
 const CAL_CELL: f32 = 32.0;
 const CAL_GAP: f32 = 2.0;
 const CAL_PAD: f32 = 12.0;
+/// Card extent, for the window-edge clamp. Counted from what the card
+/// is built from, at the six-week month it can grow to: measured short,
+/// a popup opens with its tail off the bottom and the clamp meant to
+/// stop that has nothing to clamp against.
+const CAL_HEAD_H: f32 = 22.0;
+const CAL_WEEKDAY_H: f32 = 15.0;
+const CAL_WEEKS: f32 = 6.0;
+const CAL_POP_W: f32 = CAL_CELL * 7.0 + CAL_GAP * 6.0 + 2.0 * (CAL_PAD + 1.0);
+const CAL_POP_H: f32 = CAL_HEAD_H
+    + theme::space::S2
+    + CAL_WEEKDAY_H
+    + theme::space::S2
+    + CAL_CELL * CAL_WEEKS
+    + CAL_GAP * (CAL_WEEKS - 1.0)
+    + 2.0 * (CAL_PAD + 1.0);
 
 /// Clock popup: one row per value in two columns, four rows deep —
 /// enough of the hour to choose within, short enough to sit inside the
@@ -194,6 +209,21 @@ const TIME_CELL_H: f32 = 28.0;
 const TIME_CELL_W: f32 = 64.0;
 const TIME_ROWS_VISIBLE: f32 = 4.0;
 const TIME_LIST_H: f32 = TIME_CELL_H * TIME_ROWS_VISIBLE + CAL_GAP * (TIME_ROWS_VISIBLE - 1.0);
+/// Card extent, for the window-edge clamp: one text line for the head,
+/// one for a column caption, the two lists, the Done button. Derived
+/// from what the card is built from rather than measured — the clamp
+/// only has to keep it inside the window, not to the pixel.
+const TIME_HEAD_H: f32 = 18.0;
+const TIME_CAPTION_H: f32 = 15.0;
+const TIME_POP_W: f32 = TIME_CELL_W * 2.0 + theme::space::S2 + 2.0 * (CAL_PAD + 1.0);
+const TIME_POP_H: f32 = TIME_HEAD_H
+    + theme::space::S2
+    + TIME_CAPTION_H
+    + theme::space::S1
+    + TIME_LIST_H
+    + theme::space::S2
+    + theme::control::H_MD
+    + 2.0 * (CAL_PAD + 1.0);
 
 fn parse_ymd(s: &str) -> Option<chrono::NaiveDate> {
     chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").ok()
@@ -498,6 +528,12 @@ pub struct State {
     once_stop_time: String,
     /// Which date the calendar popup is filling in, while it is open.
     cal_field: Option<CalField>,
+    /// Where the click that opened a popup was, in window space. The
+    /// row's own position is not knowable from here — the schedule card
+    /// moves with the editor's scroll offset — and the pointer is on
+    /// the button that asked for it. Same anchor the main window's
+    /// context menu uses.
+    pop_anchor: (f32, f32),
     /// Which time the clock popup is filling in, while it is open.
     time_field: Option<TimeField>,
     /// Month the calendar popup is showing: (year, month 1-12).
@@ -816,6 +852,23 @@ impl State {
         }
     }
 
+    /// Where a popup of `size` opened from the last click belongs.
+    fn popup_at(&self, size: (f32, f32)) -> iced::Padding {
+        let win = if self.win_size.0 > 0.0 {
+            self.win_size
+        } else {
+            (WIN_DEFAULT_W, WIN_DEFAULT_H)
+        };
+        let chrome = titlebar::chrome_h();
+        crate::gui::widget::anchored(
+            // The overlay stack starts below the painted titlebar; the
+            // pointer is in window space.
+            (self.pop_anchor.0, self.pop_anchor.1 - chrome),
+            size,
+            (win.0, win.1 - chrome),
+        )
+    }
+
     /// The one-off date the calendar popup is bound to.
     fn cal_text(&self, field: CalField) -> &str {
         match field {
@@ -1012,6 +1065,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 once_stop_date: String::new(),
                 once_stop_time: String::new(),
                 cal_field: None,
+                pop_anchor: (0.0, 0.0),
                 time_field: None,
                 cal_ym: (2026, 1),
                 finish: FinishKind::Nothing,
@@ -1370,6 +1424,7 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
             // The same button closes its own popup; the other one's
             // button moves the popup rather than stacking a second.
             st.cal_field = (st.cal_field != Some(field)).then_some(field);
+            st.pop_anchor = st.cursor;
             if let Some(field) = st.cal_field
                 // A blank stop date opens on the month the run starts
                 // in, which is the month the user is choosing within.
@@ -1402,6 +1457,7 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
                 return Task::none();
             }
             st.time_field = Some(field);
+            st.pop_anchor = st.cursor;
             // Opening on 00:00 with the value 45 rows below is a list
             // the user has to hunt through before they can choose.
             let v = st.time_value(field);
@@ -2979,9 +3035,9 @@ fn time_column<'a>(
     .into()
 }
 
-/// Centered hour/minute popup for the schedule's time inputs — the
-/// clock button beside each one, for a keyboard the user would rather
-/// not reach for. Centered for the same reason as the calendar.
+/// Hour/minute popup for the schedule's time inputs — the clock button
+/// beside each one, for a keyboard the user would rather not reach
+/// for. Opened at the click, like the calendar it sits beside.
 fn time_overlay<'a>(st: &'a State, field: TimeField, base: Element<'a, Msg>) -> Element<'a, Msg> {
     let t = &st.tokens;
     let t2 = *t;
@@ -3051,18 +3107,15 @@ fn time_overlay<'a>(st: &'a State, field: TimeField, base: Element<'a, Msg>) -> 
     iced::widget::stack![
         base,
         scrim,
-        container(iced::widget::opaque(card))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(Alignment::Center)
-            .align_y(Alignment::Center),
+        container(iced::widget::opaque(card)).padding(st.popup_at((TIME_POP_W, TIME_POP_H))),
     ]
     .into()
 }
 
-/// Centered month-calendar popup for the One-off date input. Centered
-/// (not anchored) because the schedule card's position shifts with the
-/// editor's scroll offset.
+/// Month-calendar popup for the One-off date inputs, opened at the
+/// click like the main window's context menu — the card's own position
+/// shifts with the editor's scroll offset, and the pointer is on the
+/// button that asked for it.
 fn calendar_overlay<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a, Msg> {
     use chrono::Datelike;
     let t = &st.tokens;
@@ -3241,11 +3294,7 @@ fn calendar_overlay<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a, Ms
     iced::widget::stack![
         base,
         scrim,
-        container(iced::widget::opaque(card))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(Alignment::Center)
-            .align_y(Alignment::Center),
+        container(iced::widget::opaque(card)).padding(st.popup_at((CAL_POP_W, CAL_POP_H))),
     ]
     .into()
 }

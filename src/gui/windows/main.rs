@@ -4374,12 +4374,8 @@ fn context_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>, id: JobId) -> E
     } else {
         (1240.0, 760.0)
     };
-    // Not enough room below the pointer: open upwards instead of
-    // sliding back up over it. Same for the right edge. Clamping is
-    // still the last word — a menu taller than the window has to start
-    // at the top whichever way it opens.
-    let left = if cx + mw > ww { cx - mw } else { cx }.clamp(0.0, (ww - mw).max(0.0));
-    let top = if cy + mh > wh { cy - mh } else { cy }.clamp(0.0, (wh - mh).max(0.0));
+    let at = crate::gui::widget::anchored((cx, cy), (mw, mh), (ww, wh));
+    let (left, top) = (at.left, at.top);
 
     // A permanent fourth layer, empty when no list is open: adding and
     // removing a layer re-keys the widgets underneath, and the table
@@ -4418,11 +4414,7 @@ fn context_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>, id: JobId) -> E
     iced::widget::stack![
         base,
         scrim,
-        container(iced::widget::opaque(menu)).padding(iced::Padding {
-            left,
-            top,
-            ..Default::default()
-        }),
+        container(iced::widget::opaque(menu)).padding(at),
         sub,
     ]
     .into()
