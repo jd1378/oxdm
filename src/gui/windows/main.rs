@@ -4197,8 +4197,11 @@ fn menu_item<'a>(
     }
 }
 
+/// `border_default`, not `border_subtle`: the subtle token is the same
+/// colour as `bg_raised` in the dark theme, so a menu's rules were
+/// nothing but the padding around them.
 fn menu_separator<'a>(t: &Tokens) -> iced::widget::Container<'a, Msg> {
-    container(hairline(t.border_subtle))
+    container(hairline(t.border_default))
         .padding([theme::space::S0, 0.0])
         .width(Length::Fill)
 }
