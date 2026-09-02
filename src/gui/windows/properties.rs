@@ -972,11 +972,13 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             Task::none()
         }
         Msg::SetCategory(label) => {
-            if let Some(c) = crate::domain::Category::ALL_ASSIGNABLE
-                .iter()
+            if let Some(c) = st
+                .settings
+                .assignable_categories()
+                .into_iter()
                 .find(|c| c.label() == label)
             {
-                st.category = *c;
+                st.category = c;
                 mark(st);
             }
             Task::none()
@@ -1970,7 +1972,8 @@ fn general_tab(st: &State) -> Element<'_, Msg> {
                 if editable {
                     combo(
                         t,
-                        crate::domain::Category::ALL_ASSIGNABLE
+                        st.settings
+                            .assignable_categories()
                             .iter()
                             .map(|c| c.label().to_owned())
                             .collect(),

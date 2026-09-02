@@ -623,6 +623,25 @@ impl Client {
         self.expect_ok(Request::OpenSettingsWindow {
             tab,
             highlight_proxy,
+            category: None,
+            delete_category: false,
+        })
+        .await
+    }
+
+    /// The Settings window on one category's card, optionally with its
+    /// delete confirmation already up.
+    pub async fn open_settings_category(
+        &self,
+        category: crate::domain::Category,
+        delete: bool,
+    ) -> Result<(), String> {
+        crate::platform::allow_foreground_handoff();
+        self.expect_ok(Request::OpenSettingsWindow {
+            tab: Some("categories".to_owned()),
+            highlight_proxy: false,
+            category: Some(category),
+            delete_category: delete,
         })
         .await
     }

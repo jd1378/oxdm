@@ -173,6 +173,9 @@ pub enum Msg {
     BrowseCategoryFolder(Category),
     BrowsedCategoryFolder(Category, Option<std::path::PathBuf>),
     CategoryQueue(Category, QueueChoice),
+    CategoryDeleteAsk(Category),
+    CategoryDeleteCancel,
+    CategoryDeleteConfirm,
     // Network
     Connections(Option<u64>),
     Concurrent(String),
@@ -305,6 +308,8 @@ pub struct State {
     queues: Vec<Queue>,
     /// Reset-oxdm confirm overlay (Advanced danger section).
     confirm_reset: bool,
+    /// The category whose delete confirmation is up, if any.
+    confirm_delete_cat: Option<Category>,
     /// What the last launcher-entry write did, or why it could not.
     /// Like the browser-bridge fields: an action's outcome, so it never
     /// counts as a change and never waits for Apply.
@@ -483,6 +488,9 @@ fn copy_section(dst: &mut Settings, src: &Settings, section: Section) {
             dst.category_extensions = src.category_extensions.clone();
             dst.category_folders = src.category_folders.clone();
             dst.category_queues = src.category_queues.clone();
+            // How a deleted category comes back: "Reset Categories" is
+            // the restore, so deleting one is never a one-way door.
+            dst.deleted_categories = src.deleted_categories.clone();
         }
         Section::Network => {
             dst.max_connections = src.max_connections;
@@ -535,18 +543,20 @@ fn normalize_for_editing(s: &mut Settings) {
 fn normalize_categories(s: &mut Settings) {
     s.category_extensions
         .retain(|c, exts| exts.as_slice() != c.default_extensions());
-    let resolved: Vec<_> = Category::ALL_ASSIGNABLE
-        .iter()
-        .map(|c| (*c, s.category_folder(*c)))
+    let resolved: Vec<_> = s
+        .assignable_categories()
+        .into_iter()
+        .map(|c| (c, s.category_folder(c)))
         .collect();
     s.category_folders = resolved.into_iter().collect();
     // Same key order as the form will rebuild it in. These maps keep
     // insertion order, and the diff compares them as written — so a map
     // holding exactly the same routing, stored in the order the daemon
     // happened to write it, read as an edit on every keystroke.
-    let queues: Vec<_> = Category::ALL_ASSIGNABLE
-        .iter()
-        .filter_map(|c| s.category_queues.get(c).map(|q| (*c, *q)))
+    let queues: Vec<_> = s
+        .assignable_categories()
+        .into_iter()
+        .filter_map(|c| s.category_queues.get(&c).map(|q| (c, *q)))
         .collect();
     s.category_queues = queues.into_iter().collect();
 }
@@ -592,28 +602,31 @@ fn mirror(st: &mut State) {
         .unwrap_or_default();
     st.user_agent = s.user_agent.clone().unwrap_or_default();
     st.ipc_port = s.ipc_port.to_string();
-    st.cat_exts = Category::ALL_ASSIGNABLE
-        .iter()
+    st.cat_exts = s
+        .assignable_categories()
+        .into_iter()
         .map(|c| {
             let exts = s
                 .category_extensions
-                .get(c)
+                .get(&c)
                 .map(|v| v.join(", "))
                 .unwrap_or_else(|| c.default_extensions().join(", "));
-            (*c, exts)
+            (c, exts)
         })
         .collect();
     // Show a real path rather than an empty field explained by a hint,
     // and make it a per-category subfolder: sorting downloads by kind is
     // the whole point of categories, so the default should already do
     // it. Writing these back on the next apply is intended.
-    st.cat_folders = Category::ALL_ASSIGNABLE
-        .iter()
-        .map(|c| (*c, s.category_folder(*c).display().to_string()))
+    st.cat_folders = s
+        .assignable_categories()
+        .into_iter()
+        .map(|c| (c, s.category_folder(c).display().to_string()))
         .collect();
-    st.cat_queues = Category::ALL_ASSIGNABLE
-        .iter()
-        .map(|c| (*c, s.category_queues.get(c).copied()))
+    st.cat_queues = s
+        .assignable_categories()
+        .into_iter()
+        .map(|c| (c, s.category_queues.get(&c).copied()))
         .collect();
     st.custom_headers = s
         .headers
@@ -622,22 +635,31 @@ fn mirror(st: &mut State) {
         .collect();
 }
 
-fn section_arg() -> Section {
+/// `--tab <name> [--category <slug>] [--delete-category]`. The main
+/// window's category menu hands its destructive step here rather than
+/// keeping a second delete dialog in step with this one.
+fn launch_args() -> (Section, Option<Category>, bool) {
+    let (mut section, mut category, mut delete) = (Section::General, None, false);
     let mut args = std::env::args().skip(3);
     while let Some(a) = args.next() {
-        if a == "--tab" {
-            return match args.next().as_deref() {
-                Some("downloads") => Section::Downloads,
-                Some("categories") => Section::Categories,
-                Some("network") => Section::Network,
-                Some("browser") => Section::Browser,
-                Some("notifications") => Section::Notifications,
-                Some("advanced") => Section::Advanced,
-                _ => Section::General,
-            };
+        match a.as_str() {
+            "--tab" => {
+                section = match args.next().as_deref() {
+                    Some("downloads") => Section::Downloads,
+                    Some("categories") => Section::Categories,
+                    Some("network") => Section::Network,
+                    Some("browser") => Section::Browser,
+                    Some("notifications") => Section::Notifications,
+                    Some("advanced") => Section::Advanced,
+                    _ => Section::General,
+                };
+            }
+            "--category" => category = args.next().as_deref().and_then(Category::from_slug),
+            "--delete-category" => delete = true,
+            _ => {}
         }
     }
-    Section::General
+    (section, category, delete)
 }
 
 pub fn boot() -> (App, Task<Msg>) {
@@ -670,9 +692,15 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
             // only restate their defaults; normalise on the way in so
             // the form does not open already "changed".
             normalize_for_editing(&mut settings);
+            let (section, asked_for, delete_asked) = launch_args();
+            // Only a category that is still there and can be deleted: a
+            // stale or already-deleted one would open a dialog about
+            // nothing.
+            let cat_open = asked_for.filter(|c| !settings.category_deleted(*c));
+            let confirm_delete_cat = cat_open.filter(|c| delete_asked && *c != Category::Other);
             let mut st = State {
                 tokens: Tokens::from_settings(&settings),
-                section: section_arg(),
+                section,
                 original: settings.clone(),
                 pair_copied: false,
                 installing_host: false,
@@ -708,9 +736,10 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 cat_exts: Vec::new(),
                 cat_folders: Vec::new(),
                 cat_queues: Vec::new(),
-                cat_open: None,
+                cat_open,
                 queues,
                 confirm_reset: false,
+                confirm_delete_cat,
                 custom_headers: Vec::new(),
                 shot: Shot::from_env(),
                 dirty: 0,
@@ -872,6 +901,33 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
         }
         Msg::PauseOnLowBattery(v) => {
             st.s.pause_on_low_battery = v;
+            Task::none()
+        }
+        Msg::CategoryDeleteAsk(cat) => {
+            st.confirm_delete_cat = (cat != Category::Other).then_some(cat);
+            Task::none()
+        }
+        Msg::CategoryDeleteCancel => {
+            st.confirm_delete_cat = None;
+            Task::none()
+        }
+        Msg::CategoryDeleteConfirm => {
+            let Some(cat) = st.confirm_delete_cat.take() else {
+                return Task::none();
+            };
+            // A pending change like any other: Apply saves it and the
+            // daemon moves the downloads, Discard and "Reset
+            // Categories" put it back.
+            if cat != Category::Other && !st.s.deleted_categories.contains(&cat) {
+                st.s.deleted_categories.push(cat);
+            }
+            if st.cat_open == Some(cat) {
+                st.cat_open = None;
+            }
+            // Drops the card and, with it, this category's extension,
+            // folder and queue mirrors, so applying cannot write back
+            // overrides for a category that is gone.
+            mirror(st);
             Task::none()
         }
         Msg::CategoryToggle(cat) => {
@@ -1201,6 +1257,17 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
                     _ => {}
                 }
             }
+            if st.confirm_delete_cat.is_some() {
+                match key.as_ref() {
+                    iced::keyboard::Key::Named(Named::Enter) => {
+                        return update_ready(st, Msg::CategoryDeleteConfirm);
+                    }
+                    iced::keyboard::Key::Named(Named::Escape) => {
+                        return update_ready(st, Msg::CategoryDeleteCancel);
+                    }
+                    _ => {}
+                }
+            }
             Task::none()
         }
         Msg::ResetSection => {
@@ -1509,6 +1576,8 @@ fn ready_view(st: &State) -> Element<'_, Msg> {
 
     let overlaid: Element<'_, Msg> = if st.confirm_reset {
         reset_overlay(st, page.into())
+    } else if let Some(cat) = st.confirm_delete_cat {
+        delete_category_overlay(st, page.into(), cat)
     } else if let Some((count, bytes)) = st.stranded {
         stranded_overlay(st, page.into(), count, bytes)
     } else {
@@ -2369,6 +2438,18 @@ fn categories_section(st: &State) -> Element<'_, Msg> {
                     )
                 ),
                 row![
+                    // `Other` is where a deleted category's downloads
+                    // go, so it has nowhere to fall to and cannot be
+                    // deleted. The button stays, greyed, so every card
+                    // keeps the same shape.
+                    Btn::new("Delete category\u{2026}")
+                        .ghost()
+                        .danger()
+                        .size(BtnSize::Sm)
+                        .icon("trash-2")
+                        .enabled(cat != Category::Other)
+                        .on_press(Msg::CategoryDeleteAsk(cat))
+                        .view(t),
                     iced::widget::Space::new().width(Length::Fill),
                     Btn::new("Reset extensions")
                         .ghost()
@@ -3106,6 +3187,92 @@ fn stranded_overlay<'a>(
         // Dismissing is "keep": the safe answer, and the one that
         // changes nothing.
         .on_press(Msg::StrandedKeep),
+    );
+
+    iced::widget::stack![
+        base,
+        scrim,
+        container(iced::widget::opaque(card))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center),
+    ]
+    .into()
+}
+
+/// Confirm overlay for deleting a category (pattern: `reset_overlay`;
+/// Enter/Escape handled in `Msg::KeyPressed`).
+///
+/// No download count: this is a pending change like every other on the
+/// page, so any number shown here would be counted before the save that
+/// acts on it. What the deletion promises is the same either way.
+fn delete_category_overlay<'a>(
+    st: &'a State,
+    base: Element<'a, Msg>,
+    cat: Category,
+) -> Element<'a, Msg> {
+    let t = &st.tokens;
+    let t2 = *t;
+    let card = container(
+        column![
+            text(format!("Delete category \u{201c}{}\u{201d}?", cat.label()))
+                .font(theme::BODY_BOLD)
+                .size(14.0)
+                .color(t.fg_1),
+            text(
+                "Its downloads move to Other, and nothing is filed here again. Files on \
+                 disk are not touched. Saved with the rest of this page; Reset \
+                 Categories brings it back.",
+            )
+            .font(theme::BODY)
+            .size(12.0)
+            .color(t.fg_2),
+            row![
+                iced::widget::Space::new().width(Length::Fill),
+                Btn::new("Cancel")
+                    .ghost()
+                    .on_press(Msg::CategoryDeleteCancel)
+                    .view(t),
+                Btn::new("Delete")
+                    .danger_filled()
+                    .icon("trash-2")
+                    .on_press(Msg::CategoryDeleteConfirm)
+                    .view(t),
+            ]
+            .spacing(theme::space::S2)
+            .align_y(Alignment::Center),
+        ]
+        .spacing(theme::space::S3),
+    )
+    .width(Length::Fixed(400.0))
+    .padding(theme::space::S4)
+    .style(move |_| container::Style {
+        background: Some(t2.bg_surface.into()),
+        border: iced::Border {
+            color: t2.border_default,
+            width: 1.0,
+            radius: theme::surface::RADIUS.into(),
+        },
+        shadow: iced::Shadow {
+            color: color::with_alpha(iced::Color::BLACK, 80.0 / 255.0),
+            offset: iced::Vector::new(0.0, 4.0),
+            blur_radius: 16.0,
+        },
+        ..Default::default()
+    });
+
+    let scrim = iced::widget::opaque(
+        mouse_area(
+            container(iced::widget::Space::new())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(|_| container::Style {
+                    background: Some(color::with_alpha(iced::Color::BLACK, 120.0 / 255.0).into()),
+                    ..Default::default()
+                }),
+        )
+        .on_press(Msg::CategoryDeleteCancel),
     );
 
     iced::widget::stack![

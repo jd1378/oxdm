@@ -991,8 +991,15 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
         Request::OpenSettingsWindow {
             tab,
             highlight_proxy,
+            category,
+            delete_category,
         } => {
-            crate::daemon::tray::spawn_settings_gui(tab.as_deref(), highlight_proxy);
+            crate::daemon::tray::spawn_settings_gui(
+                tab.as_deref(),
+                highlight_proxy,
+                category,
+                delete_category,
+            );
             Reply::Ok
         }
         Request::OpenQueuesWindow { select, delete } => {

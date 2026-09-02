@@ -4,8 +4,15 @@
 //! `Job` does not store a category. The default extension lists below
 //! mirror the AB Download Manager categories. Users can extend them via
 //! `Settings::category_extensions`.
+//!
+//! Every category but `Other` can be deleted from Settings, which drops
+//! it from `ALL_VISIBLE` for that user (see
+//! `Settings::deleted_categories`). `Other` is the catch-all everything
+//! else falls into, so it has nowhere to fall to and always stays.
 
 use serde::{Deserialize, Serialize};
+
+use super::Settings;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
@@ -53,6 +60,27 @@ impl Category {
         }
     }
 
+    /// Stable lowercase name: the serialized form, and what the GUI
+    /// subprocesses are launched with (`--category videos`).
+    pub fn slug(self) -> &'static str {
+        match self {
+            Category::Compressed => "compressed",
+            Category::Programs => "programs",
+            Category::Videos => "videos",
+            Category::Music => "music",
+            Category::Pictures => "pictures",
+            Category::Documents => "documents",
+            Category::Other => "other",
+        }
+    }
+
+    pub fn from_slug(s: &str) -> Option<Category> {
+        Category::ALL_ASSIGNABLE
+            .iter()
+            .copied()
+            .find(|c| c.slug() == s)
+    }
+
     pub fn default_extensions(self) -> &'static [&'static str] {
         match self {
             Category::Compressed => &[
@@ -85,14 +113,18 @@ impl Category {
 
 /// Classify a filename into a category using the user's extension lists,
 /// falling back to the built-in defaults for any category the user has
-/// not customised.
-pub fn classify(filename: &str, overrides: &indexmap::IndexMap<Category, Vec<String>>) -> Category {
+/// not customised. A deleted category claims nothing, so its extensions
+/// fall through to `Other` like any unknown suffix.
+pub fn classify(filename: &str, settings: &Settings) -> Category {
     let ext = match filename.rsplit_once('.') {
         Some((_, e)) if !e.is_empty() => e.to_ascii_lowercase(),
         _ => return Category::Other,
     };
     for cat in Category::ALL_VISIBLE {
-        if let Some(list) = overrides.get(cat) {
+        if settings.category_deleted(*cat) {
+            continue;
+        }
+        if let Some(list) = settings.category_extensions.get(cat) {
             if list.iter().any(|e| e.eq_ignore_ascii_case(&ext)) {
                 return *cat;
             }
@@ -101,4 +133,29 @@ pub fn classify(filename: &str, overrides: &indexmap::IndexMap<Category, Vec<Str
         }
     }
     Category::Other
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deleted_category_falls_through_to_other() {
+        let mut s = Settings::default();
+        assert_eq!(classify("clip.mkv", &s), Category::Videos);
+        s.deleted_categories = vec![Category::Videos];
+        assert_eq!(classify("clip.mkv", &s), Category::Other);
+        // Its neighbours keep classifying.
+        assert_eq!(classify("song.mp3", &s), Category::Music);
+    }
+
+    #[test]
+    fn deleting_other_is_not_possible() {
+        let mut s = Settings {
+            deleted_categories: vec![Category::Other],
+            ..Settings::default()
+        };
+        s.normalize_categories();
+        assert!(s.deleted_categories.is_empty());
+    }
 }

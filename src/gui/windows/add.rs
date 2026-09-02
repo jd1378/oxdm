@@ -793,10 +793,7 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
             if valid && !st.category_dirty {
                 let guess = name_from_url(st.url.trim());
                 if !guess.is_empty() {
-                    st.category = Some(crate::domain::classify(
-                        &guess,
-                        &st.settings.category_extensions,
-                    ));
+                    st.category = Some(crate::domain::classify(&guess, &st.settings));
                     apply_category_prefill(st);
                 }
             }
@@ -839,10 +836,7 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
                 let dir = st.destination().dir;
                 st.save_path = dir.join(st.free_name(&p.filename)).display().to_string();
                 if st.category.is_none() {
-                    st.category = Some(crate::domain::classify(
-                        &p.filename,
-                        &st.settings.category_extensions,
-                    ));
+                    st.category = Some(crate::domain::classify(&p.filename, &st.settings));
                     classified = true;
                 }
             }
@@ -894,9 +888,10 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
         Msg::SetCategory(label) => {
             let had_note = save_note(st).is_some();
             let prev = st.category;
-            st.category = Category::ALL_ASSIGNABLE
-                .iter()
-                .copied()
+            st.category = st
+                .settings
+                .assignable_categories()
+                .into_iter()
                 .find(|c| c.label() == label);
             st.category_dirty = true;
             if st.category != prev {
@@ -1219,7 +1214,8 @@ fn ready_view(st: &AddState) -> Element<'_, Msg> {
                     "category",
                     combo(
                         t,
-                        Category::ALL_ASSIGNABLE
+                        st.settings
+                            .assignable_categories()
                             .iter()
                             .map(|c| c.label().to_owned())
                             .collect(),

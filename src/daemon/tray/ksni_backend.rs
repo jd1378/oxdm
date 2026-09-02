@@ -130,7 +130,7 @@ impl Tray for OxdmTray {
         items.push(
             StandardItem {
                 label: "Settings".into(),
-                activate: Box::new(|_t: &mut Self| spawn_settings_gui(None, false)),
+                activate: Box::new(|_t: &mut Self| spawn_settings_gui(None, false, None, false)),
                 ..Default::default()
             }
             .into(),

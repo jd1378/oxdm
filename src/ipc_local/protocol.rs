@@ -281,9 +281,19 @@ pub enum Request {
     /// tab ("general" / "downloads" / "network" / "appearance" /
     /// "advanced"); `highlight_proxy` jumps to and highlights the
     /// proxy URL field on open.
+    ///
+    /// `category` expands that category's card on the Categories tab,
+    /// and `delete_category` opens its delete confirmation there: the
+    /// sidebar's category menu hands the destructive step to the pane
+    /// that already owns it, the way the queue menu does. Defaulted so
+    /// a frame from an older build still decodes.
     OpenSettingsWindow {
         tab: Option<String>,
         highlight_proxy: bool,
+        #[serde(default)]
+        category: Option<Category>,
+        #[serde(default)]
+        delete_category: bool,
     },
     /// Open or focus the Queues & scheduling window. `select` picks
     /// the queue it opens on; `delete` asks it for that queue's delete

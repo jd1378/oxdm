@@ -266,7 +266,12 @@ pub fn spawn_batch_gui(staged_path: &std::path::Path) {
 }
 
 /// Settings window.
-pub fn spawn_settings_gui(tab: Option<&str>, highlight_proxy: bool) {
+pub fn spawn_settings_gui(
+    tab: Option<&str>,
+    highlight_proxy: bool,
+    category: Option<crate::domain::Category>,
+    delete_category: bool,
+) {
     let mut args: Vec<&str> = vec!["gui", "settings"];
     if let Some(t) = tab {
         args.push("--tab");
@@ -274,6 +279,14 @@ pub fn spawn_settings_gui(tab: Option<&str>, highlight_proxy: bool) {
     }
     if highlight_proxy {
         args.push("--highlight-proxy");
+    }
+    if let Some(c) = category {
+        args.extend(["--category", c.slug()]);
+        // Only meaningful alongside a category, so it is not passed
+        // without one.
+        if delete_category {
+            args.push("--delete-category");
+        }
     }
     evict_and_spawn(crate::ipc_local::protocol::GuiKind::Settings, &args);
 }

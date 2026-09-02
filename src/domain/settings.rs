@@ -238,6 +238,18 @@ pub struct Settings {
     /// at apply time — the job stays in the Main queue.
     #[serde(default)]
     pub category_queues: IndexMap<Category, QueueId>,
+    /// Categories the user deleted. They disappear from the sidebar,
+    /// from every category picker and from classification, and their
+    /// downloads are moved to `Other` when the deletion is saved.
+    ///
+    /// `Other` can never be in here: it is where a deleted category's
+    /// files go, so deleting it would leave them nowhere. Deleting is
+    /// not destructive beyond that: "Reset Categories" in Settings
+    /// brings the built-in set back, and new downloads classify into a
+    /// restored category again. Downloads already moved to `Other` stay
+    /// there, the same way a deleted queue's downloads stay in Main.
+    #[serde(default)]
+    pub deleted_categories: Vec<Category>,
     /// True once the first-run welcome overlay has been shown and
     /// dismissed. The GUI sets it via `UpdateSettings` on either
     /// dismissal path.
@@ -389,6 +401,56 @@ impl Settings {
         self.category_folder(Category::Other)
     }
 
+    /// Whether `cat` has been deleted. `Other` never has been.
+    pub fn category_deleted(&self, cat: Category) -> bool {
+        cat != Category::Other && self.deleted_categories.contains(&cat)
+    }
+
+    /// The categories the sidebar shows above `Other`, in display order.
+    pub fn visible_categories(&self) -> Vec<Category> {
+        Category::ALL_VISIBLE
+            .iter()
+            .copied()
+            .filter(|c| !self.category_deleted(*c))
+            .collect()
+    }
+
+    /// Every category a user can pick right now: the visible ones plus
+    /// the `Other` catch-all. The single reader behind every category
+    /// picker, so a deleted category cannot be offered by one window
+    /// after another has stopped showing it.
+    pub fn assignable_categories(&self) -> Vec<Category> {
+        let mut v = self.visible_categories();
+        v.push(Category::Other);
+        v
+    }
+
+    /// Put the category fields in canonical shape: `Other` is never
+    /// deleted, a category is listed as deleted at most once, and a
+    /// deleted category carries no extension, folder or queue override
+    /// that would come back with it.
+    ///
+    /// Enforced here rather than at each call site because the deleted
+    /// list is reachable over IPC, not just from the Settings window.
+    pub fn normalize_categories(&mut self) {
+        let mut seen = Vec::new();
+        for c in std::mem::take(&mut self.deleted_categories) {
+            if c != Category::Other && !seen.contains(&c) {
+                seen.push(c);
+            }
+        }
+        self.deleted_categories = seen;
+        let gone = self.deleted_categories.clone();
+        self.category_extensions.retain(|c, _| !gone.contains(c));
+        self.category_folders.retain(|c, _| !gone.contains(c));
+        self.category_queues.retain(|c, _| !gone.contains(c));
+    }
+
+    /// The category a filename lands in under these settings.
+    pub fn classify(&self, filename: &str) -> Category {
+        super::category::classify(filename, self)
+    }
+
     /// Every folder oxdm saves into. A category folder is created on
     /// first use, so this is how a typed path can be recognised as a
     /// folder before anything exists at it — see
@@ -533,6 +595,7 @@ impl Default for Settings {
             category_extensions: IndexMap::new(),
             category_folders: default_category_folders(&detected_download_dir()),
             category_queues: IndexMap::new(),
+            deleted_categories: Vec::new(),
             first_run_seen: false,
             capture_min_size: 0,
             capture_skip_domains: Vec::new(),
@@ -562,6 +625,35 @@ mod tests {
         assert_eq!(
             default_category_folder(base, Category::Videos),
             PathBuf::from("/home/u/Downloads/Videos")
+        );
+    }
+
+    /// Deleting a category takes it out of every picker and, with it,
+    /// any override that would come back if it were restored.
+    #[test]
+    fn a_deleted_category_leaves_no_trace_behind_it() {
+        let mut s = Settings::default();
+        s.category_extensions
+            .insert(Category::Videos, vec!["mkv".into()]);
+        s.category_folders
+            .insert(Category::Videos, PathBuf::from("/v"));
+        s.deleted_categories = vec![Category::Videos, Category::Videos, Category::Other];
+        s.normalize_categories();
+
+        assert_eq!(
+            s.deleted_categories,
+            vec![Category::Videos],
+            "no duplicates, and Other is never deletable"
+        );
+        assert!(s.category_deleted(Category::Videos));
+        assert!(!s.category_deleted(Category::Other));
+        assert!(!s.category_extensions.contains_key(&Category::Videos));
+        assert!(!s.category_folders.contains_key(&Category::Videos));
+        assert!(!s.visible_categories().contains(&Category::Videos));
+        assert_eq!(
+            *s.assignable_categories().last().unwrap(),
+            Category::Other,
+            "the catch-all stays, and stays last",
         );
     }
 

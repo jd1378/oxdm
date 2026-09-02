@@ -72,6 +72,10 @@ const MENU_W: f32 = 260.0;
 const QUEUE_MENU_TITLE_H: f32 = 22.0;
 const QUEUE_MENU_ITEMS: f32 = 3.0;
 const QUEUE_MENU_SEPS: f32 = 2.0;
+/// The sidebar's category menu: a title and two rows, ruled under the
+/// title and above the destructive row.
+const CAT_MENU_ITEMS: f32 = 2.0;
+const CAT_MENU_SEPS: f32 = 2.0;
 /// Card width including its border — what the layout has to fit.
 const MENU_BOX_W: f32 = MENU_W + MENU_PAD * 2.0 + 2.0;
 
@@ -230,6 +234,8 @@ pub enum Msg {
     RemoveDontAsk(bool),
     QueueRightClick(QueueId),
     QueueMenu(QueueAction),
+    CategoryRightClick(Category),
+    CategoryMenu(CategoryAction),
     RemoveConfirm,
     /// The restart confirmation was accepted.
     RestartConfirmed,
@@ -309,6 +315,12 @@ pub enum ToolbarAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueAction {
     ToggleRun,
+    Edit,
+    Delete,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CategoryAction {
     Edit,
     Delete,
 }
@@ -441,6 +453,8 @@ pub struct Main {
     pub context_menu: Option<JobId>,
     /// Right-clicked queue in the sidebar, if its menu is open.
     pub queue_menu: Option<QueueId>,
+    /// Which sidebar category the context menu is about.
+    pub category_menu: Option<Category>,
     /// Which "Move to…" list the context menu has open, how far it is
     /// scrolled, and which scroll strip the pointer is resting on
     /// (`-1` up, `1` down, `0` neither).
@@ -580,6 +594,7 @@ impl Main {
             maximized: false,
             context_menu: None,
             queue_menu: None,
+            category_menu: None,
             submenu: None,
             submenu_first: 0,
             submenu_edge: 0,
@@ -1065,14 +1080,21 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             m.snap = snap;
             m.selection
                 .retain(|id| m.snap.jobs.iter().any(|j| j.id == *id));
+            // A category deleted from Settings takes its sidebar row
+            // with it, and a filter on a row that is gone shows an
+            // empty table with nothing selected to explain it.
+            let unfiltered = match m.filter {
+                SidebarFilter::Category(cat) if m.snap.settings.category_deleted(cat) => {
+                    Some(update_main(m, Msg::SetFilter(SidebarFilter::All)))
+                }
+                _ => None,
+            };
             if !m.welcome_shown && !m.snap.settings.first_run_seen && m.overlay == Overlay::None {
                 m.overlay = Overlay::Welcome;
                 m.welcome_shown = true;
             }
-            if added > 0 {
-                return note_adds(m, added);
-            }
-            Task::none()
+            let toast = (added > 0).then(|| note_adds(m, added));
+            Task::batch(unfiltered.into_iter().chain(toast))
         }
         Msg::Daemon(DaemonSignal::Lost) => iced::exit(),
         Msg::Daemon(DaemonSignal::Event(ev)) => match ev {
@@ -1634,6 +1656,24 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             m.queue_menu = Some(id);
             m.menu_anchor = m.cursor;
             Task::none()
+        }
+        Msg::CategoryRightClick(cat) => {
+            m.category_menu = Some(cat);
+            m.menu_anchor = m.cursor;
+            Task::none()
+        }
+        Msg::CategoryMenu(action) => {
+            let Some(cat) = m.category_menu else {
+                return Task::none();
+            };
+            close_context_menu(m);
+            let client = m.client.clone();
+            // Both hand off to the Settings pane that already owns the
+            // category's extensions, folder, queue and its delete
+            // confirmation. A second copy of any of them would be one
+            // more thing to keep in step.
+            let delete = matches!(action, CategoryAction::Delete);
+            act(async move { client.open_settings_category(cat, delete).await })
         }
         Msg::QueueMenu(action) => {
             let Some(id) = m.queue_menu else {
@@ -2209,6 +2249,7 @@ fn request_remove(m: &mut Main, kind: RemoveKind) -> Task<Msg> {
 fn close_context_menu(m: &mut Main) {
     m.context_menu = None;
     m.queue_menu = None;
+    m.category_menu = None;
     m.submenu = None;
     m.submenu_first = 0;
     m.submenu_edge = 0;
@@ -2248,7 +2289,7 @@ fn saved_file(job: &crate::domain::Job) -> std::path::PathBuf {
 
 fn scroll_submenu(m: &mut Main, dir: i8) {
     let len = match m.submenu {
-        Some(SubMenu::Category) => Category::ALL_ASSIGNABLE.len(),
+        Some(SubMenu::Category) => m.snap.settings.assignable_categories().len(),
         Some(SubMenu::Queue) => m.snap.queues.len(),
         None => return,
     };
@@ -2532,6 +2573,8 @@ fn main_view(m: &Main) -> Element<'_, Msg> {
         context_menu_overlay(m, base, id)
     } else if let Some(id) = m.queue_menu {
         queue_menu_overlay(m, base, id)
+    } else if let Some(cat) = m.category_menu {
+        category_menu_overlay(m, base, cat)
     } else if m.columns_menu {
         columns_menu_overlay(m, base)
     } else if m.snap.conflict_head.is_some()
@@ -2920,27 +2963,26 @@ fn sidebar(m: &Main) -> Element<'_, Msg> {
             false,
             Msg::SetFilter(SidebarFilter::All),
         ));
-        for (cat, icon, label) in [
-            (Category::Compressed, "archive", "Compressed"),
-            (Category::Programs, "package", "Programs"),
-            (Category::Videos, "film", "Videos"),
-            (Category::Music, "music", "Music"),
-            (Category::Pictures, "image", "Pictures"),
-            (Category::Documents, "file-text", "Documents"),
-            (Category::Other, "file", "Other"),
-        ] {
+        // Deleted categories are not here to be filtered on; see
+        // `Settings::deleted_categories`.
+        for cat in m.snap.settings.assignable_categories() {
             let active = m.filter == SidebarFilter::Category(cat);
-            col = col.push(sidebar_row(
-                t,
-                icons::icon(icon, 17.0, leader_fg(t, active)),
-                label,
-                None,
-                Some(m.cat_count(Some(cat))),
-                active,
-                rh,
-                true,
-                Msg::SetFilter(SidebarFilter::Category(cat)),
-            ));
+            col = col.push(
+                mouse_area(sidebar_row(
+                    t,
+                    icons::icon(category_icon(cat), 17.0, leader_fg(t, active)),
+                    cat.label(),
+                    None,
+                    Some(m.cat_count(Some(cat))),
+                    active,
+                    rh,
+                    true,
+                    Msg::SetFilter(SidebarFilter::Category(cat)),
+                ))
+                // Same rule as the queue rows: asking what a category
+                // can do is not asking to look at it.
+                .on_right_press(Msg::CategoryRightClick(cat)),
+            );
         }
     }
 
@@ -4320,6 +4362,86 @@ fn queue_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>, id: QueueId) -> E
     .into()
 }
 
+/// The sidebar's category menu. Both entries open the Settings window
+/// on this category's card; see `Msg::CategoryMenu`.
+fn category_menu_overlay<'a>(
+    m: &'a Main,
+    base: Element<'a, Msg>,
+    cat: Category,
+) -> Element<'a, Msg> {
+    let t = &m.tokens;
+    // `Other` is where a deleted category's downloads land, so it has
+    // nowhere to fall to. The row stays, greyed, so the menu keeps its
+    // shape from category to category.
+    let deletable = cat != Category::Other;
+    // The scrim takes the pointer the moment the menu opens, so the row
+    // it came from loses its hover; the title says which category this
+    // is about.
+    let title = container(
+        text(cat.label())
+            .font(theme::BODY_BOLD)
+            .size(12.0)
+            .color(t.fg_2),
+    )
+    .height(Length::Fixed(QUEUE_MENU_TITLE_H))
+    .align_y(Alignment::Center)
+    .padding([0.0, theme::space::S2]);
+    let menu = menu_card(
+        t,
+        column![
+            title,
+            menu_separator(t),
+            menu_item(
+                t,
+                "settings",
+                "Edit category\u{2026}",
+                None,
+                true,
+                Msg::CategoryMenu(CategoryAction::Edit),
+            ),
+            menu_separator(t),
+            menu_item(
+                t,
+                "trash-2",
+                "Delete category\u{2026}",
+                None,
+                deletable,
+                Msg::CategoryMenu(CategoryAction::Delete),
+            ),
+        ]
+        .width(Length::Fixed(MENU_W))
+        .into(),
+    );
+
+    let scrim = mouse_area(
+        container(iced::widget::Space::new())
+            .width(Length::Fill)
+            .height(Length::Fill),
+    )
+    .on_press(Msg::CloseOverlay)
+    .on_right_press(Msg::CloseOverlay);
+
+    let (ww, wh) = if m.win_size.0 > 0.0 {
+        (m.win_size.0, m.win_size.1 - titlebar::chrome_h())
+    } else {
+        (1240.0, 760.0)
+    };
+    let mh = MENU_PAD * 2.0
+        + QUEUE_MENU_TITLE_H
+        + MENU_ITEM_H * CAT_MENU_ITEMS
+        + MENU_SEP_H * CAT_MENU_SEPS;
+    let (cx, cy) = m.menu_anchor;
+    let at =
+        crate::gui::widget::anchored((cx, cy - titlebar::chrome_h()), (MENU_BOX_W, mh), (ww, wh));
+
+    iced::widget::stack![
+        base,
+        scrim,
+        container(iced::widget::opaque(menu)).padding(at)
+    ]
+    .into()
+}
+
 fn context_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>, id: JobId) -> Element<'a, Msg> {
     let t = &m.tokens;
     let phase = m.phase(id);
@@ -4620,14 +4742,17 @@ fn submenu_panel<'a>(m: &'a Main, which: SubMenu, id: JobId) -> (Element<'a, Msg
 
     // (leader, label, whether the job is already there, what to do)
     let entries: Vec<(Element<'a, Msg>, String, bool, Msg)> = match which {
-        SubMenu::Category => Category::ALL_ASSIGNABLE
-            .iter()
+        SubMenu::Category => m
+            .snap
+            .settings
+            .assignable_categories()
+            .into_iter()
             .map(|c| {
                 (
-                    icons::icon(category_icon(*c), 15.0, t2.fg_2),
+                    icons::icon(category_icon(c), 15.0, t2.fg_2),
                     c.label().to_owned(),
-                    job.is_some_and(|j| j.category == *c),
-                    Msg::MoveToCategory(*c),
+                    job.is_some_and(|j| j.category == c),
+                    Msg::MoveToCategory(c),
                 )
             })
             .collect(),

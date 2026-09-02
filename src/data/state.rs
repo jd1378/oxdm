@@ -962,6 +962,9 @@ impl AppState {
         id: JobId,
         category: Category,
     ) -> Result<(), JobError> {
+        if self.settings.read().await.category_deleted(category) {
+            return Err(JobError::Other("that category was deleted".into()));
+        }
         let mut jobs = self.jobs.write().await;
         let Some(old) = jobs.get(&id).cloned() else {
             return Err(JobError::Other("job not found".into()));
@@ -982,6 +985,42 @@ impl AppState {
             id,
             phase: old.phase(),
         });
+        Ok(())
+    }
+
+    /// Move every download in `gone` to `Other`, the way deleting a
+    /// queue moves its downloads to Main: a category is a label on the
+    /// job, so nothing on disk moves and no download is left pointing
+    /// at a category that is no longer there.
+    ///
+    /// Persisted per job before the deletion itself is saved, so a
+    /// crash in the middle leaves jobs in `Other` and the category
+    /// still listed, visible and correctable, rather than the other
+    /// way round.
+    async fn rehome_categories(&self, gone: &[Category]) -> Result<(), String> {
+        let ids: Vec<JobId> = self
+            .jobs
+            .read()
+            .await
+            .values()
+            .filter(|e| gone.contains(&e.job.category))
+            .map(|e| e.job.id)
+            .collect();
+        for id in ids {
+            let Some(entry) = self.jobs.read().await.get(&id).cloned() else {
+                continue;
+            };
+            let mut new_job = entry.job.clone();
+            new_job.category = Category::Other;
+            self.store
+                .upsert_job(&new_job)
+                .await
+                .map_err(|e| e.to_string())?;
+            let phase = entry.phase();
+            let new_entry = clone_entry_with_job(&entry, new_job).await;
+            self.jobs.write().await.insert(id, new_entry);
+            let _ = self.events.send(DomainEvent::JobUpdated { id, phase });
+        }
         Ok(())
     }
 
@@ -2215,7 +2254,7 @@ impl AppState {
         let mut moved_to = None;
         let stored_name = new_job.filename.clone().unwrap_or_default();
         if new_job.category == Category::Other {
-            new_job.category = classify(&stored_name, &settings.category_extensions);
+            new_job.category = classify(&stored_name, &settings);
             // The folder follows the category while it still can. The
             // parts live in the per-job work dir and the file is
             // assembled at the end, so this run's destination is still
@@ -2745,6 +2784,22 @@ impl AppState {
         // started, and the free-space check has no volume to measure,
         // so it silently passes everything.
         validate_work_dir(&new.work_dir)?;
+        // Deleting a category is reachable over IPC, not only from the
+        // Settings window, so its invariants are enforced here.
+        new.normalize_categories();
+        // Downloads move before the category stops existing; see
+        // `rehome_categories`.
+        let newly_deleted: Vec<Category> = {
+            let current = self.settings.read().await;
+            new.deleted_categories
+                .iter()
+                .copied()
+                .filter(|c| !current.deleted_categories.contains(c))
+                .collect()
+        };
+        if !newly_deleted.is_empty() {
+            self.rehome_categories(&newly_deleted).await?;
+        }
         // The proxy password arrives in the clear and leaves as
         // ciphertext; the plaintext never reaches the settings table.
         let typed = std::mem::take(&mut new.proxy.password);
@@ -3085,11 +3140,15 @@ impl AppState {
         // Detect the category once at creation when the caller did not
         // supply an explicit choice. `classify` falls back to
         // `Category::Other` when nothing matches.
-        let category = match category {
-            Some(c) => c,
-            None => {
-                let overrides = self.settings.read().await.category_extensions.clone();
-                classify(filename.as_deref().unwrap_or(""), &overrides)
+        let category = {
+            let settings = self.settings.read().await.clone();
+            match category {
+                // A category deleted while the Add dialog was open is
+                // no reason to refuse the download: it lands in the
+                // catch-all, which is where its files were headed.
+                Some(c) if !settings.category_deleted(c) => c,
+                Some(_) => Category::Other,
+                None => classify(filename.as_deref().unwrap_or(""), &settings),
             }
         };
         let sealed = self.seal_creds(id, creds).await?;
@@ -3384,7 +3443,7 @@ impl AppState {
             let name = free_name(&jobs, &probe.filename, Some(id));
             new_job.filename = Some(name.clone());
             if new_job.category == Category::Other {
-                new_job.category = classify(&name, &settings.category_extensions);
+                new_job.category = classify(&name, &settings);
                 // Nothing has run yet, so the destination is still
                 // nobody's decision but the app's own guess — which
                 // this just improved on.
@@ -3488,10 +3547,7 @@ impl AppState {
         // Known caveat: classification here uses the captured filename;
         // a later FilenameResolved may land in a different category —
         // no re-routing this pass.
-        let category = classify(
-            filename.as_deref().unwrap_or(""),
-            &settings.category_extensions,
-        );
+        let category = classify(filename.as_deref().unwrap_or(""), &settings);
         let save_dir = settings.category_folder(category);
         let id = self
             .add_job(
