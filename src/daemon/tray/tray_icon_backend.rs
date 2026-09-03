@@ -176,7 +176,7 @@ fn run_owner(rt: Handle, state: Arc<AppState>, jobs_rx: mpsc::Receiver<Vec<Job>>
             } else if actions.open.as_ref() == Some(id) {
                 spawn_main_gui();
             } else if actions.settings.as_ref() == Some(id) {
-                spawn_settings_gui(None, false);
+                spawn_settings_gui(None, false, None, false);
             } else if let Some(jid) = dyn_map.get(id).copied() {
                 spawn_download_gui(jid);
             }

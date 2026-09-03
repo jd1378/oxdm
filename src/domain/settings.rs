@@ -446,11 +446,6 @@ impl Settings {
         self.category_queues.retain(|c, _| !gone.contains(c));
     }
 
-    /// The category a filename lands in under these settings.
-    pub fn classify(&self, filename: &str) -> Category {
-        super::category::classify(filename, self)
-    }
-
     /// Every folder oxdm saves into. A category folder is created on
     /// first use, so this is how a typed path can be recognised as a
     /// folder before anything exists at it — see
