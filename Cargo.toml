@@ -42,9 +42,6 @@ keyring = "4"
 trash = "5"
 libc = "0.2"
 fs4 = "1.1"
-# Only to warm the page cache with the scan iced's text engine will do; same
-# version and features as cosmic-text pulls in, so the reads match.
-fontdb = { version = "0.23", default-features = false, features = ["std", "memmap", "fontconfig"] }
 interprocess = { version = "2", features = ["tokio"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
