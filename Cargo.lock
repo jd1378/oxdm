@@ -4319,6 +4319,7 @@ dependencies = [
  "dark-light",
  "dirs",
  "flate2",
+ "fontdb",
  "fs4",
  "futures",
  "humantime",

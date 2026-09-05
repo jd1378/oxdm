@@ -19,6 +19,7 @@ use crate::single_instance::InstanceGuard;
 pub mod completion_actions;
 pub mod environment_guard;
 pub mod notifications;
+pub mod prewarm;
 pub mod tray;
 pub mod update_alerts;
 
@@ -94,6 +95,7 @@ fn spawn_workers(
     spawn_autostart_check(state.clone());
     notifications::spawn(state.clone());
     environment_guard::spawn(state.clone());
+    prewarm::spawn();
     spawn_power_prompt(state.clone());
     completion_actions::spawn(state.clone());
     crate::data::spawn_hook_executor(state.clone());
