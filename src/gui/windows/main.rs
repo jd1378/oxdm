@@ -444,7 +444,12 @@ pub struct Main {
     pub tokens: Tokens,
     pub filter: SidebarFilter,
     pub tab: Tab,
-    pub sort: (SortColumn, bool), // (column, descending)
+    /// A column the user chose, and whether it is descending. `None`
+    /// is the natural order of the scope: a queue view lists its
+    /// downloads in the order the queue works through them, so the
+    /// one running is at the top and a paused one sinks to the back
+    /// where the queue put it; every other scope lists newest first.
+    pub sort: Option<(SortColumn, bool)>,
     pub search: String,
     pub selection: HashSet<JobId>,
     pub select_anchor: Option<JobId>,
@@ -586,7 +591,7 @@ impl Main {
                 // at, and a queue view now hides what has finished.
                 .unwrap_or(SidebarFilter::All),
             tab: Tab::All,
-            sort: (SortColumn::Date, true),
+            sort: None,
             search: String::new(),
             selection: HashSet::new(),
             select_anchor: None,
@@ -780,7 +785,12 @@ impl Main {
                 Tab::Finished => self.phase(j.id) == Phase::Completed,
             })
             .collect();
-        let (col, desc) = self.sort;
+        let Some((col, desc)) = self.sort else {
+            if !matches!(self.filter, SidebarFilter::Queue(_)) {
+                jobs.sort_by_key(|j| std::cmp::Reverse(j.created_at));
+            }
+            return jobs;
+        };
         jobs.sort_by(|a, b| {
             let ord = match col {
                 SortColumn::Name => a
@@ -1152,11 +1162,7 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             back_to_top(m)
         }
         Msg::SetSort(col) => {
-            if m.sort.0 == col {
-                m.sort.1 = !m.sort.1;
-            } else {
-                m.sort = (col, matches!(col, SortColumn::Date));
-            }
+            toggle_sort(m, col);
             Task::none()
         }
         Msg::SetSearch(s) => {
@@ -1398,11 +1404,7 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                 if (m.cursor.0 - press_x).abs() < COL_MOVE_SLOP {
                     // The pointer never left the header cell: a plain
                     // click, so sort (same toggle as `Msg::SetSort`).
-                    if m.sort.0 == col {
-                        m.sort.1 = !m.sort.1;
-                    } else {
-                        m.sort = (col, matches!(col, SortColumn::Date));
-                    }
+                    toggle_sort(m, col);
                     return Task::none();
                 }
                 // The header previewed the new order; commit it to the
@@ -3231,8 +3233,18 @@ fn tab_strip(m: &Main) -> Element<'_, Msg> {
 
 // ---------------------------------------------------------------- table
 
+/// A click on the column already sorting flips its direction; on
+/// another column it sorts by that one, dates newest first.
+fn toggle_sort(m: &mut Main, col: SortColumn) {
+    m.sort = Some(match m.sort {
+        Some((active, desc)) if active == col => (col, !desc),
+        _ => (col, matches!(col, SortColumn::Date)),
+    });
+}
+
 fn header_cell<'a>(m: &Main, label: &'a str, col: SortColumn, width: f32) -> Element<'a, Msg> {
-    let (active_col, desc) = m.sort;
+    let (active_col, desc) = m.sort.unzip();
+    let active = active_col == Some(col);
     // Grips are NOT part of the cell: they must straddle the column
     // boundary (design `.col-resizer { right: -8px; width: 16px }`),
     // which flow layout cannot express. They are overlaid by
@@ -3251,8 +3263,8 @@ fn header_cell<'a>(m: &Main, label: &'a str, col: SortColumn, width: f32) -> Ele
         container(col_header_sortable(
             &m.tokens,
             label,
-            active_col == col,
-            desc,
+            active,
+            desc.unwrap_or(false),
             Msg::ColMoveStart(col),
         ))
         .width(Length::Fixed(width))
