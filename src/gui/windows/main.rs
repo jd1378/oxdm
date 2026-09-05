@@ -565,7 +565,7 @@ impl Main {
     fn new(client: Arc<Client>, snap: SnapshotData) -> Self {
         let tokens = Tokens::from_settings(&snap.settings);
         let counters = snap.counters.iter().map(|c| (c.id, c.clone())).collect();
-        let prefs = crate::gui::ui_prefs::load();
+        let prefs = crate::gui::ui_prefs::load_main();
         Self {
             client,
             tokens,

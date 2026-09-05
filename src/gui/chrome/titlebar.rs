@@ -28,14 +28,10 @@ const BTN_SIDE: f32 = 24.0;
 /// both kinds of chrome or neither. New windows pick up the new value.
 ///
 /// The value comes from the GUI-local mirror in `ui_prefs`, not from
-/// `Settings` directly — see [`crate::gui::ui_prefs::UiPrefs`].
+/// `Settings` directly — see [`crate::gui::ui_prefs`].
 pub fn use_custom() -> bool {
     static CUSTOM: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *CUSTOM.get_or_init(|| {
-        crate::gui::ui_prefs::load()
-            .custom_window_chrome
-            .unwrap_or(false)
-    })
+    *CUSTOM.get_or_init(|| crate::gui::ui_prefs::custom_window_chrome().unwrap_or(false))
 }
 
 /// Vertical space the painted chrome occupies at the top of a window:

@@ -36,8 +36,7 @@ impl SizeMemo {
     /// The saved size for `slot`, no smaller than `min`, or `fallback`
     /// when nothing was saved.
     pub fn launch_size(slot: WindowSlot, fallback: iced::Size, min: iced::Size) -> iced::Size {
-        ui_prefs::load()
-            .window_for(slot)
+        ui_prefs::load_window(slot)
             .map(|w| iced::Size::new(w.width.max(min.width), w.height.max(min.height)))
             .unwrap_or(fallback)
     }

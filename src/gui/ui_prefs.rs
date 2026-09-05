@@ -1,41 +1,68 @@
-//! Persisted GUI view state (`$config/oxdm/ui-prefs.json`): each
-//! window's last size, the main table's columns, and which sidebar entry
-//! the main window was looking at. Loaded on launch, saved as each
-//! changes, under a file lock so the windows (each its own process) do
-//! not overwrite one another's saves.
+//! Persisted GUI view state under `$config/oxdm/ui/`: each window's
+//! last size, the main table's columns, and which sidebar entry the
+//! main window was looking at. Loaded on launch, saved as each changes.
+//!
+//! One file per writer. Every window kind is its own process, and a
+//! save is a read, a change and a write, so a file two processes both
+//! saved to would carry one's stale copy over the other's change. The
+//! main window owns `main.json`, the other windows own a file each, and
+//! the chrome flag, which any window may refresh, is a single value
+//! written whole. Nothing is shared, so nothing needs a lock.
+//!
+//! `ui-prefs.json`, which held all of this in one file, is read when a
+//! window's own file does not exist yet, and never written.
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{Category, QueueId};
 
+/// What the main window remembers.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
-pub struct UiPrefs {
-    /// The main window's last size. Named as it always was, so files
-    /// written before the other windows had one still restore it.
+pub struct MainPrefs {
     #[serde(default)]
     pub window: Option<WindowPrefs>,
-    /// Last size of every other window that remembers one.
-    #[serde(default)]
-    pub queues_window: Option<WindowPrefs>,
-    #[serde(default)]
-    pub settings_window: Option<WindowPrefs>,
     /// Dropped when it cannot be read: the arrays are fixed-length, so a
     /// file from a build with a different column set fails to parse, and
     /// a stale table layout must not cost the user their window size.
     #[serde(default, deserialize_with = "columns_or_none")]
     pub columns: Option<ColumnsState>,
-    /// Cached mirror of `Settings.custom_window_chrome`. The setting
-    /// itself stays the source of truth; it is copied here because a
-    /// window must decide on decorations when it is created, which is
-    /// before the daemon connection that carries `Settings` exists.
-    /// `None` = never seen, treated as the default (native chrome).
-    #[serde(default)]
-    pub custom_window_chrome: Option<bool>,
-    /// The sidebar entry the main window was on when it last closed.
-    /// `None` = never saved, or a file this build cannot read; the
-    /// window then falls back to its default (the built-in queue).
+    /// The sidebar entry the window was on when it last closed. `None`
+    /// = never saved, or a file this build cannot read; the window then
+    /// falls back to its default (the built-in queue).
     #[serde(default, deserialize_with = "sidebar_or_none")]
     pub sidebar: Option<SidebarPref>,
+}
+
+/// What a window that remembers only its size keeps.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+struct SizeOnly {
+    #[serde(default)]
+    window: Option<WindowPrefs>,
+}
+
+/// Cached mirror of `Settings.custom_window_chrome`. The setting itself
+/// stays the source of truth; it is copied here because a window must
+/// decide on decorations when it is created, which is before the daemon
+/// connection that carries `Settings` exists. `None` = never seen,
+/// treated as the default (native chrome).
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+struct ChromePrefs {
+    #[serde(default)]
+    custom_window_chrome: Option<bool>,
+}
+
+/// The one file every preference used to live in.
+#[derive(Debug, Default, Clone, Deserialize)]
+struct LegacyPrefs {
+    #[serde(default)]
+    window: Option<WindowPrefs>,
+    #[serde(default, deserialize_with = "columns_or_none")]
+    columns: Option<ColumnsState>,
+    #[serde(default)]
+    custom_window_chrome: Option<bool>,
+    #[serde(default, deserialize_with = "sidebar_or_none")]
+    sidebar: Option<SidebarPref>,
 }
 
 /// Serialisable twin of `windows::main::SidebarFilter`. Kept here rather
@@ -145,26 +172,22 @@ pub enum WindowSlot {
     Settings,
 }
 
-impl UiPrefs {
-    pub fn window_for(&self, slot: WindowSlot) -> Option<WindowPrefs> {
-        match slot {
-            WindowSlot::Main => self.window,
-            WindowSlot::Queues => self.queues_window,
-            WindowSlot::Settings => self.settings_window,
-        }
-    }
-
-    fn window_for_mut(&mut self, slot: WindowSlot) -> &mut Option<WindowPrefs> {
-        match slot {
-            WindowSlot::Main => &mut self.window,
-            WindowSlot::Queues => &mut self.queues_window,
-            WindowSlot::Settings => &mut self.settings_window,
+impl WindowSlot {
+    fn file(self) -> &'static str {
+        match self {
+            WindowSlot::Main => "main.json",
+            WindowSlot::Queues => "queues.json",
+            WindowSlot::Settings => "settings.json",
         }
     }
 }
 
-fn prefs_path() -> Option<std::path::PathBuf> {
-    Some(dirs::config_dir()?.join("oxdm").join("ui-prefs.json"))
+const CHROME_FILE: &str = "chrome.json";
+const LEGACY_FILE: &str = "ui-prefs.json";
+
+/// The directory the per-window files live in.
+fn prefs_dir() -> Option<std::path::PathBuf> {
+    Some(dirs::config_dir()?.join("oxdm").join("ui"))
 }
 
 impl ColumnsState {
@@ -182,98 +205,120 @@ impl ColumnsState {
     }
 }
 
-pub fn load() -> UiPrefs {
-    let Some(path) = prefs_path() else {
-        return UiPrefs::default();
-    };
-    load_at(&path)
+/// Everything the on-disk files are read and written through, so the
+/// tests can point it at a scratch directory.
+struct Files {
+    dir: std::path::PathBuf,
 }
 
-fn load_at(path: &std::path::Path) -> UiPrefs {
-    let mut prefs: UiPrefs = std::fs::read(path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default();
-    if let Some(cols) = &mut prefs.columns
-        && !cols.order_is_sane()
-    {
-        cols.order = identity_order();
+impl Files {
+    fn at_config() -> Option<Self> {
+        Some(Self { dir: prefs_dir()? })
     }
-    prefs
+
+    fn read<T: DeserializeOwned + Default>(&self, name: &str) -> Option<T> {
+        let bytes = std::fs::read(self.dir.join(name)).ok()?;
+        serde_json::from_slice(&bytes).ok()
+    }
+
+    /// The legacy file sits one level up, beside the directory.
+    fn legacy(&self) -> LegacyPrefs {
+        self.dir
+            .parent()
+            .and_then(|d| std::fs::read(d.join(LEGACY_FILE)).ok())
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    /// Written beside the target and renamed over it, so a reader sees
+    /// the old file or the new one and never half of one.
+    ///
+    /// Deliberately not fsynced: losing a window size or a sidebar view
+    /// to a power cut costs a re-tune, which is not worth a disk flush
+    /// on every sidebar click.
+    fn write<T: Serialize>(&self, name: &str, value: &T) {
+        let _ = std::fs::create_dir_all(&self.dir);
+        let Ok(bytes) = serde_json::to_vec_pretty(value) else {
+            return;
+        };
+        let path = self.dir.join(name);
+        let tmp = self.dir.join(format!("{name}.{}.tmp", std::process::id()));
+        if std::fs::write(&tmp, &bytes).is_err() || std::fs::rename(&tmp, &path).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+
+    fn main(&self) -> MainPrefs {
+        let mut prefs = self.read(WindowSlot::Main.file()).unwrap_or_else(|| {
+            let old = self.legacy();
+            MainPrefs {
+                window: old.window,
+                columns: old.columns,
+                sidebar: old.sidebar,
+            }
+        });
+        if let Some(cols) = &mut prefs.columns
+            && !cols.order_is_sane()
+        {
+            cols.order = identity_order();
+        }
+        prefs
+    }
+
+    fn window(&self, slot: WindowSlot) -> Option<WindowPrefs> {
+        match slot {
+            WindowSlot::Main => self.main().window,
+            _ => self.read::<SizeOnly>(slot.file())?.window,
+        }
+    }
+
+    fn save_window(&self, slot: WindowSlot, w: WindowPrefs) {
+        match slot {
+            WindowSlot::Main => self.update_main(|p| {
+                let changed = p.window != Some(w);
+                p.window = Some(w);
+                changed
+            }),
+            _ => self.write(slot.file(), &SizeOnly { window: Some(w) }),
+        }
+    }
+
+    /// A change to the main window's file. Only that window's process
+    /// writes it, and its updates run one after another on the update
+    /// loop, so the read and the write cannot interleave with another.
+    /// `f` says whether anything changed; an untouched file is not
+    /// rewritten.
+    fn update_main(&self, f: impl FnOnce(&mut MainPrefs) -> bool) {
+        let mut prefs = self.main();
+        if f(&mut prefs) {
+            self.write(WindowSlot::Main.file(), &prefs);
+        }
+    }
+
+    fn custom_window_chrome(&self) -> Option<bool> {
+        match self.read::<ChromePrefs>(CHROME_FILE) {
+            Some(c) => c.custom_window_chrome,
+            None => self.legacy().custom_window_chrome,
+        }
+    }
 }
 
-/// Change one thing in the file, under a lock shared by every window.
-///
-/// Each window kind is its own process, and two can be saving at once:
-/// the main window its sidebar, Settings its size. Each save is a read,
-/// a change and a write, so without the lock the second write carried
-/// the first one's stale copy and dropped its change. The lock is a
-/// sibling file held for the duration; `f` returns whether anything
-/// changed, and an untouched file is not rewritten.
-pub fn update(f: impl FnOnce(&mut UiPrefs) -> bool) {
-    let Some(path) = prefs_path() else { return };
-    update_at(&path, f);
+pub fn load_main() -> MainPrefs {
+    Files::at_config().map(|f| f.main()).unwrap_or_default()
 }
 
-fn update_at(path: &std::path::Path, f: impl FnOnce(&mut UiPrefs) -> bool) {
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    // Held to the end of the function. A lock that cannot be taken is
-    // not a reason to lose the change: the save goes ahead unlocked,
-    // which is what it always did.
-    let _lock = PrefsLock::take(path);
-    let mut prefs = load_at(path);
-    if f(&mut prefs) {
-        save_at(path, &prefs);
-    }
-}
-
-/// An exclusive advisory lock on `<prefs>.lock`, released on drop.
-struct PrefsLock(std::fs::File);
-
-impl PrefsLock {
-    fn take(prefs_path: &std::path::Path) -> Option<Self> {
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(prefs_path.with_extension("lock"))
-            .ok()?;
-        file.lock().ok()?;
-        Some(Self(file))
-    }
-}
-
-impl Drop for PrefsLock {
-    fn drop(&mut self) {
-        let _ = self.0.unlock();
-    }
-}
-
-/// Written beside the target and renamed over it, so a reader sees the
-/// old file or the new one and never half of one.
-///
-/// Deliberately not fsynced: this file holds window size, columns and
-/// the sidebar view. Losing it to a power cut costs a re-tune, which is
-/// not worth a disk flush on every sidebar click.
-fn save_at(path: &std::path::Path, prefs: &UiPrefs) {
-    let Ok(bytes) = serde_json::to_vec_pretty(prefs) else {
-        return;
-    };
-    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
-    if std::fs::write(&tmp, &bytes).is_err() || std::fs::rename(&tmp, path).is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
+pub fn load_window(slot: WindowSlot) -> Option<WindowPrefs> {
+    Files::at_config()?.window(slot)
 }
 
 pub fn save_window(slot: WindowSlot, w: WindowPrefs) {
-    update(|prefs| {
-        let cur = prefs.window_for_mut(slot);
-        let changed = *cur != Some(w);
-        *cur = Some(w);
-        changed
-    });
+    if let Some(f) = Files::at_config() {
+        f.save_window(slot, w);
+    }
+}
+
+pub fn custom_window_chrome() -> Option<bool> {
+    Files::at_config()?.custom_window_chrome()
 }
 
 /// Refresh the cached chrome preference from the daemon's settings.
@@ -283,49 +328,62 @@ pub fn sync_custom_window_chrome(v: bool) {
     if v == crate::gui::chrome::titlebar::use_custom() {
         return;
     }
-    update(|prefs| {
-        let changed = prefs.custom_window_chrome != Some(v);
-        prefs.custom_window_chrome = Some(v);
-        changed
-    });
+    if let Some(f) = Files::at_config() {
+        f.write(
+            CHROME_FILE,
+            &ChromePrefs {
+                custom_window_chrome: Some(v),
+            },
+        );
+    }
 }
 
 pub fn save_sidebar(s: SidebarPref) {
-    update(|prefs| {
-        let changed = prefs.sidebar != Some(s);
-        prefs.sidebar = Some(s);
-        changed
-    });
+    if let Some(f) = Files::at_config() {
+        f.update_main(|p| {
+            let changed = p.sidebar != Some(s);
+            p.sidebar = Some(s);
+            changed
+        });
+    }
 }
 
 pub fn save_columns(c: &ColumnsState) {
-    update(|prefs| {
-        prefs.columns = Some(c.clone());
-        true
-    });
+    if let Some(f) = Files::at_config() {
+        f.update_main(|p| {
+            p.columns = Some(c.clone());
+            true
+        });
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn files(dir: &tempfile::TempDir) -> Files {
+        Files {
+            dir: dir.path().join("oxdm").join("ui"),
+        }
+    }
+
     /// The file is replaced whole, and the scratch copy never survives
     /// the save that made it.
     #[test]
     fn a_save_replaces_the_file_and_leaves_nothing_behind() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("oxdm").join("ui-prefs.json");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, b"{ truncated").unwrap();
+        let f = files(&dir);
+        std::fs::create_dir_all(&f.dir).unwrap();
+        std::fs::write(f.dir.join("queues.json"), b"{ truncated").unwrap();
 
-        update_at(&path, |prefs| {
-            prefs.custom_window_chrome = Some(true);
-            true
-        });
+        let size = WindowPrefs {
+            width: 800.0,
+            height: 600.0,
+        };
+        f.save_window(WindowSlot::Queues, size);
 
-        let back: UiPrefs = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(back.custom_window_chrome, Some(true));
-        let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+        assert_eq!(f.window(WindowSlot::Queues), Some(size));
+        let leftovers: Vec<_> = std::fs::read_dir(&f.dir)
             .unwrap()
             .filter_map(|e| e.ok().map(|e| e.file_name()))
             .filter(|n| n.to_string_lossy().ends_with(".tmp"))
@@ -333,46 +391,12 @@ mod tests {
         assert!(leftovers.is_empty(), "left {leftovers:?}");
     }
 
-    /// Two windows saving different things at once both land: the
-    /// lock serialises the read-change-write, so neither carries the
-    /// other's stale copy over its change.
-    #[test]
-    fn saves_from_two_windows_do_not_drop_each_other() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ui-prefs.json");
-        let size = WindowPrefs {
-            width: 800.0,
-            height: 600.0,
-        };
-        let workers: Vec<_> = (0..8)
-            .map(|i| {
-                let path = path.clone();
-                std::thread::spawn(move || {
-                    for _ in 0..25 {
-                        update_at(&path, |prefs| {
-                            match i % 2 {
-                                0 => *prefs.window_for_mut(WindowSlot::Queues) = Some(size),
-                                _ => prefs.sidebar = Some(SidebarPref::All),
-                            }
-                            true
-                        });
-                    }
-                })
-            })
-            .collect();
-        for w in workers {
-            w.join().unwrap();
-        }
-        let back = load_at(&path);
-        assert_eq!(back.window_for(WindowSlot::Queues), Some(size));
-        assert_eq!(back.sidebar, Some(SidebarPref::All));
-    }
-
-    /// Each window's size lives in its own slot, and the main window's
-    /// keeps the field it always had.
+    /// Each window writes its own file, so one saving never touches
+    /// what another saved.
     #[test]
     fn every_window_keeps_its_own_size() {
-        let mut prefs = UiPrefs::default();
+        let dir = tempfile::tempdir().unwrap();
+        let f = files(&dir);
         let big = WindowPrefs {
             width: 1000.0,
             height: 700.0,
@@ -381,21 +405,53 @@ mod tests {
             width: 700.0,
             height: 500.0,
         };
-        *prefs.window_for_mut(WindowSlot::Queues) = Some(big);
-        *prefs.window_for_mut(WindowSlot::Settings) = Some(small);
-        assert_eq!(prefs.window_for(WindowSlot::Main), None);
-        assert_eq!(prefs.window_for(WindowSlot::Queues), Some(big));
-        assert_eq!(prefs.window_for(WindowSlot::Settings), Some(small));
+        f.save_window(WindowSlot::Queues, big);
+        f.save_window(WindowSlot::Settings, small);
+        f.save_sidebar_for_test(SidebarPref::All);
+        assert_eq!(f.window(WindowSlot::Main), None);
+        assert_eq!(f.window(WindowSlot::Queues), Some(big));
+        assert_eq!(f.window(WindowSlot::Settings), Some(small));
+        assert_eq!(f.main().sidebar, Some(SidebarPref::All));
+    }
 
-        let old: UiPrefs =
-            serde_json::from_str(r#"{"window":{"width":900.0,"height":600.0}}"#).unwrap();
-        assert_eq!(
-            old.window_for(WindowSlot::Main),
-            Some(WindowPrefs {
-                width: 900.0,
-                height: 600.0
-            })
-        );
-        assert_eq!(old.window_for(WindowSlot::Queues), None);
+    /// A file from before the split still restores the main window and
+    /// the chrome flag, and the first save carries it over rather than
+    /// starting from nothing.
+    #[test]
+    fn the_old_single_file_is_read_until_a_window_saves() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = files(&dir);
+        std::fs::create_dir_all(f.dir.parent().unwrap()).unwrap();
+        std::fs::write(
+            f.dir.parent().unwrap().join(LEGACY_FILE),
+            r#"{"window":{"width":900.0,"height":600.0},"custom_window_chrome":true,
+                "sidebar":{"view":"all"}}"#,
+        )
+        .unwrap();
+        let old_size = WindowPrefs {
+            width: 900.0,
+            height: 600.0,
+        };
+        assert_eq!(f.window(WindowSlot::Main), Some(old_size));
+        assert_eq!(f.window(WindowSlot::Queues), None);
+        assert_eq!(f.custom_window_chrome(), Some(true));
+
+        f.update_main(|p| {
+            p.columns = Some(ColumnsState::default());
+            true
+        });
+        let back = f.main();
+        assert_eq!(back.window, Some(old_size), "seeded from the old file");
+        assert_eq!(back.sidebar, Some(SidebarPref::All));
+        assert!(back.columns.is_some());
+    }
+
+    impl Files {
+        fn save_sidebar_for_test(&self, s: SidebarPref) {
+            self.update_main(|p| {
+                p.sidebar = Some(s);
+                true
+            });
+        }
     }
 }
