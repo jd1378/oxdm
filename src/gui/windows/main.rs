@@ -267,11 +267,10 @@ pub enum Msg {
     /// arrives before the old row's exit. An id-less exit would clear
     /// the highlight that had just been set.
     RowUnhovered(JobId),
-    /// The debounce for resize generation `n` elapsed.
+    /// The quiet period after resize generation `n` elapsed.
     ResizeSettled(u64),
-    /// Resize settled: `(width, height, maximized)`. Only a
-    /// non-maximized size is worth remembering.
-    WindowSizeSettled(f32, f32, bool),
+    /// Whether the window is maximized, asked once a resize settled.
+    ResizeMaximized(bool),
     SectionHovered(u8),
     SectionUnhovered(u8),
     // Pulse clock for the queue live-dot (gated on !reduce_motion)
@@ -499,12 +498,7 @@ pub struct Main {
     /// must not follow the moving mouse.
     pub menu_anchor: (f32, f32),
     pub win_size: (f32, f32),
-    /// Bumped on every resize event; a settle callback only persists if
-    /// it still owns the latest generation. Throttling instead of
-    /// debouncing dropped the *final* size of any drag shorter than the
-    /// throttle window, so the app remembered a mid-drag size — or, for
-    /// a quick drag, the size it started from.
-    pub resize_gen: u64,
+    pub size_memo: crate::gui::window_size::SizeMemo,
     pub columns: crate::gui::ui_prefs::ColumnsState,
     /// Active header drag: (column, cursor x at start, width at start).
     pub col_drag: Option<(SortColumn, f32, f32)>,
@@ -619,7 +613,9 @@ impl Main {
             cursor: (0.0, 0.0),
             menu_anchor: (0.0, 0.0),
             win_size: (0.0, 0.0),
-            resize_gen: 0,
+            size_memo: crate::gui::window_size::SizeMemo::new(
+                crate::gui::ui_prefs::WindowSlot::Main,
+            ),
             columns: prefs.columns.unwrap_or_default(),
             col_drag: None,
             col_move: None,
@@ -1498,13 +1494,8 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             m.menu_anchor = m.cursor;
             Task::none()
         }
-        Msg::WindowSizeSettled(w, h, maximized) => {
-            if !maximized {
-                crate::gui::ui_prefs::save_window(crate::gui::ui_prefs::WindowPrefs {
-                    width: w,
-                    height: h,
-                });
-            }
+        Msg::ResizeMaximized(maximized) => {
+            m.size_memo.save(maximized);
             Task::none()
         }
         Msg::ColToggle(col) => {
@@ -1514,31 +1505,12 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
         }
         Msg::WindowResized(w, h) => {
             m.win_size = (w, h);
-            m.resize_gen = m.resize_gen.wrapping_add(1);
-            let generation = m.resize_gen;
-            let clamp =
-                chrome::enforce_min_size(iced::Size::new(w, h), iced::Size::new(820.0, 520.0));
-            let settle = Task::perform(
-                async move {
-                    tokio::time::sleep(std::time::Duration::from_millis(RESIZE_SETTLE_MS)).await;
-                },
-                move |()| Msg::ResizeSettled(generation),
-            );
-            Task::batch([clamp, settle])
+            Task::batch([
+                chrome::enforce_min_size(iced::Size::new(w, h), WIN_MIN),
+                m.size_memo.resized(w, h, Msg::ResizeSettled),
+            ])
         }
-        Msg::ResizeSettled(generation) => {
-            if generation != m.resize_gen {
-                return Task::none(); // a later resize superseded this one
-            }
-            let (w, h) = m.win_size;
-            // Ask the window whether this is its maximized size before
-            // persisting: `launch_main` restores whatever is saved, so
-            // storing a maximized geometry makes every later launch open
-            // filling the screen.
-            iced::window::latest()
-                .and_then(iced::window::is_maximized)
-                .map(move |maximized| Msg::WindowSizeSettled(w, h, maximized))
-        }
+        Msg::ResizeSettled(generation) => m.size_memo.settled(generation, Msg::ResizeMaximized),
         Msg::RemoveAs(kind) => {
             close_context_menu(m);
             request_remove(m, kind)
@@ -2859,10 +2831,7 @@ const SEC_CHEV_W: f32 = 14.0;
 const SEC_HEAD_SIZE: f32 = 10.0;
 const SEC_HEAD_TRACKING: f32 = SEC_HEAD_SIZE * 0.1;
 
-/// Quiet period after the last resize event before the size is
-/// persisted — long enough to cover a drag, short enough to survive a
-/// close right afterwards.
-const RESIZE_SETTLE_MS: u64 = 400;
+const WIN_MIN: iced::Size = iced::Size::new(820.0, 520.0);
 
 fn section_header<'a>(
     t: &Tokens,
@@ -4975,17 +4944,18 @@ fn columns_menu_overlay<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, 
 // ---------------------------------------------------------------- launch
 
 pub fn launch_main() {
-    let saved = crate::gui::ui_prefs::load().window;
-    let size = saved
-        .map(|w| iced::Size::new(w.width.max(820.0), w.height.max(520.0)))
-        .unwrap_or(iced::Size::new(1240.0, 760.0));
+    let size = crate::gui::window_size::SizeMemo::launch_size(
+        crate::gui::ui_prefs::WindowSlot::Main,
+        iced::Size::new(1240.0, 760.0),
+        WIN_MIN,
+    );
     let mut app = iced::application(boot, update, view)
         .title(|_: &App| "oxdm".to_owned())
         .theme(theme_of)
         .subscription(subscription)
         .default_font(theme::BODY)
         .antialiasing(true)
-        .window(chrome::window_settings(size, iced::Size::new(820.0, 520.0)));
+        .window(chrome::window_settings(size, WIN_MIN));
     for f in theme::fonts::ALL {
         app = app.font(*f);
     }

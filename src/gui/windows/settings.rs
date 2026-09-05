@@ -247,6 +247,10 @@ pub enum Msg {
     StrandedDiscarded(Result<u64, String>),
     Cancel,
     WinResized(f32, f32),
+    /// The quiet period after resize generation `n` elapsed.
+    ResizeSettled(u64),
+    /// Whether the window is maximized, asked once a resize settled.
+    ResizeMaximized(bool),
     ShotTick,
     Shot(iced::window::Screenshot),
     Themed(Box<Tokens>),
@@ -331,6 +335,7 @@ pub struct State {
     /// shown, blanks included until the user fills or removes them.
     custom_headers: Vec<(String, String)>,
     shot: Option<Shot>,
+    size_memo: crate::gui::window_size::SizeMemo,
     /// The pairing code was just copied — the button says so with a
     /// check for a moment.
     pair_copied: bool,
@@ -742,6 +747,9 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 confirm_delete_cat,
                 custom_headers: Vec::new(),
                 shot: Shot::from_env(),
+                size_memo: crate::gui::window_size::SizeMemo::new(
+                    crate::gui::ui_prefs::WindowSlot::Settings,
+                ),
                 dirty: 0,
                 client,
             };
@@ -1352,8 +1360,14 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
             Task::none()
         }
         Msg::Cancel => iced::exit(),
-        Msg::WinResized(w, h) => {
-            chrome::enforce_min_size(iced::Size::new(w, h), iced::Size::new(640.0, 558.0))
+        Msg::WinResized(w, h) => Task::batch([
+            chrome::enforce_min_size(iced::Size::new(w, h), WIN_MIN),
+            st.size_memo.resized(w, h, Msg::ResizeSettled),
+        ]),
+        Msg::ResizeSettled(generation) => st.size_memo.settled(generation, Msg::ResizeMaximized),
+        Msg::ResizeMaximized(maximized) => {
+            st.size_memo.save(maximized);
+            Task::none()
         }
         Msg::ShotTick => {
             if let Some(shot) = &mut st.shot
@@ -3366,6 +3380,9 @@ fn reset_overlay<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a, Msg> 
     .into()
 }
 
+/// Design `.dialog-settings` floor.
+const WIN_MIN: iced::Size = iced::Size::new(640.0, 558.0);
+
 pub fn launch_settings() {
     let mut app = iced::application(boot, update, view)
         .title(|_: &App| "oxdm - Settings".to_owned())
@@ -3380,8 +3397,12 @@ pub fn launch_settings() {
             // Design `.dialog-settings` = 920×640; min stays 640×558 so
             // 920 only sets the default size and never risks clipping the
             // resizable window.
-            iced::Size::new(920.0, 660.0),
-            iced::Size::new(640.0, 558.0),
+            crate::gui::window_size::SizeMemo::launch_size(
+                crate::gui::ui_prefs::WindowSlot::Settings,
+                iced::Size::new(920.0, 660.0),
+                WIN_MIN,
+            ),
+            WIN_MIN,
         ));
     for f in theme::fonts::ALL {
         app = app.font(*f);

@@ -76,6 +76,7 @@ const NAME_FONT_SIZE: f32 = 16.0;
 /// first resize event arrives.
 const WIN_DEFAULT_W: f32 = 820.0;
 const WIN_DEFAULT_H: f32 = 620.0;
+const WIN_MIN: iced::Size = iced::Size::new(640.0, 518.0);
 
 /// Preset queue swatches (design `queue-dialog.jsx` `QUEUE_COLORS`).
 /// Persisted `Queue.color` *data* values, not theme styling tokens:
@@ -451,6 +452,10 @@ pub enum Msg {
     Saved(Result<(), String>),
     Cancel,
     WinResized(f32, f32),
+    /// The quiet period after resize generation `n` elapsed.
+    ResizeSettled(u64),
+    /// Whether the window is maximized, asked once a resize settled.
+    ResizeMaximized(bool),
     ShotTick,
     Shot(iced::window::Screenshot),
     Themed(Box<Tokens>),
@@ -547,6 +552,7 @@ pub struct State {
     color_hex: String,
     color_open: bool,
     win_size: (f32, f32),
+    size_memo: crate::gui::window_size::SizeMemo,
 
     /// Every job the daemon knows about; the pending-order table reads
     /// the selected queue's share of it.
@@ -1099,6 +1105,9 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 color_hex: String::new(),
                 color_open: false,
                 win_size: (0.0, 0.0),
+                size_memo: crate::gui::window_size::SizeMemo::new(
+                    crate::gui::ui_prefs::WindowSlot::Queues,
+                ),
                 jobs,
                 sel_job: None,
                 drag_job: None,
@@ -1636,7 +1645,15 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
         Msg::Cancel => iced::exit(),
         Msg::WinResized(w, h) => {
             st.win_size = (w, h);
-            chrome::enforce_min_size(iced::Size::new(w, h), iced::Size::new(640.0, 518.0))
+            Task::batch([
+                chrome::enforce_min_size(iced::Size::new(w, h), WIN_MIN),
+                st.size_memo.resized(w, h, Msg::ResizeSettled),
+            ])
+        }
+        Msg::ResizeSettled(generation) => st.size_memo.settled(generation, Msg::ResizeMaximized),
+        Msg::ResizeMaximized(maximized) => {
+            st.size_memo.save(maximized);
+            Task::none()
         }
         Msg::ShotTick => {
             if let Some(shot) = &mut st.shot
@@ -3427,8 +3444,12 @@ pub fn launch_queues() {
         .default_font(theme::BODY)
         .antialiasing(true)
         .window(chrome::window_settings(
-            iced::Size::new(WIN_DEFAULT_W, WIN_DEFAULT_H),
-            iced::Size::new(640.0, 518.0),
+            crate::gui::window_size::SizeMemo::launch_size(
+                crate::gui::ui_prefs::WindowSlot::Queues,
+                iced::Size::new(WIN_DEFAULT_W, WIN_DEFAULT_H),
+                WIN_MIN,
+            ),
+            WIN_MIN,
         ));
     for f in theme::fonts::ALL {
         app = app.font(*f);

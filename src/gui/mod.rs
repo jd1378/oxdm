@@ -17,4 +17,5 @@ pub mod shot;
 pub mod theme;
 pub mod ui_prefs;
 pub mod widget;
+pub mod window_size;
 pub mod windows;
