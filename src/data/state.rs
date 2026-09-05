@@ -3645,22 +3645,23 @@ impl AppState {
     /// change to the cache-folder setting cannot strand or re-fetch
     /// them. Best effort: failing to persist it only means the job
     /// falls back to the live setting, which is where it just wrote.
-    async fn record_work_root(&self, id: JobId, root: &std::path::Path) {
+    /// Returns the entry now in the map: the record rebuilds it, and a
+    /// caller holding the previous `Arc` is holding an orphan.
+    async fn record_work_root(&self, id: JobId, root: &std::path::Path) -> Option<Arc<JobEntry>> {
         let mut jobs = self.jobs.write().await;
-        let Some(old) = jobs.get(&id).cloned() else {
-            return;
-        };
+        let old = jobs.get(&id).cloned()?;
         if old.job.work_root.is_some() {
-            return;
+            return Some(old);
         }
         let mut job = old.job.clone();
         job.work_root = Some(root.to_path_buf());
         let entry = clone_entry_with_job(&old, job.clone()).await;
-        jobs.insert(id, entry);
+        jobs.insert(id, entry.clone());
         drop(jobs);
         if let Err(e) = self.store.upsert_job(&job).await {
             tracing::warn!(id = %id, error = %e, "could not record the cache folder");
         }
+        Some(entry)
     }
 
     /// Downloads whose partly-fetched data sits under a cache folder
@@ -3941,8 +3942,20 @@ impl AppState {
             return Ok(());
         }
         entry.deferred_by_cap.store(false, Ordering::Release);
+        // The phase goes with the claim, under the same locks. Every
+        // cap is counted by phase, and the setup below awaits a
+        // settings read, a directory create and a database write
+        // before the runner reports anything. Set only after those, the
+        // job sat at Queued while running, and a queue with room for
+        // one saw no room taken: the filler started the next download,
+        // then the next, and the whole list was going at once.
+        entry.set_phase(Phase::Evaluating);
         drop(jobs);
         drop(_admission);
+        let _ = self.events.send(DomainEvent::JobUpdated {
+            id,
+            phase: Phase::Evaluating,
+        });
         // Fresh cancel token per run. The previous run's token may be
         // already cancelled (pause trips it); installing a new one lets
         // resume actually run instead of returning Cancelled instantly.
@@ -3981,14 +3994,25 @@ impl AppState {
             // parts relative to wherever the daemon happens to be
             // running, and the free-space check has nothing to measure.
             entry.running.store(false, Ordering::Release);
+            entry.set_phase(Phase::Queued);
+            let _ = self.events.send(DomainEvent::JobUpdated {
+                id,
+                phase: Phase::Queued,
+            });
             return Err(JobError::Io(format!(
                 "cannot use the cache folder {}: {e}",
                 work_root.display()
             )));
         }
-        if entry.job.work_root.is_none() {
-            self.record_work_root(id, &work_root).await;
-        }
+        // Recording the folder rebuilds the entry, so from here on the
+        // one in the map is the one to write to: the resolver installed
+        // below has to be found by the conflict answer, which looks the
+        // job up by id.
+        let entry = if entry.job.work_root.is_none() {
+            self.record_work_root(id, &work_root).await.unwrap_or(entry)
+        } else {
+            entry
+        };
         let per_job_dir = Some(per_job_dir(&work_root, id));
         let interactive = dialog_open_for(self, id).await;
         // No window to ask in means the download stops and waits. It
@@ -4121,11 +4145,6 @@ impl AppState {
         let job_clone = entry.job.clone();
         let queue_id = entry.job.queue_id;
         let state = Arc::clone(self);
-        entry.set_phase(Phase::Evaluating);
-        let _ = self.events.send(DomainEvent::JobUpdated {
-            id,
-            phase: Phase::Evaluating,
-        });
         // Join the queue's run, never replace it. `insert` here
         // overwrote the tally on every start — which threw away the
         // completed/failed counts the finish notification reports, and
@@ -6816,6 +6835,29 @@ mod tests {
         assert_eq!(admit(false, false, true), Admission::Defer);
         assert_eq!(admit(false, true, true), Admission::Start, "pressing play");
         assert_eq!(admit(false, false, false), Admission::Start);
+    }
+
+    /// The cap is counted by phase, and a job's first run rebuilds its
+    /// entry (to record the cache folder) before the runner reports
+    /// one. The phase set at the claim has to survive that rebuild, or
+    /// a queue allowing one saw no slot taken and started every
+    /// download it had.
+    #[tokio::test]
+    async fn a_claimed_job_still_fills_its_slot_after_a_rebuild() {
+        let queue = crate::domain::QueueId::new();
+        let mut entry = entry_in(Phase::Queued);
+        entry.job.queue_id = queue;
+        let entry = Arc::new(entry);
+        assert!(!entry.running.swap(true, Ordering::AcqRel));
+        entry.set_phase(Phase::Evaluating);
+
+        let mut job = entry.job.clone();
+        job.work_root = Some(std::path::PathBuf::from("/tmp/cache"));
+        let rebuilt = clone_entry_with_job(&entry, job).await;
+        let mut jobs: IndexMap<JobId, Arc<JobEntry>> = IndexMap::new();
+        jobs.insert(rebuilt.job.id, rebuilt);
+
+        assert!(slots_full(&jobs, 5, queue, Some(1)));
     }
 
     /// The global limit is shared: a queue allowing ten still runs one
