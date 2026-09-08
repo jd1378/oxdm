@@ -2220,6 +2220,34 @@ impl AppState {
         app_chose_it.then_some(wanted)
     }
 
+    /// The category and folder a job is created with.
+    ///
+    /// A caller that names a category has already chosen a folder to go
+    /// with it, so both stand as given (a category deleted while the
+    /// Add dialog was open lands in the catch-all, which is where its
+    /// files were headed, not refused). A caller that leaves the
+    /// category to the daemon gets the folder that goes with the
+    /// answer under the same rule every later classification follows:
+    /// the batch window sends every row to the catch-all folder, and
+    /// without this its `.mp4` rows were labelled Videos but saved
+    /// where the Add dialog would never have put them.
+    fn route_at_creation(
+        settings: &Settings,
+        category: Option<Category>,
+        filename: Option<&str>,
+        save_dir: PathBuf,
+    ) -> (Category, PathBuf) {
+        match category {
+            Some(c) if !settings.category_deleted(c) => (c, save_dir),
+            Some(_) => (Category::Other, save_dir),
+            None => {
+                let c = classify(filename.unwrap_or(""), settings);
+                let dir = Self::retarget_dir(settings, &save_dir, c).unwrap_or(save_dir);
+                (c, dir)
+            }
+        }
+    }
+
     /// Record the name a run resolved for a job that was added without
     /// one, and classify it now that there is something to classify.
     ///
@@ -3137,19 +3165,9 @@ impl AppState {
         // did not gets the answer filled in behind it.
         let named = filename.as_deref().is_some_and(|n| !n.trim().is_empty());
         let probe_was_empty = probe.size.is_none() && probe.checksums.is_empty();
-        // Detect the category once at creation when the caller did not
-        // supply an explicit choice. `classify` falls back to
-        // `Category::Other` when nothing matches.
-        let category = {
+        let (category, save_dir) = {
             let settings = self.settings.read().await.clone();
-            match category {
-                // A category deleted while the Add dialog was open is
-                // no reason to refuse the download: it lands in the
-                // catch-all, which is where its files were headed.
-                Some(c) if !settings.category_deleted(c) => c,
-                Some(_) => Category::Other,
-                None => classify(filename.as_deref().unwrap_or(""), &settings),
-            }
+            Self::route_at_creation(&settings, category, filename.as_deref(), save_dir)
         };
         let sealed = self.seal_creds(id, creds).await?;
         let enc_cookies = self
@@ -6186,6 +6204,63 @@ impl ResumeContext for StateResumeContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn settings_under(base: &str) -> Settings {
+        Settings {
+            category_folders: crate::domain::settings::default_category_folders(
+                std::path::Path::new(base),
+            ),
+            ..Settings::default()
+        }
+    }
+
+    /// The batch window sends every row to the catch-all folder and
+    /// leaves the category to the daemon. The folder has to follow the
+    /// answer, or the Add dialog and the batch window file the same
+    /// link in two different places.
+    #[test]
+    fn creation_routes_a_daemon_classified_job_to_its_category_folder() {
+        let s = settings_under("/dl");
+        let (cat, dir) =
+            AppState::route_at_creation(&s, None, Some("clip.mp4"), PathBuf::from("/dl"));
+        assert_eq!(cat, Category::Videos);
+        assert_eq!(dir, s.category_folder(Category::Videos));
+    }
+
+    /// A folder the user picked outranks the classification, the same
+    /// as it does when a probe or a run classifies later.
+    #[test]
+    fn creation_leaves_a_user_chosen_folder_alone() {
+        let s = settings_under("/dl");
+        let (cat, dir) =
+            AppState::route_at_creation(&s, None, Some("clip.mp4"), PathBuf::from("/mnt/keep"));
+        assert_eq!(cat, Category::Videos);
+        assert_eq!(dir, PathBuf::from("/mnt/keep"));
+    }
+
+    /// Nothing to classify yet: the job waits in the catch-all for the
+    /// probe or the run to name it, exactly as before.
+    #[test]
+    fn creation_without_a_name_stays_in_the_catch_all() {
+        let s = settings_under("/dl");
+        let (cat, dir) = AppState::route_at_creation(&s, None, None, PathBuf::from("/dl"));
+        assert_eq!(cat, Category::Other);
+        assert_eq!(dir, PathBuf::from("/dl"));
+    }
+
+    /// An explicit category came with an explicit folder; both stand.
+    #[test]
+    fn creation_keeps_an_explicit_category_and_its_folder() {
+        let s = settings_under("/dl");
+        let (cat, dir) = AppState::route_at_creation(
+            &s,
+            Some(Category::Music),
+            Some("clip.mp4"),
+            PathBuf::from("/dl"),
+        );
+        assert_eq!(cat, Category::Music);
+        assert_eq!(dir, PathBuf::from("/dl"));
+    }
 
     fn entry_in(phase: Phase) -> JobEntry {
         let mut job = Job {
