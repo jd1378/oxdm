@@ -667,7 +667,11 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
                 cookies,
                 category,
                 queue,
-                crate::data::state::ProbeFacts { size, checksums },
+                crate::data::state::ProbeFacts {
+                    size,
+                    checksums,
+                    run_follows: false,
+                },
             )
             .await
         {

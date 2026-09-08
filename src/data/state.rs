@@ -1567,6 +1567,7 @@ impl AppState {
                 ProbeFacts {
                     size: None,
                     checksums: vec![feed_checksum(&info.sha256)],
+                    run_follows: false,
                 },
             )
             .await?;
@@ -3164,7 +3165,8 @@ impl AppState {
         // caller that probed says so by passing what it found; one that
         // did not gets the answer filled in behind it.
         let named = filename.as_deref().is_some_and(|n| !n.trim().is_empty());
-        let probe_was_empty = probe.size.is_none() && probe.checksums.is_empty();
+        let probe_was_empty =
+            probe.size.is_none() && probe.checksums.is_empty() && !probe.run_follows;
         let (category, save_dir) = {
             let settings = self.settings.read().await.clone();
             Self::route_at_creation(&settings, category, filename.as_deref(), save_dir)
@@ -3533,7 +3535,9 @@ impl AppState {
     }
 
     /// Convenience for IPC: build a Job from a `CaptureRequest` and add it.
-    /// Does not auto-start; caller (UI) decides per `interactive` flag.
+    /// Does not start it, but the caller must, and promptly: the job is
+    /// added without a name and without a background probe, on the
+    /// understanding that the run supplies both.
     pub async fn add_from_capture(
         self: &Arc<Self>,
         req: CaptureRequest,
@@ -3556,22 +3560,29 @@ impl AppState {
         // it in at request time. Two copies would show up as two rows
         // in Properties and drift the moment one is edited.
         let cookies = req.cookies.clone().or(captured_cookie);
-        // A capture has nobody to ask, so a name the table already
-        // holds is numbered by `add_job` rather than refused.
-        let filename = req.filename;
+        // The extension's name is a suggestion (`docs/EXTENSION_API.md`:
+        // the server's name overrides it). Stored as the job's name it
+        // would be forced on the run and never revisited, so a link
+        // captured by its text — "Download", "here" — kept that as its
+        // file name and sat in Other while the same link through the
+        // Add dialog, which asks the server, was filed as a video. The
+        // run names the job instead, the way it does for an Add dialog
+        // submitted before its probe answered, and classifies it then.
+        // The suggestion still routes the folder and the queue below:
+        // a wrong guess is put right when the name arrives
+        // (`apply_resolved_filename`), and a folder the app chose moves
+        // with it.
+        let suggested = req.filename.as_deref().unwrap_or("");
         // Per-category routing (feature #10) applies only on this
         // non-interactive path (guardian F5) — the Add dialog prefills
         // client-side instead, so an explicit user choice always wins.
-        // Known caveat: classification here uses the captured filename;
-        // a later FilenameResolved may land in a different category —
-        // no re-routing this pass.
-        let category = classify(filename.as_deref().unwrap_or(""), &settings);
+        let category = classify(suggested, &settings);
         let save_dir = settings.category_folder(category);
         let id = self
             .add_job(
                 req.url,
                 save_dir,
-                filename,
+                None,
                 req.referrer,
                 headers,
                 None,
@@ -3586,9 +3597,13 @@ impl AppState {
                 // queue was deleted since the mapping was saved) falls
                 // back to Main inside `add_job`.
                 settings.category_queues.get(&category).copied(),
-                // A capture carries no probe of its own; the run
-                // reports the size.
-                ProbeFacts::default(),
+                // A capture carries no probe of its own, and needs
+                // none: `accept_capture` starts the job at once, and
+                // the run reports the name and the size.
+                ProbeFacts {
+                    run_follows: true,
+                    ..ProbeFacts::default()
+                },
             )
             .await?;
         Ok(id)
@@ -5113,6 +5128,11 @@ pub struct ProbeResult {
 pub struct ProbeFacts {
     pub size: Option<u64>,
     pub checksums: Vec<crate::domain::Checksum>,
+    /// The caller starts the job the moment it is added, so the run is
+    /// what names it. A background probe would be a second request to
+    /// the same link, racing the first, and a one-shot link does not
+    /// survive that.
+    pub run_follows: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]

@@ -592,6 +592,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 // choices — category routing must never move them (F5).
                 st.save_dirty = true;
                 st.queue_dirty = true;
+                st.category_dirty = true;
                 st.url = job.url.to_string();
                 st.referrer = job.referrer.clone();
                 st.queue = job.queue_id;
@@ -835,9 +836,17 @@ fn update_ready(st: &mut AddState, msg: Msg) -> Task<Msg> {
                 // field points at and put the real name in it.
                 let dir = st.destination().dir;
                 st.save_path = dir.join(st.free_name(&p.filename)).display().to_string();
-                if st.category.is_none() {
-                    st.category = Some(crate::domain::classify(&p.filename, &st.settings));
-                    classified = true;
+                // The URL's last segment was only a guess at the name
+                // — `get.php` in front of a `movie.mkv` the server
+                // sends — and the guess put the job in Other. Only a
+                // category the user picked outranks what the probe
+                // found.
+                if !st.category_dirty {
+                    let found = Some(crate::domain::classify(&p.filename, &st.settings));
+                    if st.category != found {
+                        st.category = found;
+                        classified = true;
+                    }
                 }
             }
             st.probed = Some(res);
