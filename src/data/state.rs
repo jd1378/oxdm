@@ -2263,7 +2263,7 @@ impl AppState {
         &self,
         id: JobId,
         filename: String,
-    ) -> Option<std::path::PathBuf> {
+    ) -> Option<crate::data::runner::ResolvedName> {
         // odl took this from the server's `Content-Disposition` or the
         // URL; it is a suggestion, not a path.
         let name = crate::domain::filename::sanitize(&filename)?;
@@ -2303,10 +2303,13 @@ impl AppState {
         }
         let _ = self.events.send(DomainEvent::JobFilenameResolved {
             id,
-            filename: stored_name,
+            filename: stored_name.clone(),
         });
         let _ = self.events.send(DomainEvent::JobUpdated { id, phase });
-        moved_to
+        Some(crate::data::runner::ResolvedName {
+            filename: stored_name,
+            moved_to,
+        })
     }
 
     /// Replace only the source URL + destination (save_dir + filename) of
@@ -5978,7 +5981,7 @@ impl LiveBridge for StateLiveBridge {
         &self,
         id: JobId,
         filename: String,
-    ) -> Option<std::path::PathBuf> {
+    ) -> Option<crate::data::runner::ResolvedName> {
         let state = self.state.upgrade()?;
         state.apply_resolved_filename(id, filename).await
     }

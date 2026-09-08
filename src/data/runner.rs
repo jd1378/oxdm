@@ -163,6 +163,16 @@ pub struct JobRunner {
 /// Sink the runner uses to push hot per-byte progress to `LiveCounters`.
 /// Defined as a trait so `state.rs` (which owns the counters) is the
 /// only file that knows their layout.
+/// What the daemon recorded when a run resolved a job's name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedName {
+    /// The job's name from here on: the resolved one, numbered if
+    /// another job already had it.
+    pub filename: String,
+    /// The folder classifying the name moved the job to, if it did.
+    pub moved_to: Option<std::path::PathBuf>,
+}
+
 #[async_trait::async_trait]
 pub trait LiveBridge: Send + Sync + 'static {
     fn on_event(&self, id: JobId, event: &OdlProgressEvent);
@@ -189,14 +199,13 @@ pub trait LiveBridge: Send + Sync + 'static {
     /// the name odl derived from `Content-Disposition` or the URL.
     /// Awaited: every window reads `Job::filename`, and the name has to
     /// be there before the download it belongs to starts.
-    /// Returns a folder to save into when classifying the resolved
-    /// name moved the job — the destination is still a decision at this
+    /// Returns what the job was named — numbered, if the list already
+    /// held the name — and a folder to save into when classifying it
+    /// moved the job; the destination is still a decision at this
     /// point, since the file is assembled from the work dir at the end.
-    async fn on_filename_resolved(
-        &self,
-        id: JobId,
-        filename: String,
-    ) -> Option<std::path::PathBuf> {
+    /// `None` when nothing was recorded, and the engine's own name
+    /// stands.
+    async fn on_filename_resolved(&self, id: JobId, filename: String) -> Option<ResolvedName> {
         let _ = (id, filename);
         None
     }
@@ -328,19 +337,29 @@ impl JobRunner {
             // on the job before the first byte lands — a row that
             // renames itself halfway through a download reads as a
             // different download.
-            if let Some(dir) = self
+            if let Some(resolved) = self
                 .bridge
                 .on_filename_resolved(self.job_id, instruction.filename().to_owned())
                 .await
             {
-                // Only into a name nothing else holds. odl resolved
-                // conflicts against the folder it was given, and a
-                // retarget it never saw could land on top of a file
-                // already there — the folder change is the improvement,
-                // overwriting is not.
-                let target = dir.join(instruction.filename());
-                if !tokio::fs::try_exists(&target).await.unwrap_or(true) {
-                    instruction.set_save_dir(dir);
+                // The name the list settled on, not the engine's: two
+                // downloads of `setup.exe` into one folder are numbered
+                // apart in the list precisely so the second cannot
+                // assemble over the first, and the engine only checks
+                // the disk for a clash when the run begins — a file the
+                // other download has not written yet is not there to
+                // find.
+                instruction.set_filename(resolved.filename.clone());
+                if let Some(dir) = resolved.moved_to {
+                    // Only into a name nothing else holds. odl resolves
+                    // conflicts against the folder it is given, and a
+                    // retarget it never saw could land on top of a file
+                    // already there — the folder change is the
+                    // improvement, overwriting is not.
+                    let target = dir.join(&resolved.filename);
+                    if !tokio::fs::try_exists(&target).await.unwrap_or(true) {
+                        instruction.set_save_dir(dir);
+                    }
                 }
             }
         }
@@ -880,6 +899,9 @@ mod tests {
     struct RecordingBridge {
         captured: std::sync::Mutex<Option<crate::domain::CapturedResponse>>,
         server_checksums: std::sync::Mutex<Vec<Checksum>>,
+        /// What the daemon would answer when the run resolves a name:
+        /// the list's numbered version of it.
+        renamed_to: Option<String>,
     }
     #[async_trait::async_trait]
     impl LiveBridge for RecordingBridge {
@@ -889,6 +911,16 @@ mod tests {
         }
         async fn on_server_checksums(&self, _id: JobId, checksums: Vec<Checksum>) {
             *self.server_checksums.lock().unwrap() = checksums;
+        }
+        async fn on_filename_resolved(
+            &self,
+            _id: JobId,
+            _filename: String,
+        ) -> Option<ResolvedName> {
+            self.renamed_to.clone().map(|filename| ResolvedName {
+                filename,
+                moved_to: None,
+            })
         }
     }
 
@@ -1174,6 +1206,29 @@ mod tests {
             hits.load(std::sync::atomic::Ordering::Relaxed) > before,
             "the resumed run served out the old delay instead of asking again",
         );
+    }
+
+    /// A job added without a name is named by its run, and the list
+    /// numbers that name when another job already holds it. The engine
+    /// has to write under the numbered name: it checks the disk for a
+    /// clash only when the run begins, and the other job's file is not
+    /// there yet — it would have been overwritten at assembly.
+    #[tokio::test]
+    async fn an_unnamed_job_is_written_under_the_name_the_list_gave_it() {
+        let url = spawn_http_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut job = test_job(&url, dir.path().join("save"), GOOD_SHA256);
+        job.filename = None;
+        let bridge = Arc::new(RecordingBridge {
+            renamed_to: Some("file_1.bin".into()),
+            ..RecordingBridge::default()
+        });
+        let outcome = run_job_with(job, &dir.path().join("work"), bridge)
+            .await
+            .expect("download should complete");
+        let path = outcome.final_path.expect("final path");
+        assert_eq!(path.file_name().unwrap(), "file_1.bin");
+        assert_eq!(std::fs::read(path).unwrap(), BODY);
     }
 
     #[tokio::test]
