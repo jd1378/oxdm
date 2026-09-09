@@ -154,7 +154,11 @@ fn inspect(manifest: &Path, expected: &Path) -> State {
     };
     let claimed = PathBuf::from(raw);
     // Canonicalize both sides so symlinks / `..` / trailing slashes
-    // cannot make a real mismatch look identical or vice-versa.
+    // cannot make a real mismatch look identical or vice-versa, and
+    // strip the `\\?\` Windows resolution adds from both, so which
+    // spelling the caller arrived with does not decide the answer.
+    let expected = crate::platform::without_verbatim_prefix(expected);
+    let expected = expected.as_path();
     let Ok(claimed_real) =
         std::fs::canonicalize(&claimed).map(|p| crate::platform::without_verbatim_prefix(&p))
     else {
@@ -262,6 +266,7 @@ mod tests {
     /// only if it runs the host we expect — otherwise every sandboxed
     /// browser would report a mismatch on every startup.
     #[test]
+    #[cfg(unix)]
     fn our_flatpak_wrapper_counts_as_ours() {
         let dir = tempfile::tempdir().unwrap();
         let host = dir.path().join("oxdm-native-host");
