@@ -97,7 +97,7 @@ pub fn install(rt: Handle, state: Arc<AppState>) {
 }
 
 fn run_owner(rt: Handle, state: Arc<AppState>, jobs_rx: mpsc::Receiver<Vec<Job>>) {
-    let icon = crate::gui::app_icon::tray_icon_normal(crate::gui::theme::system_theme());
+    let icon = crate::gui::app_icon::tray_icon_normal(crate::gui::theme::shell_theme());
     let menu = Menu::new();
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
@@ -124,7 +124,7 @@ fn run_owner(rt: Handle, state: Arc<AppState>, jobs_rx: mpsc::Receiver<Vec<Job>>
     rebuild_menu(&tray, &mut actions, &mut dyn_map, &shape);
     let mut icon_state = IconState {
         downloading: false,
-        theme: crate::gui::theme::system_theme(),
+        theme: crate::gui::theme::shell_theme(),
     };
     apply_icon(&tray, icon_state);
 
@@ -156,7 +156,7 @@ fn run_owner(rt: Handle, state: Arc<AppState>, jobs_rx: mpsc::Receiver<Vec<Job>>
             downloading: last_jobs
                 .iter()
                 .any(|j| j.status.phase == Phase::Downloading),
-            theme: crate::gui::theme::system_theme(),
+            theme: crate::gui::theme::shell_theme(),
         };
         if next_icon != icon_state {
             icon_state = next_icon;

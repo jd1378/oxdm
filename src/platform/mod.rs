@@ -144,11 +144,9 @@ fn shell_reveal(path: &std::path::Path) -> Result<(), String> {
     let full = path
         .canonicalize()
         .map_err(|e| format!("resolve {}: {e}", path.display()))?;
-    // `canonicalize` hands back a `\\?\` extended-length path, which
-    // the shell namespace does not parse.
-    let display = full.to_string_lossy();
-    let plain = display.strip_prefix(r"\\?\").unwrap_or(&display);
-    let wide: Vec<u16> = std::ffi::OsStr::new(plain)
+    let plain = without_verbatim_prefix(&full);
+    let wide: Vec<u16> = plain
+        .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
@@ -166,7 +164,7 @@ fn shell_reveal(path: &std::path::Path) -> Result<(), String> {
             0,
             None,
         )
-        .map_err(|e| format!("parse {plain}: {e}"))?;
+        .map_err(|e| format!("parse {}: {e}", plain.display()))?;
         let opened = SHOpenFolderAndSelectItems(pidl, None, 0);
         CoTaskMemFree(Some(pidl as *const std::ffi::c_void));
         opened.map_err(|e| e.to_string())
@@ -446,6 +444,44 @@ pub fn install_desktop_entry() -> Result<DesktopEntry, String> {
 #[allow(dead_code)]
 pub fn install_desktop_entry() -> Result<DesktopEntry, String> {
     Err("a desktop entry is a Linux thing".into())
+}
+
+/// `path` without the `\\?\` that `canonicalize` puts on every
+/// Windows path.
+///
+/// The prefix is the extended-length form, and it is only understood
+/// where a path goes straight to the NT file API. The shell namespace
+/// does not parse it, and a browser handed one in a native-messaging
+/// manifest is launching a program by a name it may not resolve. A
+/// drive path comes back as `C:\…`, a UNC one as `\\server\share\…`;
+/// anything else, on any other platform, is returned as it came.
+pub fn without_verbatim_prefix(path: &std::path::Path) -> std::path::PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        use std::path::{Component, Prefix};
+        let mut parts = path.components();
+        let Some(Component::Prefix(prefix)) = parts.next() else {
+            return path.to_path_buf();
+        };
+        let root = match prefix.kind() {
+            Prefix::VerbatimDisk(d) => format!("{}:\\", d as char),
+            Prefix::VerbatimUNC(server, share) => format!(
+                "\\\\{}\\{}\\",
+                server.to_string_lossy(),
+                share.to_string_lossy()
+            ),
+            _ => return path.to_path_buf(),
+        };
+        let mut out = std::path::PathBuf::from(root);
+        for part in parts {
+            if let Component::Normal(p) = part {
+                out.push(p);
+            }
+        }
+        return out;
+    }
+    #[cfg(not(target_os = "windows"))]
+    path.to_path_buf()
 }
 
 /// The path an autostart entry, launcher or Run key should name.
@@ -983,5 +1019,35 @@ mod tests {
             false,
         )
         .unwrap();
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod verbatim_tests {
+    use super::without_verbatim_prefix;
+    use std::path::Path;
+
+    #[test]
+    fn a_drive_path_loses_its_prefix() {
+        assert_eq!(
+            without_verbatim_prefix(Path::new(r"\\?\C:\Users\x\oxdm-native-host.exe")),
+            Path::new(r"C:\Users\x\oxdm-native-host.exe")
+        );
+    }
+
+    #[test]
+    fn a_unc_path_keeps_server_and_share() {
+        assert_eq!(
+            without_verbatim_prefix(Path::new(r"\\?\UNC\srv\share\dir\a.exe")),
+            Path::new(r"\\srv\share\dir\a.exe")
+        );
+    }
+
+    #[test]
+    fn a_plain_path_is_returned_as_it_came() {
+        assert_eq!(
+            without_verbatim_prefix(Path::new(r"C:\a\b.exe")),
+            Path::new(r"C:\a\b.exe")
+        );
     }
 }

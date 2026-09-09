@@ -228,12 +228,44 @@ pub fn ksni_icon_downloading(theme: ResolvedTheme) -> Vec<ksni::Icon> {
 
 #[cfg(not(target_os = "linux"))]
 pub fn tray_icon_normal(theme: ResolvedTheme) -> Option<tray_icon::Icon> {
-    let d = normal(theme)?;
-    tray_icon::Icon::from_rgba(d.rgba.clone(), d.width, d.height).ok()
+    tray_icon_from(normal(theme)?)
 }
 
 #[cfg(not(target_os = "linux"))]
 pub fn tray_icon_downloading(theme: ResolvedTheme) -> Option<tray_icon::Icon> {
-    let d = downloading(theme)?;
+    tray_icon_from(downloading(theme)?)
+}
+
+/// One `tray_icon::Icon` from `d`, at the size the tray will draw it.
+///
+/// macOS gets the full picture: the menu bar scales with a real
+/// filter. The Windows shell does not. Handed a 512px `HICON` for a
+/// 16px slot it drops all but one source row in 32, and a glyph made
+/// of thin strokes comes out as a broken bracket. So on Windows the
+/// picture is brought down to the slot's size here, with Lanczos,
+/// before the shell ever sees it.
+#[cfg(not(target_os = "linux"))]
+fn tray_icon_from(d: &Decoded) -> Option<tray_icon::Icon> {
+    #[cfg(target_os = "windows")]
+    {
+        let px = windows_tray_px();
+        if d.width != px || d.height != px {
+            let src = image::RgbaImage::from_raw(d.width, d.height, d.rgba.clone())?;
+            let scaled =
+                image::imageops::resize(&src, px, px, image::imageops::FilterType::Lanczos3);
+            return tray_icon::Icon::from_rgba(scaled.into_raw(), px, px).ok();
+        }
+    }
     tray_icon::Icon::from_rgba(d.rgba.clone(), d.width, d.height).ok()
+}
+
+/// The edge of a notification-area icon: `SM_CXSMICON`, which the
+/// system already scales for the display's DPI (16 at 100%, 20 at
+/// 125%, 24 at 150%). 16 if the metric cannot be read.
+#[cfg(target_os = "windows")]
+fn windows_tray_px() -> u32 {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSMICON};
+    // SAFETY: a pure query with no pointers.
+    let px = unsafe { GetSystemMetrics(SM_CXSMICON) };
+    u32::try_from(px).ok().filter(|&p| p > 0).unwrap_or(16)
 }

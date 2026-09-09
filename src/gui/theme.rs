@@ -34,6 +34,7 @@ pub fn resolve(theme: Theme) -> ResolvedTheme {
 }
 
 static SYSTEM_THEME: AtomicU8 = AtomicU8::new(u8::MAX);
+static SHELL_THEME: AtomicU8 = AtomicU8::new(u8::MAX);
 type Listener = Box<dyn Fn(ResolvedTheme) + Send + Sync>;
 static LISTENERS: OnceLock<Mutex<Vec<Listener>>> = OnceLock::new();
 static POLL_STARTED: OnceLock<()> = OnceLock::new();
@@ -57,6 +58,59 @@ fn detect_once() -> ResolvedTheme {
     }
 }
 
+/// The theme of the taskbar and system tray, as opposed to the one
+/// applications are asked to use.
+///
+/// Windows keeps these as two settings. Windows 10 ships with a dark
+/// taskbar and light apps, and `AppsUseLightTheme` (what
+/// [`detect_once`] reads) then says "light" while the tray is black; a
+/// dark glyph chosen on that answer is invisible. Windows 11 defaults
+/// both the same way, which is why the tray looked right there. Every
+/// other platform has one preference, and this is it.
+fn detect_shell_once() -> ResolvedTheme {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(light) = windows_system_uses_light_theme() {
+            return if light {
+                ResolvedTheme::Light
+            } else {
+                ResolvedTheme::Dark
+            };
+        }
+    }
+    detect_once()
+}
+
+/// `HKCU\…\Themes\Personalize\SystemUsesLightTheme`. `None` when the
+/// value is absent: older builds without the split had a dark
+/// taskbar, and the caller's fallback is the app preference, which is
+/// as good a guess as any there.
+#[cfg(target_os = "windows")]
+fn windows_system_uses_light_theme() -> Option<bool> {
+    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+    let subkey = wide(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+    let name = wide("SystemUsesLightTheme");
+    let mut value: u32 = 0;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    // SAFETY: both strings are NUL-terminated and outlive the call;
+    // `value` is a u32 and `size` says so.
+    let rc = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            subkey.as_ptr(),
+            name.as_ptr(),
+            RRF_RT_REG_DWORD,
+            std::ptr::null_mut(),
+            (&mut value as *mut u32).cast(),
+            &mut size,
+        )
+    };
+    (rc == 0).then_some(value != 0)
+}
+
 fn theme_from_u8(v: u8) -> ResolvedTheme {
     if v == ResolvedTheme::Light as u8 {
         ResolvedTheme::Light
@@ -71,12 +125,14 @@ fn ensure_poller() {
     POLL_STARTED.get_or_init(|| {
         let init = detect_once();
         SYSTEM_THEME.store(init as u8, Ordering::Relaxed);
+        SHELL_THEME.store(detect_shell_once() as u8, Ordering::Relaxed);
         let _ = std::thread::Builder::new()
             .name("oxdm-theme-poll".into())
             .spawn(|| {
                 loop {
                     std::thread::sleep(Duration::from_secs(2));
                     let cur = detect_once();
+                    SHELL_THEME.store(detect_shell_once() as u8, Ordering::Relaxed);
                     let prev = theme_from_u8(SYSTEM_THEME.swap(cur as u8, Ordering::Relaxed));
                     if prev != cur
                         && let Some(lock) = LISTENERS.get()
@@ -98,6 +154,21 @@ pub fn system_theme() -> ResolvedTheme {
     if v == u8::MAX {
         let cur = detect_once();
         SYSTEM_THEME.store(cur as u8, Ordering::Relaxed);
+        cur
+    } else {
+        theme_from_u8(v)
+    }
+}
+
+/// The theme behind the system tray: what a tray glyph has to contrast
+/// with. See [`detect_shell_once`] for why this is not [`system_theme`].
+/// Polled with it; cheap.
+pub fn shell_theme() -> ResolvedTheme {
+    ensure_poller();
+    let v = SHELL_THEME.load(Ordering::Relaxed);
+    if v == u8::MAX {
+        let cur = detect_shell_once();
+        SHELL_THEME.store(cur as u8, Ordering::Relaxed);
         cur
     } else {
         theme_from_u8(v)

@@ -112,7 +112,11 @@ fn host_binary_beside(exe: &Path) -> Result<PathBuf, String> {
             dir.display()
         ));
     }
+    // Resolved so a symlinked install names the real file, and then
+    // stripped of the `\\?\` Windows resolution adds: the browser is
+    // going to run this path, and it has to be one it recognises.
     std::fs::canonicalize(&beside)
+        .map(|p| crate::platform::without_verbatim_prefix(&p))
         .map_err(|e| format!("{name} is in {} but cannot be read: {e}", dir.display()))
 }
 
@@ -294,7 +298,9 @@ fn absolute_existing(p: &Path) -> Result<PathBuf, String> {
     if !p.is_absolute() {
         return Err(format!("{} must be an absolute path", p.display()));
     }
-    std::fs::canonicalize(p).map_err(|e| format!("{}: {e}", p.display()))
+    std::fs::canonicalize(p)
+        .map(|p| crate::platform::without_verbatim_prefix(&p))
+        .map_err(|e| format!("{}: {e}", p.display()))
 }
 
 /// The shim that hands the token to the host on fd 3.

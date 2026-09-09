@@ -155,7 +155,9 @@ fn inspect(manifest: &Path, expected: &Path) -> State {
     let claimed = PathBuf::from(raw);
     // Canonicalize both sides so symlinks / `..` / trailing slashes
     // cannot make a real mismatch look identical or vice-versa.
-    let Ok(claimed_real) = std::fs::canonicalize(&claimed) else {
+    let Ok(claimed_real) =
+        std::fs::canonicalize(&claimed).map(|p| crate::platform::without_verbatim_prefix(&p))
+    else {
         // A path that does not resolve cannot be launched, so this is
         // a broken registration rather than a hostile one — but it is
         // still not ours, and the user is told either way.
