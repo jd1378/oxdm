@@ -39,19 +39,13 @@ type Listener = Box<dyn Fn(ResolvedTheme) + Send + Sync>;
 static LISTENERS: OnceLock<Mutex<Vec<Listener>>> = OnceLock::new();
 static POLL_STARTED: OnceLock<()> = OnceLock::new();
 
+/// Blocking, and on Linux a D-Bus round trip to the XDG portal with no
+/// deadline of its own. Only [`ensure_poller`]'s thread may call it:
+/// `zbus`'s blocking API resolves to tokio's `block_on` here (ksni
+/// turns on `zbus/tokio`), which panics on a thread that is currently
+/// driving async tasks: a runtime worker, or the body of a `block_on`.
 fn detect_once() -> ResolvedTheme {
-    let detected = if tokio::runtime::Handle::try_current().is_ok() {
-        dark_light::detect()
-    } else {
-        match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => rt.block_on(async { dark_light::detect() }),
-            Err(_) => return ResolvedTheme::Dark,
-        }
-    };
-    match detected {
+    match dark_light::detect() {
         Ok(dark_light::Mode::Light) => ResolvedTheme::Light,
         Ok(dark_light::Mode::Dark) => ResolvedTheme::Dark,
         _ => ResolvedTheme::Dark,
@@ -67,7 +61,7 @@ fn detect_once() -> ResolvedTheme {
 /// dark glyph chosen on that answer is invisible. Windows 11 defaults
 /// both the same way, which is why the tray looked right there. Every
 /// other platform has one preference, and this is it.
-fn detect_shell_once() -> ResolvedTheme {
+fn detect_shell_once(system: ResolvedTheme) -> ResolvedTheme {
     #[cfg(target_os = "windows")]
     {
         if let Some(light) = windows_system_uses_light_theme() {
@@ -78,7 +72,7 @@ fn detect_shell_once() -> ResolvedTheme {
             };
         }
     }
-    detect_once()
+    system
 }
 
 /// `HKCU\…\Themes\Personalize\SystemUsesLightTheme`. `None` when the
@@ -121,22 +115,40 @@ fn theme_from_u8(v: u8) -> ResolvedTheme {
     }
 }
 
+const POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+/// How long the first reader waits for the poll thread's opening
+/// answer. Detection is a portal round trip that is quick when the
+/// portal is up and open-ended when it is not, so the wait is capped:
+/// past it the reader paints dark and picks the real answer up on its
+/// next read.
+const FIRST_DETECT_BUDGET: Duration = Duration::from_millis(150);
+
+/// One detection round. Stores both themes and hands back the OS
+/// preference so the caller can diff it.
+fn sample() -> ResolvedTheme {
+    let system = detect_once();
+    SYSTEM_THEME.store(system as u8, Ordering::Relaxed);
+    SHELL_THEME.store(detect_shell_once(system) as u8, Ordering::Relaxed);
+    system
+}
+
 fn ensure_poller() {
     POLL_STARTED.get_or_init(|| {
-        let init = detect_once();
-        SYSTEM_THEME.store(init as u8, Ordering::Relaxed);
-        SHELL_THEME.store(detect_shell_once() as u8, Ordering::Relaxed);
-        let _ = std::thread::Builder::new()
+        let (first, ready) = std::sync::mpsc::sync_channel(1);
+        let spawned = std::thread::Builder::new()
             .name("oxdm-theme-poll".into())
-            .spawn(|| {
+            .spawn(move || {
+                let mut prev = sample();
+                let _ = first.send(());
                 loop {
-                    std::thread::sleep(Duration::from_secs(2));
-                    let cur = detect_once();
-                    SHELL_THEME.store(detect_shell_once() as u8, Ordering::Relaxed);
-                    let prev = theme_from_u8(SYSTEM_THEME.swap(cur as u8, Ordering::Relaxed));
-                    if prev != cur
-                        && let Some(lock) = LISTENERS.get()
-                    {
+                    std::thread::sleep(POLL_INTERVAL);
+                    let cur = sample();
+                    if prev == cur {
+                        continue;
+                    }
+                    prev = cur;
+                    if let Some(lock) = LISTENERS.get() {
                         let listeners = lock.lock().unwrap();
                         for f in listeners.iter() {
                             f(cur);
@@ -144,20 +156,16 @@ fn ensure_poller() {
                     }
                 }
             });
+        if spawned.is_ok() {
+            let _ = ready.recv_timeout(FIRST_DETECT_BUDGET);
+        }
     });
 }
 
 /// Current OS-level light/dark preference. Polled in background; cheap.
 pub fn system_theme() -> ResolvedTheme {
     ensure_poller();
-    let v = SYSTEM_THEME.load(Ordering::Relaxed);
-    if v == u8::MAX {
-        let cur = detect_once();
-        SYSTEM_THEME.store(cur as u8, Ordering::Relaxed);
-        cur
-    } else {
-        theme_from_u8(v)
-    }
+    theme_from_u8(SYSTEM_THEME.load(Ordering::Relaxed))
 }
 
 /// The theme behind the system tray: what a tray glyph has to contrast
@@ -165,18 +173,13 @@ pub fn system_theme() -> ResolvedTheme {
 /// Polled with it; cheap.
 pub fn shell_theme() -> ResolvedTheme {
     ensure_poller();
-    let v = SHELL_THEME.load(Ordering::Relaxed);
-    if v == u8::MAX {
-        let cur = detect_shell_once();
-        SHELL_THEME.store(cur as u8, Ordering::Relaxed);
-        cur
-    } else {
-        theme_from_u8(v)
-    }
+    theme_from_u8(SHELL_THEME.load(Ordering::Relaxed))
 }
 
-/// Register a callback fired on a background thread when the OS-level
-/// light/dark preference changes.
+/// Register a callback fired when the OS-level light/dark preference
+/// changes. It runs on the poller's own thread, which is outside any
+/// tokio runtime: a callback that needs one must carry its own
+/// [`tokio::runtime::Handle`].
 pub fn on_system_theme_change<F>(cb: F)
 where
     F: Fn(ResolvedTheme) + Send + Sync + 'static,
