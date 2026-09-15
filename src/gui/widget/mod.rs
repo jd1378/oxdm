@@ -11,6 +11,8 @@ pub mod ellipsis;
 pub mod error_panel;
 pub mod inputs;
 pub mod integrity;
+#[cfg(test)]
+pub mod layout_probe;
 pub mod pill_clip;
 pub mod pills;
 pub mod popup;
@@ -29,7 +31,7 @@ pub use controls::{
     toggle, toggle_row,
 };
 pub use dashed::{dashed_frame, dashed_rule};
-pub use ellipsis::{ellipsized, ellipsized_lines};
+pub use ellipsis::{ellipsized, ellipsized_lines, name_block};
 pub use inputs::{FileInput, PasswordInput, TextInput, search_field};
 pub use pills::{
     Mark, ProgressTone, TRACKING_EM, chip, dot, eyebrow, field_label, inline_progress, pill_count,

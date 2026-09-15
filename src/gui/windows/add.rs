@@ -1561,23 +1561,22 @@ fn detect_card(st: &AddState) -> Element<'_, Msg> {
     // panel replaces it in `ready_view`), so only detected / probing /
     // empty remain.
     let text_col: Element<'_, Msg> = match (detected, st.probing) {
-        (Some(p), _) => column![
-            text(p.filename.clone())
-                .font(theme::BODY_BOLD)
-                .size(14.0)
-                .color(t.fg_1),
-            text(
+        (Some(p), _) => crate::gui::widget::name_block(
+            p.filename.clone(),
+            theme::BODY_BOLD,
+            14.0,
+            t.fg_1,
+            2.0,
+            crate::gui::widget::ellipsized(
                 url::Url::parse(st.url.trim())
                     .ok()
                     .and_then(|u| u.host_str().map(str::to_owned))
-                    .unwrap_or_default()
-            )
-            .font(theme::MONO)
-            .size(11.0)
-            .color(t.fg_3),
-        ]
-        .spacing(2.0)
-        .into(),
+                    .unwrap_or_default(),
+                theme::MONO,
+                11.0,
+                t.fg_3,
+            ),
+        ),
         (None, true) => column![
             text("Detecting file information…")
                 .font(theme::BODY_BOLD)
@@ -1589,6 +1588,7 @@ fn detect_card(st: &AddState) -> Element<'_, Msg> {
                 .color(t.fg_3),
         ]
         .spacing(2.0)
+        .width(Length::Fill)
         .into(),
         (None, false) => column![
             text("Paste a URL link")
@@ -1601,6 +1601,7 @@ fn detect_card(st: &AddState) -> Element<'_, Msg> {
                 .color(t.fg_3),
         ]
         .spacing(2.0)
+        .width(Length::Fill)
         .into(),
     };
 
@@ -1637,14 +1638,9 @@ fn detect_card(st: &AddState) -> Element<'_, Msg> {
     // URL, and the outline goes solid with it.
     let waiting = detected.is_none() && !st.probing;
     let card = container(
-        row![
-            tile,
-            text_col,
-            iced::widget::Space::new().width(Length::Fill),
-            size_col
-        ]
-        .spacing(theme::space::S3)
-        .align_y(Alignment::Center),
+        row![tile, text_col, size_col]
+            .spacing(theme::space::S3)
+            .align_y(Alignment::Center),
     )
     .width(Length::Fill)
     .padding(theme::space::S3)

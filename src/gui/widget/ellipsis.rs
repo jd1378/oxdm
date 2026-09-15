@@ -61,6 +61,30 @@ pub fn ellipsized_lines<'a, M: 'a>(
     })
 }
 
+/// A title over a subtitle, taking the width the rest of its row
+/// leaves and ellipsising the title inside it.
+///
+/// Every file card in the app is `tile + this + a number` (the size,
+/// the percentage, a status chip). The number is the fact the card
+/// exists to show, and a filename is long enough to cost it: a `Shrink`
+/// column claims the whole row for the name, which leaves the number
+/// nothing to lay out in and wraps `1.9 GB` onto two lines. So the
+/// name column is the one that gives way, and it gives way by
+/// truncating rather than by wrapping onto a second line.
+pub fn name_block<'a, M: 'a>(
+    name: impl Into<String>,
+    font: Font,
+    size: f32,
+    color: Color,
+    gap: f32,
+    sub: Element<'a, M>,
+) -> Element<'a, M> {
+    iced::widget::column![ellipsized(name, font, size, color), sub]
+        .spacing(gap)
+        .width(Length::Fill)
+        .into()
+}
+
 struct Ellipsized {
     content: String,
     font: Font,
@@ -251,6 +275,59 @@ where
             origin,
             self.color,
             bounds.intersection(viewport).unwrap_or(bounds),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::name_block;
+    use crate::gui::theme;
+    use crate::gui::widget::layout_probe::measure;
+    use iced::advanced::layout::Node;
+    use iced::widget::{row, text};
+    use iced::{Color, Size};
+
+    /// The Add dialog's detected-file card put a `Shrink` name column
+    /// next to the size, and a long filename took the whole row: the
+    /// size column was laid out in what was left (nothing) and "1.9 GB"
+    /// broke onto two lines. Same shape in every file card, so the rule
+    /// is tested on the block they all share.
+    #[test]
+    fn a_long_name_does_not_squeeze_the_number_beside_it() {
+        const W: f32 = 320.0;
+        const GAP: f32 = 12.0;
+        let card = |name: String| {
+            row![
+                name_block(
+                    name,
+                    theme::BODY_BOLD,
+                    14.0,
+                    Color::BLACK,
+                    2.0,
+                    text("dl8.example.test").font(theme::MONO).size(11.0).into(),
+                ),
+                text("1.9 GB").font(theme::MONO).size(13.0),
+            ]
+            .spacing(GAP)
+        };
+        let child = |n: &Node, i: usize| n.children()[i].size();
+
+        let short = measure::<()>(card("clip.mkv".to_owned()), Size::new(W, 200.0));
+        let long = measure::<()>(
+            card("a.file.name.far.longer.than.the.card.is.wide.".repeat(5)),
+            Size::new(W, 200.0),
+        );
+
+        assert_eq!(child(&long, 1), child(&short, 1), "size column");
+        // The name truncates rather than wrapping, so the block is the
+        // same two lines tall either way…
+        assert_eq!(child(&long, 0).height, child(&short, 0).height, "block");
+        // …and the row still fits the width it was given.
+        assert!(
+            child(&long, 0).width + GAP + child(&long, 1).width <= W + 0.5,
+            "{:?}",
+            long.children()
         );
     }
 }
