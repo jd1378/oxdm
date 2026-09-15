@@ -49,9 +49,12 @@ pub fn install(rt: Handle, state: Arc<AppState>) {
     // OS theme follow-on: when the system light/dark preference flips,
     // notify the ksni tray so it re-emits its pixmap.
     let cell_theme = cell.clone();
+    let rt_theme = rt.clone();
+    // The callback runs on the theme poller's own thread, which is not
+    // inside the runtime, so `tokio::spawn` would panic there.
     crate::gui::theme::on_system_theme_change(move |theme| {
         let cell_theme = cell_theme.clone();
-        tokio::spawn(async move {
+        rt_theme.spawn(async move {
             if let Some(h) = cell_theme.get() {
                 let _ = h
                     .update(move |t: &mut OxdmTray| {
