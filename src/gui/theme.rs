@@ -37,19 +37,25 @@ static SYSTEM_THEME: AtomicU8 = AtomicU8::new(u8::MAX);
 static SHELL_THEME: AtomicU8 = AtomicU8::new(u8::MAX);
 type Listener = Box<dyn Fn(ResolvedTheme) + Send + Sync>;
 static LISTENERS: OnceLock<Mutex<Vec<Listener>>> = OnceLock::new();
-static POLL_STARTED: OnceLock<()> = OnceLock::new();
+static WATCH_STARTED: OnceLock<()> = OnceLock::new();
 
-/// Blocking, and on Linux a D-Bus round trip to the XDG portal with no
-/// deadline of its own. Only [`ensure_poller`]'s thread may call it:
-/// `zbus`'s blocking API resolves to tokio's `block_on` here (ksni
-/// turns on `zbus/tokio`), which panics on a thread that is currently
-/// driving async tasks: a runtime worker, or the body of a `block_on`.
-fn detect_once() -> ResolvedTheme {
-    match dark_light::detect() {
-        Ok(dark_light::Mode::Light) => ResolvedTheme::Light,
-        Ok(dark_light::Mode::Dark) => ResolvedTheme::Dark,
+/// `Unspecified` and every failure land on dark: the palette has no
+/// third answer, and dark is the one the design ships as default.
+fn theme_from_mode(mode: dark_light::Mode) -> ResolvedTheme {
+    match mode {
+        dark_light::Mode::Light => ResolvedTheme::Light,
         _ => ResolvedTheme::Dark,
     }
+}
+
+/// Blocking, and on Linux a D-Bus round trip to the XDG portal with no
+/// deadline of its own. Only [`ensure_watcher`]'s thread may call this
+/// or [`dark_light::subscribe`]: `zbus`'s blocking API resolves to
+/// tokio's `block_on` here (ksni turns on `zbus/tokio`), which panics
+/// on a thread that is currently driving async tasks, meaning a
+/// runtime worker or the body of a `block_on`.
+fn detect_once() -> ResolvedTheme {
+    dark_light::detect().map_or(ResolvedTheme::Dark, theme_from_mode)
 }
 
 /// The theme of the taskbar and system tray, as opposed to the one
@@ -115,46 +121,75 @@ fn theme_from_u8(v: u8) -> ResolvedTheme {
     }
 }
 
+/// Only the platforms that cannot push changes fall back to this.
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
-/// How long the first reader waits for the poll thread's opening
+/// How long the first reader waits for the watcher thread's opening
 /// answer. Detection is a portal round trip that is quick when the
 /// portal is up and open-ended when it is not, so the wait is capped:
 /// past it the reader paints dark and picks the real answer up on its
 /// next read.
 const FIRST_DETECT_BUDGET: Duration = Duration::from_millis(150);
 
-/// One detection round. Stores both themes and hands back the OS
-/// preference so the caller can diff it.
-fn sample() -> ResolvedTheme {
-    let system = detect_once();
+fn store(system: ResolvedTheme) {
     SYSTEM_THEME.store(system as u8, Ordering::Relaxed);
     SHELL_THEME.store(detect_shell_once(system) as u8, Ordering::Relaxed);
-    system
 }
 
-fn ensure_poller() {
-    POLL_STARTED.get_or_init(|| {
+/// Stores `cur` and, when it differs from `prev`, tells the listeners.
+/// Returns `cur` as the new `prev`.
+fn publish(cur: ResolvedTheme, prev: ResolvedTheme) -> ResolvedTheme {
+    store(cur);
+    if cur != prev
+        && let Some(lock) = LISTENERS.get()
+    {
+        let listeners = lock.lock().unwrap();
+        for f in listeners.iter() {
+            f(cur);
+        }
+    }
+    cur
+}
+
+/// Republishes the OS preference for as long as the process lives.
+///
+/// The portal platforms push changes, so nothing is polled there. On
+/// Windows the two preferences live in the registry and there is no
+/// single notification that covers both, but reading them is a local
+/// lookup, so the timer stays. It is also the fallback when the portal
+/// declines to hand out a subscription.
+fn follow(mut prev: ResolvedTheme) -> ! {
+    #[cfg(not(target_os = "windows"))]
+    {
+        match dark_light::subscribe() {
+            Ok(watcher) => {
+                for mode in watcher.iter() {
+                    prev = publish(theme_from_mode(mode), prev);
+                }
+                tracing::debug!("system theme watcher closed; polling from here");
+            }
+            Err(e) => tracing::debug!(error = %e, "no system theme watcher; polling"),
+        }
+    }
+    loop {
+        std::thread::sleep(POLL_INTERVAL);
+        prev = publish(detect_once(), prev);
+    }
+}
+
+fn ensure_watcher() {
+    WATCH_STARTED.get_or_init(|| {
         let (first, ready) = std::sync::mpsc::sync_channel(1);
         let spawned = std::thread::Builder::new()
-            .name("oxdm-theme-poll".into())
+            .name("oxdm-theme".into())
             .spawn(move || {
-                let mut prev = sample();
+                // Seeded, not published: a listener registered while
+                // this thread was still detecting would otherwise be
+                // called for a change that never happened.
+                let seed = detect_once();
+                store(seed);
                 let _ = first.send(());
-                loop {
-                    std::thread::sleep(POLL_INTERVAL);
-                    let cur = sample();
-                    if prev == cur {
-                        continue;
-                    }
-                    prev = cur;
-                    if let Some(lock) = LISTENERS.get() {
-                        let listeners = lock.lock().unwrap();
-                        for f in listeners.iter() {
-                            f(cur);
-                        }
-                    }
-                }
+                follow(seed);
             });
         if spawned.is_ok() {
             let _ = ready.recv_timeout(FIRST_DETECT_BUDGET);
@@ -162,29 +197,29 @@ fn ensure_poller() {
     });
 }
 
-/// Current OS-level light/dark preference. Polled in background; cheap.
+/// Current OS-level light/dark preference. Tracked in background; cheap.
 pub fn system_theme() -> ResolvedTheme {
-    ensure_poller();
+    ensure_watcher();
     theme_from_u8(SYSTEM_THEME.load(Ordering::Relaxed))
 }
 
 /// The theme behind the system tray: what a tray glyph has to contrast
 /// with. See [`detect_shell_once`] for why this is not [`system_theme`].
-/// Polled with it; cheap.
+/// Tracked with it; cheap.
 pub fn shell_theme() -> ResolvedTheme {
-    ensure_poller();
+    ensure_watcher();
     theme_from_u8(SHELL_THEME.load(Ordering::Relaxed))
 }
 
 /// Register a callback fired when the OS-level light/dark preference
-/// changes. It runs on the poller's own thread, which is outside any
+/// changes. It runs on the watcher's own thread, which is outside any
 /// tokio runtime: a callback that needs one must carry its own
 /// [`tokio::runtime::Handle`].
 pub fn on_system_theme_change<F>(cb: F)
 where
     F: Fn(ResolvedTheme) + Send + Sync + 'static,
 {
-    ensure_poller();
+    ensure_watcher();
     let lock = LISTENERS.get_or_init(|| Mutex::new(Vec::new()));
     lock.lock().unwrap().push(Box::new(cb));
 }
