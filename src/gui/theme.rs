@@ -860,6 +860,43 @@ pub fn refresh_tokens<M: Send + 'static>(
     })
 }
 
+/// Pushes this process's OS-preference changes to its windows.
+///
+/// A `watch` rather than a broadcast, and carrying no value: a window
+/// that fell behind owes itself one refresh, not one per change it
+/// missed, and it re-derives the palette from the daemon anyway.
+fn changes() -> &'static tokio::sync::watch::Sender<()> {
+    static TX: OnceLock<tokio::sync::watch::Sender<()>> = OnceLock::new();
+    TX.get_or_init(|| {
+        let (tx, _) = tokio::sync::watch::channel(());
+        let out = tx.clone();
+        on_system_theme_change(move |_| {
+            out.send_replace(());
+        });
+        tx
+    })
+}
+
+/// Fires when the OS light/dark preference changes, so a window that is
+/// already open repaints instead of keeping the palette it booted with.
+///
+/// Every GUI process watches for itself, so this costs no daemon round
+/// trip. The window still has to fetch its [`Tokens`] afterwards: they
+/// depend on the `Settings` the daemon holds as well as on this.
+pub fn system_theme_changes() -> iced::Subscription<()> {
+    iced::Subscription::run(|| {
+        iced::stream::channel(1, async move |mut out| {
+            use iced::futures::SinkExt;
+            let mut rx = changes().subscribe();
+            while rx.changed().await.is_ok() {
+                if out.send(()).await.is_err() {
+                    break;
+                }
+            }
+        })
+    })
+}
+
 pub mod fonts {
     /// All bundled font binaries, registered via `application.font(..)`.
     pub static ALL: &[&[u8]] = &[

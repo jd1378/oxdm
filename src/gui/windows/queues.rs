@@ -459,6 +459,8 @@ pub enum Msg {
     ShotTick,
     Shot(iced::window::Screenshot),
     Themed(Box<Tokens>),
+    /// The OS flipped light/dark; the palette must be re-derived.
+    SystemThemeChanged,
     Discard,
     Noop,
 }
@@ -1347,6 +1349,11 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
             Event::Focus => iced::window::latest().and_then(iced::window::gain_focus),
             _ => Task::none(),
         },
+        Msg::SystemThemeChanged => crate::gui::theme::refresh_tokens(
+            st.client.clone(),
+            |t| Msg::Themed(Box::new(t)),
+            Msg::Noop,
+        ),
         Msg::Themed(t) => {
             st.tokens = *t;
             Task::none()
@@ -1708,6 +1715,7 @@ pub fn subscription(app: &App) -> Subscription<Msg> {
     if st.shot.is_some() {
         subs.push(Shot::frames().map(|_| Msg::ShotTick));
     }
+    subs.push(crate::gui::theme::system_theme_changes().map(|()| Msg::SystemThemeChanged));
     Subscription::batch(subs)
 }
 

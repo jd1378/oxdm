@@ -135,6 +135,8 @@ pub enum Msg {
     CsCopy(CopyTarget, String),
     // Settings refresh (theme + will-send headers stay current)
     SettingsRefreshed(Box<crate::domain::Settings>),
+    /// The OS flipped light/dark; the palette must be re-derived.
+    SystemThemeChanged,
     // Footer
     OpenFolder,
     CloseWin,
@@ -734,6 +736,10 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
             Event::Focus => iced::window::latest().and_then(iced::window::gain_focus),
             _ => Task::none(),
         },
+        Msg::SystemThemeChanged => {
+            st.tokens = Tokens::from_settings(&st.settings);
+            Task::none()
+        }
         Msg::SettingsRefreshed(s) => {
             st.tokens = Tokens::from_settings(&s);
             st.settings = *s;
@@ -1337,6 +1343,7 @@ pub fn subscription(app: &App) -> Subscription<Msg> {
     if st.shot.is_some() {
         subs.push(Shot::frames().map(|_| Msg::ShotTick));
     }
+    subs.push(crate::gui::theme::system_theme_changes().map(|()| Msg::SystemThemeChanged));
     Subscription::batch(subs)
 }
 

@@ -164,6 +164,8 @@ pub enum SortColumn {
 pub enum Msg {
     Connected(Result<Connection, String>),
     Snapshot(SnapshotData),
+    /// The OS flipped light/dark; the palette must be re-derived.
+    SystemThemeChanged,
     /// The daemon's answer about the filesystem watcher's health.
     WatchLimitFetched(Option<crate::domain::WatchLimit>),
     /// Raise the limit — hands the change to the system's own
@@ -1072,6 +1074,10 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
 fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
     match msg {
         Msg::Connected(_) | Msg::Window(_) => unreachable!(),
+        Msg::SystemThemeChanged => {
+            m.tokens = Tokens::from_settings(&m.snap.settings);
+            Task::none()
+        }
         Msg::Snapshot(snap) => {
             m.tokens = Tokens::from_settings(&snap.settings);
             // Covers changes that did not come from this machine's
@@ -2441,6 +2447,7 @@ pub fn subscription(app: &App) -> Subscription<Msg> {
             );
         }
     }
+    subs.push(crate::gui::theme::system_theme_changes().map(|()| Msg::SystemThemeChanged));
     Subscription::batch(subs)
 }
 
