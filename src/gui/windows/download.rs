@@ -22,9 +22,10 @@ use crate::gui::theme::{self, Tokens};
 use crate::gui::widget::error_panel::{error_block, mid_truncate};
 use crate::gui::widget::striped::striped_progress_hatched;
 use crate::gui::widget::{
-    Btn, BtnSize, RateChart, TRACKING_EM, TabBtn, TextInput, collapsible_card, combo, hairline,
-    number_stepper, pill_progress, rate_chart, segmented, set_row_flat, set_row_groups,
-    set_row_panel, set_rows, sibling, status_dot, surface, toggle, tracked_caps, vdivider,
+    Btn, BtnSize, MissingFile, RateChart, TRACKING_EM, TabBtn, TextInput, collapsible_card, combo,
+    hairline, moved_file, number_stepper, pill_progress, rate_chart, segmented, set_row_flat,
+    set_row_groups, set_row_panel, set_rows, sibling, status_dot, surface, toggle, tracked_caps,
+    vdivider,
 };
 use crate::gui::windows::add::footer;
 use crate::ipc_local::Client;
@@ -333,6 +334,9 @@ pub enum Msg {
     /// what the user just asked to look at.
     OpenAndClose,
     OpenFolderAndClose,
+    /// The moved-file notice's folder button: the file is gone, so all
+    /// that is left to show is where it was written.
+    MissingFolder,
     HashHover(Option<HashLine>),
     HashCopy(HashLine, String),
     HashCopied(HashLine),
@@ -381,6 +385,11 @@ pub struct State {
     /// Why the daemon would not start this download. Set by the button
     /// that asked; cleared by acknowledging it.
     refusal: Option<String>,
+    /// The finished file is on disk. Refreshed as the entry changes;
+    /// the completed view only offers to open what is there.
+    file_present: bool,
+    /// The file was gone when Open was pressed — the notice is up.
+    missing: Option<MissingFile>,
     /// Hash line under the pointer, and the one that was just copied —
     /// the design highlights on hover and flips the copy mark to a
     /// check for a moment (`widget::copy::COPIED_MS`).
@@ -704,6 +713,8 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 confirm_delete: false,
                 confirm_restart: false,
                 refusal: None,
+                file_present: false,
+                missing: None,
                 hash_hover: None,
                 hash_copied: None,
                 field_copied: None,
@@ -927,6 +938,10 @@ fn refresh_fields(st: &mut State) {
         &final_path(&st.entry).display().to_string(),
         PATH_TRUNCATE_CHARS,
     );
+    // Only the completed page asks, and its messages are rare — a
+    // running download's tick never pays for this stat, and `view`,
+    // which runs per frame, never does either.
+    st.file_present = shows_complete(st) && final_path(&st.entry).is_file();
 }
 
 fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
@@ -1162,7 +1177,17 @@ fn update_state(st: &mut State, msg: Msg) -> Task<Msg> {
             Task::perform(async move { client.restart_job(id).await }, |_| Msg::Noop)
         }
         Msg::OpenAndClose => {
-            crate::platform::open_path(&final_path(&st.entry));
+            // The button only takes a press while the file is there,
+            // but "there" was true when the page last updated. A file
+            // moved since then must not send the window away on a path
+            // that opens nothing.
+            let file = final_path(&st.entry);
+            if !file.is_file() {
+                st.file_present = false;
+                st.missing = Some(MissingFile::new(&file, last_known_dir(&st.entry)));
+                return Task::none();
+            }
+            crate::platform::open_path(&file);
             iced::exit()
         }
         Msg::OpenFolderAndClose => {
@@ -1192,6 +1217,7 @@ fn update_state(st: &mut State, msg: Msg) -> Task<Msg> {
             st.confirm_delete = false;
             st.confirm_restart = false;
             st.refusal = None;
+            st.missing = None;
             Task::none()
         }
         Msg::RestartAsk => {
@@ -1221,6 +1247,12 @@ fn update_state(st: &mut State, msg: Msg) -> Task<Msg> {
         }
         Msg::OpenFolder => {
             crate::platform::open_path(&st.entry.job.save_dir);
+            Task::none()
+        }
+        Msg::MissingFolder => {
+            if let Some(missing) = st.missing.take() {
+                crate::platform::open_path(&missing.dir);
+            }
             Task::none()
         }
         Msg::CloseWin => iced::exit(),
@@ -1332,6 +1364,17 @@ fn final_path(entry: &JobEntryView) -> PathBuf {
     })
 }
 
+/// The folder the file was last written to: the final path's parent,
+/// since a run that renamed around a taken name wrote somewhere other
+/// than `save_dir`. Falls back to `save_dir` when that folder is gone
+/// too, so the file manager still lands somewhere real.
+fn last_known_dir(entry: &JobEntryView) -> PathBuf {
+    match final_path(entry).parent() {
+        Some(dir) if dir.is_dir() => dir.to_path_buf(),
+        _ => entry.job.save_dir.clone(),
+    }
+}
+
 /// What the chart holds with no history behind it: the state a window
 /// opens in, and the state Reset puts it back to.
 ///
@@ -1420,7 +1463,10 @@ pub fn view(app: &App) -> Element<'_, Msg> {
             // under a different parent, and the scrollable loses its
             // state with it — the page would jump back to the top the
             // moment the confirmation opened.
-            refusal_overlay(st, restart_overlay(st, delete_overlay(st, page)))
+            missing_overlay(
+                st,
+                refusal_overlay(st, restart_overlay(st, delete_overlay(st, page))),
+            )
         }
     })
 }
@@ -2771,9 +2817,14 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
         footer(
             t,
             row![
+                // Disabled rather than dropped when the file is gone:
+                // removing it slides the folder button under a pointer
+                // already aimed at Open, and the press then lands on an
+                // action nobody chose.
                 Btn::new("Open")
                     .primary()
                     .icon("play")
+                    .enabled(st.file_present)
                     .on_press(Msg::OpenAndClose)
                     .view(t),
                 Btn::new("Open Containing Folder")
@@ -2818,6 +2869,19 @@ fn complete_view(st: &State) -> Element<'_, Msg> {
         ]
         .into(),
     )
+}
+
+/// The finished file is not where this window says it is. Nothing was
+/// opened, and the only action left is the folder it was last in.
+fn missing_overlay<'a>(st: &'a State, base: Element<'a, Msg>) -> Element<'a, Msg> {
+    let Some(missing) = st.missing.as_ref() else {
+        return stack![base].into();
+    };
+    let card = card_surface(
+        &st.tokens,
+        moved_file::card(&st.tokens, missing, Msg::MissingFolder, Msg::Escape),
+    );
+    modal_over(&st.tokens, base, card)
 }
 
 /// "This did not start, and here is why." Nothing was touched — the
@@ -2933,9 +2997,9 @@ fn confirm_card<'a>(
     cancel: Element<'a, Msg>,
     confirm: Element<'a, Msg>,
 ) -> Element<'a, Msg> {
-    let t2 = *t;
     let (icon_name, icon_color, title) = head;
-    container(
+    card_surface(
+        t,
         column![
             row![
                 icons::icon(icon_name, 20.0, icon_color),
@@ -2956,25 +3020,34 @@ fn confirm_card<'a>(
             .spacing(theme::space::S2)
             .align_y(Alignment::Center),
         ]
-        .spacing(theme::space::S3),
+        .spacing(theme::space::S3)
+        .into(),
     )
-    .width(Length::Fixed(400.0))
-    .padding(theme::space::S4)
-    .style(move |_| container::Style {
-        background: Some(t2.bg_surface.into()),
-        border: iced::Border {
-            color: t2.border_default,
-            width: 1.0,
-            radius: theme::surface::RADIUS.into(),
-        },
-        shadow: iced::Shadow {
-            color: color::with_alpha(iced::Color::BLACK, 80.0 / 255.0),
-            offset: iced::Vector::new(0.0, 4.0),
-            blur_radius: 16.0,
-        },
-        ..Default::default()
-    })
-    .into()
+}
+
+/// The surface every modal card in this window sits on: one width, one
+/// border, one shadow, so a notice and a confirmation read as the same
+/// kind of thing.
+fn card_surface<'a>(t: &Tokens, content: Element<'a, Msg>) -> Element<'a, Msg> {
+    let t2 = *t;
+    container(content)
+        .width(Length::Fixed(400.0))
+        .padding(theme::space::S4)
+        .style(move |_| container::Style {
+            background: Some(t2.bg_surface.into()),
+            border: iced::Border {
+                color: t2.border_default,
+                width: 1.0,
+                radius: theme::surface::RADIUS.into(),
+            },
+            shadow: iced::Shadow {
+                color: color::with_alpha(iced::Color::BLACK, 80.0 / 255.0),
+                offset: iced::Vector::new(0.0, 4.0),
+                blur_radius: 16.0,
+            },
+            ..Default::default()
+        })
+        .into()
 }
 
 /// Scrim + centred card over the page. The page keeps its widget state

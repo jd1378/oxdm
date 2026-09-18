@@ -13,6 +13,7 @@ pub mod inputs;
 pub mod integrity;
 #[cfg(test)]
 pub mod layout_probe;
+pub mod moved_file;
 pub mod pill_clip;
 pub mod pills;
 pub mod popup;
@@ -33,6 +34,7 @@ pub use controls::{
 pub use dashed::{dashed_frame, dashed_rule};
 pub use ellipsis::{ellipsized, ellipsized_lines, name_block};
 pub use inputs::{FileInput, PasswordInput, TextInput, search_field};
+pub use moved_file::MissingFile;
 pub use pills::{
     Mark, ProgressTone, TRACKING_EM, chip, dot, eyebrow, field_label, inline_progress, pill_count,
     pill_progress, pulse_dot, status_dot, status_mark, swatch, tracked_caps,

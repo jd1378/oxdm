@@ -10,7 +10,7 @@ use iced::{Alignment, Element, Length};
 use crate::data::ConflictKind;
 use crate::gui::format::format_bytes;
 use crate::gui::theme::{self, Tokens};
-use crate::gui::widget::{Btn, BtnSize, checkbox, vscroll};
+use crate::gui::widget::{Btn, BtnSize, checkbox, moved_file, vscroll};
 use crate::gui::{color, icons};
 
 use super::main::{Main, Msg, RemoveKind};
@@ -698,6 +698,27 @@ pub fn remove_warning<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Ms
     ]
     .spacing(theme::space::S3);
     modal(t, base, card.into(), 460.0, Some(Msg::CloseOverlay))
+}
+
+// ----------------------------------------------------- moved file
+
+/// The row's file is not where oxdm wrote it.
+///
+/// A report, not a question: the press did nothing, and there is
+/// nothing to retry, because the path is all oxdm has of the file and
+/// it is stale. The folder it was last in is a different matter, so
+/// that action stays on offer here.
+pub fn file_missing<'a>(m: &'a Main, base: Element<'a, Msg>) -> Element<'a, Msg> {
+    let Some(missing) = m.missing_file.as_ref() else {
+        return base;
+    };
+    let card = moved_file::card(
+        &m.tokens,
+        missing,
+        Msg::OpenMissingFolder,
+        Msg::CloseOverlay,
+    );
+    modal(&m.tokens, base, card, 460.0, Some(Msg::CloseOverlay))
 }
 
 // ------------------------------------------------------ browser extensions

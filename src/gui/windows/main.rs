@@ -16,8 +16,8 @@ use crate::gui::ipc::DaemonSignal;
 use crate::gui::shot::Shot;
 use crate::gui::theme::{self, Tokens};
 use crate::gui::widget::{
-    Btn, BtnSize, ProgressTone, TabBtn, col_header_sortable, hairline, inline_progress,
-    search_field, status_dot, status_mark, swatch, tracked_caps, vdivider,
+    Btn, BtnSize, MissingFile, ProgressTone, TabBtn, col_header_sortable, hairline,
+    inline_progress, search_field, status_dot, status_mark, swatch, tracked_caps, vdivider,
 };
 use crate::gui::{color, icons};
 use crate::ipc_local::Client;
@@ -195,6 +195,9 @@ pub enum Msg {
     Toolbar(ToolbarAction),
     Tool(ToolAction),
     CloseOverlay,
+    /// The moved-file notice's folder button: show where the file was
+    /// last written, since the file itself cannot be opened.
+    OpenMissingFolder,
     /// The daemon declined an action. Carries its own words for it.
     Refused(String),
     Context(ContextAction),
@@ -430,6 +433,9 @@ pub enum Overlay {
     /// broken about the downloads themselves — this says what stopped
     /// working and offers the one change that restores it.
     WatchLimit,
+    /// Open was asked for a file that is no longer where it was
+    /// written. Nothing has happened; this says why.
+    FileMissing,
 }
 
 pub enum App {
@@ -481,6 +487,8 @@ pub struct Main {
     pub remove_problems: Vec<String>,
     /// Why the daemon would not start what was asked for, in its words.
     pub refusal: Option<String>,
+    /// The file the last Open press could not find, and where it was.
+    pub missing_file: Option<MissingFile>,
     /// Downloads a confirmed restart will start over from zero.
     pub restart_ids: Vec<JobId>,
     pub db_error: Option<String>,
@@ -605,6 +613,7 @@ impl Main {
             remove: None,
             remove_problems: Vec::new(),
             refusal: None,
+            missing_file: None,
             restart_ids: Vec::new(),
             db_error: None,
             watch_limit: None,
@@ -1201,9 +1210,7 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
         Msg::RowDoubleClick(id) => {
             let client = m.client.clone();
             if m.phase(id) == Phase::Completed {
-                if let Some(job) = m.snap.jobs.iter().find(|j| j.id == id) {
-                    crate::platform::open_path(&saved_file(job));
-                }
+                open_files(m, &HashSet::from([id]));
                 Task::none()
             } else {
                 act(async move { client.open_download_window(id).await })
@@ -1336,6 +1343,12 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             m.overlay = Overlay::Refused;
             Task::none()
         }
+        Msg::OpenMissingFolder => {
+            if let Some(missing) = m.missing_file.as_ref() {
+                crate::platform::open_path(&missing.dir);
+            }
+            update_main(m, Msg::CloseOverlay)
+        }
         Msg::CloseOverlay => {
             close_context_menu(m);
             m.columns_menu = false;
@@ -1349,6 +1362,9 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             }
             if m.overlay == Overlay::Refused {
                 m.refusal = None;
+            }
+            if m.overlay == Overlay::FileMissing {
+                m.missing_file = None;
             }
             if m.overlay == Overlay::RestartConfirm {
                 m.restart_ids.clear();
@@ -2116,7 +2132,9 @@ fn handle_key(
         }
         // Nothing to confirm — the removal already happened; Enter
         // acknowledges the report the same way the Close button does.
-        Key::Named(Named::Enter) if m.overlay == Overlay::RemoveWarning => {
+        Key::Named(Named::Enter)
+            if matches!(m.overlay, Overlay::RemoveWarning | Overlay::FileMissing) =>
+        {
             update_main(m, Msg::CloseOverlay)
         }
         Key::Named(Named::Escape) => update_main(m, Msg::CloseOverlay),
@@ -2267,6 +2285,77 @@ fn saved_file(job: &crate::domain::Job) -> std::path::PathBuf {
         .unwrap_or_else(|| job.save_dir.join(job.filename.as_deref().unwrap_or("")))
 }
 
+/// The folder a download's file was last in.
+///
+/// `saved_file`'s parent, not `save_dir`: a run that renamed around a
+/// name already taken wrote somewhere else, and that is the folder
+/// worth opening. Falls back to `save_dir` when the parent is gone
+/// too, so the file manager still lands somewhere real.
+fn last_known_dir(job: &crate::domain::Job) -> std::path::PathBuf {
+    match saved_file(job).parent() {
+        Some(dir) if dir.is_dir() => dir.to_path_buf(),
+        _ => job.save_dir.clone(),
+    }
+}
+
+/// What an Open press resolves to: the files still on disk, and the
+/// first one that is not, for the notice.
+struct OpenPlan {
+    open: Vec<std::path::PathBuf>,
+    missing: Option<MissingFile>,
+}
+
+/// Split the files an Open press covers by whether they are still
+/// there. `exists` is injected so the rule is testable without a
+/// filesystem; the caller passes `Path::is_file`.
+///
+/// Only the first missing file is named. The rest are counted: a list
+/// of paths in a notice is a wall to read, and the count is what says
+/// "this was not a one-off".
+fn plan_open(
+    targets: impl IntoIterator<Item = (std::path::PathBuf, std::path::PathBuf)>,
+    exists: impl Fn(&std::path::Path) -> bool,
+) -> OpenPlan {
+    let mut plan = OpenPlan {
+        open: Vec::new(),
+        missing: None,
+    };
+    for (file, dir) in targets {
+        if exists(&file) {
+            plan.open.push(file);
+        } else if let Some(missing) = plan.missing.as_mut() {
+            missing.others += 1;
+        } else {
+            plan.missing = Some(MissingFile::new(&file, dir));
+        }
+    }
+    plan
+}
+
+/// Open what the selection points at, and raise the moved-file notice
+/// when part of it is not on disk any more.
+///
+/// Snapshot order, not selection order: the set the selection is held
+/// in has none, and the notice names one file, so which one it names
+/// must not depend on hashing.
+fn open_files(m: &mut Main, ids: &HashSet<JobId>) {
+    let targets: Vec<_> = m
+        .snap
+        .jobs
+        .iter()
+        .filter(|job| ids.contains(&job.id))
+        .map(|job| (saved_file(job), last_known_dir(job)))
+        .collect();
+    let plan = plan_open(targets, |p| p.is_file());
+    for file in &plan.open {
+        crate::platform::open_path(file);
+    }
+    if plan.missing.is_some() {
+        m.missing_file = plan.missing;
+        m.overlay = Overlay::FileMissing;
+    }
+}
+
 fn scroll_submenu(m: &mut Main, dir: i8) {
     let len = match m.submenu {
         Some(SubMenu::Category) => m.snap.settings.assignable_categories().len(),
@@ -2285,13 +2374,13 @@ fn context_action(m: &mut Main, action: ContextAction) -> Task<Msg> {
     let ids: Vec<JobId> = m.selection.iter().copied().collect();
     let client = m.client.clone();
     match action {
-        ContextAction::Open | ContextAction::OpenFolder => {
+        ContextAction::Open => {
+            open_files(m, &m.selection.clone());
+            Task::none()
+        }
+        ContextAction::OpenFolder => {
             for id in &ids {
                 if let Some(job) = m.snap.jobs.iter().find(|j| j.id == *id) {
-                    if matches!(action, ContextAction::Open) {
-                        crate::platform::open_path(&saved_file(job));
-                        continue;
-                    }
                     // Reveal, not open. This opened the folder and left
                     // the user to find the file in it, which is the one
                     // thing the menu item is for. `reveal_in_folder`
@@ -2303,12 +2392,14 @@ fn context_action(m: &mut Main, action: ContextAction) -> Task<Msg> {
                     // has not finished has a name but nothing on disk
                     // under it, and asking a file manager to select
                     // something that is not there lands the user in
-                    // whatever folder it falls back to.
+                    // whatever folder it falls back to. A file that
+                    // moved is the same case: the folder it was last
+                    // in is what there is to show.
                     let file = saved_file(job);
                     if file.is_file() {
                         crate::platform::reveal_in_folder(&file);
                     } else {
-                        crate::platform::open_path(&job.save_dir);
+                        crate::platform::open_path(&last_known_dir(job));
                     }
                 }
             }
@@ -2576,6 +2667,7 @@ fn main_view(m: &Main) -> Element<'_, Msg> {
             Overlay::RestartConfirm => main_dialogs::restart_confirm(m, base),
             Overlay::Refused => main_dialogs::refused(m, base),
             Overlay::WatchLimit => main_dialogs::watch_limit(m, base),
+            Overlay::FileMissing => main_dialogs::file_missing(m, base),
             // Nothing open, and still three layers deep. Every overlay
             // above is a `stack` of base + scrim + panel, and a
             // scrollable keeps its offset by where it sits in the widget
@@ -4975,6 +5067,53 @@ pub fn launch_main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn target(file: &str, dir: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        (file.into(), dir.into())
+    }
+
+    /// Everything still on disk opens, and nothing is reported.
+    #[test]
+    fn present_files_open_without_a_notice() {
+        let plan = plan_open([target("/d/a.zip", "/d"), target("/d/b.zip", "/d")], |_| {
+            true
+        });
+        assert_eq!(plan.open.len(), 2);
+        assert!(plan.missing.is_none());
+    }
+
+    /// A file that moved stops nothing else: the ones still there open,
+    /// and the notice carries the name and the folder it was last in.
+    #[test]
+    fn a_moved_file_is_reported_and_the_rest_still_open() {
+        let plan = plan_open(
+            [target("/d/gone.zip", "/d"), target("/d/here.zip", "/d")],
+            |p| p.ends_with("here.zip"),
+        );
+        assert_eq!(plan.open, vec![std::path::PathBuf::from("/d/here.zip")]);
+        let missing = plan.missing.expect("the moved file is reported");
+        assert_eq!(missing.name, "gone.zip");
+        assert_eq!(missing.dir, std::path::PathBuf::from("/d"));
+        assert_eq!(missing.others, 0);
+    }
+
+    /// Several gone at once name the first and count the rest, so the
+    /// notice never claims one file when the selection lost three.
+    #[test]
+    fn further_moved_files_are_counted_not_listed() {
+        let plan = plan_open(
+            [
+                target("/d/one.zip", "/d"),
+                target("/d/two.zip", "/d"),
+                target("/e/three.zip", "/e"),
+            ],
+            |_| false,
+        );
+        assert!(plan.open.is_empty());
+        let missing = plan.missing.expect("the first moved file is reported");
+        assert_eq!(missing.name, "one.zip");
+        assert_eq!(missing.others, 2);
+    }
 
     /// A press acts on a job only when the job faces the direction the
     /// press takes. This is the fold `is_pause_resume_target` applies
