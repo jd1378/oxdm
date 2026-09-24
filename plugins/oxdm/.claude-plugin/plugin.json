@@ -1,0 +1,10 @@
+{
+  "name": "oxdm",
+  "version": "1.0.0",
+  "description": "Download through the oxdm download manager: every download shows in the user's oxdm window and resumes after errors, with machine-readable NDJSON output and typed exit codes.",
+  "author": { "name": "jd1378" },
+  "homepage": "https://github.com/jd1378/oxdm",
+  "repository": "https://github.com/jd1378/oxdm",
+  "license": "AGPL-3.0",
+  "keywords": ["download", "oxdm", "download-manager", "cli", "resumable"]
+}

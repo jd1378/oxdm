@@ -33,6 +33,7 @@
 - **Resilient.** Interrupted parts resume, and failures retry on a fixed-then-exponential backoff that you can configure.
 - **Per-job settings.** Proxy, credentials, headers, cookies and checksum, with speed limits set globally or per job.
 - **Easy updates.** It tells you a release is out; you download and install it from About.
+- **Scriptable.** `oxdm add`, `oxdm wait`, `oxdm resume` and friends drive the running app from a terminal, a script or an AI agent, with JSON output and typed exit codes.
 
 ## Install
 
@@ -145,6 +146,60 @@ The host side is a stable contract (see [`docs/EXTENSION_API.md`](docs/EXTENSION
   terminal.
 
 The pairing code the extension asks for lives in *Settings → Browser*, with Copy and Regenerate buttons. It bundles the port and the auth token in one string.
+
+## Command line and AI agents
+
+The `oxdm` binary also drives the running app. Whatever a script or an AI
+agent downloads this way lands in your list, where you can watch it,
+pause it, or resume it after an error. If oxdm is not running, the
+command starts it in the tray.
+
+The first such download creates an **Agent** category (saving into
+`Agent` inside your download folder) and an **Agent** queue, so what
+your agents fetched is one click away in the sidebar, finished or not.
+Change the category's folder or queue in *Settings → Categories*. Delete
+either and it stays deleted, even through *Reset Categories*: downloads
+are then filed by type, or go to Main. `oxdm restore-agent` brings them
+back.
+
+```bash
+oxdm add https://example.com/big.iso --wait      # add, start, follow to the end
+oxdm list --state failed                         # what went wrong
+oxdm resume --failed --wait                      # pick them up where they stopped
+oxdm help                                        # every command, exit codes, JSON contract
+```
+
+Add `--format json` for machine-readable output: one JSON object per line
+on stdout, and on failure one error object on stderr with a stable exit
+code (`3` network, `4` needs a decision, `5` disk, `7` stopped by you,
+`124` timed out; the download itself carries on). Re-running the same
+`oxdm add` does not download twice: it resumes the existing download or
+reports it as already complete.
+
+### Agent skill
+
+This repo ships an [Agent Skill](plugins/oxdm/skills/oxdm/) (the open
+`SKILL.md` standard) that teaches AI agents to download through oxdm and
+to handle its exit codes.
+
+```bash
+# Interactive: asks which agent (claude/codex/...) and global vs. project
+curl -fsSL https://raw.githubusercontent.com/jd1378/oxdm/main/tools/install-skill.sh | sh
+
+# Non-interactive
+curl -fsSL https://raw.githubusercontent.com/jd1378/oxdm/main/tools/install-skill.sh | sh -s -- codex --project
+```
+
+`tools/install-skill.sh --help` covers other agents, `--dir`, and
+flattening into an `AGENTS.md`.
+
+Claude Code users can install it as a plugin instead, which keeps it
+updated:
+
+```text
+/plugin marketplace add jd1378/oxdm
+/plugin install oxdm@oxdm
+```
 
 ## Configuration
 

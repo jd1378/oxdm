@@ -1,0 +1,15 @@
+{
+  "name": "oxdm",
+  "owner": { "name": "jd1378" },
+  "description": "Plugins for the oxdm download manager.",
+  "plugins": [
+    {
+      "name": "oxdm",
+      "source": "./plugins/oxdm",
+      "description": "Teach AI agents to download through oxdm: downloads visible in the user's window, resumable after errors, NDJSON output, typed exit codes.",
+      "version": "1.0.0",
+      "category": "productivity",
+      "tags": ["download", "cli", "agent-skill"]
+    }
+  ]
+}
