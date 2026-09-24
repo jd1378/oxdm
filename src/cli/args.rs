@@ -144,9 +144,10 @@ pub struct AddArgs {
     /// Parallel connections for these downloads
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..=64))]
     pub connections: Option<u64>,
-    /// Expected checksum ALGO:HEX (md5, sha1, sha256, sha384, sha512),
-    /// checked when the download finishes; repeatable
-    #[arg(long, value_name = "ALGO:HEX")]
+    /// Expected checksum ALGO[:ENCODING]:DIGEST, checked when the file is
+    /// saved: md5, sha1, sha256, sha384 or sha512; ENCODING hex (default)
+    /// or base64. Repeatable; one URL only
+    #[arg(long, value_name = "ALGO:DIGEST")]
     pub checksum: Vec<String>,
     /// Add without starting
     #[arg(long, conflicts_with = "wait")]

@@ -154,13 +154,15 @@ fn parse_authorization(value: &str) -> Result<Option<AuthAdv>, Failure> {
     Ok(None)
 }
 
-/// `ALGO:HEX`, e.g. `sha256:9f86…`. Stored as a checksum the user
-/// supplied, checked when the download finishes.
+/// `ALGO:DIGEST` or `ALGO:ENCODING:DIGEST`, as odl takes it: e.g.
+/// `sha256:9f86…` or `sha256:base64:n4bQ…`. `ENCODING` is `hex` (the
+/// default) or `base64`. Stored as lowercase hex, the form every other
+/// checksum on a job is in, and checked when the download finishes.
 pub fn parse_checksum(spec: &str) -> Result<Checksum, Failure> {
     let bad = |why: &str| Failure::usage(format!("--checksum {spec}: {why}"));
-    let (algo, hex) = spec
+    let (algo, rest) = spec
         .split_once(':')
-        .ok_or_else(|| bad("expected ALGO:HEX"))?;
+        .ok_or_else(|| bad("expected ALGO:DIGEST"))?;
     let algo = match algo.trim().to_ascii_lowercase().replace('-', "").as_str() {
         "md5" => Algo::Md5,
         "sha1" => Algo::Sha1,
@@ -169,11 +171,25 @@ pub fn parse_checksum(spec: &str) -> Result<Checksum, Failure> {
         "sha512" => Algo::Sha512,
         _ => return Err(bad("algorithm must be md5, sha1, sha256, sha384 or sha512")),
     };
-    let hex = hex.trim().to_ascii_lowercase();
+    let (encoding, digest) = match rest.split_once(':') {
+        Some((enc, digest)) => (enc.trim().to_ascii_lowercase(), digest.trim()),
+        None => ("hex".to_owned(), rest.trim()),
+    };
+    let hex = match encoding.as_str() {
+        "hex" => digest.to_ascii_lowercase(),
+        "base64" => base64::engine::general_purpose::STANDARD
+            .decode(digest)
+            .map_err(|_| bad("not valid base64"))?
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect(),
+        _ => return Err(bad("encoding must be hex or base64")),
+    };
     if hex.len() != algo.hex_len() || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(bad(&format!(
-            "a {} digest is {} hex characters",
+            "a {} digest is {} bytes ({} hex characters)",
             algo.label(),
+            algo.hex_len() / 2,
             algo.hex_len()
         )));
     }
@@ -328,6 +344,22 @@ mod tests {
         assert_eq!(x.auth.token, "from-stdin");
     }
 
+    /// odl's base64 form: the same digest, spelled differently.
+    #[test]
+    fn a_base64_digest_is_stored_as_hex() {
+        // sha256("") in both spellings.
+        const HEX: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        const B64: &str = "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=";
+        let c = parse_checksum(&format!("sha256:base64:{B64}")).unwrap();
+        assert_eq!(c.hash, HEX);
+        assert!(parse_checksum("sha256:base64:not*base64").is_err());
+        assert!(
+            parse_checksum("md5:base64:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=").is_err(),
+            "a sha256 digest is not an md5 one"
+        );
+        assert!(parse_checksum(&format!("sha256:base32:{HEX}")).is_err());
+    }
+
     #[test]
     fn malformed_headers_are_refused() {
         for bad in ["no colon", ": empty name", "Bad Name: x", "X: a\nb"] {
@@ -350,6 +382,12 @@ mod tests {
         assert_eq!(c.hash, "ab".repeat(32));
         assert_eq!(c.source, CsSource::User);
         assert!(parse_checksum("sha256:abc").is_err(), "too short");
+        assert_eq!(
+            parse_checksum(&format!("sha256:hex:{}", "ab".repeat(32)))
+                .unwrap()
+                .hash,
+            "ab".repeat(32)
+        );
         assert!(parse_checksum(&format!("crc32:{}", "a".repeat(8))).is_err());
         assert!(parse_checksum(&format!("md5:{}", "g".repeat(32))).is_err());
     }

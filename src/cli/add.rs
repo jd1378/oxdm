@@ -12,12 +12,12 @@ use std::sync::Arc;
 use super::args::AddArgs;
 use super::control::{Refusals, maybe_wait, needs_decision, run_job, saved_file, snapshot};
 use super::daemon::lost;
-use super::failure::Failure;
+use super::failure::{Failure, Kind};
 use super::input::{self, Dest};
 use super::output::Out;
 use super::query::queue_named;
-use super::view::{Action, Line};
-use crate::domain::{Creds, Job, JobId, Phase, Queue, QueueId};
+use super::view::{Action, Line, short};
+use crate::domain::{Checksum, Creds, CsStatus, Job, JobError, JobId, Phase, Queue, QueueId};
 use crate::ipc_local::Client;
 use crate::ipc_local::protocol::AddJobReq;
 
@@ -56,6 +56,13 @@ pub fn plan(args: AddArgs) -> Result<Plan, Failure> {
         .iter()
         .map(|c| input::parse_checksum(c))
         .collect::<Result<Vec<_>, _>>()?;
+    // A digest describes one file; given to several, it would fail
+    // every one but the file it is for.
+    if !checksums.is_empty() && urls.len() > 1 {
+        return Err(Failure::usage(
+            "--checksum is one file's digest: add one URL at a time when giving it",
+        ));
+    }
     let referrer = args.referrer.as_deref().map(input::parse_url).transpose()?;
     let output = args
         .output
@@ -120,7 +127,7 @@ pub async fn add(client: &Arc<Client>, plan: Plan, out: Out) -> Result<(), Failu
             .then(|| find_existing(&snap.jobs, &url, &dest))
             .flatten();
         let outcome = match existing {
-            Some(job) => reuse(client, &snap, job, &url, args.no_start).await,
+            Some(job) => reuse(client, &snap, job, &url, args.no_start, &checksums).await,
             None => create(client, &fresh, &url).await,
         };
         match outcome {
@@ -212,8 +219,9 @@ async fn reuse(
     job: &Job,
     url: &url::Url,
     no_start: bool,
+    checksums: &[Checksum],
 ) -> Result<(JobId, Line), Refused> {
-    let state = revive(client, job, no_start)
+    let state = revive(client, job, no_start, checksums)
         .await
         .map_err(|e| (Some(job.id), e))?;
     let line = Line::Added {
@@ -268,14 +276,33 @@ fn find_existing<'a>(jobs: &'a [Job], url: &url::Url, dest: &Dest) -> Option<&'a
         .max_by_key(|j| j.created_at)
 }
 
-/// Bring an existing download back to life, as far as it needs.
-async fn revive(client: &Client, job: &Job, no_start: bool) -> Result<Action, Failure> {
+/// Bring an existing download back to life, as far as it needs, and
+/// hold it to any checksum this command brings that it did not have.
+async fn revive(
+    client: &Client,
+    job: &Job,
+    no_start: bool,
+    checksums: &[Checksum],
+) -> Result<Action, Failure> {
+    let added = new_checksums(job, checksums);
     let phase = job.status.phase;
     if phase == Phase::Completed {
         if saved_file(job).is_some() {
+            // The file is here: the new digests are checked against it
+            // now, and a mismatch is this command's answer.
+            if !added.is_empty() {
+                attach_checksums(client, job, &added).await?;
+                verify_saved(client, job.id, &added).await?;
+            }
+            // A digest checked earlier may already condemn this file.
+            if let Some(f) = needs_decision(job) {
+                return Err(f);
+            }
             return Ok(Action::Complete);
         }
-        // Finished once, but the file has gone: this is a fresh fetch.
+        // Finished once, but the file has gone: this is a fresh fetch,
+        // and the fetch checks every digest the job carries.
+        attach_checksums(client, job, &added).await?;
         if no_start {
             return Ok(Action::NotStarted);
         }
@@ -284,13 +311,98 @@ async fn revive(client: &Client, job: &Job, no_start: bool) -> Result<Action, Fa
     if let Some(f) = needs_decision(job) {
         return Err(f);
     }
+    // Once a download has data, the engine reads a changed list of
+    // expected digests as a changed file, and a resume would stop on
+    // that. The digest waits for the finished file instead.
+    if !added.is_empty() && has_started(job) {
+        return Err(Failure::usage(format!(
+            "download {} has already started, so a new checksum cannot be added until it \
+             finishes; let it finish (`oxdm resume` / `oxdm wait`), then run this add again \
+             to check the saved file",
+            short(&job.id.to_string())
+        )));
+    }
     if phase.is_running() {
         return Ok(Action::Running);
     }
+    attach_checksums(client, job, &added).await?;
     if no_start {
         return Ok(Action::NotStarted);
     }
     run_job(client, job.id, false).await
+}
+
+/// A run has begun: bytes, a working folder, or a start on record.
+fn has_started(job: &Job) -> bool {
+    job.status.phase.is_running()
+        || job.status.downloaded > 0
+        || job.work_root.is_some()
+        || job.started_at.is_some()
+}
+
+/// The digests in `given` the job does not carry yet.
+fn new_checksums(job: &Job, given: &[Checksum]) -> Vec<Checksum> {
+    given
+        .iter()
+        .filter(|c| {
+            !job.checksums
+                .iter()
+                .any(|k| k.algo == c.algo && k.hash.eq_ignore_ascii_case(&c.hash))
+        })
+        .cloned()
+        .collect()
+}
+
+async fn attach_checksums(client: &Client, job: &Job, added: &[Checksum]) -> Result<(), Failure> {
+    if added.is_empty() {
+        return Ok(());
+    }
+    let mut rows = job.checksums.clone();
+    rows.extend_from_slice(added);
+    client.set_job_checksums(job.id, rows).await.map_err(lost)
+}
+
+/// Hash the saved file in the daemon and judge the digests this command
+/// added. Waits for the answer: "complete" is only true once it is in.
+async fn verify_saved(client: &Client, id: JobId, added: &[Checksum]) -> Result<(), Failure> {
+    client.verify_checksums(id).await.map_err(lost)?;
+    let view = loop {
+        let Some(v) = client.job_entry(id).await.map_err(lost)? else {
+            return Err(Failure::new(
+                Kind::Stopped,
+                "it was removed while being checked",
+            ));
+        };
+        // `verify_pending` clears only after the verdicts are recorded;
+        // `verifying` alone clears a moment before.
+        if !v.verifying && !v.job.verify_pending {
+            break v;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    };
+    for want in added {
+        let row = view
+            .job
+            .checksums
+            .iter()
+            .find(|k| k.algo == want.algo && k.hash.eq_ignore_ascii_case(&want.hash));
+        match row.map(|r| (r.status, r.expected.clone())) {
+            Some((CsStatus::Verified, _)) => {}
+            Some((CsStatus::Mismatch, actual)) => {
+                return Err(Failure::from_job_error(&JobError::ChecksumMismatch {
+                    expected: want.hash.clone(),
+                    actual: actual.unwrap_or_default(),
+                }));
+            }
+            _ => {
+                return Err(Failure::new(
+                    Kind::Io,
+                    "the saved file could not be read to check it",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -314,6 +426,57 @@ mod tests {
             filename: name.map(str::to_owned),
             explicit,
         }
+    }
+
+    fn add_args(argv: &[&str]) -> AddArgs {
+        use clap::Parser;
+        let mut full = vec!["oxdm", "add"];
+        full.extend_from_slice(argv);
+        match crate::cli::args::Cli::try_parse_from(full).unwrap().command {
+            crate::cli::args::Command::Add(a) => a,
+            _ => unreachable!(),
+        }
+    }
+
+    /// One digest, one file: with two links it would fail one of them.
+    #[test]
+    fn a_checksum_is_refused_with_more_than_one_url() {
+        let sum = format!("sha256:{}", "ab".repeat(32));
+        let two = add_args(&["https://e.x/a", "https://e.x/b", "--checksum", &sum]);
+        let Err(f) = plan(two) else {
+            panic!("accepted")
+        };
+        assert_eq!(f.kind, Kind::Usage);
+        assert!(plan(add_args(&["https://e.x/a", "--checksum", &sum])).is_ok());
+        assert!(plan(add_args(&["https://e.x/a", "https://e.x/b"])).is_ok());
+    }
+
+    #[test]
+    fn a_download_has_started_once_it_has_anything_to_resume() {
+        let mut j = crate::cli::fixtures::job();
+        assert!(!has_started(&j), "queued, never run");
+        j.work_root = Some(PathBuf::from("/cache"));
+        assert!(has_started(&j), "its folder exists, so its metadata may");
+        j.work_root = None;
+        j.status.downloaded = 1;
+        assert!(has_started(&j));
+        j.status.downloaded = 0;
+        j.status.phase = Phase::Evaluating;
+        assert!(has_started(&j));
+    }
+
+    #[test]
+    fn only_digests_the_job_lacks_are_new() {
+        let mut j = crate::cli::fixtures::job();
+        let known = input::parse_checksum(&format!("sha256:{}", "ab".repeat(32))).unwrap();
+        j.checksums.push(Checksum {
+            status: CsStatus::Verified,
+            ..known.clone()
+        });
+        let upper = input::parse_checksum(&format!("sha256:{}", "AB".repeat(32))).unwrap();
+        let other = input::parse_checksum(&format!("md5:{}", "cd".repeat(16))).unwrap();
+        let added = new_checksums(&j, &[upper, other.clone()]);
+        assert_eq!(added, vec![other], "same digest in another case is not new");
     }
 
     #[test]

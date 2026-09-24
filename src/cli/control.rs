@@ -35,11 +35,25 @@ pub fn needs_decision(job: &Job) -> Option<Failure> {
     if job.status.phase != Phase::Conflict && !job.integrity_failed() {
         return None;
     }
+    // A check of the saved file records its verdict on the row, not as
+    // the run's error.
+    let failed_row = || {
+        job.checksums
+            .iter()
+            .find(|c| c.status == crate::domain::CsStatus::Mismatch)
+            .map(|c| {
+                describe(&JobError::ChecksumMismatch {
+                    expected: c.hash.clone(),
+                    actual: c.expected.clone().unwrap_or_default(),
+                })
+            })
+    };
     let cause = job
         .status
         .error
         .as_ref()
         .map(describe)
+        .or_else(failed_row)
         .unwrap_or_else(|| "it stopped on a conflict".to_owned());
     Some(Failure::new(
         Kind::Conflict,
@@ -319,5 +333,20 @@ mod tests {
             needs_decision(&j).is_some(),
             "every byte is there and wrong"
         );
+
+        // Condemned by a later check of the saved file: the row says why.
+        j.status.phase = Phase::Completed;
+        j.status.error = None;
+        j.status.final_path = Some("/dl/a.zip".into());
+        j.checksums.push(crate::domain::Checksum {
+            algo: crate::domain::Algo::Sha1,
+            hash: "0".repeat(40),
+            source: crate::domain::CsSource::User,
+            status: crate::domain::CsStatus::Mismatch,
+            expected: Some("2a49".into()),
+        });
+        let f = needs_decision(&j).unwrap();
+        assert!(f.message.contains("expected 0000"), "{}", f.message);
+        assert!(f.message.contains("got 2a49"), "{}", f.message);
     }
 }
