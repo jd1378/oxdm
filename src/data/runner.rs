@@ -221,12 +221,14 @@ pub trait LiveBridge: Send + Sync + 'static {
     /// Called with one verdict per checksum row the run checked, so the
     /// job records what was true of each rather than one answer for all
     /// of them.
-    async fn on_checksum_results(
-        &self,
-        id: JobId,
-        results: Vec<(usize, crate::domain::CsStatus, Option<String>)>,
-    ) {
-        let _ = (id, results);
+    async fn on_checksum_results(&self, id: JobId, verdicts: Vec<crate::domain::Verdict>) {
+        let _ = (id, verdicts);
+    }
+    /// The job's checksum rows as they stand now, for the check at the
+    /// end of a run. `None` falls back to the rows the run started with.
+    async fn current_checksums(&self, id: JobId) -> Option<Vec<crate::domain::Checksum>> {
+        let _ = id;
+        None
     }
 }
 
@@ -313,16 +315,6 @@ impl JobRunner {
             crate::data::mapping::merge_checksums(&mut job.checksums, advertised);
         }
 
-        // Feature #14: hand the job's expected checksums to odl so the
-        // Verifying phase actually compares — a mismatch surfaces as
-        // `JobError::ChecksumMismatch` through the existing error path.
-        // Source filtering (Server/User only) lives in
-        // `mapping::checksum_digests`.
-        let digests = crate::data::mapping::checksum_digests(&job);
-        if !digests.is_empty() {
-            instruction.add_checksums(digests);
-        }
-
         // The name the user chose. odl derives one from the URL or
         // `Content-Disposition`, which is right for a job that was never
         // renamed and wrong for every one that was: the list, the
@@ -371,6 +363,15 @@ impl JobRunner {
             instruction.set_download_dir(per_job);
         }
 
+        // odl checks nothing itself (`verify_checksums(false)`); the list
+        // it is handed is only the file's identity, and has to match what
+        // it recorded when this download began. See
+        // `mapping::engine_checksums`.
+        let recorded = recorded_checksums(&instruction.metadata_path()).await;
+        let handed = crate::data::mapping::engine_checksums(recorded, instruction.checksums());
+        instruction.clear_checksums();
+        instruction.add_checksums(handed);
+
         // A server that stops honouring `Range` mid-download is odl's
         // problem to recover from since 2.1: it asks the resolver, and
         // on `Restart` discards the parts and re-fetches the file whole
@@ -390,39 +391,55 @@ impl JobRunner {
         // file exists by now, so a mismatch can be reported against a
         // download the user still has, and the digests we compute are
         // worth keeping rather than being thrown away inside a verify
-        // step. Reported as its own phase — a large file takes a while
-        // and a silent pause after 100% reads as a hang.
-        let rows = crate::data::mapping::checksum_rows_to_verify(&job);
-        if !rows.is_empty() {
-            self.bridge.on_event(
-                self.job_id,
-                &OdlProgressEvent::PhaseChanged(odl::progress::Phase::Verifying),
-            );
-            let _ = self.events.send(DomainEvent::JobUpdated {
-                id: self.job_id,
-                phase: Phase::Verifying,
-            });
-            // Hashing a gigabyte takes seconds. odl 2.2 reports it per
-            // block, and oxdm forwards that as a row of its own — the
-            // same shape assembly already uses — so the bar moves
-            // instead of sitting at 100% hoping.
-            let size = tokio::fs::metadata(&path)
+        // step.
+        self.verify_file(&path, &job.checksums).await?;
+
+        Ok(RunOutcome {
+            final_path: Some(path),
+            already_complete: false,
+        })
+    }
+
+    /// Check the saved file against every checksum row the job carries,
+    /// as the rows are now rather than as the run found them: one added
+    /// while the file downloaded, or while it was being hashed, is
+    /// checked too. Reported as its own phase, since a large file takes
+    /// a while and a silent pause after 100% reads as a hang.
+    async fn verify_file(
+        &self,
+        path: &std::path::Path,
+        started_with: &[crate::domain::Checksum],
+    ) -> Result<(), JobError> {
+        let mut judged: Vec<crate::domain::Verdict> = Vec::new();
+        let mut size = None;
+        loop {
+            let checksums = self
+                .bridge
+                .current_checksums(self.job_id)
                 .await
-                .map(|m| m.len())
-                .unwrap_or(0);
-            if size > 0 {
-                self.bridge.on_event(
-                    self.job_id,
-                    &OdlProgressEvent::PartAdded {
-                        ulid: odl::progress::VERIFY_ULID.to_string(),
-                        offset: 0,
-                        size,
-                    },
-                );
+                .unwrap_or_else(|| started_with.to_vec());
+            let rows: Vec<usize> = crate::data::mapping::checksum_rows_to_verify(&checksums)
+                .into_iter()
+                .filter(|i| {
+                    !judged
+                        .iter()
+                        .any(|v| checksums[*i].same_digest(v.algo, &v.hash))
+                })
+                .collect();
+            if rows.is_empty() {
+                break;
             }
+            let size = match size {
+                Some(s) => s,
+                None => {
+                    let s = self.announce_verifying(path).await;
+                    size = Some(s);
+                    s
+                }
+            };
             let outcome = verify_rows(
-                &path,
-                &job.checksums,
+                path,
+                &checksums,
                 &rows,
                 &self.cancel,
                 size,
@@ -438,35 +455,98 @@ impl JobRunner {
                 },
             )
             .await;
-            self.bridge.on_event(
-                self.job_id,
-                &OdlProgressEvent::PartFinished {
-                    ulid: odl::progress::VERIFY_ULID.to_string(),
-                },
-            );
-            let results = outcome?;
+            let results = match outcome {
+                Ok(r) => r,
+                Err(e) => {
+                    self.finish_verifying();
+                    return Err(e);
+                }
+            };
             // Every row's own verdict, before the run's outcome: a job
             // with a good MD5 and a bad SHA-1 has one of each, and
             // painting them both with the failure told the user their
             // MD5 was wrong when it was the only thing that matched.
-            let failed = results.iter().find_map(|(i, status, computed)| {
-                (*status == crate::domain::CsStatus::Mismatch).then(|| {
-                    (
-                        job.checksums[*i].hash.to_ascii_lowercase(),
-                        computed.clone().unwrap_or_default(),
-                    )
-                })
-            });
-            self.bridge.on_checksum_results(self.job_id, results).await;
-            if let Some((expected, actual)) = failed {
-                return Err(JobError::ChecksumMismatch { expected, actual });
-            }
+            let found = crate::domain::verdicts(&checksums, results);
+            self.bridge
+                .on_checksum_results(self.job_id, found.clone())
+                .await;
+            judged.extend(found);
         }
+        if size.is_some() {
+            self.finish_verifying();
+        }
+        match judged
+            .iter()
+            .find(|v| v.status == crate::domain::CsStatus::Mismatch)
+        {
+            Some(v) => Err(JobError::ChecksumMismatch {
+                expected: v.hash.to_ascii_lowercase(),
+                actual: v.computed.clone().unwrap_or_default(),
+            }),
+            None => Ok(()),
+        }
+    }
 
-        Ok(RunOutcome {
-            final_path: Some(path),
-            already_complete: false,
-        })
+    /// Enter the Verifying phase, with a progress row of its own. Hashing
+    /// a gigabyte takes seconds; odl reports it per block, and oxdm
+    /// forwards that the same way assembly is shown, so the bar moves
+    /// instead of sitting at 100%. Returns the file's size.
+    async fn announce_verifying(&self, path: &std::path::Path) -> u64 {
+        self.bridge.on_event(
+            self.job_id,
+            &OdlProgressEvent::PhaseChanged(odl::progress::Phase::Verifying),
+        );
+        let _ = self.events.send(DomainEvent::JobUpdated {
+            id: self.job_id,
+            phase: Phase::Verifying,
+        });
+        let size = tokio::fs::metadata(path)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0);
+        if size > 0 {
+            self.bridge.on_event(
+                self.job_id,
+                &OdlProgressEvent::PartAdded {
+                    ulid: odl::progress::VERIFY_ULID.to_string(),
+                    offset: 0,
+                    size,
+                },
+            );
+        }
+        size
+    }
+
+    fn finish_verifying(&self) {
+        self.bridge.on_event(
+            self.job_id,
+            &OdlProgressEvent::PartFinished {
+                ulid: odl::progress::VERIFY_ULID.to_string(),
+            },
+        );
+    }
+}
+
+/// The checksums odl recorded for this download when it began, from its
+/// `metadata.pb`. Empty when there is none yet (a fresh or restarted
+/// download), or when it does not read: odl has its own answer for a
+/// metadata file it cannot use.
+async fn recorded_checksums(metadata: &std::path::Path) -> Vec<odl::hash::HashDigest> {
+    use prost::Message;
+    let Ok(bytes) = tokio::fs::read(metadata).await else {
+        return Vec::new();
+    };
+    // odl frames it length-delimited (`io::persist_metadata`).
+    match odl::download_metadata::DownloadMetadata::decode_length_delimited(bytes.as_slice()) {
+        Ok(m) => m
+            .checksums
+            .into_iter()
+            .filter_map(|c| odl::hash::HashDigest::try_from(c).ok())
+            .collect(),
+        Err(e) => {
+            tracing::debug!(path = %metadata.display(), error = %e, "unreadable metadata");
+            Vec::new()
+        }
     }
 }
 
@@ -653,6 +733,28 @@ mod tests {
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    /// What odl wrote is what comes back, so a resume can hand it the
+    /// same list; nothing to read is an empty list, never an error.
+    #[tokio::test]
+    async fn the_recorded_checksums_are_read_back_from_metadata() {
+        use prost::Message;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("metadata.pb");
+        assert!(recorded_checksums(&path).await.is_empty(), "no file yet");
+
+        let digest = odl::hash::HashDigest::MD5("a".repeat(32), odl::hash::HashEncoding::Hex);
+        let metadata = odl::download_metadata::DownloadMetadata {
+            checksums: vec![digest.clone().into()],
+            ..Default::default()
+        };
+        // Framed the way odl writes it.
+        std::fs::write(&path, metadata.encode_length_delimited_to_vec()).unwrap();
+        assert_eq!(recorded_checksums(&path).await, vec![digest]);
+
+        std::fs::write(&path, b"\xff\xff not a metadata file").unwrap();
+        assert!(recorded_checksums(&path).await.is_empty());
+    }
 
     const BODY: &[u8] = b"hello world";
     /// SHA-256 of `BODY`.
@@ -1021,6 +1123,68 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(60), runner.run(job))
             .await
             .expect("runner timed out")
+    }
+
+    /// The daemon's rows as they change under a run: each read answers
+    /// the next list, the last one standing once they run out.
+    struct ChangingRows {
+        lists: std::sync::Mutex<Vec<Vec<Checksum>>>,
+        verdicts: std::sync::Mutex<Vec<crate::domain::Verdict>>,
+    }
+    #[async_trait::async_trait]
+    impl LiveBridge for ChangingRows {
+        fn on_event(&self, _id: JobId, _event: &OdlProgressEvent) {}
+        async fn current_checksums(&self, _id: JobId) -> Option<Vec<Checksum>> {
+            let mut lists = self.lists.lock().unwrap();
+            Some(if lists.len() > 1 {
+                lists.remove(0)
+            } else {
+                lists[0].clone()
+            })
+        }
+        async fn on_checksum_results(&self, _id: JobId, found: Vec<crate::domain::Verdict>) {
+            self.verdicts.lock().unwrap().extend(found);
+        }
+    }
+
+    fn user_row(algo: Algo, hash: &str) -> Checksum {
+        Checksum {
+            algo,
+            hash: hash.into(),
+            source: CsSource::User,
+            status: CsStatus::Unverified,
+            expected: None,
+        }
+    }
+
+    /// A checksum added while the file downloaded, or while the first
+    /// ones were being hashed, is checked by the same run. The run
+    /// started with only the good SHA-256; the MD5 arrives on the second
+    /// read, after that hash was done.
+    #[tokio::test]
+    async fn a_checksum_added_during_the_run_is_checked_by_it() {
+        let url = spawn_http_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let job = test_job(&url, dir.path().join("save"), GOOD_SHA256);
+        let good = user_row(Algo::Sha256, GOOD_SHA256);
+        let wrong_md5 = user_row(Algo::Md5, &"0".repeat(32));
+        let bridge = Arc::new(ChangingRows {
+            lists: std::sync::Mutex::new(vec![vec![good.clone()], vec![good, wrong_md5]]),
+            verdicts: std::sync::Mutex::new(Vec::new()),
+        });
+
+        let err = run_job_with(job, &dir.path().join("work"), bridge.clone())
+            .await
+            .expect_err("the late MD5 is wrong");
+        assert!(
+            matches!(&err, JobError::ChecksumMismatch { expected, .. } if expected == &"0".repeat(32)),
+            "{err:?}"
+        );
+        let verdicts = bridge.verdicts.lock().unwrap();
+        let status = |algo| verdicts.iter().find(|v| v.algo == algo).map(|v| v.status);
+        assert_eq!(status(Algo::Sha256), Some(CsStatus::Verified));
+        assert_eq!(status(Algo::Md5), Some(CsStatus::Mismatch));
+        assert_eq!(verdicts.len(), 2, "each digest judged once");
     }
 
     #[tokio::test]

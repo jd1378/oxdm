@@ -58,6 +58,10 @@ iced_anim = { version = "=0.3.1", default-features = false, features = ["widgets
 notify = { version = "8.2.0", default-features = false, features = ["macos_fsevent"] }
 tar = "0.4"
 flate2 = "1"
+# Reads the checksums odl recorded in a download's `metadata.pb`
+# (`runner::recorded_checksums`). Already in-tree through odl; the
+# version has to be odl's, whose generated types implement its `Message`.
+prost = "0.14"
 # The scripting/agent command line (`oxdm add`, `oxdm wait`, …). The
 # daemon and window entry points keep their own hand-rolled dispatch.
 clap = { version = "4.6", features = ["derive"] }

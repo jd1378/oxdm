@@ -4325,6 +4325,7 @@ dependencies = [
  "notify-rust",
  "odl",
  "percent-encoding",
+ "prost",
  "rand 0.10.2",
  "raw-window-handle",
  "reqwest",

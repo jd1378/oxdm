@@ -256,15 +256,14 @@ fn bearer_header(job: &Job, auth_secret: Option<&str>) -> Option<String> {
     }
 }
 
-/// Which of the job's checksum rows this run should check, by index.
+/// Which checksum rows a run should check, by index.
 ///
 /// The same rows as `checksum_digests` — `Server`/`User` sources only,
 /// since a `Computed` one describes a previous run's bytes — but it
 /// keeps the row indices, so each row can be given its own verdict
 /// instead of one verdict being painted across all of them.
-pub fn checksum_rows_to_verify(job: &Job) -> Vec<usize> {
-    job.checksums
-        .iter()
+pub fn checksum_rows_to_verify(rows: &[Checksum]) -> Vec<usize> {
+    rows.iter()
         .enumerate()
         .filter(|(_, c)| matches!(c.source, CsSource::Server | CsSource::User))
         .filter(|(_, c)| checksum_to_digest(c).is_some())
@@ -285,6 +284,26 @@ pub fn checksum_digests(job: &Job) -> Vec<HashDigest> {
         .filter(|c| matches!(c.source, CsSource::Server | CsSource::User))
         .filter_map(checksum_to_digest)
         .collect()
+}
+
+/// The checksums odl is handed for a run: the ones it recorded when this
+/// download began (from `metadata.pb`), then any the server advertises
+/// now that it has not seen.
+///
+/// odl keeps that list as part of the file's identity and reads any
+/// change in it on a resume as a changed file. The job's own rows stay
+/// out: oxdm checks them itself once the file is written, and handing
+/// them over made a checksum added to a started download stop its next
+/// resume as "file changed". A digest the server changes is still a
+/// change, and still caught.
+pub fn engine_checksums(recorded: Vec<HashDigest>, advertised: &[HashDigest]) -> Vec<HashDigest> {
+    let mut out = recorded;
+    for d in advertised {
+        if !out.contains(d) {
+            out.push(d.clone());
+        }
+    }
+    out
 }
 
 /// oxdm's algorithm enum in odl's terms.
@@ -326,10 +345,6 @@ fn algo_from_odl(a: odl::hash::HashAlgorithm) -> Option<Algo> {
 }
 
 /// Checksums the server advertised on the `evaluate` probe, as job rows.
-///
-/// Read *before* `add_checksums` hands odl the job's own digests —
-/// afterwards the two are indistinguishable, and the job's would come
-/// back labelled as the server's.
 ///
 /// Servers write digests in hex or base64 depending on the header;
 /// `Job` stores hex, so everything is normalised through the decoded
@@ -567,6 +582,37 @@ mod tests {
         assert_eq!(digests.len(), 1);
         assert!(matches!(&digests[0], HashDigest::MD5(h, HashEncoding::Hex)
             if h == "5eb63bbbe01eeed093cb22bb8f5acdc3"));
+    }
+
+    fn md5(h: &str) -> HashDigest {
+        HashDigest::MD5(h.repeat(32), HashEncoding::Hex)
+    }
+
+    /// A fresh download starts from what the server says.
+    #[test]
+    fn a_fresh_run_hands_odl_only_the_servers_checksums() {
+        assert_eq!(engine_checksums(Vec::new(), &[md5("a")]), vec![md5("a")]);
+        assert!(engine_checksums(Vec::new(), &[]).is_empty());
+    }
+
+    /// A download begun before this change recorded the job's own rows
+    /// too; handing back exactly that list lets it resume. The job's
+    /// rows are not consulted, so adding one changes nothing here.
+    #[test]
+    fn a_resume_hands_back_what_odl_recorded() {
+        let recorded = vec![md5("a"), md5("b")];
+        assert_eq!(engine_checksums(recorded.clone(), &[md5("a")]), recorded);
+        assert_eq!(engine_checksums(recorded.clone(), &[]), recorded);
+    }
+
+    /// A server advertising a new digest describes a different file, and
+    /// odl should hear about it.
+    #[test]
+    fn a_new_server_digest_still_reads_as_a_changed_file() {
+        let recorded = vec![md5("a")];
+        let handed = engine_checksums(recorded.clone(), &[md5("c")]);
+        assert_ne!(handed, recorded);
+        assert_eq!(handed, vec![md5("a"), md5("c")]);
     }
 
     #[test]

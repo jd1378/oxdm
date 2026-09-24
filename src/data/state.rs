@@ -3104,7 +3104,10 @@ impl AppState {
                 e.verifying.store(false, Ordering::Release);
             }
             match results {
-                Ok(rows) => state.apply_checksum_results(id, rows).await,
+                Ok(rows) => {
+                    let found = crate::domain::verdicts(&entry.job.checksums, rows);
+                    state.apply_checksum_results(id, found).await
+                }
                 // An unreadable file says nothing about the hashes, so
                 // no row's verdict changes — but a window that asked
                 // deserves to hear why nothing happened. It can vanish
@@ -3172,19 +3175,13 @@ impl AppState {
     async fn apply_checksum_results(
         self: &Arc<Self>,
         id: JobId,
-        results: Vec<(usize, crate::domain::CsStatus, Option<String>)>,
+        verdicts: Vec<crate::domain::Verdict>,
     ) {
         let Some(entry) = self.job_entry(id).await else {
             return;
         };
         let mut job = entry.job.clone();
-        for (i, status, computed) in results {
-            let Some(c) = job.checksums.get_mut(i) else {
-                continue;
-            };
-            c.status = status;
-            c.expected = computed;
-        }
+        crate::domain::apply_verdicts(&mut job.checksums, &verdicts);
         let fresh = clone_entry_with_job(&entry, job).await;
         clear_settled_mismatch(&fresh);
         let phase = fresh.phase();
@@ -6123,15 +6120,16 @@ impl LiveBridge for StateLiveBridge {
         }
     }
 
-    async fn on_checksum_results(
-        &self,
-        id: JobId,
-        results: Vec<(usize, crate::domain::CsStatus, Option<String>)>,
-    ) {
+    async fn on_checksum_results(&self, id: JobId, verdicts: Vec<crate::domain::Verdict>) {
         let Some(state) = self.state.upgrade() else {
             return;
         };
-        state.apply_checksum_results(id, results).await;
+        state.apply_checksum_results(id, verdicts).await;
+    }
+
+    async fn current_checksums(&self, id: JobId) -> Option<Vec<crate::domain::Checksum>> {
+        let state = self.state.upgrade()?;
+        state.job_entry(id).await.map(|e| e.job.checksums.clone())
     }
 
     fn on_final_path(&self, id: JobId, path: std::path::PathBuf) {

@@ -19,7 +19,7 @@ pub use advanced::{Advanced, AuthAdv, AuthScheme, Creds, CustomHeader, ProxyAdv,
 pub use build_flags::SELF_UPDATE;
 pub use capture::CaptureRequest;
 pub use category::{Category, classify};
-pub use checksum::{Algo, Checksum, CsSource, CsStatus};
+pub use checksum::{Algo, Checksum, CsSource, CsStatus, Verdict, apply_verdicts, verdicts};
 pub use filename::{name_key, unique_name};
 pub use headers::{has_header, header_name_eq, normalize_headers, upsert_header};
 pub use job::{
