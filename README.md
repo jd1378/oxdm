@@ -182,6 +182,8 @@ This repo ships an [Agent Skill](plugins/oxdm/skills/oxdm/) (the open
 `SKILL.md` standard) that teaches AI agents to download through oxdm and
 to handle its exit codes.
 
+Linux / macOS:
+
 ```bash
 # Interactive: asks which agent (claude/codex/...) and global vs. project
 curl -fsSL https://raw.githubusercontent.com/jd1378/oxdm/main/tools/install-skill.sh | sh
@@ -192,6 +194,15 @@ curl -fsSL https://raw.githubusercontent.com/jd1378/oxdm/main/tools/install-skil
 
 `tools/install-skill.sh --help` covers other agents, `--dir`, and
 flattening into an `AGENTS.md`.
+
+Windows (PowerShell):
+
+```powershell
+# Claude Code, all projects. Other places: $HOME\.codex\skills\oxdm for
+# Codex, or .claude\skills\oxdm (.codex\skills\oxdm) for this project only.
+$d = "$HOME\.claude\skills\oxdm"; New-Item -ItemType Directory -Force $d | Out-Null
+"SKILL.md", "reference.md", "examples.md" | % { irm "https://raw.githubusercontent.com/jd1378/oxdm/main/plugins/oxdm/skills/oxdm/$_" -OutFile "$d\$_" }
+```
 
 Claude Code users can install it as a plugin instead, which keeps it
 updated:
