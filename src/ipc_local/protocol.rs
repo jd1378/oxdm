@@ -121,6 +121,19 @@ pub enum Request {
     Resume(JobId),
     CancelToQueued(JobId),
     RestartJob(JobId),
+    /// Start or resume a job (`fresh`: discard what it downloaded and
+    /// start over), saying whose run it is. `Resume` and `RestartJob`
+    /// are a person at a window by definition; the command line is
+    /// automation, and its failures must not raise windows.
+    ///
+    /// A refusal comes back as `Reply::Refused` with the error whole, so
+    /// the caller can tell "no free slot, queued" from "disk full"
+    /// without reading a sentence.
+    Run {
+        id: JobId,
+        manual: bool,
+        fresh: bool,
+    },
     /// Delete the assembled file for a completed job, leaving the job
     /// itself in the list. `Remove` is the one that forgets the
     /// download; this only reclaims the bytes on disk.
@@ -160,6 +173,13 @@ pub enum Request {
     ResumeAll,
     UpsertQueue(Queue),
     DeleteQueue(QueueId),
+    /// Where a command-line (agent) download goes: category, folder and
+    /// queue, with the Agent category and queue created on first use.
+    /// Reply is `Reply::AgentRoute`.
+    AgentRoute,
+    /// Bring back whichever of the Agent category and queue the user
+    /// deleted (`oxdm restore-agent`). Reply is `Reply::AgentRoute`.
+    RestoreAgent,
 
     // ── settings / hosts ───────────────────────────────────────────
     /// Boxed: `Settings` is by far the largest payload and would bloat
@@ -398,6 +418,12 @@ pub struct AddJobReq {
     /// checked even if the very first attempt is what completes it.
     #[serde(default)]
     pub checksums: Vec<crate::domain::Checksum>,
+    /// The caller starts the job the moment it is added, so its run is
+    /// what names it. Without this the daemon probes a job that arrives
+    /// knowing nothing, and that probe races the run to the same link: a
+    /// one-shot link does not survive two requests.
+    #[serde(default)]
+    pub run_follows: bool,
 }
 
 // Resolution mirrors of `odl::conflict::*` so the wire is independent
@@ -437,6 +463,10 @@ pub enum Reply {
     /// the file it was meant to take with it is still on disk. Distinct
     /// from `Err`, which means nothing happened.
     Warning(String),
+    /// Like `Err`, with the reason kept whole for a caller that branches
+    /// on it.
+    Refused(JobError),
+    AgentRoute(crate::data::AgentRoute),
     Snapshot(SnapshotData),
     JobEntry(Option<JobEntryView>),
     JobAdded(JobId),
@@ -641,4 +671,44 @@ pub struct JobEntryView {
     /// so closing the one that started it changes nothing.
     #[serde(default)]
     pub verifying: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A window from before `run_follows` existed still adds jobs, and
+    /// they keep the background probe it relied on.
+    #[test]
+    fn an_add_without_run_follows_still_decodes() {
+        let old = r#"{"url":"https://example.com/a.zip","save_dir":"/dl","filename":null,
+            "referrer":null,"headers":{},"max_connections":null}"#;
+        let req: AddJobReq = serde_json::from_str(old).unwrap();
+        assert!(!req.run_follows);
+    }
+
+    #[test]
+    fn the_cli_requests_round_trip() {
+        let id = JobId::new();
+        let frame = Frame::Request(
+            7,
+            Box::new(Request::Run {
+                id,
+                manual: false,
+                fresh: true,
+            }),
+        );
+        let back: Frame = serde_json::from_slice(&serde_json::to_vec(&frame).unwrap()).unwrap();
+        let Frame::Request(7, req) = back else {
+            panic!("not a request")
+        };
+        assert!(matches!(
+            *req,
+            Request::Run { id: got, manual: false, fresh: true } if got == id
+        ));
+
+        let reply = Reply::Refused(JobError::Deferred);
+        let back: Reply = serde_json::from_slice(&serde_json::to_vec(&reply).unwrap()).unwrap();
+        assert!(matches!(back, Reply::Refused(JobError::Deferred)));
+    }
 }

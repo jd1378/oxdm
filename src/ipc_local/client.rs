@@ -274,6 +274,25 @@ impl Client {
     pub async fn restart_job(&self, id: JobId) -> Result<(), String> {
         self.expect_ok(Request::RestartJob(id)).await
     }
+    /// Start or resume `id` (`fresh`: from zero). Outer `Err` = transport
+    /// failure; inner `Err` = the daemon's refusal, whole.
+    pub async fn run(
+        &self,
+        id: JobId,
+        manual: bool,
+        fresh: bool,
+    ) -> Result<Result<(), JobError>, String> {
+        match self
+            .request(Request::Run { id, manual, fresh })
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            Reply::Ok => Ok(Ok(())),
+            Reply::Refused(e) => Ok(Err(e)),
+            Reply::Err(e) => Err(e),
+            other => Err(format!("unexpected reply: {other:?}")),
+        }
+    }
     pub async fn verify_checksums(&self, id: JobId) -> Result<(), String> {
         self.expect_ok(Request::VerifyChecksums(id)).await
     }
@@ -338,6 +357,24 @@ impl Client {
     }
     pub async fn delete_queue(&self, id: QueueId) -> Result<(), String> {
         self.expect_ok(Request::DeleteQueue(id)).await
+    }
+    /// Where a command-line download goes; sets the Agent category and
+    /// queue up on first use.
+    pub async fn agent_route(&self) -> Result<crate::data::AgentRoute, String> {
+        self.expect_route(Request::AgentRoute).await
+    }
+
+    /// Bring back the Agent category and queue if the user deleted them.
+    pub async fn restore_agent(&self) -> Result<crate::data::AgentRoute, String> {
+        self.expect_route(Request::RestoreAgent).await
+    }
+
+    async fn expect_route(&self, req: Request) -> Result<crate::data::AgentRoute, String> {
+        match self.request(req).await.map_err(|e| e.to_string())? {
+            Reply::AgentRoute(r) => Ok(r),
+            Reply::Err(e) => Err(e),
+            other => Err(format!("unexpected reply: {other:?}")),
+        }
     }
 
     /// Save just the fields the window edited.

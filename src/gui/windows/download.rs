@@ -1534,6 +1534,7 @@ fn header_card(st: &State) -> Element<'_, Msg> {
         crate::domain::Category::Music => t.cat_music,
         crate::domain::Category::Pictures => t.cat_pictures,
         crate::domain::Category::Documents => t.cat_documents,
+        crate::domain::Category::Agent => t.cat_agent,
         crate::domain::Category::Other => t.fg_3,
     };
     let tile_bg = color::mix(t.bg_surface, cat_color, 0.20);

@@ -5,7 +5,9 @@
 //! - [`data`]: state, persistence, and the `odl` runner.
 //! - [`ipc`]: browser-extension bridge (capture API).
 //! - [`gui`]: iced (tiny-skia) presentation layer.
+//! - [`cli`]: the scripting command line, another daemon client.
 
+pub mod cli;
 pub mod daemon;
 pub mod data;
 pub mod domain;

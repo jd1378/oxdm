@@ -23,6 +23,16 @@ fn attach_parent_console() {}
 
 fn main() {
     attach_parent_console();
+    // The scripting command line keeps stdout for its own output, so it
+    // is routed before the daemon's logging claims it.
+    let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    if argv
+        .get(1)
+        .and_then(|a| a.to_str())
+        .is_some_and(oxdm::cli::handles)
+    {
+        std::process::exit(oxdm::cli::main(argv));
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -150,6 +160,19 @@ fn main() {
 
 fn print_help() {
     println!("oxdm - cross-platform download manager");
+    println!();
+    println!("COMMANDS (for scripts and AI agents; `--format json` for machine output):");
+    println!(
+        "    oxdm add <URL>...         Add downloads (to the \"Agent\" category) and start them"
+    );
+    println!("    oxdm list [TEXT]          List downloads");
+    println!("    oxdm status <ID>...       Show downloads");
+    println!("    oxdm wait <ID>...         Wait for downloads to finish");
+    println!("    oxdm pause|resume|restart|remove <ID>...");
+    println!("    oxdm probe <URL>          Ask the server about a URL");
+    println!("    oxdm queues               List queues");
+    println!("    oxdm restore-agent        Recreate a deleted Agent category and queue");
+    println!("    oxdm help [COMMAND]       Details, exit codes and the JSON contract");
     println!();
     println!("USAGE:");
     println!("    oxdm                      Start (or surface) the daemon + main window");

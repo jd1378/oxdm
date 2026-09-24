@@ -286,6 +286,7 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                             category: None,
                             size: probed.as_ref().and_then(|p| p.size),
                             checksums: probed.map(|p| p.checksums.clone()).unwrap_or_default(),
+                            run_follows: false,
                         };
                         match client.add_job(add).await {
                             Ok(id) => added.push(id),

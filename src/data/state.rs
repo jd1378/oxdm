@@ -445,6 +445,9 @@ pub struct AppState {
     /// it to decide whether conflicts should drive UI dialogs or the
     /// notify-and-park path.
     pub dialog_visible_for: RwLock<Option<JobId>>,
+    /// Serialises `agent_route`, so two first downloads arriving together
+    /// create one Agent category and one Agent queue between them.
+    agent_setup: tokio::sync::Mutex<()>,
     /// Job ids that should not appear in the user-facing queue list.
     /// Currently used for the self-update artifact download — we
     /// reuse the regular runner + download window for it but want the
@@ -754,6 +757,7 @@ impl AppState {
             update_channel: Arc::new(NoopUpdateChannel),
             ext_token: RwLock::new(token),
             dialog_visible_for: RwLock::new(None),
+            agent_setup: tokio::sync::Mutex::new(()),
             hidden_jobs: RwLock::new(std::collections::HashSet::new()),
             run_finished: tokio::sync::Notify::new(),
             admission: tokio::sync::Mutex::new(()),
@@ -879,6 +883,82 @@ impl AppState {
         // nothing until everything already going had finished.
         self.trim_to_queue_cap(id).await;
         Ok(())
+    }
+
+    /// The queue called `name`, created with default settings when there
+    /// is none. Looked up and created under one lock, so two callers
+    /// asking for the same new name at once share one queue rather than
+    /// making two that nobody can tell apart.
+    pub async fn ensure_queue(&self, name: &str) -> Result<QueueId, String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("a queue needs a name".into());
+        }
+        let mut queues = self.queues.write().await;
+        if let Some(q) = queues.values().find(|q| q.is_named(name)) {
+            return Ok(q.id);
+        }
+        let queue = Queue::new_named(name);
+        let id = queue.id;
+        self.store
+            .upsert_queue(&queue)
+            .await
+            .map_err(|e| e.to_string())?;
+        queues.insert(id, queue);
+        drop(queues);
+        let _ = self.events.send(DomainEvent::QueuesChanged);
+        Ok(id)
+    }
+
+    /// Where a download the command line adds goes, creating the Agent
+    /// category and the Agent queue the first time one arrives.
+    ///
+    /// Each is created once. A deletion is the user's answer and stands:
+    /// a deleted category is not brought back (downloads are filed by
+    /// type again), and a deleted queue is not made again. Only
+    /// [`Self::restore_agent`] undoes either.
+    pub async fn agent_route(&self) -> Result<AgentRoute, String> {
+        self.set_up_agent(false).await
+    }
+
+    /// Bring back whichever of the Agent category and queue the user
+    /// deleted, at their request (`oxdm restore-agent`).
+    pub async fn restore_agent(&self) -> Result<AgentRoute, String> {
+        self.set_up_agent(true).await
+    }
+
+    async fn set_up_agent(&self, restore: bool) -> Result<AgentRoute, String> {
+        let _one_at_a_time = self.agent_setup.lock().await;
+        let current = self.settings().await;
+        let plan = {
+            let queues = self.queues.read().await;
+            plan_agent(&current, restore, |q| queues.contains_key(&q))
+        };
+        // Adopts a queue the user already called "Agent" rather than
+        // making a second one beside it.
+        let new_queue = match plan.make_queue {
+            true => Some(self.ensure_queue(Queue::AGENT_NAME).await?),
+            false => None,
+        };
+        let mut next = current.clone();
+        {
+            let queues = self.queues.read().await;
+            apply_agent_plan(&mut next, &plan, new_queue, |q| queues.contains_key(&q));
+        }
+        if agent_fields(&next) != agent_fields(&current) {
+            let keys = [
+                "agent_queue",
+                "agent_category_created",
+                "deleted_categories",
+                "category_folders",
+                "category_queues",
+            ]
+            .map(str::to_owned);
+            self.update_settings_fields(next, &keys).await?;
+        }
+        let settings = self.settings().await;
+        let queues = self.queues.read().await;
+        Ok(route_agent(&settings, |q| queues.contains_key(&q)))
     }
 
     pub async fn delete_queue(self: &Arc<Self>, id: QueueId) -> Result<(), String> {
@@ -5106,6 +5186,110 @@ impl AppState {
     }
 }
 
+/// Where a command-line download goes. See `AppState::agent_route`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AgentRoute {
+    /// `Agent` while that category exists; `None` once the user deleted
+    /// it, and the download is filed by type like any other.
+    pub category: Option<Category>,
+    /// The folder it saves to unless the caller names one.
+    pub dir: PathBuf,
+    /// `None` is Main.
+    pub queue: Option<QueueId>,
+}
+
+/// What setting agents up has to make.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AgentPlan {
+    make_queue: bool,
+    make_category: bool,
+}
+
+/// First use makes what was never made; a restore also remakes what the
+/// user deleted.
+fn plan_agent(
+    settings: &Settings,
+    restore: bool,
+    queue_exists: impl Fn(QueueId) -> bool,
+) -> AgentPlan {
+    let queue_gone = settings.agent_queue.is_some_and(|q| !queue_exists(q));
+    AgentPlan {
+        make_queue: settings.agent_queue.is_none() || (restore && queue_gone),
+        make_category: !settings.agent_category_created
+            || (restore && settings.category_deleted(Category::Agent)),
+    }
+}
+
+/// Record what `plan` made. `queue_exists` must already see `new_queue`.
+fn apply_agent_plan(
+    s: &mut Settings,
+    plan: &AgentPlan,
+    new_queue: Option<QueueId>,
+    queue_exists: impl Fn(QueueId) -> bool,
+) {
+    if new_queue.is_some() {
+        s.agent_queue = new_queue;
+    }
+    if plan.make_category {
+        s.agent_category_created = true;
+        s.deleted_categories.retain(|c| *c != Category::Agent);
+        // Beside the other category folders, wherever the user moved
+        // them.
+        let base = s.category_folder(Category::Other);
+        s.category_folders
+            .entry(Category::Agent)
+            .or_insert_with(|| crate::domain::default_category_folder(&base, Category::Agent));
+    }
+    // The category's card names the queue its downloads go to: the Agent
+    // queue, unless the user picked another one that still exists.
+    let picked = s
+        .category_queues
+        .get(&Category::Agent)
+        .is_some_and(|q| queue_exists(*q));
+    if let Some(q) = s.agent_queue.filter(|q| queue_exists(*q))
+        && s.agent_category_active()
+        && !picked
+    {
+        s.category_queues.insert(Category::Agent, q);
+    }
+}
+
+/// The settings `set_up_agent` may change, to tell whether it did.
+fn agent_fields(s: &Settings) -> impl PartialEq + use<> {
+    (
+        s.agent_queue,
+        s.agent_category_created,
+        s.category_deleted(Category::Agent),
+        s.category_folders.get(&Category::Agent).cloned(),
+        s.category_queues.get(&Category::Agent).copied(),
+    )
+}
+
+/// The routing half of `agent_route`, pure. The Agent category's own
+/// default queue decides while the category exists, because that is the
+/// setting the user sees and can change; unset (a Settings window saved
+/// from a copy older than the category), the Agent queue stands in. A
+/// queue that no longer exists sends the download to Main.
+fn route_agent(settings: &Settings, queue_exists: impl Fn(QueueId) -> bool) -> AgentRoute {
+    let agent_queue = settings.agent_queue.filter(|q| queue_exists(*q));
+    if settings.agent_category_active() {
+        let queue = match settings.category_queues.get(&Category::Agent) {
+            Some(q) => Some(*q).filter(|q| queue_exists(*q)),
+            None => agent_queue,
+        };
+        return AgentRoute {
+            category: Some(Category::Agent),
+            dir: settings.category_folder(Category::Agent),
+            queue,
+        };
+    }
+    AgentRoute {
+        category: None,
+        dir: settings.category_folder(Category::Other),
+        queue: agent_queue,
+    }
+}
+
 /// Result of `AppState::probe`. All fields are best-effort — anything
 /// the server did not advertise stays `None` / empty.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -6283,6 +6467,133 @@ mod tests {
         );
         assert_eq!(cat, Category::Music);
         assert_eq!(dir, PathBuf::from("/dl"));
+    }
+
+    fn agent_settings() -> (Settings, QueueId) {
+        let q = QueueId::new();
+        let mut s = settings_under("/dl");
+        s.agent_category_created = true;
+        s.agent_queue = Some(q);
+        s.category_folders
+            .insert(Category::Agent, PathBuf::from("/dl/Agent"));
+        s.category_queues.insert(Category::Agent, q);
+        (s, q)
+    }
+
+    #[test]
+    fn an_agent_download_goes_to_the_agent_category_folder_and_queue() {
+        let (s, q) = agent_settings();
+        let r = route_agent(&s, |_| true);
+        assert_eq!(r.category, Some(Category::Agent));
+        assert_eq!(r.dir, PathBuf::from("/dl/Agent"));
+        assert_eq!(r.queue, Some(q));
+    }
+
+    /// A deleted Agent queue is not made again: its downloads go to Main.
+    #[test]
+    fn a_deleted_agent_queue_sends_downloads_to_main() {
+        let (s, _) = agent_settings();
+        assert_eq!(route_agent(&s, |_| false).queue, None);
+    }
+
+    /// The category's card is where the user changes it.
+    #[test]
+    fn the_agent_categorys_own_queue_setting_wins() {
+        let (mut s, _) = agent_settings();
+        let night = QueueId::new();
+        s.category_queues.insert(Category::Agent, night);
+        assert_eq!(route_agent(&s, |_| true).queue, Some(night));
+
+        // Unset (a Settings window saved from an older copy): the Agent
+        // queue stands in rather than Main.
+        s.category_queues.shift_remove(&Category::Agent);
+        assert_eq!(route_agent(&s, |_| true).queue, s.agent_queue);
+    }
+
+    /// Deleted is an answer: filed by type again, not brought back.
+    #[test]
+    fn a_deleted_agent_category_files_downloads_by_type() {
+        let (mut s, q) = agent_settings();
+        s.deleted_categories.push(Category::Agent);
+        s.normalize_categories();
+        let r = route_agent(&s, |_| true);
+        assert_eq!(r.category, None);
+        assert_eq!(r.dir, s.category_folder(Category::Other));
+        assert_eq!(r.queue, Some(q), "the Agent queue still exists and is used");
+    }
+
+    fn set_up(s: &mut Settings, restore: bool, queues: &mut Vec<QueueId>) -> AgentPlan {
+        let plan = plan_agent(s, restore, |q| queues.contains(&q));
+        let new_queue = plan.make_queue.then(QueueId::new);
+        queues.extend(new_queue);
+        apply_agent_plan(s, &plan, new_queue, |q| queues.contains(&q));
+        plan
+    }
+
+    #[test]
+    fn the_first_agent_download_makes_the_category_and_the_queue() {
+        let mut s = settings_under("/dl");
+        let mut queues = Vec::new();
+        let plan = set_up(&mut s, false, &mut queues);
+        assert!(plan.make_queue && plan.make_category);
+        assert!(s.agent_category_active());
+        assert_eq!(s.agent_queue, queues.first().copied());
+        assert_eq!(s.category_queues.get(&Category::Agent), queues.first());
+        assert_eq!(
+            s.category_folder(Category::Agent),
+            PathBuf::from("/dl/Agent")
+        );
+
+        // The second makes nothing.
+        let again = set_up(&mut s, false, &mut queues);
+        assert!(!again.make_queue && !again.make_category);
+        assert_eq!(queues.len(), 1);
+    }
+
+    /// Only a restore undoes a deletion; an ordinary download leaves it.
+    #[test]
+    fn deleted_agent_pieces_come_back_only_on_restore() {
+        let mut s = settings_under("/dl");
+        let mut queues = Vec::new();
+        set_up(&mut s, false, &mut queues);
+        // The user deletes both.
+        queues.clear();
+        s.deleted_categories.push(Category::Agent);
+        s.normalize_categories();
+
+        let plan = set_up(&mut s, false, &mut queues);
+        assert!(!plan.make_queue && !plan.make_category);
+        assert!(!s.agent_category_active());
+        assert!(queues.is_empty());
+
+        let plan = set_up(&mut s, true, &mut queues);
+        assert!(plan.make_queue && plan.make_category);
+        assert!(s.agent_category_active());
+        assert_eq!(s.agent_queue, queues.first().copied());
+        assert_eq!(
+            s.category_queues.get(&Category::Agent),
+            queues.first(),
+            "the restored category points at the restored queue"
+        );
+    }
+
+    /// A restore brings back what is missing and leaves the user's own
+    /// choices alone.
+    #[test]
+    fn a_restore_keeps_a_queue_the_user_picked_for_the_category() {
+        let mut s = settings_under("/dl");
+        let mut queues = Vec::new();
+        set_up(&mut s, false, &mut queues);
+        let night = QueueId::new();
+        queues.push(night);
+        s.category_queues.insert(Category::Agent, night);
+
+        let plan = set_up(&mut s, true, &mut queues);
+        assert!(
+            !plan.make_queue && !plan.make_category,
+            "nothing was missing"
+        );
+        assert_eq!(s.category_queues.get(&Category::Agent), Some(&night));
     }
 
     fn entry_in(phase: Phase) -> JobEntry {

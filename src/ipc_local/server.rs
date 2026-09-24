@@ -655,6 +655,7 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
             queue,
             size,
             checksums,
+            run_follows,
         }) => match state
             .add_job(
                 url,
@@ -670,7 +671,7 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
                 crate::data::state::ProbeFacts {
                     size,
                     checksums,
-                    run_follows: false,
+                    run_follows,
                 },
             )
             .await
@@ -728,6 +729,18 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
             match state.restart_job(id).await {
                 Ok(()) => Reply::Ok,
                 Err(e) => Reply::Err(job_err_string(e)),
+            }
+        }
+        Request::Run { id, manual, fresh } => {
+            state.mark_run_intent(id, manual).await;
+            let run = if fresh {
+                state.restart_job(id).await
+            } else {
+                state.resume(id).await
+            };
+            match run {
+                Ok(()) => Reply::Ok,
+                Err(e) => Reply::Refused(e),
             }
         }
         Request::Remove(id, opts) => {
@@ -791,6 +804,14 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
         },
         Request::DeleteQueue(id) => match state.delete_queue(id).await {
             Ok(()) => Reply::Ok,
+            Err(e) => Reply::Err(e),
+        },
+        Request::AgentRoute => match state.agent_route().await {
+            Ok(route) => Reply::AgentRoute(route),
+            Err(e) => Reply::Err(e),
+        },
+        Request::RestoreAgent => match state.restore_agent().await {
+            Ok(route) => Reply::AgentRoute(route),
             Err(e) => Reply::Err(e),
         },
         Request::UpdateSettingsFields { settings, keys } => {

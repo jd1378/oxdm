@@ -362,6 +362,7 @@ impl AddState {
                 .detected()
                 .map(|p| p.checksums.clone())
                 .unwrap_or_default(),
+            run_follows: false,
         })
     }
 }

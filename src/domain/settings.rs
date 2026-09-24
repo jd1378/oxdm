@@ -245,8 +245,9 @@ pub struct Settings {
     /// `Other` can never be in here: it is where a deleted category's
     /// files go, so deleting it would leave them nowhere. Deleting is
     /// not destructive beyond that: "Reset Categories" in Settings
-    /// brings the built-in set back, and new downloads classify into a
-    /// restored category again. Downloads already moved to `Other` stay
+    /// brings the built-in set back (not `Agent`, which is not built in;
+    /// `oxdm restore-agent` is its way back), and new downloads classify
+    /// into a restored category again. Downloads already moved to `Other` stay
     /// there, the same way a deleted queue's downloads stay in Main.
     #[serde(default)]
     pub deleted_categories: Vec<Category>,
@@ -255,6 +256,18 @@ pub struct Settings {
     /// dismissal path.
     #[serde(default)]
     pub first_run_seen: bool,
+    /// The `Agent` category has been created: set by the first download
+    /// the command line adds. Until then the category does not exist as
+    /// far as the user can see. Kept apart from `deleted_categories` so
+    /// "never created" and "deleted by the user" stay distinguishable:
+    /// the second is respected, the first is created on demand.
+    #[serde(default)]
+    pub agent_category_created: bool,
+    /// The queue made for command-line downloads the first time one
+    /// arrived. Recorded by id, so a renamed queue is still the one, and
+    /// a deleted one is not made again.
+    #[serde(default)]
+    pub agent_queue: Option<QueueId>,
 
     // ── browser-extension capture rules ─────────────────────────────
     // Single source of truth for which downloads the extension hands
@@ -349,9 +362,12 @@ pub fn default_category_folder(base: &std::path::Path, cat: Category) -> PathBuf
 /// Every category materialised against `base`, in display order. New
 /// installs store these outright so the folder a user sees is the folder
 /// that is saved, with nothing derived behind their back.
+///
+/// `Agent` gets its folder when it is created, not before.
 pub fn default_category_folders(base: &std::path::Path) -> IndexMap<Category, PathBuf> {
     Category::ALL_ASSIGNABLE
         .iter()
+        .filter(|c| **c != Category::Agent)
         .map(|c| (*c, default_category_folder(base, *c)))
         .collect()
 }
@@ -408,11 +424,20 @@ impl Settings {
 
     /// The categories the sidebar shows above `Other`, in display order.
     pub fn visible_categories(&self) -> Vec<Category> {
-        Category::ALL_VISIBLE
+        let mut v: Vec<Category> = Category::ALL_VISIBLE
             .iter()
             .copied()
             .filter(|c| !self.category_deleted(*c))
-            .collect()
+            .collect();
+        if self.agent_category_active() {
+            v.push(Category::Agent);
+        }
+        v
+    }
+
+    /// `Agent` exists: created by a first download, and not deleted since.
+    pub fn agent_category_active(&self) -> bool {
+        self.agent_category_created && !self.category_deleted(Category::Agent)
     }
 
     /// Every category a user can pick right now: the visible ones plus
@@ -592,6 +617,8 @@ impl Default for Settings {
             category_queues: IndexMap::new(),
             deleted_categories: Vec::new(),
             first_run_seen: false,
+            agent_category_created: false,
+            agent_queue: None,
             capture_min_size: 0,
             capture_skip_domains: Vec::new(),
             capture_skip_extensions: default_skip_extensions(),
@@ -621,6 +648,34 @@ mod tests {
             default_category_folder(base, Category::Videos),
             PathBuf::from("/home/u/Downloads/Videos")
         );
+    }
+
+    /// Not created yet, created, deleted: three states, and only the
+    /// middle one is shown. Taking it off the deleted list (what `oxdm
+    /// restore-agent` does) brings a created Agent back; nothing shows
+    /// one that was never made.
+    #[test]
+    fn the_agent_category_shows_only_between_creation_and_deletion() {
+        let mut s = Settings::default();
+        assert!(!s.visible_categories().contains(&Category::Agent));
+        assert!(!s.assignable_categories().contains(&Category::Agent));
+        assert!(
+            !default_category_folders(Path::new("/dl")).contains_key(&Category::Agent),
+            "no folder before it exists"
+        );
+
+        s.agent_category_created = true;
+        assert!(s.agent_category_active());
+        let v = s.visible_categories();
+        assert_eq!(v.last(), Some(&Category::Agent), "after the file types");
+        assert_eq!(s.assignable_categories().last(), Some(&Category::Other));
+
+        s.deleted_categories.push(Category::Agent);
+        assert!(!s.agent_category_active());
+        assert!(!s.visible_categories().contains(&Category::Agent));
+
+        s.deleted_categories.clear();
+        assert!(s.agent_category_active());
     }
 
     /// Deleting a category takes it out of every picker and, with it,

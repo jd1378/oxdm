@@ -58,6 +58,9 @@ iced_anim = { version = "=0.3.1", default-features = false, features = ["widgets
 notify = { version = "8.2.0", default-features = false, features = ["macos_fsevent"] }
 tar = "0.4"
 flate2 = "1"
+# The scripting/agent command line (`oxdm add`, `oxdm wait`, …). The
+# daemon and window entry points keep their own hand-rolled dispatch.
+clap = { version = "4.6", features = ["derive"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ksni = "0.3.4"

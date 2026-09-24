@@ -4964,6 +4964,7 @@ fn category_icon(c: Category) -> &'static str {
         Category::Music => "music",
         Category::Pictures => "image",
         Category::Documents => "file-text",
+        Category::Agent => "bot",
         Category::Other => "file",
     }
 }

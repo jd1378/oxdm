@@ -465,6 +465,19 @@ fn pending_settings(st: &State) -> Settings {
     s
 }
 
+/// Put one section back to oxdm's defaults.
+///
+/// "Reset Categories" restores the built-in categories. `Agent` is not
+/// built in: one the user deleted stays deleted, and `oxdm restore-agent`
+/// is its way back.
+fn reset_section(s: &mut Settings, section: Section) {
+    let agent_deleted = s.category_deleted(Category::Agent);
+    copy_section(s, &Settings::default(), section);
+    if agent_deleted && !s.deleted_categories.contains(&Category::Agent) {
+        s.deleted_categories.push(Category::Agent);
+    }
+}
+
 /// Copy one section's fields from `src` onto `dst`. The list lives here
 /// so "reset this section" cannot drift from what the section shows.
 fn copy_section(dst: &mut Settings, src: &Settings, section: Section) {
@@ -1290,7 +1303,7 @@ fn update_ready_inner(st: &mut State, msg: Msg) -> Task<Msg> {
             // edits is what Discard is for. The defaults land as pending
             // changes, so they can be reviewed, discarded, or applied
             // like any other edit.
-            copy_section(&mut st.s, &Settings::default(), st.section);
+            reset_section(&mut st.s, st.section);
             mirror(st);
             Task::none()
         }
@@ -2292,6 +2305,11 @@ fn downloads_section(st: &State) -> Element<'_, Msg> {
 /// tile, settings-dialog.jsx).
 const CAT_ICON_TILE: f32 = 28.0;
 
+/// What the `Agent` category holds: its card's summary, and the hint in
+/// the extensions field it does not use.
+const AGENT_CATEGORY_SUMMARY: &str = "Sent by AI agents and scripts";
+const AGENT_CATEGORY_HINT: &str = "Downloads sent with oxdm add land here, whatever their type";
+
 /// Sidebar icon per category (same glyphs as the main-window sidebar).
 fn cat_icon_name(cat: Category) -> &'static str {
     match cat {
@@ -2301,6 +2319,7 @@ fn cat_icon_name(cat: Category) -> &'static str {
         Category::Music => "music",
         Category::Pictures => "image",
         Category::Documents => "file-text",
+        Category::Agent => "bot",
         Category::Other => "file",
     }
 }
@@ -2316,6 +2335,7 @@ fn cat_tint(t: &Tokens, cat: Category) -> iced::Color {
         Category::Music => t.cat_music,
         Category::Pictures => t.cat_pictures,
         Category::Documents => t.cat_documents,
+        Category::Agent => t.cat_agent,
         Category::Other => t.fg_3,
     }
 }
@@ -2347,11 +2367,15 @@ fn categories_section(st: &State) -> Element<'_, Msg> {
             .and_then(|(_, q)| *q);
 
         let n_exts = exts.split(',').filter(|e| !e.trim().is_empty()).count();
-        let summary = if cat == Category::Other {
-            "Everything the other categories don't claim".to_owned()
-        } else {
-            format!("{n_exts} extensions")
+        let summary = match cat {
+            Category::Other => "Everything the other categories don't claim".to_owned(),
+            Category::Agent => AGENT_CATEGORY_SUMMARY.to_owned(),
+            _ => format!("{n_exts} extensions"),
         };
+        // `Other` and `Agent` are not lists of extensions: one takes
+        // what nothing else claims, the other what came from the command
+        // line.
+        let by_extension = !matches!(cat, Category::Other | Category::Agent);
 
         let icon_tile = container(icons::icon(cat_icon_name(cat), 14.0, tint))
             .width(Length::Fixed(CAT_ICON_TILE))
@@ -2424,14 +2448,15 @@ fn categories_section(st: &State) -> Element<'_, Msg> {
                 label_input(
                     t,
                     "extensions, comma-separated, no dots",
-                    // "Other" is the overflow bucket, not a list: it
-                    // takes whatever the named categories don't claim,
-                    // so there is nothing to edit.
-                    if cat == Category::Other {
+                    if !by_extension {
                         TextInput::new("")
                             .mono()
                             .enabled(false)
-                            .hint("Everything the other categories don't claim lands here")
+                            .hint(if cat == Category::Agent {
+                                AGENT_CATEGORY_HINT
+                            } else {
+                                "Everything the other categories don't claim lands here"
+                            })
                             .view(t)
                     } else {
                         TextInput::new(exts)
@@ -2477,7 +2502,7 @@ fn categories_section(st: &State) -> Element<'_, Msg> {
                         .ghost()
                         .accent(true)
                         .size(BtnSize::Sm)
-                        .enabled(cat != Category::Other)
+                        .enabled(by_extension)
                         .on_press(Msg::CategoryReset(cat))
                         .view(t),
                 ],
@@ -3424,6 +3449,27 @@ pub fn launch_settings() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reset brings the built-in categories back, never a deleted Agent.
+    #[test]
+    fn reset_categories_restores_the_built_ins_but_not_agent() {
+        let mut s = Settings {
+            agent_category_created: true,
+            deleted_categories: vec![Category::Videos, Category::Agent],
+            ..Settings::default()
+        };
+        reset_section(&mut s, Section::Categories);
+        assert!(!s.category_deleted(Category::Videos));
+        assert!(s.category_deleted(Category::Agent));
+
+        // A live Agent category survives the reset as it was.
+        let mut s = Settings {
+            agent_category_created: true,
+            ..Settings::default()
+        };
+        reset_section(&mut s, Section::Categories);
+        assert!(s.agent_category_active());
+    }
 
     /// The example odl's own retry policy documents, and its tests
     /// assert: max 6, fixed 3, 500ms gives 500, 500, 500, 1000, 2000,

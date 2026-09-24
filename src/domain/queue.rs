@@ -61,6 +61,9 @@ pub struct Queue {
 impl Queue {
     pub const MAIN_NAME: &'static str = "Main";
 
+    /// The queue made for command-line (agent) downloads on first use.
+    pub const AGENT_NAME: &'static str = "Agent";
+
     /// Downloads a queue runs at once unless it is told otherwise. Its
     /// own number, not a share of `Settings::max_concurrent_downloads` —
     /// that one caps every queue together.
@@ -97,6 +100,23 @@ impl Queue {
             stop_on_error: false,
             color: None,
         }
+    }
+
+    /// A user queue with the same defaults as Main, under its own name
+    /// and a colour of its own.
+    pub fn new_named(name: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            builtin: false,
+            color: Some(random_vivid_color()),
+            ..Self::new_main()
+        }
+    }
+
+    /// Queue names are matched the way people type them: ignoring case
+    /// and surrounding blanks.
+    pub fn is_named(&self, name: &str) -> bool {
+        self.name.trim().to_lowercase() == name.trim().to_lowercase()
     }
 }
 
@@ -513,5 +533,28 @@ mod finish_summary_tests {
             .spent_by_run(now)
         );
         assert!(!QueueSchedule::Condition(CondSet::default()).spent_by_run(now));
+    }
+}
+
+#[cfg(test)]
+mod naming_tests {
+    use super::Queue;
+
+    #[test]
+    fn a_name_matches_whatever_the_case_and_padding() {
+        let q = Queue::new_named("Agent");
+        assert!(q.is_named("agent"));
+        assert!(q.is_named("  AGENT "));
+        assert!(!q.is_named("Agents"));
+    }
+
+    /// A queue made by name is an ordinary user queue: deletable, and
+    /// not a second Main.
+    #[test]
+    fn a_named_queue_is_not_builtin() {
+        let q = Queue::new_named("Agent");
+        assert!(!q.builtin);
+        assert_eq!(q.name, "Agent");
+        assert_ne!(q.id, Queue::new_main().id);
     }
 }

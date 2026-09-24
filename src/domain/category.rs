@@ -1,14 +1,17 @@
 //! File-type categories shown in the sidebar tree.
 //!
-//! Categories are derived from the filename extension at render time; the
-//! `Job` does not store a category. The default extension lists below
-//! mirror the AB Download Manager categories. Users can extend them via
-//! `Settings::category_extensions`.
+//! A job's category is decided when it is created, from its filename
+//! extension (the default lists below mirror the AB Download Manager
+//! categories; users can extend them via `Settings::category_extensions`).
 //!
 //! Every category but `Other` can be deleted from Settings, which drops
-//! it from `ALL_VISIBLE` for that user (see
-//! `Settings::deleted_categories`). `Other` is the catch-all everything
-//! else falls into, so it has nowhere to fall to and always stays.
+//! it from the sidebar for that user (see `Settings::deleted_categories`).
+//! `Other` is the catch-all everything else falls into, so it has nowhere
+//! to fall to and always stays.
+//!
+//! `Agent` is not a file type: it holds what AI agents and scripts sent
+//! through the command line (`oxdm add`), and it exists only once the
+//! first such download arrives (`Settings::agent_category_created`).
 
 use serde::{Deserialize, Serialize};
 
@@ -23,10 +26,12 @@ pub enum Category {
     Music,
     Pictures,
     Documents,
+    Agent,
     Other,
 }
 
 impl Category {
+    /// The categories a file is sorted into by its extension.
     pub const ALL_VISIBLE: &'static [Category] = &[
         Category::Compressed,
         Category::Programs,
@@ -36,8 +41,9 @@ impl Category {
         Category::Documents,
     ];
 
-    /// Every category a user can explicitly assign — the visible set
-    /// plus the `Other` catch-all.
+    /// Every category there is: the file types, `Agent`, and the
+    /// `Other` catch-all. Which of them a user can pick right now is
+    /// `Settings::assignable_categories`.
     pub const ALL_ASSIGNABLE: &'static [Category] = &[
         Category::Compressed,
         Category::Programs,
@@ -45,6 +51,7 @@ impl Category {
         Category::Music,
         Category::Pictures,
         Category::Documents,
+        Category::Agent,
         Category::Other,
     ];
 
@@ -56,6 +63,7 @@ impl Category {
             Category::Music => "Music",
             Category::Pictures => "Pictures",
             Category::Documents => "Documents",
+            Category::Agent => "Agent",
             Category::Other => "Other",
         }
     }
@@ -70,6 +78,7 @@ impl Category {
             Category::Music => "music",
             Category::Pictures => "pictures",
             Category::Documents => "documents",
+            Category::Agent => "agent",
             Category::Other => "other",
         }
     }
@@ -106,7 +115,8 @@ impl Category {
                 "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "rtf",
                 "txt", "md", "epub", "mobi", "azw", "azw3", "csv",
             ],
-            Category::Other => &[],
+            // Sorted by who asked, not by what the file is.
+            Category::Agent | Category::Other => &[],
         }
     }
 }
@@ -147,6 +157,16 @@ mod tests {
         assert_eq!(classify("clip.mkv", &s), Category::Other);
         // Its neighbours keep classifying.
         assert_eq!(classify("song.mp3", &s), Category::Music);
+    }
+
+    /// Nothing an extension says makes a download an agent's.
+    #[test]
+    fn no_extension_classifies_as_agent() {
+        let mut s = Settings::default();
+        s.category_extensions
+            .insert(Category::Agent, vec!["zip".to_owned()]);
+        assert_eq!(classify("a.zip", &s), Category::Compressed);
+        assert_eq!(Category::from_slug("agent"), Some(Category::Agent));
     }
 
     #[test]

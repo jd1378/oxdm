@@ -37,7 +37,8 @@ pub use pause::{CancelResumeStrategy, PauseStrategy};
 pub use queue_scheduler::spawn as spawn_queue_scheduler;
 pub use runner::PartCounters;
 pub use state::{
-    AppState, JobEntry, ProbeResult, RemoveOpts, decode_pairing_code, encode_pairing_code,
+    AgentRoute, AppState, JobEntry, ProbeResult, RemoveOpts, decode_pairing_code,
+    encode_pairing_code,
 };
 pub use update_channel::{
     HttpFeedUpdateChannel, NoopUpdateChannel, UpdateChannel, UpdateInfo, UpdaterEvent,

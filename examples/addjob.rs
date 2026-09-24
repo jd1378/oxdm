@@ -122,6 +122,8 @@ async fn main() {
             category: None,
             size,
             checksums: Vec::new(),
+            // The daemon's own probe is part of what this exercises.
+            run_follows: false,
         })
         .await
         .expect("add");
