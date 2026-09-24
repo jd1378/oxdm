@@ -1,6 +1,6 @@
 {
   "name": "oxdm",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Download through the oxdm download manager: every download shows in the user's oxdm window and resumes after errors, with machine-readable NDJSON output and typed exit codes.",
   "author": { "name": "jd1378" },
   "homepage": "https://github.com/jd1378/oxdm",

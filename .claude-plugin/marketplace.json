@@ -7,7 +7,7 @@
       "name": "oxdm",
       "source": "./plugins/oxdm",
       "description": "Teach AI agents to download through oxdm: downloads visible in the user's window, resumable after errors, NDJSON output, typed exit codes.",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "category": "productivity",
       "tags": ["download", "cli", "agent-skill"]
     }

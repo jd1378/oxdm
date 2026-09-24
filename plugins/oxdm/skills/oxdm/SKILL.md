@@ -120,10 +120,10 @@ oxdm --format json queues
   downloaded data, and `restart --delete-file` moves the old file to the
   trash.
 - **Checksums are per file.** `--checksum ALGO:DIGEST` (hex, or
-  `ALGO:base64:DIGEST`) goes with a single URL. Give it on the first
-  `add`: a download that has started cannot take a new one until it
-  finishes (exit 2). On a finished download, it hashes the saved file
-  and exits 4 on a mismatch.
+  `ALGO:base64:DIGEST`) goes with a single URL. Re-running `add` with a
+  new one attaches it to the download already in the list: an
+  unfinished one checks it when the file is written; a finished one is
+  hashed now, exiting 4 on a mismatch.
 - **Secrets never on the command line.** Pipe headers in: `-H @-` reads
   `Name: Value` lines from stdin. `Cookie` and `Authorization` (Basic,
   Bearer) are stored encrypted by oxdm.

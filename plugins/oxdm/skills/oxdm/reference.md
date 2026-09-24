@@ -96,12 +96,9 @@ A `--checksum` the download does not carry yet is added to it first:
 
 - finished, file present: the file is hashed now, before `add` answers;
   a mismatch is a `rejected` line and exit 4
-- finished with the file gone, or queued and never started: the run that
-  follows checks it
-- started but not finished (running, paused, failed part-way): refused
-  with exit 2, because a download's expected digests cannot change
-  once it has data. Let it finish (`oxdm resume`, `oxdm wait`), then run
-  the same `add` again to check the saved file
+- not finished (queued, running, paused, failed part-way): its run
+  checks it when the file is written, and resuming keeps the data
+  already downloaded
 
 ### `restart --delete-file`, `remove --delete-file`
 
