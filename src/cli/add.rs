@@ -16,7 +16,7 @@ use super::failure::{Failure, Kind};
 use super::input::{self, Dest};
 use super::output::Out;
 use super::query::queue_named;
-use super::view::{Action, Line, short};
+use super::view::{Action, Line};
 use crate::domain::{Checksum, Creds, CsStatus, Job, JobError, JobId, Phase, Queue, QueueId};
 use crate::ipc_local::Client;
 use crate::ipc_local::protocol::AddJobReq;
@@ -311,33 +311,16 @@ async fn revive(
     if let Some(f) = needs_decision(job) {
         return Err(f);
     }
-    // Once a download has data, the engine reads a changed list of
-    // expected digests as a changed file, and a resume would stop on
-    // that. The digest waits for the finished file instead.
-    if !added.is_empty() && has_started(job) {
-        return Err(Failure::usage(format!(
-            "download {} has already started, so a new checksum cannot be added until it \
-             finishes; let it finish (`oxdm resume` / `oxdm wait`), then run this add again \
-             to check the saved file",
-            short(&job.id.to_string())
-        )));
-    }
+    // Checked at the end of the run, whether it is going now or is
+    // started again below.
+    attach_checksums(client, job, &added).await?;
     if phase.is_running() {
         return Ok(Action::Running);
     }
-    attach_checksums(client, job, &added).await?;
     if no_start {
         return Ok(Action::NotStarted);
     }
     run_job(client, job.id, false).await
-}
-
-/// A run has begun: bytes, a working folder, or a start on record.
-fn has_started(job: &Job) -> bool {
-    job.status.phase.is_running()
-        || job.status.downloaded > 0
-        || job.work_root.is_some()
-        || job.started_at.is_some()
 }
 
 /// The digests in `given` the job does not carry yet.
@@ -449,20 +432,6 @@ mod tests {
         assert_eq!(f.kind, Kind::Usage);
         assert!(plan(add_args(&["https://e.x/a", "--checksum", &sum])).is_ok());
         assert!(plan(add_args(&["https://e.x/a", "https://e.x/b"])).is_ok());
-    }
-
-    #[test]
-    fn a_download_has_started_once_it_has_anything_to_resume() {
-        let mut j = crate::cli::fixtures::job();
-        assert!(!has_started(&j), "queued, never run");
-        j.work_root = Some(PathBuf::from("/cache"));
-        assert!(has_started(&j), "its folder exists, so its metadata may");
-        j.work_root = None;
-        j.status.downloaded = 1;
-        assert!(has_started(&j));
-        j.status.downloaded = 0;
-        j.status.phase = Phase::Evaluating;
-        assert!(has_started(&j));
     }
 
     #[test]
