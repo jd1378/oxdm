@@ -404,10 +404,16 @@ mod tests {
             &is_dir,
         )
         .unwrap();
-        assert_eq!(
-            fresh.dir.as_os_str(),
-            "/home/u/new",
-            "no trailing separator"
+        // Compared as a path (the separator is the platform's), and as
+        // text for the part that matters: nothing trails the name.
+        assert_eq!(fresh.dir, Path::new("/home/u/new"));
+        assert!(
+            !fresh
+                .dir
+                .to_string_lossy()
+                .ends_with(std::path::is_separator),
+            "no trailing separator: {}",
+            fresh.dir.display()
         );
         assert_eq!(fresh.filename, None);
     }

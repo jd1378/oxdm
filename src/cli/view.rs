@@ -563,7 +563,8 @@ mod tests {
         let v = DownloadView::new(&j, None, &[]);
         assert_eq!(v.percent, Some(25.0));
         assert_eq!(v.state, State::Active);
-        assert_eq!(v.path.as_deref(), Some("/nonexistent-oxdm-cli/dl/a.zip"));
+        let want = Path::new("/nonexistent-oxdm-cli/dl").join("a.zip");
+        assert_eq!(v.path.as_deref().map(Path::new), Some(want.as_path()));
         assert!(!v.file_exists);
 
         j.status.total = None;
