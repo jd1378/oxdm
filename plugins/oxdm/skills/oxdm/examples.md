@@ -87,8 +87,16 @@ oxdm --format json add "https://example.com/file.zip" \
     --wait --timeout 5m
 ```
 
-A mismatch ends with `failed` (`"kind":"conflict"`) and exit 4. The file
-is complete but wrong; downloading it again is the user's call:
+The digest can also be base64:
+`--checksum "sha256:base64:n4bQgYhMfWWaL+qgxVrQFaO/TxsrC4Is0V1sFbDwCgg="`.
+Give `--checksum` with one URL per command.
+
+A mismatch ends with `failed` (`"kind":"conflict"`) and exit 4. Running the
+same `add --checksum ...` for a download that already finished hashes the
+saved file instead of downloading it again, so it also answers "is the
+file I already have the right one?".
+
+The file is complete but wrong; downloading it again is the user's call:
 
 ```bash
 oxdm --format json restart <ID> --delete-file --wait --timeout 5m

@@ -51,7 +51,7 @@ what they started, exactly like `wait`. `DUR` is like `90s`, `10m`, `1h`.
 | `-H, --header "Name: Value"` | repeatable. `@FILE` reads one header per line, `@-` from stdin. `Cookie` and `Authorization: Basic/Bearer` are stored encrypted |
 | `--referrer URL` | Referer to send |
 | `--connections N` | parallel connections (1 to 64) |
-| `--checksum ALGO:HEX` | expected digest, checked at the end; repeatable. `md5`, `sha1`, `sha256`, `sha384`, `sha512` |
+| `--checksum ALGO[:ENCODING]:DIGEST` | expected digest, checked when the file is saved; repeatable. `md5`, `sha1`, `sha256`, `sha384`, `sha512`; `ENCODING` is `hex` (default) or `base64`. Only with a single URL (exit 2 otherwise). A mismatch fails with `kind: "conflict"`, exit 4 |
 | `--no-start` | add only |
 | `--new` | add even if the URL is already in the list |
 | `--show` | open the progress window for each download |
@@ -91,6 +91,17 @@ again. It is reported with `"existing": true` and:
 - stopped, failed, queued: resumed
 - running: left alone
 - in conflict (checksum mismatch, file changed): refused with exit 4
+
+A `--checksum` the download does not carry yet is added to it first:
+
+- finished, file present: the file is hashed now, before `add` answers;
+  a mismatch is a `rejected` line and exit 4
+- finished with the file gone, or queued and never started: the run that
+  follows checks it
+- started but not finished (running, paused, failed part-way): refused
+  with exit 2, because a download's expected digests cannot change
+  once it has data. Let it finish (`oxdm resume`, `oxdm wait`), then run
+  the same `add` again to check the saved file
 
 ### `restart --delete-file`, `remove --delete-file`
 
