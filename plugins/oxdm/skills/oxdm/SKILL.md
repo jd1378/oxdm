@@ -13,6 +13,26 @@ can be resumed from where it stopped instead of starting over.
 Check the CLI exists with `oxdm help` (it lists `add`, `wait`, `list`).
 The full contract is under `oxdm help`; `reference.md` mirrors it.
 
+## Finding `oxdm`
+
+If the shell answers `oxdm: command not found`, oxdm may be installed in
+a folder that is not on this shell's `PATH`. Try the installers' default
+locations and use the first one that runs `help`:
+
+| OS | path |
+|----|------|
+| Linux, macOS | `~/.local/bin/oxdm` |
+| Windows (PowerShell) | `& "$env:LOCALAPPDATA\Programs\oxdm\oxdm.exe"` |
+| Windows (Git Bash) | `"$LOCALAPPDATA/Programs/oxdm/oxdm.exe"` |
+
+If one works, call it by that full path for the rest of the task, and
+tell the user once that its folder is not on their `PATH` (on Linux and
+macOS: add `export PATH="$HOME/.local/bin:$PATH"` to their shell
+profile; on Windows the installer already added it, so a new terminal
+picks it up). If none works, oxdm is not installed, or was installed
+somewhere else: ask the user where, or point them to
+https://github.com/jd1378/oxdm#install. Do not install it yourself.
+
 ## Golden rule
 
 **Always pass `--format json`.** You get one JSON object per line on
