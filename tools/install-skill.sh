@@ -31,7 +31,7 @@ SCOPE:
                   (falls back to --global when non-interactive)
 
 Other:
-  agents-md [FILE]  flatten the skill into FILE for non-SKILL.md agents
+  agents-md [FILE]  flatten SKILL.md into FILE for non-SKILL.md agents
                     (default ./AGENTS.md)
   -h, --help
 
@@ -139,13 +139,10 @@ flatten_agents_md() {
   {
     echo "$begin"
     echo
-    # SKILL.md body without its YAML frontmatter.
-    awk 'NR==1&&$0=="---"{f=1;next} f&&$0=="---"{f=0;next} !f{print}' "${STAGE}/SKILL.md"
-    echo; echo "---"; echo
-    cat "${STAGE}/reference.md"
-    echo; echo "---"; echo
-    cat "${STAGE}/examples.md"
-    echo
+    # SKILL.md body only, up to "More detail": an AGENTS.md is read every
+    # session, so reference.md and examples.md stay out; the body points
+    # to `oxdm help` for the full contract instead.
+    awk 'NR==1&&$0=="---"{f=1;next} f&&$0=="---"{f=0;next} /^## More detail/{exit} !f{print}' "${STAGE}/SKILL.md"
     echo "$end"
   } >> "$tmp"
   mv "$tmp" "$out"
