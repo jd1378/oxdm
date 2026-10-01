@@ -214,11 +214,13 @@ reports `requires_auth: true`.
 In `failed` and `rejected` lines:
 
 ```json
-{"kind": "network", "message": "HTTP 404 Not Found", "retryable": false}
+{"kind": "network", "message": "nothing at this address (HTTP 404 or 410)", "retryable": false}
 ```
 
 `retryable: true` means trying again unchanged (`oxdm resume`) can be
 expected to help: connection errors, timeouts, HTTP 408, 429 and 5xx.
+A refusal the server will not change (HTTP 401, 403, 404, 407, 410) is
+`network` with `retryable: false`; any other 4xx is `other`.
 
 On stderr, once, when the exit code is not 0:
 
