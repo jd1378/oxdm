@@ -1422,6 +1422,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dirs"
+version = "7.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d57d423b3c82e89b9a24ca3091fee61f456a26edbd28d26c65906f4bc1dcd8f"
+dependencies = [
+ "dirs-sys",
+]
+
+[[package]]
 name = "dirs-sys"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4199,19 +4208,19 @@ dependencies = [
 
 [[package]]
 name = "odl"
-version = "3.2.0"
+version = "3.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dfe82b4c81c5dac0432733532d2cbd8d57d6abc131474240ed8e0f66cdd1153d"
+checksum = "bc0aa368a304acf8165213cb239d68b0fac76bd7b0c957d3410e8c0c2c75fb75"
 dependencies = [
  "async-trait",
  "atomicwrites",
- "base64 0.22.1",
+ "base64 0.23.1",
  "bytes",
  "chrono",
  "derive_builder",
  "deunicode",
  "digest 0.11.3",
- "dirs",
+ "dirs 7.0.0",
  "filetime",
  "futures",
  "http",
@@ -4307,7 +4316,7 @@ dependencies = [
  "chrono",
  "clap",
  "dark-light",
- "dirs",
+ "dirs 6.0.0",
  "flate2",
  "fs4",
  "futures",
@@ -6604,7 +6613,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "045979e3f037cd18ad1cb2a419dfda133c5c29c9f3453370079f2255d46c257e"
 dependencies = [
  "crossbeam-channel",
- "dirs",
+ "dirs 6.0.0",
  "libappindicator",
  "muda",
  "objc2 0.6.4",

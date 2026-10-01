@@ -807,6 +807,61 @@ mod tests {
         format!("http://{addr}/file.bin")
     }
 
+    /// One origin of a redirect, recording the head of every request it
+    /// gets (lowercased). With `redirect_to` it answers everything with a
+    /// 302 there. Without, it serves `BODY`, except to a request carrying
+    /// a cookie or an `Authorization`, which it refuses with 401 the way
+    /// GitHub's asset host refused a github.com session.
+    async fn spawn_origin(
+        redirect_to: Option<String>,
+    ) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let heads = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = heads.clone();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let redirect_to = redirect_to.clone();
+                let seen = seen.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 1024];
+                    while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match sock.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        }
+                    }
+                    let head = String::from_utf8_lossy(&buf).to_ascii_lowercase();
+                    let refused =
+                        head.contains("\r\ncookie:") || head.contains("\r\nauthorization:");
+                    let send_body = redirect_to.is_none() && !refused && !head.starts_with("head ");
+                    seen.lock().unwrap().push(head);
+                    let response = match redirect_to {
+                        Some(to) => format!(
+                            "HTTP/1.1 302 Found\r\nLocation: {to}\r\nContent-Length: 0\r\n\
+                             Connection: close\r\n\r\n"
+                        ),
+                        None if refused => "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\
+                                            Connection: close\r\n\r\n"
+                            .to_owned(),
+                        None => format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: \
+                             application/octet-stream\r\nConnection: close\r\n\r\n",
+                            BODY.len()
+                        ),
+                    };
+                    let _ = sock.write_all(response.as_bytes()).await;
+                    if send_body {
+                        let _ = sock.write_all(BODY).await;
+                    }
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        (format!("http://{addr}/file.bin"), heads)
+    }
+
     fn part(size: u64) -> PartCounters {
         PartCounters {
             ulid: "01ULID".into(),
@@ -1084,6 +1139,23 @@ mod tests {
         bridge: Arc<dyn LiveBridge>,
         cancel: CancellationToken,
     ) -> Result<RunOutcome, JobError> {
+        run_job_as(job, work_dir, bridge, cancel, Secrets::default()).await
+    }
+
+    /// What the daemon decrypts from the job's row just before a run.
+    #[derive(Default)]
+    struct Secrets {
+        cookies: Option<String>,
+        auth_password: Option<String>,
+    }
+
+    async fn run_job_as(
+        job: Job,
+        work_dir: &std::path::Path,
+        bridge: Arc<dyn LiveBridge>,
+        cancel: CancellationToken,
+        secrets: Secrets,
+    ) -> Result<RunOutcome, JobError> {
         let per_job = crate::data::state::per_job_dir(work_dir, job.id);
         tokio::fs::create_dir_all(&per_job).await.expect("mkdir");
         // Mirror production: retries enabled (so a 503 schedules a
@@ -1109,9 +1181,9 @@ mod tests {
             bridge,
             per_job_dir: Some(per_job),
             live_controls: odl::progress::LiveControls::new(),
-            auth_password: None,
+            auth_password: secrets.auth_password,
             proxy_password: None,
-            cookies: None,
+            cookies: secrets.cookies,
             resolver: Arc::new(UiResolver::new(
                 job.id,
                 events2,
@@ -1405,5 +1477,56 @@ mod tests {
             .expect("download should verify");
         let path = outcome.final_path.expect("final path");
         assert_eq!(std::fs::read(path).unwrap(), BODY);
+    }
+
+    /// A link that redirects to another host (a release asset on a CDN)
+    /// takes the site's cookies and token only as far as the site. The
+    /// CDN refusing a github.com session with 401 is how odl handing them
+    /// on surfaced. Nor do they land in the plaintext files beside the
+    /// parts: the daemon encrypts them at rest, and a copy there undid it.
+    #[tokio::test]
+    async fn credentials_stay_with_the_host_they_were_given_for() {
+        let (cdn, cdn_heads) = spawn_origin(None).await;
+        let (url, site_heads) = spawn_origin(Some(cdn)).await;
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("work");
+        let mut job = test_job(&url, dir.path().join("save"), GOOD_SHA256);
+        job.advanced.auth.scheme = crate::domain::AuthScheme::Bearer;
+        let per_job = crate::data::state::per_job_dir(&work, job.id);
+
+        let outcome = run_job_as(
+            job,
+            &work,
+            Arc::new(RecordingBridge::default()),
+            CancellationToken::new(),
+            Secrets {
+                cookies: Some("session=s3cret".into()),
+                auth_password: Some("t0ken".into()),
+            },
+        )
+        .await;
+
+        let site = site_heads.lock().unwrap().join("\n");
+        assert!(
+            site.contains("cookie: session=s3cret") && site.contains("authorization: bearer t0ken"),
+            "the site was never sent the credentials, so nothing here is proven:\n{site}",
+        );
+        let cdn = cdn_heads.lock().unwrap().join("\n");
+        assert!(!cdn.is_empty(), "the redirect was never followed");
+        assert!(
+            !cdn.contains("s3cret") && !cdn.contains("t0ken"),
+            "credentials reached the host the site redirected to:\n{cdn}",
+        );
+        outcome.expect("the download completes without them");
+        for entry in std::fs::read_dir(&per_job).unwrap() {
+            let path = entry.unwrap().path();
+            let bytes = std::fs::read(&path).unwrap();
+            let holds = |secret: &[u8]| bytes.windows(secret.len()).any(|w| w == secret);
+            assert!(
+                !holds(b"s3cret") && !holds(b"t0ken"),
+                "{} holds a credential in plaintext",
+                path.display(),
+            );
+        }
     }
 }
