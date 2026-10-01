@@ -364,8 +364,7 @@ pub fn error_detail(err: &JobError) -> String {
 /// one of the two without saying which.
 const NOT_FOUND_STEPS: &[&str] = &[
     "Check the address for typos, then open it in a browser.",
-    "The file may have moved or been taken down. Look for a current link.",
-    "If the URL was copied from a page, copy it again; some are one-time.",
+    "The file may have moved, or the link expired. Get a new one from where you found it.",
 ];
 
 /// Tone, list heading and recovery steps for the failures worth
