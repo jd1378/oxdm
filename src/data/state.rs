@@ -717,6 +717,31 @@ impl AppState {
             let _ = std::fs::remove_dir_all(dir);
         }
 
+        // Once per profile: the credentials odl before 3.3 copied beside
+        // the parts. Here, before any run exists, because odl rewrites the
+        // same files while it downloads.
+        const CREDENTIALS_SCRUBBED: &str = "metadata_credentials_scrubbed";
+        if store.meta(CREDENTIALS_SCRUBBED).await.is_none() {
+            let mut roots = vec![settings.work_dir.clone()];
+            for root in stored_jobs.iter().filter_map(|j| j.work_root.as_ref()) {
+                if !roots.contains(root) {
+                    roots.push(root.clone());
+                }
+            }
+            let scrub = crate::data::metadata_scrub::scrub_credentials(&roots);
+            if scrub.rewritten > 0 {
+                tracing::info!(
+                    files = scrub.rewritten,
+                    "cleared stored credentials from download metadata"
+                );
+            }
+            if scrub.failed == 0
+                && let Err(e) = store.set_meta(CREDENTIALS_SCRUBBED, "1").await
+            {
+                tracing::warn!(error = %e, "could not record the credential scrub; it runs again next start");
+            }
+        }
+
         let mut jobs = IndexMap::new();
         let completion = seeded_completion(&settings);
         for j in stored_jobs {
@@ -5554,8 +5579,9 @@ fn seeded_completion(settings: &Settings) -> crate::domain::OnCompletion {
 }
 
 /// Directory-name prefix every per-job working dir carries. The reset
-/// sweep keys off it, so the two must not drift apart.
-const PER_JOB_PREFIX: &str = ".oxdm-";
+/// sweep and the credential scrub key off it, so they must not drift
+/// apart.
+pub(crate) const PER_JOB_PREFIX: &str = ".oxdm-";
 
 fn per_job_dir_name(id: JobId) -> String {
     format!("{PER_JOB_PREFIX}{}", id.0.simple())
