@@ -94,6 +94,9 @@ pub fn classify(e: &JobError) -> (Kind, bool) {
         JobError::HttpStatus { code, .. } => {
             (Kind::Network, *code == 408 || *code == 429 || *code >= 500)
         }
+        // The same refusals, from odl without their code: filed with the
+        // statuses they are, and as final.
+        JobError::AccessRefused | JobError::UrlBroken => (Kind::Network, false),
         JobError::ServerConflict(_)
         | JobError::NotResumable(_)
         | JobError::FileChanged(_)
@@ -154,6 +157,9 @@ mod tests {
         };
         assert_eq!(classify(&status(404)), (Kind::Network, false));
         assert_eq!(classify(&status(403)), (Kind::Network, false));
+        // odl's codeless forms of the same answers keep their class.
+        assert_eq!(classify(&JobError::UrlBroken), (Kind::Network, false));
+        assert_eq!(classify(&JobError::AccessRefused), (Kind::Network, false));
         assert_eq!(classify(&status(429)), (Kind::Network, true));
         assert_eq!(classify(&status(503)), (Kind::Network, true));
         assert_eq!(

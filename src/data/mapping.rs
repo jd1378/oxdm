@@ -473,7 +473,11 @@ pub fn job_error_from_odl(e: &OdlError) -> JobError {
                 odl::conflict::ServerConflict::NotResumable => {
                     JobError::NotResumable(conflict.to_string())
                 }
-                _ => JobError::ServerConflict(conflict.to_string()),
+                // Refusals, not questions: nothing a person answers lets
+                // the same run go on, and parking them as conflicts put
+                // a 404 under "the file on the server changed".
+                odl::conflict::ServerConflict::CredentialsInvalid => JobError::AccessRefused,
+                odl::conflict::ServerConflict::UrlBroken => JobError::UrlBroken,
             },
             ConflictError::ChecksumMismatch { expected, actual } => JobError::ChecksumMismatch {
                 expected: expected.clone(),

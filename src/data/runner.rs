@@ -955,6 +955,39 @@ mod tests {
         assert!(p.finished.load(std::sync::atomic::Ordering::Acquire));
     }
 
+    /// Server that answers every request, the probe included, with
+    /// `status` (e.g. `"404 Not Found"`), counting them.
+    async fn spawn_refusing_server(
+        status: &'static str,
+    ) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let counter = hits.clone();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let counter = counter.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 1024];
+                    while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match sock.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        }
+                    }
+                    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let head = format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    );
+                    let _ = sock.write_all(head.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        (format!("http://{addr}/file.bin"), hits)
+    }
+
     /// Server that answers every GET with `503` + a long `Retry-After`,
     /// counting the attempts. HEAD still succeeds, so the download gets
     /// as far as scheduling retries. Returns the URL and the counter.
@@ -1477,6 +1510,33 @@ mod tests {
             .expect("download should verify");
         let path = outcome.final_path.expect("final path");
         assert_eq!(std::fs::read(path).unwrap(), BODY);
+    }
+
+    /// A probe the server refuses for good is believed the first time,
+    /// and the refusal keeps what it was. odl reports these without
+    /// their code; mapped as conflicts, a dead link read "the file on
+    /// the server changed" and was parked as a question to answer.
+    #[tokio::test]
+    async fn a_refused_probe_fails_at_once_as_what_it_was() {
+        for (status, expected) in [
+            ("404 Not Found", JobError::UrlBroken),
+            ("410 Gone", JobError::UrlBroken),
+            ("401 Unauthorized", JobError::AccessRefused),
+            ("403 Forbidden", JobError::AccessRefused),
+        ] {
+            let (url, hits) = spawn_refusing_server(status).await;
+            let dir = tempfile::tempdir().unwrap();
+            let job = test_job(&url, dir.path().join("save"), GOOD_SHA256);
+
+            let outcome = run_job(job, &dir.path().join("work")).await;
+
+            assert_eq!(outcome.err(), Some(expected), "{status}");
+            assert_eq!(
+                hits.load(std::sync::atomic::Ordering::Relaxed),
+                1,
+                "{status} was asked again",
+            );
+        }
     }
 
     /// A link that redirects to another host (a release asset on a CDN)

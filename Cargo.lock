@@ -4191,9 +4191,9 @@ dependencies = [
 
 [[package]]
 name = "odl"
-version = "3.3.0"
+version = "3.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc0aa368a304acf8165213cb239d68b0fac76bd7b0c957d3410e8c0c2c75fb75"
+checksum = "2952527b595b9a05d28e6cb15293a01fb4d0705f45bd0e71043b145632e630f0"
 dependencies = [
  "async-trait",
  "atomicwrites",

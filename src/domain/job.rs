@@ -174,6 +174,15 @@ pub enum JobError {
         reason: Option<String>,
         url: Option<String>,
     },
+    /// The server, or a proxy on the way, turned the request away for
+    /// who sent it: HTTP 401, 403 or 407. odl reports the three alike
+    /// (`ServerConflict::CredentialsInvalid`), so which one is unknown.
+    #[error("the server refused access (HTTP 401, 403 or 407)")]
+    AccessRefused,
+    /// Nothing at this address any more: HTTP 404 or 410.
+    /// (odl `ServerConflict::UrlBroken`.)
+    #[error("nothing at this address (HTTP 404 or 410)")]
+    UrlBroken,
     #[error("server conflict: {0}")]
     ServerConflict(String),
     /// The server refused a ranged request, so the bytes already on

@@ -79,6 +79,18 @@ pub fn error_meta(err: &JobError) -> (&'static str, &'static str, &'static str, 
                 "The server answered with an error instead of the file.",
             ),
         },
+        JobError::AccessRefused => (
+            "key",
+            "The server refused access",
+            "ACCESS_REFUSED",
+            "The server, or a proxy on the way, turned this request away.",
+        ),
+        JobError::UrlBroken => (
+            "file",
+            "The file isn't at this address",
+            "URL_BROKEN",
+            "The server has nothing at this URL any more.",
+        ),
         JobError::NotResumable(_) => (
             "plug-zap",
             "Server refused to resume",
@@ -278,6 +290,10 @@ pub fn error_detail(err: &JobError) -> String {
                 None => format!("The server {what} (HTTP {code})."),
             }
         }
+        JobError::AccessRefused => {
+            "The server refused access to this file (HTTP 401, 403 or 407).".into()
+        }
+        JobError::UrlBroken => "The server has nothing at this address (HTTP 404 or 410).".into(),
         JobError::ServerConflict(_) => {
             "The file on the server no longer matches the one this download started.".into()
         }
@@ -344,6 +360,14 @@ pub fn error_detail(err: &JobError) -> String {
     }
 }
 
+/// Recovery steps for a 404 or 410, and for odl's `UrlBroken`, which is
+/// one of the two without saying which.
+const NOT_FOUND_STEPS: &[&str] = &[
+    "Check the address for typos, then open it in a browser.",
+    "The file may have moved or been taken down. Look for a current link.",
+    "If the URL was copied from a page, copy it again; some are one-time.",
+];
+
 /// Tone, list heading and recovery steps for the failures worth
 /// spelling out. `None` for every other kind — those keep the plain
 /// [`error_block`]. Shared with [`error_block_height`], so the window
@@ -374,15 +398,7 @@ fn recovery_copy(err: &JobError) -> Option<(Tone, &'static str, &'static [&'stat
                      Settings → Network.",
                 ],
             ),
-            404 | 410 => (
-                Tone::Danger,
-                TRY,
-                &[
-                    "Check the address for typos, then open it in a browser.",
-                    "The file may have moved or been taken down. Look for a current link.",
-                    "If the URL was copied from a page, copy it again; some are one-time.",
-                ],
-            ),
+            404 | 410 => (Tone::Danger, TRY, NOT_FOUND_STEPS),
             429 => (
                 Tone::Warning,
                 TRY,
@@ -410,6 +426,21 @@ fn recovery_copy(err: &JobError) -> Option<(Tone, &'static str, &'static [&'stat
                 ],
             ),
         },
+        // odl's codeless 401/403/407: the advice for all three, since
+        // which one it was is not known.
+        JobError::AccessRefused => (
+            Tone::Danger,
+            TRY,
+            &[
+                "Add or correct the sign-in under Properties → Connection, then retry.",
+                "If the link came from a logged-in page, copy it again from that session; \
+                 signed links expire.",
+                "Cookies sent with it can be refused too. Turn off Send cookies under \
+                 Properties → Cookies and retry.",
+                "Behind a proxy that asks for a password? Check Settings → Network.",
+            ],
+        ),
+        JobError::UrlBroken => (Tone::Danger, TRY, NOT_FOUND_STEPS),
         // Not a design variant: DNS is the one network failure where the
         // useful moves are specific (typo, VPN/custom resolver, fresh
         // domain) rather than "check your connection".
