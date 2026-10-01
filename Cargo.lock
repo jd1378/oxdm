@@ -4290,7 +4290,7 @@ dependencies = [
 
 [[package]]
 name = "oxdm"
-version = "0.12.22"
+version = "0.12.23"
 dependencies = [
  "aes-gcm",
  "arboard",
