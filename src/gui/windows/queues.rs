@@ -3743,8 +3743,8 @@ fn order_row<'a>(
     if job.status.phase.is_running()
         && let Some(total) = job.status.total.filter(|t| *t > 0)
     {
-        let pct = (job.status.downloaded as f64 / total as f64 * 100.0).min(100.0);
-        status = format!("{status} {pct:.0}%");
+        let pct = crate::domain::progress::percent(job.status.downloaded, total);
+        status = format!("{status} {pct}%");
     }
     let name = job.filename.clone().unwrap_or_else(|| job.url.to_string());
 

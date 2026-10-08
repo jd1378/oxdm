@@ -11,6 +11,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use super::failure::{Kind, classify, describe};
+use crate::domain::progress::permille;
 use crate::domain::{Job, JobError, Phase, Queue};
 use crate::gui::format::{format_bytes, format_speed};
 use crate::ipc_local::protocol::JobCounters;
@@ -158,7 +159,7 @@ impl DownloadView {
         };
         let percent = match (phase, total) {
             (Phase::Completed, _) => Some(100.0),
-            (_, Some(t)) if t > 0 => Some((downloaded as f64 / t as f64 * 1000.0).round() / 10.0),
+            (_, Some(t)) if t > 0 => Some(f64::from(permille(downloaded, t)) / 10.0),
             _ => None,
         };
         Self {
@@ -418,7 +419,7 @@ impl Line {
                 let amount = match total {
                     Some(t) if *t > 0 => format!(
                         "{:.1}% ({} of {})",
-                        *downloaded as f64 / *t as f64 * 100.0,
+                        f64::from(permille(*downloaded, *t)) / 10.0,
                         format_bytes(*downloaded),
                         format_bytes(*t)
                     ),
@@ -569,6 +570,16 @@ mod tests {
 
         j.status.total = None;
         assert_eq!(DownloadView::new(&j, None, &[]).percent, None);
+    }
+
+    #[test]
+    fn progress_reads_complete_only_when_every_byte_is_there() {
+        let mut j = job(Phase::Downloading);
+        j.status.downloaded = 99_999;
+        j.status.total = Some(100_000);
+        assert_eq!(DownloadView::new(&j, None, &[]).percent, Some(99.9));
+        j.status.phase = Phase::Completed;
+        assert_eq!(DownloadView::new(&j, None, &[]).percent, Some(100.0));
     }
 
     #[test]

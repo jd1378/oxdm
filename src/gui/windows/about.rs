@@ -758,7 +758,7 @@ fn updates(st: &State) -> Element<'_, Msg> {
             match total {
                 Some(size) if *size > 0 => format!(
                     "Downloading v{version}… {}%",
-                    (*done as f64 / *size as f64 * 100.0).round() as u64
+                    crate::domain::progress::percent(*done, *size)
                 ),
                 _ => format!("Downloading v{version}…"),
             },

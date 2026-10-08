@@ -9,6 +9,7 @@ pub mod filename;
 pub mod headers;
 pub mod job;
 pub mod native_host;
+pub mod progress;
 pub mod queue;
 pub mod save_path;
 pub mod settings;

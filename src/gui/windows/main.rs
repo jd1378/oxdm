@@ -3835,9 +3835,9 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
     // files, and an allow-list would hide progress that is still there.
     // Only Queued-at-0% and Completed (100%, already said by the label)
     // stay plain dots.
-    let frac = match (c.map(|c| c.downloaded), total) {
-        (Some(d), Some(tot)) if tot > 0 => d as f64 / tot as f64,
-        _ => 0.0,
+    let (done, size) = match (c.map(|c| c.downloaded), total) {
+        (Some(d), Some(tot)) if tot > 0 => (d, tot),
+        _ => (0, 0),
     };
     let tone = match phase {
         Phase::Failed => ProgressTone::Failed,
@@ -3849,11 +3849,11 @@ fn job_row<'a>(m: &'a Main, job: &'a crate::domain::Job) -> Element<'a, Msg> {
     // resume, so a bar at 100% measures work that is over and offers a
     // number where the answer is "this file is wrong".
     let integrity_failed = job.integrity_failed();
-    let stopped_with_progress = frac > 0.0 && phase != Phase::Completed && !integrity_failed;
+    let stopped_with_progress = done > 0 && phase != Phase::Completed && !integrity_failed;
     let status_cell: Element<'_, Msg> = if phase.is_running() || stopped_with_progress {
         let (_, label) = phase_style(t, phase);
         cell(
-            inline_progress(t, frac as f32, label, selected, tone, Length::Fill, 22.0),
+            inline_progress(t, done, size, label, selected, tone, Length::Fill, 22.0),
             Length::Fixed(m.columns.width(SortColumn::Status as usize)),
             Alignment::Start,
         )

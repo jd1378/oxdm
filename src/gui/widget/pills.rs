@@ -339,10 +339,13 @@ pub enum ProgressTone {
 }
 
 /// Table-cell progress: sunken track + translucent fill (per `tone`) +
-/// centered `"{label} · {pct}%"` body_bold(11) caption.
+/// centered `"{label} · {pct}%"` body_bold(11) caption, for `done` of
+/// `total` bytes (`total` `0` when unknown).
+#[allow(clippy::too_many_arguments)]
 pub fn inline_progress<'a, M: 'a>(
     t: &Tokens,
-    frac: f32,
+    done: u64,
+    total: u64,
     label: String,
     selected: bool,
     tone: ProgressTone,
@@ -362,11 +365,19 @@ pub fn inline_progress<'a, M: 'a>(
             ProgressTone::Failed => with_alpha(crate::gui::color::rust::R300, 0.5),
         }
     };
+    let frac = if total > 0 {
+        (done as f64 / total as f64) as f32
+    } else {
+        0.0
+    };
     canvas(PillProgress {
         frac: frac.clamp(0.0, 1.0),
         track: t.bg_sunken,
         fill,
-        label: Some(format!("{label} · {}%", (frac * 100.0).round() as u32)),
+        label: Some(format!(
+            "{label} · {}%",
+            crate::domain::progress::percent(done, total)
+        )),
         label_color: t.fg_1,
         border: Some(Color {
             a: 26.0 / 255.0,

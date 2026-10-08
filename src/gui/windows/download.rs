@@ -11,6 +11,7 @@ use iced::widget::{column, container, row, stack, text};
 use iced::{Alignment, Element, Length, Subscription, Task};
 
 use crate::domain::checksum::CsStatus;
+use crate::domain::progress::percent;
 use crate::domain::{JobError, JobId, OnCompletion, Phase, ShutdownAction};
 use crate::gui::chrome::{self, WindowControl, titlebar};
 use crate::gui::color;
@@ -543,11 +544,13 @@ impl State {
             .filter(|p| p.size > 0)
             .map(|p| (p.downloaded, p.size))
     }
-    fn frac(&self) -> f32 {
-        match self.total() {
-            Some(t) if t > 0 => (self.entry.counters.downloaded as f64 / t as f64) as f32,
-            _ => 0.0,
-        }
+    /// The bytes behind the hero bar, its percentage and the title's.
+    fn bar(&self) -> (u64, u64) {
+        bar_bytes(
+            self.assembly(),
+            self.entry.counters.downloaded,
+            self.total(),
+        )
     }
 
     /// The download's size — the largest anything has claimed it to be
@@ -596,12 +599,8 @@ impl State {
             // assembled that is the copy's progress, not the
             // transfer's, and a title reading 100% over a bar at 40%
             // makes the user pick one to believe.
-            let frac = bar_frac(self.assembly(), self.frac());
-            format!(
-                "{name} - {} {}%",
-                phase.label(),
-                (frac * 100.0).round() as u32
-            )
+            let (done, total) = self.bar();
+            format!("{name} - {} {}%", phase.label(), percent(done, total))
         } else {
             format!("{name} - {}", phase.label())
         }
@@ -1572,10 +1571,10 @@ fn header_card(st: &State) -> Element<'_, Msg> {
         // The bar's number, not the transfer's: during assembly they
         // are different, and a hero reading 100% above a bar at 35%
         // asks the user to pick one.
-        Some(_) => format!(
-            "{}%",
-            (bar_frac(st.assembly(), st.frac()) * 100.0).round() as u32
-        ),
+        Some(_) => {
+            let (done, total) = st.bar();
+            format!("{}%", percent(done, total))
+        }
         None => "—".to_owned(),
     };
 
@@ -1758,7 +1757,7 @@ fn running_view(st: &State) -> Element<'_, Msg> {
     }
     hero = hero
         .push(sibling(striped_progress_hatched(
-            bar_frac(st.assembly(), st.frac()),
+            bar_frac(st.bar()),
             Length::Fill,
             10.0,
             track,
@@ -2173,7 +2172,7 @@ fn info_tab(st: &State) -> Element<'_, Msg> {
                 None => row![
                     pill_progress(frac, Length::Fill, 6.0, t.progress_track, t.progress_fill),
                     container(
-                        text(format!("{}%", (frac * 100.0).round() as u32))
+                        text(format!("{}%", percent(p.downloaded, p.size)))
                             .font(theme::MONO)
                             .size(11.0)
                             .color(t.fg_2)
@@ -3251,13 +3250,21 @@ fn cb_row<'a>(content: Element<'a, Msg>) -> Element<'a, Msg> {
         .into()
 }
 
-/// What the hero bar measures: the assembly copy while one is running,
-/// the transfer otherwise.
-fn bar_frac(assembly: Option<(u64, u64)>, downloaded: f32) -> f32 {
+/// What the hero bar measures, as `(done, total)` bytes with `total`
+/// `0` when unknown: the assembly copy while one is running, the
+/// transfer otherwise.
+fn bar_bytes(assembly: Option<(u64, u64)>, downloaded: u64, total: Option<u64>) -> (u64, u64) {
     match assembly {
-        Some((done, total)) if total > 0 => done as f32 / total as f32,
-        _ => downloaded,
+        Some((done, size)) if size > 0 => (done, size),
+        _ => (downloaded, total.unwrap_or(0)),
     }
+}
+
+fn bar_frac((done, total): (u64, u64)) -> f32 {
+    if total == 0 {
+        return 0.0;
+    }
+    (done as f64 / total as f64) as f32
 }
 
 /// Track, fill and stripe gradient for the hero bar.
@@ -3703,12 +3710,15 @@ mod tests {
     /// over and its own fraction would sit at 100% saying nothing.
     #[test]
     fn the_bar_follows_assembly_while_it_runs() {
-        assert_eq!(bar_frac(Some((250, 1000)), 1.0), 0.25);
-        // No assembly in flight: the download's own fraction stands.
-        assert_eq!(bar_frac(None, 0.5), 0.5);
+        assert_eq!(bar_bytes(Some((250, 1000)), 4000, Some(4000)), (250, 1000));
+        // No assembly in flight: the download's own bytes stand.
+        assert_eq!(bar_bytes(None, 500, Some(1000)), (500, 1000));
         // A zero-length assembly cannot divide; the caller filters it,
         // and the fallback is what the download reported.
-        assert_eq!(bar_frac(Some((0, 0)), 0.75), 0.75);
+        assert_eq!(bar_bytes(Some((0, 0)), 750, Some(1000)), (750, 1000));
+        assert_eq!(bar_bytes(None, 750, None), (750, 0));
+        assert_eq!(bar_frac((250, 1000)), 0.25);
+        assert_eq!(bar_frac((750, 0)), 0.0);
     }
 
     /// Disconnecting and powering off are not rivals: the link goes

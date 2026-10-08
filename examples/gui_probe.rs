@@ -293,7 +293,8 @@ fn inputs_page(t: &theme::Tokens) -> Element<'static, Msg> {
         ),
         widget::inline_progress(
             t,
-            0.63,
+            63,
+            100,
             "Downloading".into(),
             false,
             widget::ProgressTone::Active,
@@ -304,7 +305,8 @@ fn inputs_page(t: &theme::Tokens) -> Element<'static, Msg> {
         // it cannot be mistaken for a live transfer.
         widget::inline_progress(
             t,
-            0.38,
+            38,
+            100,
             "Paused".into(),
             false,
             widget::ProgressTone::Paused,
@@ -313,7 +315,8 @@ fn inputs_page(t: &theme::Tokens) -> Element<'static, Msg> {
         ),
         widget::inline_progress(
             t,
-            0.23,
+            23,
+            100,
             "Failed".into(),
             false,
             widget::ProgressTone::Failed,
