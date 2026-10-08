@@ -594,6 +594,18 @@ fn hydrate(st: &mut State) {
     };
 }
 
+/// What the locked form says about the speed limit. Without one of its
+/// own the download runs under the global limit, and "Unlimited" would
+/// misstate it.
+fn speed_limit_label(own: Option<u64>, global: Option<u64>) -> String {
+    let speed = |bps: u64| crate::gui::format::format_speed(bps as f64);
+    match (own, global.filter(|bps| *bps > 0)) {
+        (Some(bps), _) => speed(bps),
+        (None, Some(bps)) => format!("{} (global)", speed(bps)),
+        (None, None) => "Unlimited".to_owned(),
+    }
+}
+
 /// The connection cap this form would send: `None` is "let oxdm
 /// choose", and anything outside 1–16 is not a cap the daemon accepts.
 fn pending_max_conn(st: &State) -> Option<u64> {
@@ -1495,7 +1507,7 @@ fn transfer_section(st: &State) -> Element<'_, Msg> {
             set_row(
                 t,
                 "Speed limit",
-                Some("Caps this download alone, on top of the global limit."),
+                Some("Caps this download alone, in place of the global limit."),
                 toggle(t, st.limit_on, editable, Msg::UseLimiter),
             ),
             set_row(t, "Limit to", None, value_row.into()),
@@ -1518,10 +1530,7 @@ fn transfer_section(st: &State) -> Element<'_, Msg> {
             kv_row(
                 t,
                 "Speed limit",
-                match pending_speed_limit(st) {
-                    Some(bps) => crate::gui::format::format_speed(bps as f64),
-                    None => "Unlimited".to_owned(),
-                },
+                speed_limit_label(pending_speed_limit(st), st.settings.speed_limit),
                 false,
             ),
         ]
@@ -3250,5 +3259,18 @@ mod tests {
     fn an_emptied_user_agent_stops_being_a_header() {
         let rows = vec![("X-Api-Key".to_owned(), "k".to_owned())];
         assert_eq!(compose_headers(&rows, "   "), rows);
+    }
+
+    /// The download's own limit replaces the global one; without it,
+    /// the global one is what the download runs under.
+    #[test]
+    fn the_speed_limit_shown_is_the_one_in_force() {
+        let mb = 1024 * 1024;
+        let own = speed_limit_label(Some(2 * mb), Some(mb));
+        assert!(!own.contains("global"), "{own}");
+        let global = speed_limit_label(None, Some(mb));
+        assert!(global.ends_with(" (global)"), "{global}");
+        assert_eq!(speed_limit_label(None, None), "Unlimited");
+        assert_eq!(speed_limit_label(None, Some(0)), "Unlimited");
     }
 }

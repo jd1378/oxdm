@@ -2584,7 +2584,7 @@ fn network_section(st: &State) -> Element<'_, Msg> {
                     set_row(
                         t,
                         "Speed limit",
-                        Some("Applies across every download at once."),
+                        Some("Applies to each download separately."),
                         speed_limit_picker(st)
                     ),
                     set_row(
