@@ -25,6 +25,33 @@ function Warn($m) { Write-Host "! $m" -ForegroundColor Yellow }
 # Not `exit`: under `irm | iex` that closes the window, error and all.
 function Fail($m) { throw "error: $m" }
 
+# Windows refuses to overwrite a program that is running. Every oxdm
+# process runs from $Dir: the daemon, its windows, and the browser
+# bridge, which the browser starts on its own.
+function Get-OxdmProcess {
+  $full = [IO.Path]::GetFullPath($Dir).TrimEnd('\')
+  Get-Process -Name 'oxdm*' -ErrorAction SilentlyContinue |
+    Where-Object { $_.Path -and ((Split-Path $_.Path -Parent) -ieq $full) }
+}
+
+# Renaming a running program is allowed where overwriting it is not;
+# oxdm deletes the `.oxdm-old` copy on its next start, as after an
+# update.
+function Install-Binary($src, $name) {
+  $dst = Join-Path $Dir $name
+  try { Copy-Item $src $dst -Force }
+  catch {
+    if (-not (Test-Path -LiteralPath $dst)) { throw }
+    $old = [IO.Path]::ChangeExtension($dst, 'oxdm-old')
+    Remove-Item -LiteralPath $old -Force -ErrorAction SilentlyContinue
+    Move-Item -LiteralPath $dst -Destination $old
+    # Put the old program back rather than leave none.
+    try { Copy-Item $src $dst -Force }
+    catch { Move-Item -LiteralPath $old -Destination $dst -Force; throw }
+  }
+  Ok "installed: $dst"
+}
+
 Step 'Detecting platform'
 $arch = (Get-CimInstance Win32_OperatingSystem).OSArchitecture
 switch -Wildcard ($arch) {
@@ -101,15 +128,32 @@ try {
   $host_ = Get-ChildItem -Path $tmp -Recurse -File -Filter 'oxdm-native-host.exe' | Select-Object -First 1
   if (-not $oxdm)  { Fail "oxdm.exe not found in archive" }
 
+  if (Get-OxdmProcess) {
+    Step 'Stopping oxdm'
+    # Asked first so downloads are paused with their progress saved.
+    # Not relied on: the kill below covers a daemon that does not
+    # answer, and `Install-Binary` a process that outlives the kill.
+    try {
+      $q = Start-Process -FilePath (Join-Path $Dir 'oxdm.exe') -ArgumentList '--quit' -WindowStyle Hidden -PassThru
+      $null = $q.WaitForExit(10000)
+      $deadline = (Get-Date).AddSeconds(10)
+      while ((Get-OxdmProcess | Where-Object ProcessName -eq 'oxdm') -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 250
+      }
+    } catch {
+      Warn "could not ask oxdm to quit: $($_.Exception.Message)"
+    }
+    Get-OxdmProcess | Stop-Process -Force -ErrorAction SilentlyContinue
+    Ok 'oxdm stopped'
+  }
+
   Step "Installing to $Dir"
   if (-not (Test-Path $Dir)) { New-Item -ItemType Directory -Path $Dir | Out-Null }
-  Copy-Item $oxdm.FullName (Join-Path $Dir 'oxdm.exe') -Force
-  Ok "installed: $Dir\oxdm.exe"
+  Install-Binary $oxdm.FullName 'oxdm.exe'
   # Not fatal when an archive lacks it: oxdm runs without the browser
   # bridge, minus that integration.
   if ($host_) {
-    Copy-Item $host_.FullName (Join-Path $Dir 'oxdm-native-host.exe') -Force
-    Ok "installed: $Dir\oxdm-native-host.exe"
+    Install-Binary $host_.FullName 'oxdm-native-host.exe'
   } else {
     Warn "'oxdm-native-host.exe' is not in this archive - browser integration will be unavailable."
   }
