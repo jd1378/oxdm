@@ -22,7 +22,8 @@ function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Info($m) { Write-Host "    $m" -ForegroundColor DarkGray }
 function Ok($m)   { Write-Host "✓ $m" -ForegroundColor Green }
 function Warn($m) { Write-Host "! $m" -ForegroundColor Yellow }
-function Fail($m) { Write-Host "error: $m" -ForegroundColor Red; exit 1 }
+# Not `exit`: under `irm | iex` that closes the window, error and all.
+function Fail($m) { throw "error: $m" }
 
 Step 'Detecting platform'
 $arch = (Get-CimInstance Win32_OperatingSystem).OSArchitecture
@@ -66,6 +67,7 @@ try {
   # the difference between "downloaded from GitHub" and "downloaded
   # what the release actually built".
   Step 'Verifying'
+  $want = $null
   try {
     # To a file, then read it as text. `Invoke-WebRequest` hands back
     # `Content` as a byte array whenever the server does not call the
@@ -78,11 +80,15 @@ try {
     # `<hash>  <name>`, or `<hash> *<name>` when it was written in
     # binary mode; the digest is the first field either way.
     $want = ($sums -split '\s+')[0]
+  } catch {
+    Warn "could not verify the download: $($_.Exception.Message)"
+  }
+  # Outside the try: `Fail` throws, and the catch above would turn a
+  # mismatch into a warning.
+  if ($want) {
     $got = (Get-FileHash -Path $pkg -Algorithm SHA256).Hash.ToLower()
     if ($want.ToLower() -ne $got) { Fail "checksum mismatch: expected $want, got $got" }
     Ok 'sha256 matches'
-  } catch {
-    Warn "could not verify the download: $($_.Exception.Message)"
   }
 
   Step 'Extracting'
