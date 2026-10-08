@@ -36,6 +36,23 @@ warn() { printf '\033[33m!\033[0m %s\n' "$*"; }
 
 OS="$(uname -s)"
 
+# Removing the program does not stop it: the daemon would keep its
+# tray icon and downloads going, and under --purge write its database
+# back after it was deleted.
+if [ -x "$INSTALL_DIR/oxdm" ] && pgrep -x oxdm >/dev/null 2>&1; then
+  step "Stopping oxdm"
+  "$INSTALL_DIR/oxdm" --quit >/dev/null 2>&1 || true
+  i=0
+  while pgrep -x oxdm >/dev/null 2>&1 && [ "$i" -lt 40 ]; do
+    sleep 0.5; i=$((i + 1))
+  done
+  if pgrep -x oxdm >/dev/null 2>&1; then
+    warn "oxdm is still running; quit it from its tray icon"
+  else
+    ok "oxdm stopped"
+  fi
+fi
+
 step "Removing binaries"
 for bin in oxdm oxdm-native-host; do
   if [ -f "$INSTALL_DIR/$bin" ]; then
@@ -50,6 +67,15 @@ if [ "$OS" = "Linux" ]; then
            "$HOME/.local/share/icons/hicolor/512x512/apps/oxdm.png"; do
     if [ -f "$f" ]; then rm -f "$f"; ok "removed $f"; fi
   done
+fi
+
+if [ "$OS" = "Darwin" ]; then
+  # Login autostart, written when "start with system" is on.
+  f="$HOME/Library/LaunchAgents/com.oxdm.app.plist"
+  if [ -f "$f" ]; then
+    launchctl unload "$f" >/dev/null 2>&1 || true
+    rm -f "$f"; ok "removed $f"
+  fi
 fi
 
 if [ "$PURGE" = 1 ]; then
