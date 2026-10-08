@@ -319,6 +319,8 @@ pub enum Msg {
     Disconnect(bool),
     // Footer / complete view
     PauseResume,
+    /// The daemon's answer to a Pause or Resume.
+    Toggled(Result<(), String>),
     Cancel,
     /// Failure recovery (design §3.3): discard the partial file and
     /// fetch from byte 0. The only way forward when the server refuses
@@ -386,6 +388,11 @@ pub struct State {
     /// Why the daemon would not start this download. Set by the button
     /// that asked; cleared by acknowledging it.
     refusal: Option<String>,
+    /// A Pause or Resume is with the daemon, and the buttons that send
+    /// one are off until it answers. A Resume can wait out the run a
+    /// Pause just stopped, and a press that looks unanswered gets
+    /// pressed again.
+    toggling: bool,
     /// The finished file is on disk. Refreshed as the entry changes;
     /// the completed view only offers to open what is there.
     file_present: bool,
@@ -712,6 +719,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 confirm_delete: false,
                 confirm_restart: false,
                 refusal: None,
+                toggling: false,
                 file_present: false,
                 missing: None,
                 hash_hover: None,
@@ -1134,6 +1142,10 @@ fn update_state(st: &mut State, msg: Msg) -> Task<Msg> {
             Task::batch([apply_completion(st), fit_for_tab(st)])
         }
         Msg::PauseResume => {
+            if st.toggling {
+                return Task::none();
+            }
+            st.toggling = true;
             let client = st.client.clone();
             let id = st.id;
             let running = st.phase().is_running();
@@ -1145,14 +1157,23 @@ fn update_state(st: &mut State, msg: Msg) -> Task<Msg> {
                         client.resume(id).await
                     }
                 },
-                |r| match r {
-                    Ok(()) => Msg::Noop,
-                    // Resuming is the one action the daemon declines on
-                    // the user's behalf; a button that silently does
-                    // nothing reads as broken.
-                    Err(e) => Msg::Refused(e),
-                },
+                Msg::Toggled,
             )
+        }
+        Msg::Toggled(result) => {
+            st.toggling = false;
+            match result {
+                // Read back now, so the buttons come back on facing the
+                // new state rather than the one they were pressed in.
+                Ok(()) => refetch(st.client.clone(), st.id),
+                // Resuming is the one action the daemon declines on the
+                // user's behalf; a button that silently does nothing
+                // reads as broken.
+                Err(e) => {
+                    st.refusal = Some(e);
+                    Task::none()
+                }
+            }
         }
         Msg::Refused(reason) => {
             st.refusal = Some(reason);
@@ -1710,7 +1731,7 @@ fn running_view(st: &State) -> Element<'_, Msg> {
     // Footer morphs on error kind (design §3.3 "context-dependent on
     // error kind"); the normal transfer footer is pause/resume + cancel.
     let footer_right: Element<'_, Msg> = match &error {
-        Some(err) => error_footer(t, err),
+        Some(err) => error_footer(t, err, st.toggling),
         None => row![
             // Assembly cannot be interrupted: the final file is being
             // written from the parts, and stopping half-way leaves
@@ -1723,7 +1744,7 @@ fn running_view(st: &State) -> Element<'_, Msg> {
             })
             .primary()
             .icon(if phase.is_running() { "pause" } else { "play" })
-            .enabled(phase != Phase::Assembling)
+            .enabled(phase != Phase::Assembling && !st.toggling)
             .on_press(Msg::PauseResume)
             .view(t),
             Btn::new("Cancel")
@@ -1796,7 +1817,9 @@ fn running_view(st: &State) -> Element<'_, Msg> {
 /// keep). Cancel stays the danger action in every variant. Buttons
 /// whose backend action doesn't exist in this window (e.g. delete the
 /// tampered file on disk) are intentionally omitted, not invented.
-fn error_footer<'a>(t: &Tokens, err: &JobError) -> Element<'a, Msg> {
+/// `toggling`: a retry is already with the daemon; the buttons that
+/// send one stay off until it answers.
+fn error_footer<'a>(t: &Tokens, err: &JobError, toggling: bool) -> Element<'a, Msg> {
     let cancel = Btn::new("Cancel")
         .danger()
         .icon("x")
@@ -1806,6 +1829,7 @@ fn error_footer<'a>(t: &Tokens, err: &JobError) -> Element<'a, Msg> {
         Btn::new("Retry")
             .primary()
             .icon("rotate-cw")
+            .enabled(!toggling)
             .on_press(Msg::PauseResume)
             .view(t)
     };
@@ -1835,6 +1859,7 @@ fn error_footer<'a>(t: &Tokens, err: &JobError) -> Element<'a, Msg> {
             Btn::new("Try again")
                 .toolbar()
                 .icon("rotate-cw")
+                .enabled(!toggling)
                 .on_press(Msg::PauseResume)
                 .view(t),
             cancel,
@@ -1869,6 +1894,7 @@ fn error_footer<'a>(t: &Tokens, err: &JobError) -> Element<'a, Msg> {
                 Btn::new("Continue")
                     .primary()
                     .icon("play")
+                    .enabled(!toggling)
                     .on_press(Msg::PauseResume)
                     .view(t)
             };
@@ -1878,6 +1904,7 @@ fn error_footer<'a>(t: &Tokens, err: &JobError) -> Element<'a, Msg> {
                     Btn::new("Try again")
                         .toolbar()
                         .icon("rotate-cw")
+                        .enabled(!toggling)
                         .on_press(Msg::PauseResume)
                         .view(t),
                     cancel,

@@ -200,6 +200,12 @@ pub enum Msg {
     OpenMissingFolder,
     /// The daemon declined an action. Carries its own words for it.
     Refused(String),
+    /// The daemon answered a Pause (`running`) or Resume sent for `ids`.
+    Toggled {
+        ids: Vec<JobId>,
+        running: bool,
+        result: Result<(), String>,
+    },
     Context(ContextAction),
     /// Open one of the context menu's "Move to…" lists, or close
     /// whichever is open (the pointer moved to a plain entry).
@@ -459,6 +465,11 @@ pub struct Main {
     pub sort: Option<(SortColumn, bool)>,
     pub search: String,
     pub selection: HashSet<JobId>,
+    /// Jobs with a Pause or Resume still with the daemon. Not offered
+    /// another until it answers: a Resume can wait out the run a Pause
+    /// just stopped, and a press that looks unanswered gets pressed
+    /// again.
+    pub toggling: HashSet<JobId>,
     pub select_anchor: Option<JobId>,
     pub collapsed_sections: HashSet<u8>,
     pub maximized: bool,
@@ -598,6 +609,7 @@ impl Main {
             sort: None,
             search: String::new(),
             selection: HashSet::new(),
+            toggling: HashSet::new(),
             select_anchor: None,
             collapsed_sections: HashSet::new(),
             maximized: false,
@@ -710,13 +722,16 @@ impl Main {
     /// The jobs a press acts on, and the direction it takes.
     fn pause_resume_targets(&self) -> (bool, Vec<JobId>) {
         let running = self.pause_resume_direction();
-        let ids = self
-            .selection
+        (running, self.pause_resume_ids(running))
+    }
+
+    /// The selected jobs a press in `running`'s direction acts on.
+    fn pause_resume_ids(&self, running: bool) -> Vec<JobId> {
+        self.selection
             .iter()
             .copied()
             .filter(|id| self.is_pause_resume_target(*id, running))
-            .collect();
-        (running, ids)
+            .collect()
     }
 
     fn toggle_actionable(&self) -> bool {
@@ -953,6 +968,35 @@ where
         Ok(()) => Msg::Noop,
         Err(e) => Msg::Refused(e),
     })
+}
+
+/// Pause (`running`) or Resume `ids`, holding their buttons off until
+/// the daemon answers.
+fn toggle(m: &mut Main, running: bool, ids: Vec<JobId>) -> Task<Msg> {
+    m.toggling.extend(ids.iter().copied());
+    let client = m.client.clone();
+    Task::perform(
+        async move {
+            let mut result = Ok(());
+            for id in &ids {
+                let sent = if running {
+                    client.pause(*id).await
+                } else {
+                    client.resume(*id).await
+                };
+                if let Err(e) = sent {
+                    result = Err(e);
+                    break;
+                }
+            }
+            (ids, result)
+        },
+        move |(ids, result)| Msg::Toggled {
+            ids,
+            running,
+            result,
+        },
+    )
 }
 
 fn refresh(client: Arc<Client>) -> Task<Msg> {
@@ -1342,6 +1386,26 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
             m.refusal = Some(reason);
             m.overlay = Overlay::Refused;
             Task::none()
+        }
+        Msg::Toggled {
+            ids,
+            running,
+            result,
+        } => {
+            for id in &ids {
+                m.toggling.remove(id);
+            }
+            match result {
+                Ok(()) => Task::none(),
+                // Starting is the one thing the daemon says no to on the
+                // user's behalf. The Pause it refuses, mid-assembly, the
+                // button does not offer.
+                Err(e) if !running => update_main(m, Msg::Refused(e)),
+                Err(e) => {
+                    tracing::warn!("ipc action failed: {e}");
+                    Task::none()
+                }
+            }
         }
         Msg::OpenMissingFolder => {
             if let Some(missing) = m.missing_file.as_ref() {
@@ -2024,21 +2088,7 @@ fn update_main(m: &mut Main, msg: Msg) -> Task<Msg> {
                 // that drew the button and the press that fires it.
                 ToolbarAction::PauseResume => {
                     let (running, ids) = m.pause_resume_targets();
-                    if running {
-                        act(async move {
-                            for id in ids {
-                                client.pause(id).await?;
-                            }
-                            Ok(())
-                        })
-                    } else {
-                        act_reporting(async move {
-                            for id in ids {
-                                client.resume(id).await?;
-                            }
-                            Ok(())
-                        })
-                    }
+                    toggle(m, running, ids)
                 }
                 ToolbarAction::StopAll => act(async move { client.stop_all().await }),
                 ToolbarAction::Clean => request_clean(m),
@@ -2409,23 +2459,14 @@ fn context_action(m: &mut Main, action: ContextAction) -> Task<Msg> {
         // on one row but acts on the whole selection, so a finished
         // download sitting in it must not be resumed alongside a paused
         // one, and an already-paused one must not be paused again.
+        // In the direction the item said, not one worked out again now.
         ContextAction::Resume => {
-            let ids = m.pause_resume_targets().1;
-            act_reporting(async move {
-                for id in ids {
-                    client.resume(id).await?;
-                }
-                Ok(())
-            })
+            let ids = m.pause_resume_ids(false);
+            toggle(m, false, ids)
         }
         ContextAction::Pause => {
-            let ids = m.pause_resume_targets().1;
-            act(async move {
-                for id in ids {
-                    client.pause(id).await?;
-                }
-                Ok(())
-            })
+            let ids = m.pause_resume_ids(true);
+            toggle(m, true, ids)
         }
         // Restarting throws away everything already fetched, so it
         // asks first — the same question the download window's own
@@ -4251,15 +4292,18 @@ fn pause_resume_job(m: &Main, id: JobId) -> (bool, bool) {
         .jobs
         .iter()
         .any(|j| j.id == id && j.integrity_failed());
-    pause_resume_rule(m.phase(id), integrity_failed)
+    pause_resume_rule(m.phase(id), integrity_failed, m.toggling.contains(&id))
 }
 
-/// The rule itself, over nothing but a job's phase and whether its
-/// integrity check failed.
-fn pause_resume_rule(phase: Phase, integrity_failed: bool) -> (bool, bool) {
+/// The rule itself, over nothing but a job's phase, whether its
+/// integrity check failed, and whether a Pause or Resume for it is
+/// still with the daemon.
+fn pause_resume_rule(phase: Phase, integrity_failed: bool, pending: bool) -> (bool, bool) {
     let running = phase.is_running();
-    let enabled =
-        phase != Phase::Completed && phase != Phase::Assembling && !(integrity_failed && !running);
+    let enabled = !pending
+        && phase != Phase::Completed
+        && phase != Phase::Assembling
+        && !(integrity_failed && !running);
     (running, enabled)
 }
 
@@ -5120,17 +5164,50 @@ mod tests {
     /// press takes. This is the fold `is_pause_resume_target` applies
     /// over a selection, over a list of phases instead of a snapshot.
     fn targets(jobs: &[(Phase, bool)]) -> (bool, Vec<usize>) {
-        let running = jobs.iter().any(|(p, _)| p.is_running());
+        let jobs: Vec<_> = jobs.iter().map(|&(p, bad)| (p, bad, false)).collect();
+        targets_pending(&jobs)
+    }
+
+    /// [`targets`], with each job's request-pending flag.
+    fn targets_pending(jobs: &[(Phase, bool, bool)]) -> (bool, Vec<usize>) {
+        let running = jobs.iter().any(|(p, _, _)| p.is_running());
         let ids = jobs
             .iter()
             .enumerate()
-            .filter(|(_, (p, bad))| {
-                let (job_running, actionable) = pause_resume_rule(*p, *bad);
+            .filter(|(_, (p, bad, pending))| {
+                let (job_running, actionable) = pause_resume_rule(*p, *bad, *pending);
                 actionable && job_running == running
             })
             .map(|(i, _)| i)
             .collect();
         (running, ids)
+    }
+
+    /// A Resume can wait out the run a Pause just stopped. A job whose
+    /// request has not been answered is not offered another press, so
+    /// a second click does not send a second request.
+    #[test]
+    fn a_job_waiting_on_an_answer_is_not_pressed_again() {
+        assert!(
+            targets_pending(&[(Phase::Paused, false, true)])
+                .1
+                .is_empty()
+        );
+        let (running, ids) = targets_pending(&[(Phase::Downloading, false, true)]);
+        assert!(running, "still a Pause, just not one to offer");
+        assert!(ids.is_empty());
+    }
+
+    /// The rest of the selection is not held back by the job that is
+    /// waiting.
+    #[test]
+    fn the_rest_of_a_selection_is_still_pressed() {
+        let (_, ids) = targets_pending(&[
+            (Phase::Paused, false, true),
+            (Phase::Paused, false, false),
+            (Phase::Queued, false, false),
+        ]);
+        assert_eq!(ids, vec![1, 2]);
     }
 
     /// A finished download has nothing to resume, so Resume passes it
