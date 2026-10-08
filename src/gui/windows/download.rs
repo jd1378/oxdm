@@ -734,9 +734,8 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 samples: fresh_samples(entry.counters.phase.is_running()),
                 peak: 0.0,
                 anim_t: 0.0,
-                use_limiter: limit.is_some() || entry.session_speed_override > 0,
+                use_limiter: limit.is_some(),
                 limit_kbs: limit
-                    .or((entry.session_speed_override > 0).then_some(entry.session_speed_override))
                     .map(|b| (b / 1024).to_string())
                     .unwrap_or_else(|| "100".to_owned()),
                 limit_unit_mb: false,

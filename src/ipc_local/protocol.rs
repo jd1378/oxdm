@@ -243,7 +243,6 @@ pub enum Request {
     RetryFileWatch,
 
     // ── per-job overrides ──────────────────────────────────────────
-    SetSessionSpeedLimit(JobId, Option<u64>),
     SetPersistentSpeedLimit(JobId, Option<u64>),
     SetMaxConnections(JobId, Option<u64>),
     SetOnCompletion(JobId, OnCompletion),
@@ -636,6 +635,12 @@ pub struct JobCounters {
     /// download show the running retry tally; completion reads the
     /// persisted `Job::retries` instead.
     pub retries: u32,
+    /// The most connections a run may hold open, as odl last said;
+    /// `None` until a run's transfer starts, and the last run's once it
+    /// ends. Below what was asked for once odl has lowered it after
+    /// failed parts.
+    #[serde(default)]
+    pub connection_limit: Option<u32>,
     pub parts: Vec<PartView>,
 }
 
@@ -665,7 +670,6 @@ pub struct JobEntryView {
     pub job: Job,
     pub counters: JobCounters,
     pub on_completion: OnCompletion,
-    pub session_speed_override: u64,
     /// A hash of the saved file is running in the daemon right now.
     /// Lives here rather than in a window so every window agrees, and
     /// so closing the one that started it changes nothing.

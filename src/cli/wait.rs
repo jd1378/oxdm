@@ -397,6 +397,7 @@ mod tests {
             is_resumable: 1,
             running: phase.is_running(),
             retries: 0,
+            connection_limit: None,
             parts: Vec::new(),
         }
     }

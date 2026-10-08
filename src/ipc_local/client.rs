@@ -514,9 +514,6 @@ impl Client {
         }
     }
 
-    pub async fn set_session_speed_limit(&self, id: JobId, bps: Option<u64>) -> Result<(), String> {
-        self.expect_ok(Request::SetSessionSpeedLimit(id, bps)).await
-    }
     pub async fn set_persistent_speed_limit(
         &self,
         id: JobId,

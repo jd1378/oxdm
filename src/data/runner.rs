@@ -5,10 +5,8 @@
 use std::sync::Arc;
 
 use odl::download_manager::{DownloadManager, DownloadRequest, EvaluateRequest};
-use odl::progress::{
-    AsyncReporter, DownloadContext, ProgressEvent as OdlProgressEvent, ProgressReporter,
-};
-use tokio::sync::broadcast;
+use odl::progress::{DownloadContext, ProgressEvent as OdlProgressEvent, ProgressReporter};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::data::events::DomainEvent;
@@ -137,9 +135,10 @@ pub struct JobRunner {
     /// Per-job override for the metadata / parts directory. `None` ⇒
     /// use the manager's global `download_dir`.
     pub per_job_dir: Option<std::path::PathBuf>,
-    /// Shared live knobs (max_connections) lifted from `JobEntry`. We
-    /// hand a clone to odl via `DownloadContext::with_live` so the GUI
-    /// can mutate the running job's connection count mid-flight.
+    /// Shared live knobs (connection cap, speed limit) lifted from
+    /// `JobEntry` and primed by the caller for this run. A clone goes to
+    /// odl via `DownloadContext::with_live`, so the GUI can change the
+    /// running job mid-flight.
     pub live_controls: odl::progress::LiveControls,
     /// HTTP Basic password decrypted from the DB just before spawning
     /// the runner. Combined with `Job.auth_user` to build an
@@ -160,9 +159,6 @@ pub struct JobRunner {
     pub resolver: Arc<UiResolver>,
 }
 
-/// Sink the runner uses to push hot per-byte progress to `LiveCounters`.
-/// Defined as a trait so `state.rs` (which owns the counters) is the
-/// only file that knows their layout.
 /// What the daemon recorded when a run resolved a job's name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedName {
@@ -173,26 +169,35 @@ pub struct ResolvedName {
     pub moved_to: Option<std::path::PathBuf>,
 }
 
+/// Sink the runner uses to push progress to `LiveCounters`. Defined as a
+/// trait so `state.rs` (which owns the counters) is the only file that
+/// knows their layout.
+///
+/// Every call is awaited and must land: most of what odl says, it says
+/// once. A part announced, finished or cleared, or a phase changed, is
+/// never repeated, so an implementation waits for what it needs rather
+/// than skipping the call when that is busy.
 #[async_trait::async_trait]
 pub trait LiveBridge: Send + Sync + 'static {
-    fn on_event(&self, id: JobId, event: &OdlProgressEvent);
+    /// One odl event, in the order odl sent it. See [`EventPump`].
+    async fn on_event(&self, id: JobId, event: &OdlProgressEvent);
     /// Called once after `evaluate` succeeds with the resume-support
     /// flag the server advertised. Used by the UI's Info tab.
-    fn on_evaluated(&self, id: JobId, is_resumable: bool) {
+    async fn on_evaluated(&self, id: JobId, is_resumable: bool) {
         let _ = (id, is_resumable);
     }
     /// Called once after `evaluate` succeeds with the headers the
     /// server sent on that probe (already stripped of credential-
     /// bearing entries). Feeds Properties → Headers → captured
     /// response. Not called when the probe returned no headers.
-    fn on_response_headers(&self, id: JobId, captured: crate::domain::CapturedResponse) {
+    async fn on_response_headers(&self, id: JobId, captured: crate::domain::CapturedResponse) {
         let _ = (id, captured);
     }
     /// Called the moment the assembled file exists, before anything is
     /// checked against it. A verification failure is still a failure
     /// with a file on disk, and a job that does not know where that
     /// file is cannot offer to delete it.
-    fn on_final_path(&self, id: JobId, path: std::path::PathBuf) {
+    async fn on_final_path(&self, id: JobId, path: std::path::PathBuf) {
         let _ = (id, path);
     }
     /// Called after `evaluate` for a job that was added without one —
@@ -235,31 +240,24 @@ pub trait LiveBridge: Send + Sync + 'static {
 impl JobRunner {
     /// Run the job. The caller has already inserted a `JobEntry` for
     /// `job_id` and stored `cancel`; we just drive ODL.
-    pub async fn run(self, mut job: Job) -> Result<RunOutcome, JobError> {
+    pub async fn run(self, job: Job) -> Result<RunOutcome, JobError> {
+        let pump = EventPump::spawn(self.job_id, self.bridge.clone(), self.events.clone());
+        let outcome =
+            futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(self.drive(job, &pump)))
+                .await;
+        // The caller writes the run's final phase and counters next; an
+        // event still queued would land on top of them. A panic is no
+        // exception: the caller catches it and writes its epilogue too.
+        pump.flush().await;
+        outcome.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    }
+
+    async fn drive(&self, mut job: Job, pump: &Arc<EventPump>) -> Result<RunOutcome, JobError> {
         let url = job.url.clone();
         let save_dir = job.save_dir.clone();
 
-        let reporter = Arc::new(BridgeReporter {
-            id: self.job_id,
-            inner: self.bridge.clone(),
-            events: self.events.clone(),
-        });
-        let async_reporter: Arc<AsyncReporter> = AsyncReporter::spawn(BridgeReporter {
-            id: self.job_id,
-            inner: self.bridge.clone(),
-            events: self.events.clone(),
-        });
-        let _ = reporter; // kept for clarity — AsyncReporter wraps a clone
-
-        // Seed the live cap with the job's persisted override (if any)
-        // so the first run-loop iteration honours it before any user
-        // edit. Subsequent UI edits hit `live_controls.set_max_connections`
-        // directly and odl picks them up on the next loop iteration.
-        if let Some(n) = job.max_connections {
-            self.live_controls.set_max_connections(n as usize);
-        }
         let ctx = DownloadContext::new()
-            .with_reporter(async_reporter)
+            .with_reporter(pump.clone())
             .with_cancel(self.cancel.clone())
             .with_url(url.clone())
             .with_live(self.live_controls.clone());
@@ -295,9 +293,10 @@ impl JobRunner {
         // headers go on advertising — so this is the server's own
         // record, not the header's claim.
         self.bridge
-            .on_evaluated(self.job_id, instruction.is_resumable());
+            .on_evaluated(self.job_id, instruction.is_resumable())
+            .await;
         if let Some(captured) = crate::data::mapping::captured_response(&instruction) {
-            self.bridge.on_response_headers(self.job_id, captured);
+            self.bridge.on_response_headers(self.job_id, captured).await;
         }
 
         // What the server advertised in its headers becomes part of the
@@ -385,14 +384,14 @@ impl JobRunner {
             .download(dl_req)
             .await
             .map_err(|e| job_error_from_odl(&e))?;
-        self.bridge.on_final_path(self.job_id, path.clone());
+        self.bridge.on_final_path(self.job_id, path.clone()).await;
 
         // Hashing is oxdm's, not odl's (`verify_checksums(false)`): the
         // file exists by now, so a mismatch can be reported against a
         // download the user still has, and the digests we compute are
         // worth keeping rather than being thrown away inside a verify
         // step.
-        self.verify_file(&path, &job.checksums).await?;
+        self.verify_file(&path, &job.checksums, pump).await?;
 
         Ok(RunOutcome {
             final_path: Some(path),
@@ -409,6 +408,7 @@ impl JobRunner {
         &self,
         path: &std::path::Path,
         started_with: &[crate::domain::Checksum],
+        pump: &EventPump,
     ) -> Result<(), JobError> {
         let mut judged: Vec<crate::domain::Verdict> = Vec::new();
         let mut size = None;
@@ -432,7 +432,7 @@ impl JobRunner {
             let size = match size {
                 Some(s) => s,
                 None => {
-                    let s = self.announce_verifying(path).await;
+                    let s = announce_verifying(path, pump).await;
                     size = Some(s);
                     s
                 }
@@ -444,21 +444,18 @@ impl JobRunner {
                 &self.cancel,
                 size,
                 |done, total| {
-                    self.bridge.on_event(
-                        self.job_id,
-                        &OdlProgressEvent::PartProgress {
-                            ulid: odl::progress::VERIFY_ULID.to_string(),
-                            downloaded: done,
-                            total,
-                        },
-                    );
+                    pump.on_event(OdlProgressEvent::PartProgress {
+                        ulid: odl::progress::VERIFY_ULID.to_string(),
+                        downloaded: done,
+                        total,
+                    });
                 },
             )
             .await;
             let results = match outcome {
                 Ok(r) => r,
                 Err(e) => {
-                    self.finish_verifying();
+                    finish_verifying(pump);
                     return Err(e);
                 }
             };
@@ -473,7 +470,7 @@ impl JobRunner {
             judged.extend(found);
         }
         if size.is_some() {
-            self.finish_verifying();
+            finish_verifying(pump);
         }
         match judged
             .iter()
@@ -486,45 +483,39 @@ impl JobRunner {
             None => Ok(()),
         }
     }
+}
 
-    /// Enter the Verifying phase, with a progress row of its own. Hashing
-    /// a gigabyte takes seconds; odl reports it per block, and oxdm
-    /// forwards that the same way assembly is shown, so the bar moves
-    /// instead of sitting at 100%. Returns the file's size.
-    async fn announce_verifying(&self, path: &std::path::Path) -> u64 {
-        self.bridge.on_event(
-            self.job_id,
-            &OdlProgressEvent::PhaseChanged(odl::progress::Phase::Verifying),
-        );
-        let _ = self.events.send(DomainEvent::JobUpdated {
-            id: self.job_id,
-            phase: Phase::Verifying,
+/// Enter the Verifying phase, with a progress row of its own. Hashing a
+/// gigabyte takes seconds; odl reports it per block, and oxdm forwards
+/// that the same way assembly is shown, so the bar moves instead of
+/// sitting at 100%. Returns the file's size.
+///
+/// Sent through the pump behind odl's own events, so a late assembly
+/// event cannot land after it. Applied before hashing starts: a small
+/// file is hashed before the queue would otherwise reach it.
+async fn announce_verifying(path: &std::path::Path, pump: &EventPump) -> u64 {
+    pump.on_event(OdlProgressEvent::PhaseChanged(
+        odl::progress::Phase::Verifying,
+    ));
+    let size = tokio::fs::metadata(path)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0);
+    if size > 0 {
+        pump.on_event(OdlProgressEvent::PartAdded {
+            ulid: odl::progress::VERIFY_ULID.to_string(),
+            offset: 0,
+            size,
         });
-        let size = tokio::fs::metadata(path)
-            .await
-            .map(|m| m.len())
-            .unwrap_or(0);
-        if size > 0 {
-            self.bridge.on_event(
-                self.job_id,
-                &OdlProgressEvent::PartAdded {
-                    ulid: odl::progress::VERIFY_ULID.to_string(),
-                    offset: 0,
-                    size,
-                },
-            );
-        }
-        size
     }
+    pump.flush().await;
+    size
+}
 
-    fn finish_verifying(&self) {
-        self.bridge.on_event(
-            self.job_id,
-            &OdlProgressEvent::PartFinished {
-                ulid: odl::progress::VERIFY_ULID.to_string(),
-            },
-        );
-    }
+fn finish_verifying(pump: &EventPump) {
+    pump.on_event(OdlProgressEvent::PartFinished {
+        ulid: odl::progress::VERIFY_ULID.to_string(),
+    });
 }
 
 /// The checksums odl recorded for this download when it began, from its
@@ -641,88 +632,133 @@ fn build_credentials(
     Some(odl::credentials::Credentials::new(user, auth_password))
 }
 
-/// `ProgressReporter` that fans events out to (a) the shared `LiveBridge`
-/// for per-byte updates and (b) the `DomainEvent` broadcast for coarse
-/// state changes the UI cares about.
-pub struct BridgeReporter {
-    id: JobId,
-    inner: Arc<dyn LiveBridge>,
-    events: broadcast::Sender<DomainEvent>,
+/// Hands odl's events to the bridge one at a time, in the order they
+/// were sent, then fans the coarse ones out as `DomainEvent`s.
+///
+/// odl emits from its download tasks and must not be kept waiting, so
+/// sending only queues. The task draining the queue waits for whatever
+/// the bridge needs instead: a part announced, finished or cleared is
+/// said once, and skipping it while the job list was busy left the
+/// window without that part for good.
+pub struct EventPump {
+    tx: mpsc::UnboundedSender<Pumped>,
 }
 
-impl ProgressReporter for BridgeReporter {
-    fn on_event(&self, event: OdlProgressEvent) {
-        self.inner.on_event(self.id, &event);
-        match &event {
-            OdlProgressEvent::PhaseChanged(p) => {
-                let _ = self.events.send(DomainEvent::JobUpdated {
-                    id: self.id,
-                    phase: phase_from_odl(*p),
-                });
+enum Pumped {
+    Event(OdlProgressEvent),
+    /// Answered once everything queued before it has been applied.
+    Flush(oneshot::Sender<()>),
+}
+
+impl EventPump {
+    pub fn spawn(
+        id: JobId,
+        bridge: Arc<dyn LiveBridge>,
+        events: broadcast::Sender<DomainEvent>,
+    ) -> Arc<Self> {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        // Ends when the last sender goes: the run's own handle and the
+        // odl context holding the other.
+        tokio::spawn(async move {
+            while let Some(item) = rx.recv().await {
+                match item {
+                    Pumped::Event(event) => {
+                        bridge.on_event(id, &event).await;
+                        announce(&events, id, &event);
+                    }
+                    Pumped::Flush(done) => {
+                        let _ = done.send(());
+                    }
+                }
             }
-            OdlProgressEvent::FilenameResolved(name) => {
-                let _ = self.events.send(DomainEvent::JobFilenameResolved {
-                    id: self.id,
-                    filename: name.clone(),
-                });
-            }
-            OdlProgressEvent::PartAdded { ulid, offset, size } => {
-                let _ = self.events.send(DomainEvent::JobPartAdded {
-                    id: self.id,
-                    ulid: ulid.clone(),
-                    offset: *offset,
-                    size: *size,
-                });
-            }
-            OdlProgressEvent::RetryScheduled {
-                ulid,
-                attempt,
-                max_attempts,
-                delay,
-                server_requested,
-            } => {
-                let _ = self.events.send(DomainEvent::JobRetryScheduled {
-                    id: self.id,
-                    ulid: ulid.clone(),
-                    attempt: *attempt,
-                    max_attempts: *max_attempts,
-                    delay_ms: delay.as_millis() as u64,
-                    server_requested: *server_requested,
-                });
-            }
-            OdlProgressEvent::PartFinished { ulid } => {
-                let _ = self.events.send(DomainEvent::JobPartFinished {
-                    id: self.id,
-                    ulid: ulid.clone(),
-                });
-            }
-            OdlProgressEvent::Completed { .. } => {
-                // Canonical `JobCompleted` is emitted by the outcome
-                // handler in `state.rs` once the runner future returns.
-                // Forwarding it here as well caused subscribers
-                // (`completion_actions`, `notifications`) to fire twice
-                // — including spawning a second download-complete
-                // dialog when the focus registry hadn't yet picked up
-                // the first spawn.
-            }
-            OdlProgressEvent::Failed { message } => {
-                let _ = self.events.send(DomainEvent::JobFailed {
-                    id: self.id,
-                    error: JobError::Other(message.clone()),
-                });
-            }
-            OdlProgressEvent::Cancelled => {
-                let _ = self.events.send(DomainEvent::JobUpdated {
-                    id: self.id,
-                    phase: Phase::Paused,
-                });
-            }
-            // Hot path / UI pulls these from LiveCounters. The wildcard
-            // also absorbs whatever a future odl engine reports:
-            // `ProgressEvent` is `non_exhaustive`, and an event this
-            // build has no notion of is not one it can render.
-            _ => {}
+        });
+        Arc::new(Self { tx })
+    }
+
+    /// Wait until every event sent so far has been applied.
+    pub async fn flush(&self) {
+        let (done, applied) = oneshot::channel();
+        if self.tx.send(Pumped::Flush(done)).is_ok() {
+            // An error is the drain task gone, nothing left to wait for.
+            let _ = applied.await;
         }
+    }
+}
+
+impl ProgressReporter for EventPump {
+    fn on_event(&self, event: OdlProgressEvent) {
+        // Fails only once the drain task is gone, with the runtime.
+        let _ = self.tx.send(Pumped::Event(event));
+    }
+}
+
+/// The `DomainEvent` broadcast for the state changes the UI is told
+/// about; per-byte progress it reads from `LiveCounters` instead.
+fn announce(events: &broadcast::Sender<DomainEvent>, id: JobId, event: &OdlProgressEvent) {
+    match event {
+        OdlProgressEvent::PhaseChanged(p) => {
+            let _ = events.send(DomainEvent::JobUpdated {
+                id,
+                phase: phase_from_odl(*p),
+            });
+        }
+        OdlProgressEvent::FilenameResolved(name) => {
+            let _ = events.send(DomainEvent::JobFilenameResolved {
+                id,
+                filename: name.clone(),
+            });
+        }
+        OdlProgressEvent::PartAdded { ulid, offset, size } => {
+            let _ = events.send(DomainEvent::JobPartAdded {
+                id,
+                ulid: ulid.clone(),
+                offset: *offset,
+                size: *size,
+            });
+        }
+        OdlProgressEvent::RetryScheduled {
+            ulid,
+            attempt,
+            max_attempts,
+            delay,
+            server_requested,
+        } => {
+            let _ = events.send(DomainEvent::JobRetryScheduled {
+                id,
+                ulid: ulid.clone(),
+                attempt: *attempt,
+                max_attempts: *max_attempts,
+                delay_ms: delay.as_millis() as u64,
+                server_requested: *server_requested,
+            });
+        }
+        OdlProgressEvent::PartFinished { ulid } => {
+            let _ = events.send(DomainEvent::JobPartFinished {
+                id,
+                ulid: ulid.clone(),
+            });
+        }
+        // The canonical `JobCompleted` and `JobFailed` are emitted by
+        // the outcome handler in `state.rs` once the runner future
+        // returns, every failure odl reports being the error `download`
+        // returns. Forwarding these as well made subscribers
+        // (`completion_actions`, `notifications`) fire twice: a second
+        // dialog and notification, a conflict also announced as a
+        // failure, and a failed update abandoned twice. The copy sent
+        // here also carried only odl's message, and came before the
+        // phase was written.
+        OdlProgressEvent::Completed { .. } | OdlProgressEvent::Failed { .. } => {}
+        OdlProgressEvent::Cancelled => {
+            let _ = events.send(DomainEvent::JobUpdated {
+                id,
+                phase: Phase::Paused,
+            });
+        }
+        // Hot path / UI pulls these from LiveCounters. The wildcard
+        // also absorbs whatever a future odl engine reports:
+        // `ProgressEvent` is `non_exhaustive`, and an event this
+        // build has no notion of is not one it can render.
+        _ => {}
     }
 }
 
@@ -767,6 +803,11 @@ mod tests {
     /// connection. No Range support → odl treats it as non-resumable
     /// and downloads in a single part.
     async fn spawn_http_server() -> String {
+        serve(BODY).await
+    }
+
+    /// [`spawn_http_server`], with `body` in place of `BODY`.
+    async fn serve(body: &'static [u8]) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr");
         tokio::spawn(async move {
@@ -794,11 +835,11 @@ mod tests {
                         "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: \
                          application/octet-stream\r\nSet-Cookie: sid=secret; \
                          Path=/\r\nConnection: close\r\n\r\n",
-                        BODY.len()
+                        body.len()
                     );
                     let _ = sock.write_all(header.as_bytes()).await;
                     if !head_only {
-                        let _ = sock.write_all(BODY).await;
+                        let _ = sock.write_all(body).await;
                     }
                     let _ = sock.shutdown().await;
                 });
@@ -1095,8 +1136,8 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl LiveBridge for RecordingBridge {
-        fn on_event(&self, _id: JobId, _event: &OdlProgressEvent) {}
-        fn on_response_headers(&self, _id: JobId, captured: crate::domain::CapturedResponse) {
+        async fn on_event(&self, _id: JobId, _event: &OdlProgressEvent) {}
+        async fn on_response_headers(&self, _id: JobId, captured: crate::domain::CapturedResponse) {
             *self.captured.lock().unwrap() = Some(captured);
         }
         async fn on_server_checksums(&self, _id: JobId, checksums: Vec<Checksum>) {
@@ -1172,7 +1213,15 @@ mod tests {
         bridge: Arc<dyn LiveBridge>,
         cancel: CancellationToken,
     ) -> Result<RunOutcome, JobError> {
-        run_job_as(job, work_dir, bridge, cancel, Secrets::default()).await
+        run_job_as(
+            job,
+            work_dir,
+            bridge,
+            cancel,
+            Secrets::default(),
+            odl::progress::LiveControls::new(),
+        )
+        .await
     }
 
     /// What the daemon decrypts from the job's row just before a run.
@@ -1188,6 +1237,7 @@ mod tests {
         bridge: Arc<dyn LiveBridge>,
         cancel: CancellationToken,
         secrets: Secrets,
+        live_controls: odl::progress::LiveControls,
     ) -> Result<RunOutcome, JobError> {
         let per_job = crate::data::state::per_job_dir(work_dir, job.id);
         tokio::fs::create_dir_all(&per_job).await.expect("mkdir");
@@ -1213,7 +1263,7 @@ mod tests {
             cancel,
             bridge,
             per_job_dir: Some(per_job),
-            live_controls: odl::progress::LiveControls::new(),
+            live_controls,
             auth_password: secrets.auth_password,
             proxy_password: None,
             cookies: secrets.cookies,
@@ -1238,7 +1288,7 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl LiveBridge for ChangingRows {
-        fn on_event(&self, _id: JobId, _event: &OdlProgressEvent) {}
+        async fn on_event(&self, _id: JobId, _event: &OdlProgressEvent) {}
         async fn current_checksums(&self, _id: JobId) -> Option<Vec<Checksum>> {
             let mut lists = self.lists.lock().unwrap();
             Some(if lists.len() > 1 {
@@ -1500,6 +1550,149 @@ mod tests {
         assert_eq!(std::fs::read(path).unwrap(), BODY);
     }
 
+    /// Applies each event late, the way the daemon's bridge does while
+    /// the job list is busy, and keeps the once-only ones in order.
+    #[derive(Default)]
+    struct SlowBridge {
+        seen: std::sync::Mutex<Vec<String>>,
+    }
+    #[async_trait::async_trait]
+    impl LiveBridge for SlowBridge {
+        async fn on_event(&self, _id: JobId, event: &OdlProgressEvent) {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+            let seen = match event {
+                OdlProgressEvent::PartAdded { ulid, .. } => format!("added {ulid}"),
+                OdlProgressEvent::PartFinished { ulid } => format!("finished {ulid}"),
+                OdlProgressEvent::PartsCleared => "cleared".to_owned(),
+                OdlProgressEvent::PhaseChanged(p) => format!("phase {p:?}"),
+                _ => return,
+            };
+            self.seen.lock().unwrap().push(seen);
+        }
+    }
+
+    /// The outcome handler announces how a run ended, with the error
+    /// the run returned. odl's own word on it would be a second copy.
+    #[test]
+    fn the_end_of_a_run_is_not_announced_from_odls_events() {
+        let (events, mut rx) = broadcast::channel(4);
+        let id = JobId::new();
+        announce(
+            &events,
+            id,
+            &OdlProgressEvent::Failed {
+                message: "refused".into(),
+            },
+        );
+        announce(
+            &events,
+            id,
+            &OdlProgressEvent::Completed {
+                path: "/tmp/f".into(),
+                already_complete: false,
+            },
+        );
+        assert!(rx.try_recv().is_err(), "nothing sent");
+    }
+
+    #[tokio::test]
+    async fn the_pump_applies_events_in_order_and_flush_waits_for_them() {
+        let bridge = Arc::new(SlowBridge::default());
+        let (events, _rx) = broadcast::channel(16);
+        let pump = EventPump::spawn(JobId::new(), bridge.clone(), events);
+        pump.on_event(OdlProgressEvent::PartAdded {
+            ulid: "a".into(),
+            offset: 0,
+            size: 1,
+        });
+        pump.on_event(OdlProgressEvent::PartsCleared);
+        pump.on_event(OdlProgressEvent::PartFinished { ulid: "a".into() });
+        pump.flush().await;
+        assert_eq!(
+            *bridge.seen.lock().unwrap(),
+            ["added a", "cleared", "finished a"]
+        );
+    }
+
+    /// Says when the first bytes of a transfer have arrived.
+    #[derive(Default)]
+    struct FirstBytes(tokio::sync::Notify);
+    #[async_trait::async_trait]
+    impl LiveBridge for FirstBytes {
+        async fn on_event(&self, _id: JobId, event: &OdlProgressEvent) {
+            if matches!(event, OdlProgressEvent::Progress { downloaded, .. } if *downloaded > 0) {
+                self.0.notify_one();
+            }
+        }
+    }
+
+    /// A limit changed mid-run reaches the transfer without stopping it.
+    /// At the starting rate this file takes half a minute.
+    #[tokio::test]
+    async fn a_speed_limit_lifted_mid_run_applies_at_once() {
+        static LARGE: [u8; 512 * 1024] = [0; 512 * 1024];
+        let url = serve(&LARGE).await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut job = test_job(&url, dir.path().join("save"), GOOD_SHA256);
+        job.checksums.clear();
+        let live = odl::progress::LiveControls::new();
+        live.set_speed_limit(Some(16 * 1024));
+        let bridge = Arc::new(FirstBytes::default());
+        let run = tokio::spawn({
+            let live = live.clone();
+            let bridge = bridge.clone();
+            let work = dir.path().join("work");
+            async move {
+                run_job_as(
+                    job,
+                    &work,
+                    bridge,
+                    CancellationToken::new(),
+                    Secrets::default(),
+                    live,
+                )
+                .await
+            }
+        });
+        // Lifted mid-transfer, not before it starts.
+        tokio::time::timeout(Duration::from_secs(10), bridge.0.notified())
+            .await
+            .expect("the transfer starts");
+        assert!(!run.is_finished(), "held to the limit it started with");
+        live.set_speed_limit(None);
+        let outcome = tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("lifting the limit lets it finish")
+            .unwrap()
+            .expect("download");
+        let path = outcome.final_path.expect("final path");
+        assert_eq!(std::fs::read(path).unwrap().len(), LARGE.len());
+    }
+
+    /// The daemon writes the run's outcome as soon as `run` returns, so
+    /// every event has to be applied by then, the runner's own verify
+    /// events included, and in the order they happened.
+    #[tokio::test]
+    async fn every_event_is_applied_before_the_run_returns() {
+        let url = spawn_http_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let job = test_job(&url, dir.path().join("save"), GOOD_SHA256);
+        let bridge = Arc::new(SlowBridge::default());
+        run_job_with(job, &dir.path().join("work"), bridge.clone())
+            .await
+            .expect("download should verify");
+        let seen = bridge.seen.lock().unwrap();
+        let verify = odl::progress::VERIFY_ULID;
+        assert_eq!(
+            seen.last().map(String::as_str),
+            Some(format!("finished {verify}").as_str()),
+            "{seen:?}"
+        );
+        let verifying = seen.iter().position(|e| e == "phase Verifying");
+        let last_phase = seen.iter().rposition(|e| e.starts_with("phase "));
+        assert!(verifying.is_some() && verifying == last_phase, "{seen:?}");
+    }
+
     #[tokio::test]
     async fn user_checksum_match_completes() {
         let url = spawn_http_server().await;
@@ -1563,6 +1756,7 @@ mod tests {
                 cookies: Some("session=s3cret".into()),
                 auth_password: Some("t0ken".into()),
             },
+            odl::progress::LiveControls::new(),
         )
         .await;
 

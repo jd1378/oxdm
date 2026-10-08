@@ -452,17 +452,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
-name = "atomicwrites"
-version = "0.4.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ef1bb8d1b645fe38d51dfc331d720fb5fc2c94b440c76cc79c80ff265ca33e3"
-dependencies = [
- "rustix 0.38.44",
- "tempfile",
- "windows-sys 0.52.0",
-]
-
-[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4191,12 +4180,11 @@ dependencies = [
 
 [[package]]
 name = "odl"
-version = "3.3.1"
+version = "3.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2952527b595b9a05d28e6cb15293a01fb4d0705f45bd0e71043b145632e630f0"
+checksum = "f906f3291e94e404bc9792155b12ec2e7ad0aa39affb89d77db758389f41a094"
 dependencies = [
  "async-trait",
- "atomicwrites",
  "base64 0.23.1",
  "bytes",
  "chrono",
@@ -4221,6 +4209,7 @@ dependencies = [
  "regex",
  "reqwest",
  "reqwest-retry",
+ "rustix 1.1.5",
  "secrecy",
  "serde",
  "sha1 0.11.0",
@@ -4233,6 +4222,7 @@ dependencies = [
  "tracing",
  "ulid",
  "url",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

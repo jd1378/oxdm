@@ -15,6 +15,10 @@ use crate::domain::{
     ProxyMode, ResponseHeader, Settings,
 };
 
+/// Connections for a download when neither it nor the settings name a
+/// number.
+pub const DEFAULT_MAX_CONNECTIONS: u64 = 8;
+
 pub fn settings_to_odl_config(
     s: &Settings,
     proxy_password: Option<&str>,
@@ -42,9 +46,9 @@ pub fn settings_to_download_options(
     b.verify_checksums(false);
     // `None` means "Determine automatically"; the per-job overlay set
     // by add_window (size-based suggest_segments) provides the real
-    // value. Fall back to 8 here for jobs created without a per-job
-    // override (e.g. captures).
-    b.max_connections(s.max_connections.unwrap_or(8))
+    // value. Fall back to the default here for jobs created without a
+    // per-job override (e.g. captures).
+    b.max_connections(s.max_connections.unwrap_or(DEFAULT_MAX_CONNECTIONS))
         .max_retries(s.max_retries)
         .wait_between_retries(s.wait_between_retries)
         .n_fixed_retries(s.n_fixed_retries)

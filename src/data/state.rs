@@ -34,8 +34,8 @@ use crate::domain::{
 /// In-memory record per job. Lives in `AppState::jobs`.
 ///
 /// `parts` uses `std::sync::RwLock` (not tokio's) because UI render code
-/// reads it from a sync context. The runner only ever does
-/// `try_read`/`try_write` on it, so contention is bounded.
+/// reads it from a sync context. Nothing holds it across an await, so
+/// the event bridge waits for it rather than skip an event.
 pub struct JobEntry {
     pub job: Job,
     /// Authoritative live phase. `job.status.phase` is the load-time
@@ -121,11 +121,6 @@ pub struct JobEntry {
     /// via `splice_live`, so a fresh probe supersedes an older capture
     /// and the same splice persists it back through `persist_job`.
     pub captured_response: std::sync::RwLock<Option<crate::domain::CapturedResponse>>,
-    /// Session-scoped per-job speed cap, in bytes/sec. `0` = inherit
-    /// the global `Settings::speed_limit`. Lives only in memory; the
-    /// Speed tab's "Remember" checkbox writes the value to
-    /// `Job::speed_limit_override` for cross-restart persistence.
-    pub session_speed_override: std::sync::atomic::AtomicU64,
     /// Per-job completion actions (IDM-style "Options on completion").
     /// Defaults to showing the system notification only.
     pub on_completion: std::sync::RwLock<crate::domain::OnCompletion>,
@@ -145,11 +140,15 @@ pub struct JobEntry {
     /// "Download complete" dialog has a real path to open / reveal.
     pub final_path: std::sync::RwLock<Option<PathBuf>>,
     /// Live knobs handed to odl through `DownloadContext::with_live` on
-    /// run. Stays attached to the entry so concurrent control paths
-    /// (Apply button in the Speed tab, queue rebalancer, etc.) can call
-    /// `set_max_connections` mid-flight without going through the
-    /// runner's future.
+    /// run: the connection cap and the speed limit. Stays attached to
+    /// the entry so the download window, Properties and a Settings save
+    /// can change a running download without going through the runner's
+    /// future.
     pub live_controls: odl::progress::LiveControls,
+    /// The most connections a run may hold open, as odl last said. Not
+    /// what was asked for: odl lowers it after failed parts. `0` until a
+    /// run's transfer starts; the last run's stays once it ends.
+    pub connection_limit: AtomicU32,
 }
 
 /// Digests computed from one particular file.
@@ -178,6 +177,31 @@ async fn file_identity(path: &std::path::Path) -> Option<(u64, i64)> {
 }
 
 impl JobEntry {
+    /// The speed cap this job runs under: its own, in place of `global`.
+    /// `None` is no cap.
+    pub fn speed_limit(&self, global: Option<u64>) -> Option<u64> {
+        self.job.speed_limit_override.or(global)
+    }
+
+    /// Hand odl the speed limit this job runs under. Callers hold the
+    /// job list and the settings, so nothing changes between reading
+    /// the limit and setting it.
+    fn push_speed_limit(&self, global: Option<u64>) {
+        self.live_controls.set_speed_limit(self.speed_limit(global));
+    }
+
+    /// Ready the live controls for a run: the speed limit in force, and
+    /// the job's own connection cap or none. The controls outlive runs,
+    /// so a cap from an earlier one, or odl's lowering after failed
+    /// parts, is cleared rather than carried into this one.
+    fn prime_live_controls(&self, global_speed: Option<u64>) {
+        self.push_speed_limit(global_speed);
+        match self.job.max_connections {
+            Some(n) => self.live_controls.set_max_connections(n as usize),
+            None => self.live_controls.clear_max_connections(),
+        }
+    }
+
     /// Is any segment still moving, while others retry?
     ///
     /// A part counts when odl sampled it inside the grace window and it
@@ -216,6 +240,33 @@ impl JobEntry {
         } else {
             Phase::Reconnecting
         }
+    }
+
+    /// The current run's token has been cancelled: it was paused,
+    /// removed or stopped, and is winding down.
+    fn told_to_stop(&self) -> bool {
+        self.cancel
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_cancelled()
+    }
+
+    /// A phase the run itself reports. Ignored once it has been told to
+    /// stop: its events still queued from before a Pause would put it
+    /// back to Downloading, and a Resume pressed then found a download
+    /// that looked like it was running and started nothing.
+    fn set_run_phase(&self, p: Phase) {
+        if !self.told_to_stop() {
+            self.set_phase(p);
+        }
+    }
+
+    /// The run is over or told to stop, but its task has not yet
+    /// written the outcome and let go of the job. The phase alone does
+    /// not say so: a run told to stop can still be reporting a running
+    /// one.
+    fn winding_down(&self) -> bool {
+        self.running.load(Ordering::Acquire) && (self.told_to_stop() || !self.phase().is_running())
     }
 
     /// Digests already known for the file `ident` describes.
@@ -320,12 +371,12 @@ impl JobEntry {
             deferred_by_cap: AtomicBool::new(false),
             is_resumable: std::sync::atomic::AtomicI8::new(0),
             captured_response: std::sync::RwLock::new(None),
-            session_speed_override: std::sync::atomic::AtomicU64::new(0),
             on_completion: std::sync::RwLock::new(on_completion),
             hashed: std::sync::Mutex::new(None),
             resolver: RwLock::new(None),
             final_path: std::sync::RwLock::new(job_final_path),
             live_controls: odl::progress::LiveControls::new(),
+            connection_limit: AtomicU32::new(0),
         }
     }
 
@@ -1005,16 +1056,11 @@ impl AppState {
             .map(|e| e.job.id)
             .collect();
         for jid in &job_ids {
-            let entry_opt = self.jobs.read().await.get(jid).cloned();
-            if let Some(entry) = entry_opt {
-                let mut new_job = entry.job.clone();
-                new_job.queue_id = main_id;
+            if let Some(fresh) = self.rebuild_entry(*jid, |j| j.queue_id = main_id).await {
                 self.store
-                    .upsert_job(&new_job)
+                    .upsert_job(&fresh.job)
                     .await
                     .map_err(|e| e.to_string())?;
-                let new_entry = clone_entry_with_job(&entry, new_job).await;
-                self.jobs.write().await.insert(*jid, new_entry);
             }
         }
         self.store
@@ -1112,18 +1158,17 @@ impl AppState {
             .map(|e| e.job.id)
             .collect();
         for id in ids {
-            let Some(entry) = self.jobs.read().await.get(&id).cloned() else {
+            let Some(fresh) = self
+                .rebuild_entry(id, |j| j.category = Category::Other)
+                .await
+            else {
                 continue;
             };
-            let mut new_job = entry.job.clone();
-            new_job.category = Category::Other;
             self.store
-                .upsert_job(&new_job)
+                .upsert_job(&fresh.job)
                 .await
                 .map_err(|e| e.to_string())?;
-            let phase = entry.phase();
-            let new_entry = clone_entry_with_job(&entry, new_job).await;
-            self.jobs.write().await.insert(id, new_entry);
+            let phase = fresh.phase();
             let _ = self.events.send(DomainEvent::JobUpdated { id, phase });
         }
         Ok(())
@@ -2023,25 +2068,31 @@ impl AppState {
         self.hidden_jobs.read().await.contains(&id)
     }
 
-    /// Update the session-only per-job speed cap. `None` clears it.
-    pub async fn set_session_speed_limit(
-        &self,
-        id: JobId,
-        bps: Option<u64>,
-    ) -> Result<(), JobError> {
-        let entry = self
-            .job_entry(id)
-            .await
-            .ok_or_else(|| JobError::Other("job not found".into()))?;
-        entry
-            .session_speed_override
-            .store(bps.unwrap_or(0), Ordering::Release);
-        Ok(())
+    /// Hand odl the speed limit job `id` runs under, read from the job
+    /// and the settings as they stand. Both are held while it is set,
+    /// so of two changes racing each other the later one stays in
+    /// force, not whichever pushed last.
+    async fn push_speed_limit(&self, id: JobId) {
+        let jobs = self.jobs.read().await;
+        let settings = self.settings.read().await;
+        if let Some(entry) = jobs.get(&id) {
+            entry.push_speed_limit(settings.speed_limit);
+        }
+    }
+
+    /// [`JobEntry::prime_live_controls`] for job `id`, under the same
+    /// locks as [`Self::push_speed_limit`].
+    async fn prime_live_controls(&self, id: JobId) {
+        let jobs = self.jobs.read().await;
+        let settings = self.settings.read().await;
+        if let Some(entry) = jobs.get(&id) {
+            entry.prime_live_controls(settings.speed_limit);
+        }
     }
 
     /// Persist (or clear) the per-job speed cap on the `Job` itself
     /// so it survives restarts. Mirrors IDM's "Remember settings for
-    /// this file" checkbox.
+    /// this file" checkbox. A running download takes it at once.
     pub async fn set_persistent_speed_limit(
         &self,
         id: JobId,
@@ -2062,6 +2113,7 @@ impl AppState {
         let new_entry = clone_entry_with_job(&old, new_job.clone()).await;
         jobs.insert(id, new_entry);
         drop(jobs);
+        self.push_speed_limit(id).await;
 
         self.store
             .upsert_job(&new_job)
@@ -2080,6 +2132,7 @@ impl AppState {
         {
             return Err(JobError::Other("max connections capped at 16".into()));
         }
+        let global = self.settings.read().await.max_connections;
         let mut jobs = self.jobs.write().await;
         let Some(old) = jobs.get(&id).cloned() else {
             return Err(JobError::Other("job not found".into()));
@@ -2087,20 +2140,14 @@ impl AppState {
         let mut new_job = old.job.clone();
         new_job.max_connections = n;
         let new_entry = clone_entry_with_job(&old, new_job.clone()).await;
-        // Push the change into the live odl run loop (no-op if the job
-        // is not currently running — odl will pick the value up the
-        // next time it starts). `None` falls back to the global
-        // default baked into the manager's config, which odl expresses
-        // as 0: "unset, re-seed from the options on the next run".
-        //
-        // Written unconditionally, including that 0. Skipping it left
-        // the last explicit cap in the shared control, and odl only
-        // seeds an *unset* one — so clearing the override in Properties
-        // changed the stored job and nothing else, for every later run
-        // until the daemon restarted.
-        new_entry
-            .live_controls
-            .set_max_connections(n.unwrap_or(0) as usize);
+        // Push the change into the live odl run loop; one not running
+        // takes it when it next starts. Without an override the global
+        // cap applies, set here rather than cleared: cleared, a running
+        // download falls back on what it was started with, which is the
+        // override just removed.
+        new_entry.live_controls.set_max_connections(
+            n.unwrap_or(global.unwrap_or(crate::data::mapping::DEFAULT_MAX_CONNECTIONS)) as usize,
+        );
         jobs.insert(id, new_entry);
         drop(jobs);
         self.store
@@ -2810,19 +2857,19 @@ impl AppState {
         // keep displaying stale "(stored)" hints.
         let ids: Vec<JobId> = self.jobs.read().await.keys().copied().collect();
         for id in &ids {
-            let entry = match self.job_entry(*id).await {
-                Some(e) => e,
-                None => continue,
+            let Some(fresh) = self
+                .rebuild_entry(*id, |j| {
+                    j.enc_auth_password = None;
+                    j.enc_proxy_password = None;
+                    j.enc_cookies = None;
+                })
+                .await
+            else {
+                continue;
             };
-            let mut new_job = entry.job.clone();
-            new_job.enc_auth_password = None;
-            new_job.enc_proxy_password = None;
-            new_job.enc_cookies = None;
-            let new_entry = clone_entry_with_job(&entry, new_job).await;
-            self.jobs.write().await.insert(*id, new_entry);
             let _ = self.events.send(DomainEvent::JobUpdated {
                 id: *id,
-                phase: entry.phase(),
+                phase: fresh.phase(),
             });
         }
         let key = crate::data::crypto::MasterKey::generate().map_err(|e| e.to_string())?;
@@ -2984,6 +3031,15 @@ impl AppState {
         // window shows only starts working after a restart.
         *self.ext_token.write().await = new.ext_token.clone();
         *self.settings.write().await = new;
+        // A running download without a limit of its own takes the new
+        // global one now, not on its next run.
+        {
+            let jobs = self.jobs.read().await;
+            let settings = self.settings.read().await;
+            for entry in jobs.values() {
+                entry.push_speed_limit(settings.speed_limit);
+            }
+        }
         let _ = self.events.send(DomainEvent::SettingsChanged);
         Ok(())
     }
@@ -3052,6 +3108,21 @@ impl AppState {
 
     pub async fn job_entry(&self, id: JobId) -> Option<Arc<JobEntry>> {
         self.jobs.read().await.get(&id).cloned()
+    }
+
+    /// Apply `edit` to a job's `Job` and swap in the rebuilt entry,
+    /// under one write lock. Built from the entry as it stands then:
+    /// one copied from an earlier look loses whatever landed in between,
+    /// a part odl announced or another edit. `None` when the job is
+    /// gone.
+    async fn rebuild_entry(&self, id: JobId, edit: impl FnOnce(&mut Job)) -> Option<Arc<JobEntry>> {
+        let mut jobs = self.jobs.write().await;
+        let old = jobs.get(&id)?.clone();
+        let mut job = old.job.clone();
+        edit(&mut job);
+        let fresh = clone_entry_with_job(&old, job).await;
+        jobs.insert(id, fresh.clone());
+        Some(fresh)
     }
 
     /// Persist the live state of `id` into the store. Captures phase,
@@ -3162,11 +3233,13 @@ impl AppState {
         if entry.job.verify_pending == pending {
             return;
         }
-        let mut job = entry.job.clone();
-        job.verify_pending = pending;
-        let fresh = clone_entry_with_job(&entry, job).await;
-        self.jobs.write().await.insert(id, fresh);
-        self.persist_job(id).await;
+        if self
+            .rebuild_entry(id, |j| j.verify_pending = pending)
+            .await
+            .is_some()
+        {
+            self.persist_job(id).await;
+        }
     }
 
     /// Re-run every hash check that was interrupted by a daemon exit.
@@ -3202,15 +3275,19 @@ impl AppState {
         id: JobId,
         verdicts: Vec<crate::domain::Verdict>,
     ) {
-        let Some(entry) = self.job_entry(id).await else {
+        let mut jobs = self.jobs.write().await;
+        let Some(old) = jobs.get(&id).cloned() else {
             return;
         };
-        let mut job = entry.job.clone();
+        let mut job = old.job.clone();
         crate::domain::apply_verdicts(&mut job.checksums, &verdicts);
-        let fresh = clone_entry_with_job(&entry, job).await;
+        let fresh = clone_entry_with_job(&old, job).await;
+        // Before it is published: a rebuild landing in between would
+        // copy the mismatch this clears.
         clear_settled_mismatch(&fresh);
         let phase = fresh.phase();
-        self.jobs.write().await.insert(id, fresh);
+        jobs.insert(id, fresh);
+        drop(jobs);
         self.persist_job(id).await;
         // A verdict changes what every window says about the job —
         // whether it is tampered, whether it can be resumed. Silence
@@ -3899,14 +3976,14 @@ impl AppState {
     /// Wait out a run that has been told to stop but has not finished
     /// writing its outcome yet, and hand back the entry to start from.
     ///
-    /// Bounded: a job whose phase still says it is running is genuinely
-    /// running and returns immediately, and the wait gives up rather
-    /// than blocking a request forever if an epilogue never lands.
+    /// Bounded: a run nobody told to stop is genuinely running and
+    /// returns immediately, and the wait gives up rather than blocking a
+    /// request forever if an epilogue never lands.
     async fn settle_previous_run(&self, id: JobId, entry: Arc<JobEntry>) -> Arc<JobEntry> {
         const GRACE: std::time::Duration = std::time::Duration::from_secs(3);
         let deadline = std::time::Instant::now() + GRACE;
         let mut entry = entry;
-        while entry.running.load(Ordering::Acquire) && !entry.phase().is_running() {
+        while entry.winding_down() {
             if std::time::Instant::now() >= deadline {
                 tracing::warn!(id = %id, "previous run has not released the job; starting anyway");
                 break;
@@ -4009,6 +4086,12 @@ impl AppState {
     }
 
     pub async fn start_job(self: &Arc<Self>, id: JobId) -> Result<(), JobError> {
+        self.start_run(id, false).await
+    }
+
+    /// [`Self::start_job`]; `resumed` when it picks a stopped transfer
+    /// back up, which counts as an interruption if a run starts.
+    async fn start_run(self: &Arc<Self>, id: JobId, resumed: bool) -> Result<(), JobError> {
         // The daemon is winding down; starting a transfer now would
         // either be paused a moment later or hold the exit open.
         if self.is_exiting() {
@@ -4079,6 +4162,14 @@ impl AppState {
         if entry.running.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
+        // Picking a stopped transfer back up is an interruption too —
+        // whether the user paused it or a failure did. Counted at the
+        // claim, so a Resume that finds the job already running, or that
+        // the caps defer, adds none. A job that never started has
+        // nothing to interrupt.
+        if resumed && entry.counters.downloaded() > 0 {
+            entry.interruptions.fetch_add(1, Ordering::Relaxed);
+        }
         entry.deferred_by_cap.store(false, Ordering::Release);
         // The phase goes with the claim, under the same locks. Every
         // cap is counted by phase, and the setup below awaits a
@@ -4110,6 +4201,9 @@ impl AppState {
         if let Ok(mut retrying) = entry.retrying_parts.lock() {
             retrying.clear();
         }
+        // The last run's limit, odl's lowering included, says nothing
+        // about this one until its transfer starts.
+        entry.connection_limit.store(0, Ordering::Release);
         let manager = self.manager.read().await.clone();
         let events = self.events.clone();
         let bridge: Arc<dyn LiveBridge> = Arc::new(StateLiveBridge {
@@ -4162,22 +4256,18 @@ impl AppState {
         // `notify_failed`).
         let park_on_conflict = !interactive;
 
+        // The speed limit rides on the live controls, which outrank the
+        // manager's options and can change mid-run. Read from the entry as
+        // it stands now: `entry` was looked up before several awaits, and
+        // an edit landing since would be undone.
+        self.prime_live_controls(id).await;
+
         // Effective settings overlay:
         //   global Settings → per-job overrides.
         // When any layer changes the manager-level config, build a
         // fresh `DownloadManager` off a settings copy — odl applies
-        // `speed_limit` / `max_connections` / `user_agent` per Manager,
-        // not per call.
-        let session_override = entry.session_speed_override.load(Ordering::Acquire);
-        let job_override = entry.job.speed_limit_override;
-        let effective_speed = if session_override != 0 {
-            Some(session_override)
-        } else if let Some(o) = job_override {
-            Some(o)
-        } else {
-            settings.speed_limit
-        };
-
+        // `user_agent` and headers per Manager, not per call.
+        //
         // Per-job headers captured from the browser extension (or
         // CLI). Merge into the per-run config so odl sends them on
         // every request. A per-job `User-Agent` header is promoted to
@@ -4190,11 +4280,10 @@ impl AppState {
             .find(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
             .map(|(_, v)| v.clone());
 
-        let needs_rebuild =
-            effective_speed != settings.speed_limit || !job_headers.is_empty() || job_ua.is_some();
+        // A per-job User-Agent is one of the headers.
+        let needs_rebuild = !job_headers.is_empty();
         let runner_manager = if needs_rebuild {
             let mut s = settings.clone();
-            s.speed_limit = effective_speed;
             for (k, v) in job_headers.iter() {
                 if k.eq_ignore_ascii_case("user-agent") {
                     continue;
@@ -4600,17 +4689,25 @@ impl AppState {
                 .clone(),
         };
         let res = self.pause_strategy.pause(&handle).await;
-        // Whatever this download was waiting for, it is not waiting any
-        // more. Left set, a job the cap had deferred would be started
-        // again by the slot filler moments after the user paused it —
-        // and Pause all would end with a download running.
-        entry.deferred_by_cap.store(false, Ordering::Release);
-        // The runner outcome handler also sets phase + zeros counters on
-        // Cancelled, but the runner may take a tick to wind down. Flip
-        // the visible state immediately so the dialog footer button and
-        // the speed/ETA cells switch the moment the user clicks Pause.
-        entry.set_phase(Phase::Paused);
-        entry.reset_live_speed();
+        // Under the job list, on the entry it holds now. An event the run
+        // applied just before the cancel holds the list while it writes,
+        // so these land after it; the ones after the cancel leave the
+        // phase alone (`set_run_phase`).
+        if let Some(entry) = self.jobs.write().await.get(&id) {
+            // Whatever this download was waiting for, it is not waiting
+            // any more. Left set, a job the cap had deferred would be
+            // started again by the slot filler moments after the user
+            // paused it — and Pause all would end with a download
+            // running.
+            entry.deferred_by_cap.store(false, Ordering::Release);
+            // The runner outcome handler also sets phase + zeros
+            // counters on Cancelled, but the runner may take a tick to
+            // wind down. Flip the visible state immediately so the
+            // dialog footer button and the speed/ETA cells switch the
+            // moment the user clicks Pause.
+            entry.set_phase(Phase::Paused);
+            entry.reset_live_speed();
+        }
         self.persist_job(id).await;
         let _ = self.events.send(DomainEvent::JobUpdated {
             id,
@@ -4632,12 +4729,6 @@ impl AppState {
             return Err(JobError::Other(
                 "this file failed its integrity check; restart the download instead".into(),
             ));
-        }
-        // Picking a stopped transfer back up is an interruption too —
-        // whether the user paused it or a failure did. A job that never
-        // started has nothing to interrupt.
-        if entry.counters.downloaded() > 0 {
-            entry.interruptions.fetch_add(1, Ordering::Relaxed);
         }
         let handle = JobHandle {
             id,
@@ -5944,9 +6035,6 @@ async fn clone_entry_with_job(old: &Arc<JobEntry>, new_job: Job) -> Arc<JobEntry
         deferred_by_cap: AtomicBool::new(old.deferred_by_cap.load(Ordering::Acquire)),
         is_resumable: std::sync::atomic::AtomicI8::new(old.is_resumable.load(Ordering::Acquire)),
         captured_response: std::sync::RwLock::new(captured_response),
-        session_speed_override: std::sync::atomic::AtomicU64::new(
-            old.session_speed_override.load(Ordering::Acquire),
-        ),
         on_completion: std::sync::RwLock::new(on_completion),
         // Carried over: the bytes on disk did not change because a row
         // was added to the list describing them.
@@ -5954,6 +6042,7 @@ async fn clone_entry_with_job(old: &Arc<JobEntry>, new_job: Job) -> Arc<JobEntry
         resolver: RwLock::new(resolver),
         final_path: std::sync::RwLock::new(final_path),
         live_controls: old.live_controls.clone(),
+        connection_limit: AtomicU32::new(old.connection_limit.load(Ordering::Acquire)),
     })
 }
 
@@ -6121,28 +6210,30 @@ struct StateLiveBridge {
 
 #[async_trait::async_trait]
 impl LiveBridge for StateLiveBridge {
-    fn on_evaluated(&self, id: JobId, is_resumable: bool) {
+    // Each of these holds the job list while it writes. An edit rebuilds
+    // the entry under the write lock, and one landing between the lookup
+    // and the write would copy the entry from before it.
+
+    async fn on_evaluated(&self, id: JobId, is_resumable: bool) {
         let Some(state) = self.state.upgrade() else {
             return;
         };
-        if let Ok(jobs) = state.jobs.try_read()
-            && let Some(entry) = jobs.get(&id)
-        {
+        if let Some(entry) = state.jobs.read().await.get(&id) {
             entry
                 .is_resumable
                 .store(if is_resumable { 1 } else { -1 }, Ordering::Release);
         }
     }
 
-    fn on_response_headers(&self, id: JobId, captured: crate::domain::CapturedResponse) {
+    async fn on_response_headers(&self, id: JobId, captured: crate::domain::CapturedResponse) {
         let Some(state) = self.state.upgrade() else {
             return;
         };
-        if let Ok(jobs) = state.jobs.try_read()
-            && let Some(entry) = jobs.get(&id)
-            && let Ok(mut slot) = entry.captured_response.write()
-        {
-            *slot = Some(captured);
+        if let Some(entry) = state.jobs.read().await.get(&id) {
+            *entry
+                .captured_response
+                .write()
+                .unwrap_or_else(|e| e.into_inner()) = Some(captured);
         }
     }
 
@@ -6158,15 +6249,12 @@ impl LiveBridge for StateLiveBridge {
         state.job_entry(id).await.map(|e| e.job.checksums.clone())
     }
 
-    fn on_final_path(&self, id: JobId, path: std::path::PathBuf) {
+    async fn on_final_path(&self, id: JobId, path: std::path::PathBuf) {
         let Some(state) = self.state.upgrade() else {
             return;
         };
-        if let Ok(jobs) = state.jobs.try_read()
-            && let Some(entry) = jobs.get(&id)
-            && let Ok(mut slot) = entry.final_path.write()
-        {
-            *slot = Some(path.clone());
+        if let Some(entry) = state.jobs.read().await.get(&id) {
+            *entry.final_path.write().unwrap_or_else(|e| e.into_inner()) = Some(path.clone());
         }
         // odl may have chosen a different name than the job carries —
         // a file of that name was already in the folder, so it wrote
@@ -6194,227 +6282,223 @@ impl LiveBridge for StateLiveBridge {
         state.apply_resolved_filename(id, filename).await
     }
 
-    fn on_event(&self, id: JobId, event: &OdlProgressEvent) {
+    async fn on_event(&self, id: JobId, event: &OdlProgressEvent) {
         let Some(state) = self.state.upgrade() else {
             return;
         };
-        // Update counters synchronously (cheap atomics) — we cannot await
-        // here. RwLocks on `parts` are accessed via try_read/try_write to
-        // avoid blocking the reporter. Drops on contention are fine: the
-        // UI is sampling at 8 Hz from the same atomics anyway.
-        match event {
-            OdlProgressEvent::Progress { downloaded, total } => {
-                if let Ok(jobs) = state.jobs.try_read()
-                    && let Some(entry) = jobs.get(&id)
-                {
-                    // odl's sample is what this run has; it replaces
-                    // whatever was on screen. A monotonic rule kept the
-                    // *previous* run's byte count — a download that
-                    // finished, failed its check and was started again
-                    // showed 100% beside segments at 40%.
-                    //
-                    // Since 2.2 the aggregate belongs to the transfer
-                    // alone — assembly and verification report on their
-                    // own rows — and the downloader closes it with one
-                    // final sample at the full size. Only the `0` odl
-                    // emits while re-evaluating a resume, before it has
-                    // read the part offsets back off disk, is still
-                    // dropped.
-                    if *downloaded > 0 {
-                        entry.counters.set_downloaded(*downloaded);
-                    }
-                    entry.counters.set_total(*total);
-                }
+        apply_to_job(&state.jobs, id, event).await;
+    }
+}
+
+/// Apply one odl event to the job it belongs to, waiting for the job
+/// list rather than skipping the event while it is busy.
+///
+/// The list is held while the event is applied: an edit rebuilds the
+/// entry under the write lock, and one landing between the lookup and
+/// the write would copy the entry from before the event.
+async fn apply_to_job(
+    jobs: &RwLock<IndexMap<JobId, Arc<JobEntry>>>,
+    id: JobId,
+    event: &OdlProgressEvent,
+) {
+    if let Some(entry) = jobs.read().await.get(&id) {
+        apply_odl_event(entry, event);
+    }
+}
+
+/// What one odl event changes about a job. The locks taken here are
+/// held for a few field writes and never across an await, so waiting on
+/// them is brief; a skipped event is not, since most are sent once.
+fn apply_odl_event(entry: &JobEntry, event: &OdlProgressEvent) {
+    match event {
+        OdlProgressEvent::Progress { downloaded, total } => {
+            // odl's sample is what this run has; it replaces whatever
+            // was on screen. A monotonic rule kept the *previous* run's
+            // byte count — a download that finished, failed its check
+            // and was started again showed 100% beside segments at 40%.
+            //
+            // Since 2.2 the aggregate belongs to the transfer alone —
+            // assembly and verification report on their own rows — and
+            // the downloader closes it with one final sample at the full
+            // size. Only the `0` odl emits while re-evaluating a resume,
+            // before it has read the part offsets back off disk, is
+            // still dropped.
+            if *downloaded > 0 {
+                entry.counters.set_downloaded(*downloaded);
             }
-            OdlProgressEvent::Speed { bytes_per_second } => {
-                if let Ok(jobs) = state.jobs.try_read()
-                    && let Some(entry) = jobs.get(&id)
-                {
-                    entry.counters.set_speed(*bytes_per_second);
-                }
-            }
-            OdlProgressEvent::PartAdded { ulid, offset, size } => {
-                if let Ok(jobs) = state.jobs.try_read()
-                    && let Some(entry) = jobs.get(&id)
-                    && let Ok(mut parts) = entry.parts.try_write()
-                {
-                    // First part of a new run: the rows still on screen
-                    // belong to the last one. Swap, rather than leaving
-                    // both sets to pile up.
-                    if entry.parts_stale.swap(false, Ordering::AcqRel) {
-                        parts.clear();
-                        // A run that cannot resume starts at byte zero:
-                        // whatever the last attempt fetched went with
-                        // it. The monotonic guard on `Progress` exists
-                        // for the transient zero odl emits while
-                        // re-evaluating a resume, and would otherwise
-                        // hold the old figure here — leaving the window
-                        // claiming 176 MB while its only segment reads
-                        // 52 MB and the file on disk is empty.
-                        if entry.is_resumable.load(Ordering::Acquire) < 0 {
-                            entry.counters.set_downloaded(0);
-                        }
-                    }
-                    parts.insert(
-                        ulid.clone(),
-                        Arc::new(PartCounters {
-                            ulid: ulid.clone(),
-                            offset: *offset,
-                            size: AtomicU64::new(crate::data::runner::part_size(*size)),
-                            downloaded: AtomicU64::new(0),
-                            speed_bps_bits: AtomicU64::new(0),
-                            finished: AtomicBool::new(false),
-                            sampled_at_ms: std::sync::atomic::AtomicI64::new(0),
-                        }),
-                    );
-                }
-            }
-            // A restart re-split the download: the ulids announced so
-            // far name nothing, and no `PartFinished` is coming for
-            // them. Their bytes went with them, so the job's own count
-            // goes back to zero rather than counting a transfer that
-            // was thrown away.
-            OdlProgressEvent::PartsCleared => {
-                if let Ok(jobs) = state.jobs.try_read()
-                    && let Some(entry) = jobs.get(&id)
-                {
-                    if let Ok(mut parts) = entry.parts.try_write() {
-                        parts.clear();
-                    }
-                    entry.parts_stale.store(false, Ordering::Release);
+            entry.counters.set_total(*total);
+        }
+        OdlProgressEvent::Speed { bytes_per_second } => {
+            entry.counters.set_speed(*bytes_per_second);
+        }
+        OdlProgressEvent::PartAdded { ulid, offset, size } => {
+            let mut parts = entry.parts.write().unwrap_or_else(|e| e.into_inner());
+            // First part of a new run: the rows still on screen belong
+            // to the last one. Swap, rather than leaving both sets to
+            // pile up.
+            if entry.parts_stale.swap(false, Ordering::AcqRel) {
+                parts.clear();
+                // A run that cannot resume starts at byte zero: whatever
+                // the last attempt fetched went with it. The monotonic
+                // guard on `Progress` exists for the transient zero odl
+                // emits while re-evaluating a resume, and would otherwise
+                // hold the old figure here — leaving the window claiming
+                // 176 MB while its only segment reads 52 MB and the file
+                // on disk is empty.
+                if entry.is_resumable.load(Ordering::Acquire) < 0 {
                     entry.counters.set_downloaded(0);
                 }
             }
-            OdlProgressEvent::PartProgress {
-                ulid,
-                downloaded,
-                total,
-            } => {
-                if let Ok(jobs) = state.jobs.try_read()
-                    && let Some(entry) = jobs.get(&id)
-                {
-                    if let Ok(parts) = entry.parts.try_read()
-                        && let Some(p) = parts.get(ulid)
-                    {
-                        p.apply_progress(*downloaded, *total);
-                        // odl samples every part it has in flight on a
-                        // fixed cadence, so this arriving is the part
-                        // saying it still holds a connection — even in
-                        // a tick where no bytes landed.
-                        p.mark_sampled(now_ms());
-                    }
-                    // This part is making progress again — drop it from
-                    // the retrying set. Removing by ulid (not a blanket
-                    // counter decrement) means a sibling part's tick
-                    // can't clear a still-retrying part.
-                    //
-                    // The guard is dropped before anything asks whether
-                    // a part is transferring: that answer reads the
-                    // same lock.
-                    let all_clear = entry
-                        .retrying_parts
-                        .lock()
-                        .map(|mut retrying| retrying.remove(ulid) && retrying.is_empty())
-                        .unwrap_or(false);
-                    // Either the last retry finished, or this part is
-                    // carrying the download on its own while another
-                    // one retries. Both are `Downloading` — but only
-                    // out of `Reconnecting`, so a later Assembling /
-                    // Verifying transition is never clobbered.
-                    if entry.phase() == Phase::Reconnecting
-                        && (all_clear || entry.any_part_transferring(now_ms()))
-                    {
-                        entry.set_phase(Phase::Downloading);
-                    }
-                }
-            }
-            // The wait before the next attempt. odl announces it when
-            // the wait *starts*, and `PartRetrying` only when the retry
-            // fires — so without this the row said "Downloading" for
-            // the whole wait and flickered through Reconnecting for an
-            // instant afterwards. A download waiting to try again is
-            // the state the user wants named.
-            OdlProgressEvent::RetryScheduled { ulid, .. } => {
-                if let Ok(jobs) = state.jobs.try_read()
-                    && let Some(entry) = jobs.get(&id)
-                {
-                    if let Ok(mut retrying) = entry.retrying_parts.lock() {
-                        // A whole-download retry (the initial probe) has
-                        // no part to key on; it clears when the next
-                        // phase change lands.
-                        retrying.insert(ulid.clone().unwrap_or_else(|| WHOLE_JOB_RETRY.to_owned()));
-                    }
-                    entry.set_phase(entry.retry_phase(now_ms()));
-                }
-            }
-            OdlProgressEvent::PartRetrying { ulid, .. } => {
-                if let Ok(jobs) = state.jobs.try_read()
-                    && let Some(entry) = jobs.get(&id)
-                {
-                    // Count every retry event (plan W2). Mark this part
-                    // as retrying and surface the Reconnecting banner
-                    // while ≥1 part is mid-retry (plan W1).
-                    entry.retries.fetch_add(1, Ordering::Relaxed);
-                    // A dropped connection is an interruption whether or
-                    // not the retry succeeds.
-                    entry.interruptions.fetch_add(1, Ordering::Relaxed);
-                    if let Ok(mut retrying) = entry.retrying_parts.lock() {
-                        retrying.insert(ulid.clone());
-                    }
-                    entry.set_phase(entry.retry_phase(now_ms()));
-                }
-            }
-            OdlProgressEvent::PartSpeed {
-                ulid,
-                bytes_per_second,
-            } => {
-                if let Ok(jobs) = state.jobs.try_read()
-                    && let Some(entry) = jobs.get(&id)
-                    && let Ok(parts) = entry.parts.try_read()
-                    && let Some(p) = parts.get(ulid)
-                {
-                    p.speed_bps_bits
-                        .store(bytes_per_second.to_bits(), Ordering::Relaxed);
-                    p.mark_sampled(now_ms());
-                }
-            }
-            OdlProgressEvent::PartFinished { ulid } => {
-                if let Ok(jobs) = state.jobs.try_read()
-                    && let Some(entry) = jobs.get(&id)
-                    && let Ok(parts) = entry.parts.try_read()
-                    && let Some(p) = parts.get(ulid)
-                {
-                    p.mark_finished();
-                }
-            }
-            OdlProgressEvent::PhaseChanged(p) => {
-                if let Ok(jobs) = state.jobs.try_read()
-                    && let Some(entry) = jobs.get(&id)
-                {
-                    let phase = crate::data::mapping::phase_from_odl(*p);
-                    // First Downloading transition of the run stamps
-                    // started_at (set-once; `0` = unset).
-                    if phase == Phase::Downloading {
-                        let _ = entry.started_at_ms.compare_exchange(
-                            0,
-                            now_ms(),
-                            Ordering::AcqRel,
-                            Ordering::Relaxed,
-                        );
-                    }
-                    entry.set_phase(phase);
-                }
-            }
-            OdlProgressEvent::Cancelled => {
-                if let Ok(jobs) = state.jobs.try_read()
-                    && let Some(entry) = jobs.get(&id)
-                {
-                    entry.set_phase(Phase::Paused);
-                    entry.reset_live_speed();
-                }
-            }
-            _ => {}
+            parts.insert(
+                ulid.clone(),
+                Arc::new(PartCounters {
+                    ulid: ulid.clone(),
+                    offset: *offset,
+                    size: AtomicU64::new(crate::data::runner::part_size(*size)),
+                    downloaded: AtomicU64::new(0),
+                    speed_bps_bits: AtomicU64::new(0),
+                    finished: AtomicBool::new(false),
+                    sampled_at_ms: std::sync::atomic::AtomicI64::new(0),
+                }),
+            );
         }
+        // A restart re-split the download: the ulids announced so far
+        // name nothing, and no `PartFinished` is coming for them. Their
+        // bytes went with them, so the job's own count goes back to zero
+        // rather than counting a transfer that was thrown away.
+        OdlProgressEvent::PartsCleared => {
+            entry
+                .parts
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
+            entry.parts_stale.store(false, Ordering::Release);
+            entry.counters.set_downloaded(0);
+        }
+        OdlProgressEvent::PartProgress {
+            ulid,
+            downloaded,
+            total,
+        } => {
+            if let Some(p) = entry
+                .parts
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(ulid)
+            {
+                p.apply_progress(*downloaded, *total);
+                // odl samples every part it has in flight on a fixed
+                // cadence, so this arriving is the part saying it still
+                // holds a connection — even in a tick where no bytes
+                // landed.
+                p.mark_sampled(now_ms());
+            }
+            // This part is making progress again — drop it from the
+            // retrying set. Removing by ulid (not a blanket counter
+            // decrement) means a sibling part's tick can't clear a
+            // still-retrying part.
+            //
+            // The guard is dropped before anything asks whether a part
+            // is transferring: that answer reads the same lock.
+            let all_clear = {
+                let mut retrying = entry
+                    .retrying_parts
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                retrying.remove(ulid) && retrying.is_empty()
+            };
+            // Either the last retry finished, or this part is carrying
+            // the download on its own while another one retries. Both
+            // are `Downloading` — but only out of `Reconnecting`, so a
+            // later Assembling / Verifying transition is never
+            // clobbered.
+            if entry.phase() == Phase::Reconnecting
+                && (all_clear || entry.any_part_transferring(now_ms()))
+            {
+                entry.set_run_phase(Phase::Downloading);
+            }
+        }
+        // The wait before the next attempt. odl announces it when the
+        // wait *starts*, and `PartRetrying` only when the retry fires —
+        // so without this the row said "Downloading" for the whole wait
+        // and flickered through Reconnecting for an instant afterwards.
+        // A download waiting to try again is the state the user wants
+        // named.
+        OdlProgressEvent::RetryScheduled { ulid, .. } => {
+            // A whole-download retry (the initial probe) has no part to
+            // key on; it clears when the next phase change lands.
+            entry
+                .retrying_parts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(ulid.clone().unwrap_or_else(|| WHOLE_JOB_RETRY.to_owned()));
+            entry.set_run_phase(entry.retry_phase(now_ms()));
+        }
+        OdlProgressEvent::PartRetrying { ulid, .. } => {
+            // Count every retry event (plan W2). Mark this part as
+            // retrying and surface the Reconnecting banner while ≥1 part
+            // is mid-retry (plan W1).
+            entry.retries.fetch_add(1, Ordering::Relaxed);
+            // A dropped connection is an interruption whether or not the
+            // retry succeeds.
+            entry.interruptions.fetch_add(1, Ordering::Relaxed);
+            entry
+                .retrying_parts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(ulid.clone());
+            entry.set_run_phase(entry.retry_phase(now_ms()));
+        }
+        OdlProgressEvent::PartSpeed {
+            ulid,
+            bytes_per_second,
+        } => {
+            if let Some(p) = entry
+                .parts
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(ulid)
+            {
+                p.speed_bps_bits
+                    .store(bytes_per_second.to_bits(), Ordering::Relaxed);
+                p.mark_sampled(now_ms());
+            }
+        }
+        OdlProgressEvent::PartFinished { ulid } => {
+            if let Some(p) = entry
+                .parts
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(ulid)
+            {
+                p.mark_finished();
+            }
+        }
+        OdlProgressEvent::ConnectionLimitChanged { max_connections } => {
+            entry.connection_limit.store(
+                u32::try_from(*max_connections).unwrap_or(u32::MAX),
+                Ordering::Release,
+            );
+        }
+        OdlProgressEvent::PhaseChanged(p) => {
+            let phase = crate::data::mapping::phase_from_odl(*p);
+            // First Downloading transition of the run stamps started_at
+            // (set-once; `0` = unset).
+            if phase == Phase::Downloading {
+                let _ = entry.started_at_ms.compare_exchange(
+                    0,
+                    now_ms(),
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                );
+            }
+            entry.set_run_phase(phase);
+        }
+        OdlProgressEvent::Cancelled => {
+            entry.set_phase(Phase::Paused);
+            entry.reset_live_speed();
+        }
+        _ => {}
     }
 }
 
@@ -6428,7 +6512,7 @@ impl ResumeContext for StateResumeContext {
         let Some(state) = self.state.upgrade() else {
             return Err(JobError::Other("app state dropped".into()));
         };
-        state.start_job(id).await
+        state.start_run(id, true).await
     }
 }
 
@@ -6741,6 +6825,140 @@ mod tests {
             );
         }
         assert_eq!(entry.retry_phase(now), Phase::Reconnecting);
+    }
+
+    /// A part announced while the job list is busy lands once it frees
+    /// up. odl announces a part once; skipped, it was never shown.
+    #[tokio::test]
+    async fn an_event_waits_for_a_busy_job_list_instead_of_being_dropped() {
+        let entry = Arc::new(entry_in(Phase::Downloading));
+        let id = entry.job.id;
+        let jobs = Arc::new(RwLock::new(IndexMap::from([(id, entry.clone())])));
+        let busy = jobs.write().await;
+        let applied = tokio::spawn({
+            let jobs = jobs.clone();
+            async move {
+                let added = OdlProgressEvent::PartAdded {
+                    ulid: "a".into(),
+                    offset: 0,
+                    size: 10,
+                };
+                apply_to_job(&jobs, id, &added).await;
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(!applied.is_finished(), "waiting on the list");
+        drop(busy);
+        applied.await.unwrap();
+        assert!(entry.parts.read().unwrap().contains_key("a"));
+    }
+
+    #[test]
+    fn once_only_events_change_the_job() {
+        let (entry, ulids, _) = entry_with_parts(2);
+        entry.counters.set_downloaded(500);
+
+        apply_odl_event(
+            &entry,
+            &OdlProgressEvent::PartFinished {
+                ulid: ulids[0].clone(),
+            },
+        );
+        assert!(
+            entry.parts.read().unwrap()[&ulids[0]]
+                .finished
+                .load(Ordering::Acquire)
+        );
+
+        apply_odl_event(
+            &entry,
+            &OdlProgressEvent::ConnectionLimitChanged { max_connections: 3 },
+        );
+        assert_eq!(entry.connection_limit.load(Ordering::Acquire), 3);
+
+        apply_odl_event(&entry, &OdlProgressEvent::PartsCleared);
+        assert!(entry.parts.read().unwrap().is_empty());
+        assert_eq!(entry.counters.downloaded(), 0);
+    }
+
+    /// Events a paused run sends before it winds down cannot put it
+    /// back to a running phase. A Resume pressed then found a download
+    /// that looked like it was running and started nothing.
+    #[test]
+    fn a_run_told_to_stop_keeps_the_phase_it_was_given() {
+        let (entry, ulids, _) = entry_with_parts(2);
+        entry.running.store(true, Ordering::Release);
+        entry.set_phase(Phase::Reconnecting);
+        entry.cancel.lock().unwrap().cancel();
+        entry.set_phase(Phase::Paused);
+
+        apply_odl_event(
+            &entry,
+            &OdlProgressEvent::PhaseChanged(odl::progress::Phase::Downloading),
+        );
+        apply_odl_event(
+            &entry,
+            &OdlProgressEvent::PartProgress {
+                ulid: ulids[0].clone(),
+                downloaded: 10,
+                total: 1024,
+            },
+        );
+        apply_odl_event(
+            &entry,
+            &OdlProgressEvent::PartRetrying {
+                ulid: ulids[1].clone(),
+                attempt: 1,
+            },
+        );
+        assert_eq!(entry.phase(), Phase::Paused);
+        assert!(entry.winding_down(), "a Resume waits for the run to end");
+
+        entry.running.store(false, Ordering::Release);
+        assert!(!entry.winding_down());
+    }
+
+    /// A run nobody told to stop is running, whatever its phase passes
+    /// through; one past its end is winding down until it lets go.
+    #[test]
+    fn only_a_run_that_is_ending_is_waited_for() {
+        let entry = entry_in(Phase::Downloading);
+        entry.running.store(true, Ordering::Release);
+        assert!(!entry.winding_down());
+        entry.set_phase(Phase::Failed);
+        assert!(entry.winding_down());
+
+        // Told to stop, it is ending even while its phase says running.
+        let entry = entry_in(Phase::Downloading);
+        entry.running.store(true, Ordering::Release);
+        entry.cancel.lock().unwrap().cancel();
+        assert!(entry.winding_down());
+    }
+
+    /// A download's own limit replaces the global one, above it or below.
+    #[test]
+    fn the_speed_limit_is_the_jobs_own_in_place_of_the_global_one() {
+        let mut entry = entry_in(Phase::Downloading);
+        assert_eq!(entry.speed_limit(Some(500)), Some(500));
+        assert_eq!(entry.speed_limit(None), None);
+        entry.job.speed_limit_override = Some(200);
+        assert_eq!(entry.speed_limit(Some(500)), Some(200));
+        entry.job.speed_limit_override = Some(900);
+        assert_eq!(entry.speed_limit(Some(500)), Some(900));
+    }
+
+    /// A run starts from the job's own connection cap or none, whatever
+    /// an earlier run left in the controls: a cap set then, or odl's
+    /// lowering after failed parts.
+    #[test]
+    fn a_run_starts_from_the_jobs_own_connection_cap() {
+        let mut entry = entry_in(Phase::Queued);
+        entry.live_controls.set_max_connections(1);
+        entry.prime_live_controls(None);
+        assert_eq!(entry.live_controls.max_connections(), 0, "unset");
+        entry.job.max_connections = Some(4);
+        entry.prime_live_controls(None);
+        assert_eq!(entry.live_controls.max_connections(), 4);
     }
 
     /// A finished segment has nothing left to transfer, so it cannot

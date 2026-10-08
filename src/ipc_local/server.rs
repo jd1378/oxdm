@@ -535,6 +535,7 @@ fn snapshot_counters(id: JobId, entry: &JobEntry) -> JobCounters {
     let is_resumable = entry.is_resumable.load(AtomicOrd::Acquire);
     let running = entry.running.load(AtomicOrd::Acquire);
     let retries = entry.retries.load(AtomicOrd::Relaxed);
+    let connection_limit = Some(entry.connection_limit.load(AtomicOrd::Acquire)).filter(|n| *n > 0);
     let now_ms = chrono::Utc::now().timestamp_millis();
     let parts = entry
         .parts
@@ -562,6 +563,7 @@ fn snapshot_counters(id: JobId, entry: &JobEntry) -> JobCounters {
         is_resumable,
         running,
         retries,
+        connection_limit,
         parts,
     }
 }
@@ -638,7 +640,6 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
                 job: crate::data::state::splice_live(&entry),
                 counters,
                 on_completion,
-                session_speed_override: entry.session_speed_override.load(AtomicOrd::Acquire),
                 verifying: entry.verifying.load(AtomicOrd::Acquire),
             }))
         }
@@ -904,12 +905,6 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
                 auth_password,
                 proxy_password,
                 cookies,
-            }
-        }
-        Request::SetSessionSpeedLimit(id, bps) => {
-            match state.set_session_speed_limit(id, bps).await {
-                Ok(()) => Reply::Ok,
-                Err(e) => Reply::Err(job_err_string(e)),
             }
         }
         Request::SetPersistentSpeedLimit(id, bps) => {
