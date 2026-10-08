@@ -2084,8 +2084,14 @@ fn info_tab(st: &State) -> Element<'_, Msg> {
     // Counts what is open, and says nothing when nothing is. Rounding
     // an empty table up to "1 parallel connections" claimed a
     // connection that did not exist and contradicted the Speed tab's
-    // allowance.
-    let segments_right = text(match n_parts {
+    // allowance. Open parts, not parts: a download can hold more parts
+    // than connections, the rest waiting their turn.
+    let open = c
+        .parts
+        .iter()
+        .filter(|p| !is_pseudo_part(&p.ulid) && p.active && !p.finished)
+        .count();
+    let segments_right = text(match open {
         0 => String::new(),
         1 => "1 connection".to_owned(),
         n => format!("{n} parallel connections"),
