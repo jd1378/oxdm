@@ -13,15 +13,60 @@ param(
 
 $ErrorActionPreference = 'Stop'
 if (-not $Dir) { $Dir = Join-Path $env:LOCALAPPDATA 'Programs\oxdm' }
+$exe = Join-Path $Dir 'oxdm.exe'
 
 function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Ok($m)   { Write-Host "✓ $m" -ForegroundColor Green }
 function Warn($m) { Write-Host "! $m" -ForegroundColor Yellow }
 
+# Windows refuses to delete a program that is running. Every oxdm
+# process runs from $Dir: the daemon, its windows, and the browser
+# bridge, which the browser starts on its own.
+function Get-OxdmProcess {
+  $full = [IO.Path]::GetFullPath($Dir).TrimEnd('\')
+  Get-Process -Name 'oxdm*' -ErrorAction SilentlyContinue |
+    Where-Object { $_.Path -and ((Split-Path $_.Path -Parent) -ieq $full) }
+}
+
+if (Get-OxdmProcess) {
+  Step 'Stopping oxdm'
+  # Asked first so downloads are paused with their progress saved. Not
+  # relied on: the kill below covers a daemon that does not answer.
+  try {
+    $q = Start-Process -FilePath $exe -ArgumentList '--quit' -WindowStyle Hidden -PassThru
+    $null = $q.WaitForExit(10000)
+    $deadline = (Get-Date).AddSeconds(10)
+    while ((Get-OxdmProcess | Where-Object ProcessName -eq 'oxdm') -and (Get-Date) -lt $deadline) {
+      Start-Sleep -Milliseconds 250
+    }
+  } catch {
+    Warn "could not ask oxdm to quit: $($_.Exception.Message)"
+  }
+  Get-OxdmProcess | Stop-Process -Force -ErrorAction SilentlyContinue
+  Ok 'oxdm stopped'
+}
+
 Step 'Removing binaries'
-foreach ($n in 'oxdm.exe', 'oxdm-native-host.exe') {
-  $p = Join-Path $Dir $n
-  if (Test-Path $p) { Remove-Item $p -Force; Ok "removed $p" }
+# `*.oxdm-old` are programs an update renamed aside while they ran.
+$bins = @('oxdm.exe', 'oxdm-native-host.exe' | ForEach-Object { Join-Path $Dir $_ })
+if (Test-Path -LiteralPath $Dir) {
+  $bins += @(Get-ChildItem -LiteralPath $Dir -Filter '*.oxdm-old' -Force | ForEach-Object FullName)
+}
+foreach ($p in $bins) {
+  if (-not (Test-Path -LiteralPath $p)) { continue }
+  # A killed process can hold its file for a moment, and a browser can
+  # restart the bridge in between.
+  for ($i = 1; ; $i++) {
+    try { Remove-Item -LiteralPath $p -Force; break }
+    catch {
+      if ($i -ge 10) {
+        throw "could not remove ${p}: $($_.Exception.Message) Quit oxdm from its tray icon, close browsers using the oxdm extension, and run this again."
+      }
+      Get-OxdmProcess | Stop-Process -Force -ErrorAction SilentlyContinue
+      Start-Sleep -Milliseconds 500
+    }
+  }
+  Ok "removed $p"
 }
 if ((Test-Path $Dir) -and -not (Get-ChildItem $Dir -Force | Where-Object { $_ })) {
   Remove-Item $Dir -Force; Ok "removed empty $Dir"
@@ -40,6 +85,14 @@ if ($userPath) {
 # Start menu shortcut.
 $lnk = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\oxdm.lnk'
 if (Test-Path $lnk) { Remove-Item $lnk -Force; Ok "removed $lnk" }
+
+# Login autostart (Settings > start with system), only when it names
+# the binary just removed.
+$run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+$auto = (Get-ItemProperty -Path $run -Name 'oxdm' -ErrorAction SilentlyContinue).oxdm
+if ($auto -and $auto.IndexOf($exe, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+  Remove-ItemProperty -Path $run -Name 'oxdm'; Ok 'removed login autostart'
+}
 
 if ($Purge) {
   Step 'Purging user data'
