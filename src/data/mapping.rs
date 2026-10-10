@@ -11,8 +11,8 @@ use odl::hash::{HashDigest, HashEncoding};
 use odl::progress::Phase as OdlPhase;
 
 use crate::domain::{
-    Algo, AuthScheme, CapturedResponse, Checksum, CsSource, Job, JobError, Phase, ProxyAdv,
-    ProxyMode, ResponseHeader, Settings,
+    Algo, AuthScheme, CaptureRequest, CapturedResponse, Checksum, CsSource, Job, JobError, Phase,
+    ProxyAdv, ProxyMode, ResponseHeader, Settings,
 };
 
 /// Connections for a download when neither it nor the settings name a
@@ -102,36 +102,82 @@ pub fn job_overlay_options(
         b.max_connections(n);
     }
     apply_job_proxy(&mut b, job, proxy_password)?;
-    let bearer = bearer_header(job, auth_secret);
-    let cookies_present = cookies.is_some_and(|s| !s.is_empty());
-    if !job.headers.is_empty() || cookies_present || bearer.is_some() || job.referrer.is_some() {
-        // Merge per-job headers on top of global; the decrypted
-        // cookie jar (never stored in `Job.headers`) is injected here
-        // so it lives only in the per-run overlay.
-        // `upsert_header`, not `insert`: field names are
-        // case-insensitive, so a job's `x-api-key` has to replace a
-        // global `X-API-Key` here rather than ride alongside it.
-        let mut merged = base.headers().cloned().unwrap_or_default();
-        // The page the link came from. Captured by the extension and
-        // editable in Properties → Headers; it lives on its own
-        // column rather than in the header bag, so it is spliced in
-        // here — below the job's own headers, so a hand-written
-        // `Referer` still wins.
-        if let Some(r) = job.referrer.as_ref() {
-            crate::domain::upsert_header(&mut merged, "Referer", r.to_string());
-        }
-        for (k, v) in job.headers.iter() {
-            crate::domain::upsert_header(&mut merged, k, v.clone());
-        }
-        if let Some(c) = cookies.filter(|s| !s.is_empty()) {
-            crate::domain::upsert_header(&mut merged, "Cookie", c.to_string());
-        }
-        if let Some(v) = bearer {
-            crate::domain::upsert_header(&mut merged, "Authorization", v);
-        }
-        b.headers(Some(merged));
-    }
+    overlay_headers(
+        &mut b,
+        base,
+        job.referrer.as_ref(),
+        &job.headers,
+        cookies,
+        bearer_header(job, auth_secret),
+    );
     b.build().map_err(|e| e.to_string())
+}
+
+/// The options a job made from `capture` runs with: its headers,
+/// cookies and referrer on top of the global options. Nothing else
+/// differs, since a capture sets no proxy, connection count or
+/// credentials of its own.
+pub fn capture_overlay_options(
+    base: &DownloadOptions,
+    capture: &CaptureRequest,
+) -> Result<DownloadOptions, String> {
+    let (headers, cookies) = capture.job_headers();
+    let mut b = base.clone().into_builder();
+    overlay_headers(
+        &mut b,
+        base,
+        capture.referrer.as_ref(),
+        &headers,
+        cookies.as_deref(),
+        None,
+    );
+    b.build().map_err(|e| e.to_string())
+}
+
+/// Merge a request's own headers on top of the global ones. The
+/// decrypted cookie jar (never stored in `Job.headers`) is injected
+/// here so it lives only in the per-run overlay.
+fn overlay_headers(
+    b: &mut DownloadOptionsBuilder,
+    base: &DownloadOptions,
+    referrer: Option<&url::Url>,
+    headers: &crate::domain::headers::HeaderMap,
+    cookies: Option<&str>,
+    bearer: Option<String>,
+) {
+    let cookies = cookies.filter(|s| !s.is_empty());
+    if headers.is_empty() && cookies.is_none() && bearer.is_none() && referrer.is_none() {
+        return;
+    }
+    // `upsert_header`, not `insert`: field names are case-insensitive,
+    // so a job's `x-api-key` has to replace a global `X-API-Key` here
+    // rather than ride alongside it.
+    let mut merged = base.headers().cloned().unwrap_or_default();
+    // The page the link came from. Captured by the extension and
+    // editable in Properties → Headers; it lives on its own column
+    // rather than in the header bag, so it is spliced in here, below
+    // the job's own headers, so a hand-written `Referer` still wins.
+    if let Some(r) = referrer {
+        crate::domain::upsert_header(&mut merged, "Referer", r.to_string());
+    }
+    for (k, v) in headers.iter() {
+        crate::domain::upsert_header(&mut merged, k, v.clone());
+    }
+    // odl sets its user agent option after the header bag, so a
+    // `User-Agent` left only among the headers loses to the global one.
+    if let Some((_, ua)) = headers
+        .iter()
+        .find(|(k, _)| crate::domain::header_name_eq(k, "User-Agent"))
+    {
+        b.user_agent(Some(ua.clone()));
+    }
+    if let Some(c) = cookies {
+        crate::domain::upsert_header(&mut merged, "Cookie", c.to_string());
+    }
+    if let Some(v) = bearer {
+        crate::domain::upsert_header(&mut merged, "Authorization", v);
+    }
+    b.headers(Some(merged));
 }
 
 /// Translate the job's proxy configuration onto the options builder.
@@ -413,6 +459,17 @@ pub fn merge_checksums(existing: &mut Vec<Checksum>, incoming: Vec<Checksum>) ->
 /// headers before and after a restart. `Download::response_headers`
 /// would hand back the *raw* map — never use it for anything we store
 /// or show.
+/// The media type the server gave the file, without its parameters.
+pub fn mime_type(instr: &odl::Download) -> Option<String> {
+    let value = instr
+        .response_headers()?
+        .get("content-type")?
+        .to_str()
+        .ok()?;
+    let mime = value.split(';').next().unwrap_or(value).trim();
+    (!mime.is_empty()).then(|| mime.to_owned())
+}
+
 pub fn captured_response(instr: &odl::Download) -> Option<CapturedResponse> {
     let probed_at = instr.response_headers_probed_at()?;
     Some(CapturedResponse {
@@ -900,6 +957,43 @@ mod tests {
         let headers = opts.headers().expect("headers");
         assert_eq!(headers.len(), 1);
         assert_eq!(headers["cookie"], "fresh=2");
+    }
+
+    /// A capture's probe sends what its job's run will: the referrer,
+    /// the browser's UA and cookies on top of the global headers, and a
+    /// header the capture spelled out over the field of the same name.
+    #[test]
+    fn a_capture_overlay_carries_what_its_job_would_send() {
+        let mut global = indexmap::IndexMap::new();
+        global.insert("X-Global".to_owned(), "g".to_owned());
+        let base = DownloadOptionsBuilder::default()
+            .headers(Some(global))
+            .build()
+            .unwrap();
+        let mut capture = CaptureRequest::from_url("https://example.com/f.zip".parse().unwrap());
+        capture.referrer = Some("https://example.com/page".parse().unwrap());
+        capture.user_agent = Some("Browser/1".into());
+        capture.headers.insert("cookie".into(), "sid=1".into());
+        capture
+            .headers
+            .insert("Referer".into(), "https://example.com/other".into());
+
+        let opts = capture_overlay_options(&base, &capture).unwrap();
+        let headers = opts.headers().expect("headers");
+        assert_eq!(headers["X-Global"], "g");
+        assert_eq!(headers["Referer"], "https://example.com/other");
+        assert_eq!(headers["Cookie"], "sid=1");
+        assert_eq!(headers.len(), 4, "{headers:?}");
+        // The option, not just the header: odl applies it last.
+        assert_eq!(opts.user_agent(), Some("Browser/1"));
+    }
+
+    #[test]
+    fn the_media_type_is_read_without_its_parameters() {
+        let instr =
+            instruction_with_headers(&[("content-type", "text/plain; charset=utf-8")], Some(1));
+        assert_eq!(mime_type(&instr).as_deref(), Some("text/plain"));
+        assert_eq!(mime_type(&instruction_with_headers(&[], Some(1))), None);
     }
 
     /// A `Download` carrying `digests`, standing in for what odl's

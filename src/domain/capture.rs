@@ -81,6 +81,23 @@ impl CaptureRequest {
             auto_start_queue: false,
         }
     }
+
+    /// The header bag a job made from this capture keeps, and the
+    /// cookies it sends. A `Cookie` among the captured headers is
+    /// pulled out to ride the encrypted-secret path instead of being
+    /// persisted as plaintext; the `cookies` field outranks it.
+    pub fn job_headers(&self) -> (IndexMap<String, String>, Option<String>) {
+        let mut headers = self.headers.clone();
+        let captured_cookie = headers
+            .shift_remove("Cookie")
+            .or_else(|| headers.shift_remove("cookie"));
+        if let Some(ua) = self.user_agent.as_deref()
+            && !headers.contains_key("User-Agent")
+        {
+            headers.insert("User-Agent".into(), ua.into());
+        }
+        (headers, self.cookies.clone().or(captured_cookie))
+    }
 }
 
 /// Response sent back to the extension after a capture is accepted.

@@ -195,9 +195,13 @@ Reply:
 ## Message: `EvaluateUrl`
 
 Lets the extension's mass-select dialog probe a URL with the same
-cookies/UA/referrer that the eventual capture would use. The host
-issues a `HEAD` (falls back to a 1-byte ranged `GET` for hosts that
-reject `HEAD`) and returns whatever metadata it could extract.
+cookies/UA/referrer/headers that the eventual capture would use, merged
+the way a capture merges them, through the proxy set in oxdm. The host
+asks the way the download will: a `GET` for the first byte, never a
+`HEAD`, which some hosts route elsewhere (github.com sends a signed-in
+`HEAD` for a release asset to a host that answers 401). It returns what
+the server said about the file, or an error if it refused or did not
+answer within 10 seconds.
 
 ```json
 { "kind": "evaluate_url", "id": "r2",

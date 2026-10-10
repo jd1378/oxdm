@@ -3527,7 +3527,7 @@ impl AppState {
         Ok(())
     }
 
-    /// Run an HTTP probe (HEAD) to discover filename / size / resume
+    /// Run an HTTP probe to discover filename / size / resume
     /// support, without queueing or starting a download.
     ///
     /// Used by the Add-Download dialog to fill detected fields live.
@@ -3698,30 +3698,22 @@ impl AppState {
 
     pub async fn probe(&self, url: url::Url) -> Result<ProbeResult, JobError> {
         let manager = self.manager.read().await.clone();
-        let settings = self.settings.read().await.clone();
-        let resolver = ProbeResolver;
-        let instr = manager
-            .evaluate(
-                odl::download_manager::EvaluateRequest::new(
-                    url,
-                    settings.fallback_dir(),
-                    &resolver,
-                )
-                // Same engine the run will use, or the probe would
-                // describe a file the download never fetches.
-                .engine(crate::data::runner::FORCED_ENGINE),
-            )
-            .await
-            .map_err(|e| crate::data::mapping::job_error_from_odl(&e))?;
-        Ok(ProbeResult {
-            checksums: crate::data::mapping::server_checksums(&instr),
-            filename: instr.filename().to_string(),
-            size: instr.size(),
-            is_resumable: instr.is_resumable(),
-            etag: instr.etag().map(str::to_owned),
-            last_modified: instr.last_modified(),
-            requires_auth: instr.requires_auth(),
-        })
+        let save_dir = self.settings.read().await.fallback_dir();
+        probe_with(&manager, url, save_dir, None).await
+    }
+
+    /// Probe a link the way a job made from `capture` would fetch it:
+    /// with its cookies, user agent and referrer, through the same
+    /// proxy. The extension's mass-select dialog asks before anything
+    /// is captured. Not shared like [`Self::probe_shared`], since the
+    /// answer depends on whose session asked.
+    pub async fn probe_capture(&self, capture: &CaptureRequest) -> Result<ProbeResult, JobError> {
+        let manager = self.manager.read().await.clone();
+        let save_dir = self.settings.read().await.fallback_dir();
+        let options =
+            crate::data::mapping::capture_overlay_options(manager.config().download(), capture)
+                .map_err(JobError::Other)?;
+        probe_with(&manager, capture.url.clone(), save_dir, Some(&options)).await
     }
 
     /// Convenience for IPC: build a Job from a `CaptureRequest` and add it.
@@ -3733,23 +3725,11 @@ impl AppState {
         req: CaptureRequest,
     ) -> Result<JobId, JobError> {
         let settings = self.settings().await;
-        // Pull `Cookie` (and a stray `Authorization` if present) out of
-        // the captured header bag so they ride the encrypted-secret
-        // path instead of being persisted as plaintext headers.
-        let mut headers = req.headers.clone();
-        let captured_cookie = headers
-            .shift_remove("Cookie")
-            .or_else(|| headers.shift_remove("cookie"));
-        if let Some(ua) = req.user_agent.as_deref()
-            && !headers.contains_key("User-Agent")
-        {
-            headers.insert("User-Agent".into(), ua.into());
-        }
         // The referrer is *not* copied into the header bag: it rides
         // `Job::referrer`, and `mapping::job_overlay_options` splices
         // it in at request time. Two copies would show up as two rows
         // in Properties and drift the moment one is edited.
-        let cookies = req.cookies.clone().or(captured_cookie);
+        let (headers, cookies) = req.job_headers();
         // The extension's name is a suggestion (`docs/EXTENSION_API.md`:
         // the server's name overrides it). Stored as the job's name it
         // would be forced on the run and never revisited, so a link
@@ -5407,12 +5387,48 @@ fn route_agent(settings: &Settings, queue_exists: impl Fn(QueueId) -> bool) -> A
     }
 }
 
+/// What `evaluate` finds at `url`, asked with `options` on top of the
+/// manager's own.
+async fn probe_with(
+    manager: &DownloadManager,
+    url: url::Url,
+    save_dir: PathBuf,
+    options: Option<&odl::config::DownloadOptions>,
+) -> Result<ProbeResult, JobError> {
+    let resolver = ProbeResolver;
+    let mut req = odl::download_manager::EvaluateRequest::new(url, save_dir, &resolver)
+        // Same engine the run will use, or the probe would
+        // describe a file the download never fetches.
+        .engine(crate::data::runner::FORCED_ENGINE);
+    if let Some(o) = options {
+        req = req.options(o);
+    }
+    let instr = manager
+        .evaluate(req)
+        .await
+        .map_err(|e| crate::data::mapping::job_error_from_odl(&e))?;
+    Ok(ProbeResult {
+        checksums: crate::data::mapping::server_checksums(&instr),
+        filename: instr.filename().to_string(),
+        size: instr.size(),
+        mime_type: crate::data::mapping::mime_type(&instr),
+        is_resumable: instr.is_resumable(),
+        etag: instr.etag().map(str::to_owned),
+        last_modified: instr.last_modified(),
+        requires_auth: instr.requires_auth(),
+    })
+}
+
 /// Result of `AppState::probe`. All fields are best-effort — anything
 /// the server did not advertise stays `None` / empty.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProbeResult {
     pub filename: String,
     pub size: Option<u64>,
+    /// The file's media type, without parameters. Defaulted so a reply
+    /// from an older daemon still reads.
+    #[serde(default)]
+    pub mime_type: Option<String>,
     pub is_resumable: bool,
     pub etag: Option<String>,
     pub last_modified: Option<i64>,
@@ -7843,6 +7859,128 @@ mod tests {
         assert_eq!(purge_work_dir_partials(root), 1);
         assert!(!root.join(".oxdm-link").exists());
         assert!(outside.join("precious").exists());
+    }
+
+    /// Serves one file the way github.com serves a release asset to a
+    /// signed-in browser: a HEAD is refused with 401, and a GET carrying
+    /// the session gets the file. Anything else is a 404. Records the
+    /// head of every request (lowercased).
+    async fn spawn_signed_in_asset(total: usize) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let heads = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = heads.clone();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let seen = seen.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 1024];
+                    while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match sock.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        }
+                    }
+                    let head = String::from_utf8_lossy(&buf).to_ascii_lowercase();
+                    seen.lock().unwrap().push(head.clone());
+                    let reply = if head.starts_with("head ") {
+                        "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n".to_owned()
+                    } else if head.contains("\r\ncookie: user_session=s3cret\r\n") {
+                        let range = head.contains("\r\nrange: bytes=0-0\r\n");
+                        let (status, length, extra) = if range {
+                            (
+                                "206 Partial Content",
+                                1,
+                                format!("Content-Range: bytes 0-0/{total}\r\n"),
+                            )
+                        } else {
+                            ("200 OK", total, String::new())
+                        };
+                        format!(
+                            "HTTP/1.1 {status}\r\nContent-Length: {length}\r\n{extra}\
+                             Accept-Ranges: bytes\r\nContent-Type: application/gzip\r\n\
+                             Content-Disposition: attachment; filename=app.tar.gz\r\n\
+                             ETag: \"v1\"\r\n\r\n"
+                        )
+                    } else {
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_owned()
+                    };
+                    let _ = sock.write_all(reply.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        (
+            format!("http://{addr}/releases/download/v1/app.tar.gz"),
+            heads,
+        )
+    }
+
+    /// A manager with a global user agent, as the daemon's always has.
+    fn probe_manager(work: &std::path::Path) -> DownloadManager {
+        let cfg = odl::config::ConfigBuilder::default()
+            .download_dir(work.to_path_buf())
+            .download(
+                odl::config::DownloadOptionsBuilder::default()
+                    .user_agent(Some("oxdm/test".into()))
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap();
+        DownloadManager::new(cfg)
+    }
+
+    /// The extension's mass-select dialog asks about a captured link with
+    /// the browser's session. It used to send a HEAD, which a signed-in
+    /// github.com routes to a host that answers 401, and fall back to a
+    /// ranged GET whose `Content-Length` of 1 it took for the file's size.
+    #[tokio::test]
+    async fn a_capture_is_probed_with_its_session_the_way_its_download_asks() {
+        let total = 15_206_584;
+        let (url, heads) = spawn_signed_in_asset(total).await;
+        let dir = tempfile::tempdir().unwrap();
+        let manager = probe_manager(&dir.path().join("work"));
+        let mut capture = CaptureRequest::from_url(url.parse().unwrap());
+        capture.cookies = Some("user_session=s3cret".into());
+        capture.user_agent = Some("Browser/1".into());
+        let options =
+            crate::data::mapping::capture_overlay_options(manager.config().download(), &capture)
+                .unwrap();
+
+        let probe = probe_with(
+            &manager,
+            capture.url.clone(),
+            dir.path().into(),
+            Some(&options),
+        )
+        .await
+        .expect("the session's GET is served");
+
+        assert_eq!(probe.size, Some(total as u64));
+        assert_eq!(probe.filename, "app.tar.gz");
+        assert_eq!(probe.mime_type.as_deref(), Some("application/gzip"));
+        assert_eq!(probe.etag.as_deref(), Some("\"v1\""));
+        assert!(probe.is_resumable);
+        let asked = heads.lock().unwrap().clone();
+        assert!(!asked.is_empty());
+        for head in &asked {
+            assert!(
+                head.starts_with("get "),
+                "not asked the way parts ask:\n{head}"
+            );
+            assert!(
+                head.contains("\r\nuser-agent: browser/1\r\n"),
+                "not the browser's UA:\n{head}"
+            );
+        }
+
+        // Without the session the same link is refused, and that is the
+        // answer: not metadata read off the error page.
+        let refused = probe_with(&manager, capture.url.clone(), dir.path().into(), None).await;
+        assert_eq!(refused, Err(JobError::UrlBroken));
     }
 
     #[test]

@@ -274,7 +274,16 @@ async fn dispatch(state: &Arc<AppState>, text: &str) -> CaptureResponse {
             cookies,
             user_agent,
             headers,
-        } => crate::ipc::evaluator::evaluate(id, url, referrer, cookies, user_agent, headers).await,
+        } => {
+            let capture = CaptureRequest {
+                referrer,
+                cookies,
+                user_agent,
+                headers,
+                ..CaptureRequest::from_url(url)
+            };
+            crate::ipc::evaluator::evaluate(state, id, capture).await
+        }
         IpcRequest::BatchCapture {
             id,
             interactive,
