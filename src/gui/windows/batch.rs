@@ -168,10 +168,12 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
             let mut probes = Vec::new();
             for (i, r) in rows.iter().enumerate() {
                 let client = client.clone();
-                let url = r.req.url.clone();
+                // Asked with what the capture carries, so a link behind
+                // the browser's session is described, not refused.
+                let target = crate::domain::ProbeTarget::from_capture(&r.req);
                 probes.push(Task::perform(
                     async move {
-                        match client.probe(url).await {
+                        match client.probe(target).await {
                             // Batch rows render a flat message; flatten
                             // the structured `JobError` here.
                             Ok(inner) => inner.map(Box::new).map_err(|e| e.to_string()),

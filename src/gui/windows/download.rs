@@ -1937,7 +1937,7 @@ fn stat<'a>(t: &Tokens, label: &'a str, value: String, accent: bool) -> Element<
 }
 
 /// One-line "this transfer goes through a proxy" note, mirroring
-/// `apply_job_proxy`'s precedence: an explicit mode wins, `Inherit`
+/// `apply_proxy`'s precedence: an explicit mode wins, `Inherit`
 /// falls back to the legacy per-job proxy URL, and `System` only means
 /// "whatever the environment says" — no host to name, and claiming one
 /// would be a guess. Credentials are never rendered.

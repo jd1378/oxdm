@@ -286,7 +286,14 @@ pub enum Request {
     CancelUpdate,
 
     // ── one-shot helpers ───────────────────────────────────────────
+    /// Probe a bare link. Kept beside `ProbeAs`, which says the same
+    /// with nothing but a URL, so a bare probe still reaches a daemon
+    /// older than it.
     Probe(Url),
+    /// Probe a link with what its download would send it: the Add
+    /// dialog's form, a captured link's cookies and user agent.
+    /// Secrets travel in plaintext over the local socket, as an add's do.
+    ProbeAs(Box<crate::domain::ProbeTarget>),
 
     /// Ask the daemon to surface a per-job download window: focus an
     /// existing GUI subprocess if one is registered, otherwise spawn
@@ -714,5 +721,25 @@ mod tests {
         let reply = Reply::Refused(JobError::Deferred);
         let back: Reply = serde_json::from_slice(&serde_json::to_vec(&reply).unwrap()).unwrap();
         assert!(matches!(back, Reply::Refused(JobError::Deferred)));
+    }
+
+    /// The Add dialog's probe crosses the socket whole, and a reply from
+    /// a daemon that predates `mime_type` still reads.
+    #[test]
+    fn a_probe_with_its_fields_round_trips() {
+        let mut target =
+            crate::domain::ProbeTarget::bare("https://example.com/a.zip".parse().unwrap());
+        target.cookies = Some("sid=1".into());
+        let frame = Frame::Request(3, Box::new(Request::ProbeAs(Box::new(target.clone()))));
+        let back: Frame = serde_json::from_slice(&serde_json::to_vec(&frame).unwrap()).unwrap();
+        let Frame::Request(3, req) = back else {
+            panic!("not a request")
+        };
+        assert!(matches!(*req, Request::ProbeAs(got) if *got == target));
+
+        let old = r#"{"filename":"a.zip","size":1,"is_resumable":true,"etag":null,
+            "last_modified":null,"requires_auth":false,"checksums":[]}"#;
+        let probe: ProbeResult = serde_json::from_str(old).unwrap();
+        assert_eq!(probe.mime_type, None);
     }
 }

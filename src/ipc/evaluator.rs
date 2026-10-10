@@ -11,6 +11,7 @@
 use std::time::Duration;
 
 use crate::data::AppState;
+use crate::domain::ProbeTarget;
 use crate::domain::capture::{CaptureRequest, CaptureResponse};
 
 /// The dialog shows a row per link and waits on each; a server that
@@ -22,7 +23,12 @@ pub async fn evaluate(state: &AppState, id: String, capture: CaptureRequest) -> 
     if let Err(reason) = crate::ipc::guard_public_http_url(&capture.url) {
         return err(id, url, reason);
     }
-    let probe = match tokio::time::timeout(EVALUATE_TIMEOUT, state.probe_capture(&capture)).await {
+    let probe = match tokio::time::timeout(
+        EVALUATE_TIMEOUT,
+        state.probe_shared(ProbeTarget::from_capture(&capture)),
+    )
+    .await
+    {
         Ok(Ok(probe)) => probe,
         Ok(Err(e)) => return err(id, url, e.to_string()),
         Err(_) => return err(id, url, "timed out".to_owned()),

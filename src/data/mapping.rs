@@ -11,7 +11,7 @@ use odl::hash::{HashDigest, HashEncoding};
 use odl::progress::Phase as OdlPhase;
 
 use crate::domain::{
-    Algo, AuthScheme, CaptureRequest, CapturedResponse, Checksum, CsSource, Job, JobError, Phase,
+    Algo, AuthScheme, CapturedResponse, Checksum, CsSource, Job, JobError, Phase, ProbeTarget,
     ProxyAdv, ProxyMode, ResponseHeader, Settings,
 };
 
@@ -101,7 +101,12 @@ pub fn job_overlay_options(
     if let Some(n) = job.max_connections {
         b.max_connections(n);
     }
-    apply_job_proxy(&mut b, job, proxy_password)?;
+    apply_proxy(
+        &mut b,
+        &job.advanced.proxy,
+        job.proxy.as_deref(),
+        proxy_password,
+    )?;
     overlay_headers(
         &mut b,
         base,
@@ -113,25 +118,33 @@ pub fn job_overlay_options(
     b.build().map_err(|e| e.to_string())
 }
 
-/// The options a job made from `capture` runs with: its headers,
-/// cookies and referrer on top of the global options. Nothing else
-/// differs, since a capture sets no proxy, connection count or
-/// credentials of its own.
-pub fn capture_overlay_options(
+/// The options and sign-in a probe of `target` asks with: those of a
+/// job holding the same fields, built by the same rules as
+/// [`job_overlay_options`] and the runner's Basic credentials.
+pub fn probe_overlay(
     base: &DownloadOptions,
-    capture: &CaptureRequest,
-) -> Result<DownloadOptions, String> {
-    let (headers, cookies) = capture.job_headers();
+    target: &ProbeTarget,
+) -> Result<(DownloadOptions, Option<odl::credentials::Credentials>), String> {
+    let (proxy, auth) = (&target.creds.proxy, &target.creds.auth);
     let mut b = base.clone().into_builder();
+    apply_proxy(&mut b, proxy, None, Some(proxy.password.as_str()))?;
+    let bearer = match auth.scheme {
+        AuthScheme::Bearer => bearer_value(Some(auth.token.as_str())),
+        _ => None,
+    };
     overlay_headers(
         &mut b,
         base,
-        capture.referrer.as_ref(),
-        &headers,
-        cookies.as_deref(),
-        None,
+        target.referrer.as_ref(),
+        &target.headers,
+        target.cookies.as_deref(),
+        bearer,
     );
-    b.build().map_err(|e| e.to_string())
+    let basic = (auth.scheme == AuthScheme::Basic && !auth.username.is_empty()).then(|| {
+        let password = Some(auth.password.as_str()).filter(|p| !p.is_empty());
+        odl::credentials::Credentials::new(&auth.username, password)
+    });
+    Ok((b.build().map_err(|e| e.to_string())?, basic))
 }
 
 /// Merge a request's own headers on top of the global ones. The
@@ -195,12 +208,12 @@ fn overlay_headers(
 ///   configured proxy, the environment's and the platform's — which is
 ///   the whole point of the mode, and why it could not be offered
 ///   before odl 3.1 could express it.
-fn apply_job_proxy(
+fn apply_proxy(
     b: &mut DownloadOptionsBuilder,
-    job: &Job,
+    adv: &ProxyAdv,
+    legacy: Option<&str>,
     proxy_password: Option<&str>,
 ) -> Result<(), String> {
-    let adv = &job.advanced.proxy;
     // Every mode but Inherit states `no_proxy` outright. The overlay is
     // built on the global options, so a global "None" would otherwise
     // survive into a job that names a proxy — and odl's `no_proxy`
@@ -211,8 +224,8 @@ fn apply_job_proxy(
             b.no_proxy(true);
         }
         ProxyMode::Inherit => {
-            if let Some(p) = job.proxy.clone() {
-                let merged = merge_proxy_password(&p, proxy_password)?;
+            if let Some(p) = legacy {
+                let merged = merge_proxy_password(p, proxy_password)?;
                 b.no_proxy(false);
                 b.proxy(Some(merged));
             }
@@ -291,9 +304,7 @@ fn synth_proxy_url(
 /// it to something else would be dishonest.
 fn bearer_header(job: &Job, auth_secret: Option<&str>) -> Option<String> {
     match job.advanced.auth.scheme {
-        AuthScheme::Bearer => auth_secret
-            .filter(|s| !s.is_empty())
-            .map(|t| format!("Bearer {t}")),
+        AuthScheme::Bearer => bearer_value(auth_secret),
         AuthScheme::Digest => {
             tracing::warn!(
                 job = %job.id,
@@ -304,6 +315,12 @@ fn bearer_header(job: &Job, auth_secret: Option<&str>) -> Option<String> {
         }
         AuthScheme::None | AuthScheme::Basic => None,
     }
+}
+
+fn bearer_value(token: Option<&str>) -> Option<String> {
+    token
+        .filter(|t| !t.is_empty())
+        .map(|t| format!("Bearer {t}"))
 }
 
 /// Which checksum rows a run should check, by index.
@@ -970,7 +987,8 @@ mod tests {
             .headers(Some(global))
             .build()
             .unwrap();
-        let mut capture = CaptureRequest::from_url("https://example.com/f.zip".parse().unwrap());
+        let mut capture =
+            crate::domain::CaptureRequest::from_url("https://example.com/f.zip".parse().unwrap());
         capture.referrer = Some("https://example.com/page".parse().unwrap());
         capture.user_agent = Some("Browser/1".into());
         capture.headers.insert("cookie".into(), "sid=1".into());
@@ -978,7 +996,7 @@ mod tests {
             .headers
             .insert("Referer".into(), "https://example.com/other".into());
 
-        let opts = capture_overlay_options(&base, &capture).unwrap();
+        let (opts, basic) = probe_overlay(&base, &ProbeTarget::from_capture(&capture)).unwrap();
         let headers = opts.headers().expect("headers");
         assert_eq!(headers["X-Global"], "g");
         assert_eq!(headers["Referer"], "https://example.com/other");
@@ -986,6 +1004,42 @@ mod tests {
         assert_eq!(headers.len(), 4, "{headers:?}");
         // The option, not just the header: odl applies it last.
         assert_eq!(opts.user_agent(), Some("Browser/1"));
+        assert!(basic.is_none());
+    }
+
+    /// The Add dialog's sign-in and proxy reach its probe the way they
+    /// reach the job's run: Basic as odl credentials, a token as a
+    /// header, the proxy with its password.
+    #[test]
+    fn a_probe_signs_in_and_connects_as_its_form_says() {
+        let base = DownloadOptionsBuilder::default().build().unwrap();
+        let mut target = ProbeTarget::bare("https://example.com/f.zip".parse().unwrap());
+        target.creds.auth = crate::domain::AuthAdv {
+            scheme: AuthScheme::Basic,
+            username: "me".into(),
+            password: "pw".into(),
+            ..Default::default()
+        };
+        target.creds.proxy = ProxyAdv {
+            mode: ProxyMode::Http,
+            host: "proxy.lan".into(),
+            port: "8080".into(),
+            auth_enabled: true,
+            username: "p".into(),
+            password: "s3cret".into(),
+            ..ProxyAdv::default()
+        };
+        let (opts, basic) = probe_overlay(&base, &target).unwrap();
+        let basic = basic.expect("Basic credentials");
+        assert_eq!((basic.username(), basic.password()), ("me", Some("pw")));
+        assert_eq!(opts.proxy(), Some("http://p:s3cret@proxy.lan:8080/"));
+        assert!(opts.headers().is_none());
+
+        target.creds.auth.scheme = AuthScheme::Bearer;
+        target.creds.auth.token = "tok".into();
+        let (opts, basic) = probe_overlay(&base, &target).unwrap();
+        assert!(basic.is_none());
+        assert_eq!(opts.headers().unwrap()["Authorization"], "Bearer tok");
     }
 
     #[test]

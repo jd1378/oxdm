@@ -130,7 +130,7 @@ pub async fn queues(client: &Arc<Client>, out: Out) -> Result<(), Failure> {
 pub async fn probe(client: &Arc<Client>, args: ProbeArgs, out: Out) -> Result<(), Failure> {
     let url = parse_url(&args.url)?;
     let p = client
-        .probe(url.clone())
+        .probe(crate::domain::ProbeTarget::bare(url.clone()))
         .await
         .map_err(lost)?
         .map_err(|e| Failure::from_job_error(&e))?;

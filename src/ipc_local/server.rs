@@ -995,7 +995,12 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> Reply {
             state.confirm_pending_shutdown();
             Reply::Ok
         }
-        Request::Probe(url) => Reply::ProbeResult(state.probe_shared(url).await),
+        Request::Probe(url) => Reply::ProbeResult(
+            state
+                .probe_shared(crate::domain::ProbeTarget::bare(url))
+                .await,
+        ),
+        Request::ProbeAs(target) => Reply::ProbeResult(state.probe_shared(*target).await),
         Request::OpenDownloadWindow(id) => {
             crate::daemon::tray::spawn_download_gui(id);
             Reply::Ok

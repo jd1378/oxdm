@@ -20,7 +20,7 @@ use iced::widget::{column, container, row, text, text_editor};
 use iced::{Alignment, Element, Length, Subscription, Task};
 
 use crate::data::ProbeResult;
-use crate::domain::{Category, JobId, QueueId};
+use crate::domain::{Category, JobId, ProbeTarget, QueueId};
 use crate::gui::chrome::{self, WindowControl, titlebar};
 use crate::gui::format::format_bytes;
 use crate::gui::shot::Shot;
@@ -318,10 +318,12 @@ impl AddState {
         )
     }
 
-    fn build_req(&self) -> Option<AddJobReq> {
+    /// The link and what the download the form describes would send
+    /// it. The probe and the add both read it here, so the dialog
+    /// describes the file the job will get, and the job's own probe
+    /// shares the dialog's request.
+    fn probe_target(&self) -> Option<ProbeTarget> {
         let url: url::Url = self.url.trim().parse().ok()?;
-        let dest = self.destination();
-        let (save_dir, filename) = (dest.dir, dest.filename);
         let mut headers = indexmap::IndexMap::new();
         for (k, v) in &self.headers {
             if !k.trim().is_empty() {
@@ -334,6 +336,23 @@ impl AddState {
         if !self.user_agent.trim().is_empty() {
             headers.insert("User-Agent".to_owned(), self.user_agent.trim().to_owned());
         }
+        let cookies = self.cookies.text();
+        let cookies = Some(cookies.trim())
+            .filter(|c| !c.is_empty())
+            .map(str::to_owned);
+        Some(ProbeTarget {
+            url,
+            referrer: self.referrer.clone(),
+            headers,
+            cookies,
+            creds: conn_form::creds(&self.proxy, &self.auth),
+        })
+    }
+
+    fn build_req(&self) -> Option<AddJobReq> {
+        let target = self.probe_target()?;
+        let dest = self.destination();
+        let (save_dir, filename) = (dest.dir, dest.filename);
         // Non-resumable downloads are forced to a single connection (the
         // Segments combo is locked to "1 connection (forced)" in that state).
         let segments = if self.detected().is_some_and(|p| !p.is_resumable) {
@@ -341,21 +360,16 @@ impl AddState {
         } else {
             self.segments
         };
-        let cookies_text = self.cookies.text();
-        let opt = |s: &str| {
-            let s = s.trim();
-            (!s.is_empty()).then(|| s.to_owned())
-        };
         Some(AddJobReq {
-            url,
+            url: target.url,
             queue: Some(self.queue),
             save_dir,
             filename,
-            referrer: self.referrer.clone(),
-            headers,
+            referrer: target.referrer,
+            headers: target.headers,
             max_connections: Some(segments),
-            creds: conn_form::creds(&self.proxy, &self.auth),
-            cookies: opt(&cookies_text),
+            creds: target.creds,
+            cookies: target.cookies,
             category: self.category,
             size: self.detected().and_then(|p| p.size),
             checksums: self
@@ -705,12 +719,12 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Msg> {
 fn start_probe(st: &AddState) -> Task<Msg> {
     let generation = st.probe_gen;
     let client = st.client.clone();
-    let Ok(url) = st.url.trim().parse::<url::Url>() else {
+    let Some(target) = st.probe_target() else {
         return Task::none();
     };
     Task::perform(
         async move {
-            match tokio::time::timeout(std::time::Duration::from_millis(8000), client.probe(url))
+            match tokio::time::timeout(std::time::Duration::from_millis(8000), client.probe(target))
                 .await
             {
                 Ok(Ok(inner)) => inner,

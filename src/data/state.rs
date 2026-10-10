@@ -27,8 +27,8 @@ use crate::data::runner::{JobRunner, LiveBridge, PartCounters};
 use crate::data::store::Store;
 use crate::data::update_channel::{NoopUpdateChannel, UpdateChannel};
 use crate::domain::{
-    CaptureRequest, Category, Job, JobError, JobId, JobStatus, LiveCounters, Phase, Queue, QueueId,
-    Settings, classify,
+    CaptureRequest, Category, Job, JobError, JobId, JobStatus, LiveCounters, Phase, ProbeTarget,
+    Queue, QueueId, Settings, classify,
 };
 
 /// In-memory record per job. Lives in `AppState::jobs`.
@@ -3361,6 +3361,16 @@ impl AppState {
             let settings = self.settings.read().await.clone();
             Self::route_at_creation(&settings, category, filename.as_deref(), save_dir)
         };
+        // Asked with what the job sends, from the plaintext the job is
+        // about to seal, so it matches the Add dialog's own probe of
+        // the same form and shares its request.
+        let target = ProbeTarget {
+            url: url.clone(),
+            referrer: referrer.clone(),
+            headers: headers.clone(),
+            cookies: cookies.clone(),
+            creds: creds.clone(),
+        };
         let sealed = self.seal_creds(id, creds).await?;
         let enc_cookies = self
             .encrypt_field(id, crate::data::crypto::Field::Cookies, cookies.as_deref())
@@ -3405,16 +3415,7 @@ impl AppState {
         };
         apply_sealed_creds(&mut job, sealed);
         let completion = seeded_completion(&self.settings().await);
-        let url = job.url.clone();
-        // A job with credentials is not one a bare probe can describe:
-        // the server answers a sign-in page, and recording its name and
-        // size on the job would be worse than knowing nothing. Those
-        // jobs learn from their own run, which carries the secrets.
-        let probe_worth_it = !named
-            && probe_was_empty
-            && job.auth_user.is_none()
-            && job.enc_auth_password.is_none()
-            && job.enc_cookies.is_none();
+        let probe_worth_it = !named && probe_was_empty;
         // The name is made unique and the job goes in under the same
         // lock: two adds landing together must not both decide the
         // same name is free. The store write stays inside it too, so
@@ -3431,7 +3432,7 @@ impl AppState {
         let _ = self.events.send(DomainEvent::JobAdded { id });
         self.queue_took_a_job(queue_id).await;
         if probe_worth_it {
-            self.probe_in_background(id, url);
+            self.probe_in_background(id, target);
         }
         Ok(id)
     }
@@ -3534,18 +3535,21 @@ impl AppState {
     /// Internally goes through `DownloadManager::evaluate` with a
     /// `ProbeResolver` that aborts on every conflict, so the call
     /// either returns metadata or a clean error — never side-effects.
-    /// Probe `url`, sharing one request between everyone who asks.
+    /// Probe `target`, sharing one request between everyone who asks
+    /// the same link with the same headers, cookies and credentials.
     ///
     /// The Add dialog asks, and a moment later the job it created asks
     /// again; a second request would ask the same server the same
     /// question for the same answer. Callers that arrive while a probe
     /// is running wait for it, and one that arrives just after gets
-    /// what it found (see [`PROBE_FRESH_FOR`]).
+    /// what it found (see [`PROBE_FRESH_FOR`]). One session's answer is
+    /// never another's: a signed-in browser can be shown a file that
+    /// the same link refuses without it.
     ///
     /// Failures are shared too, and deliberately not cached: a server
     /// that was unreachable a second ago is worth asking again.
-    pub async fn probe_shared(&self, url: url::Url) -> Result<ProbeResult, JobError> {
-        let key = url.as_str().to_owned();
+    pub async fn probe_shared(&self, target: ProbeTarget) -> Result<ProbeResult, JobError> {
+        let key = probe_key(&target);
         let mut rx = {
             let mut slots = self.probes.lock().await;
             // Swept whenever the map is held anyway: entries past
@@ -3573,11 +3577,11 @@ impl AppState {
             // is better than reporting an error nobody caused.
             return match rx.recv().await {
                 Ok(result) => (*result).clone(),
-                Err(_) => self.probe(url).await,
+                Err(_) => self.probe(&target).await,
             };
         }
 
-        let result = Arc::new(self.probe(url).await);
+        let result = Arc::new(self.probe(&target).await);
         {
             let mut slots = self.probes.lock().await;
             let waiters = match slots.remove(&key) {
@@ -3613,10 +3617,10 @@ impl AppState {
     /// Failure is silent by design. Nothing the user asked for has
     /// failed yet; if the link really is dead they find out when they
     /// start the download, with the error panel that flow already has.
-    fn probe_in_background(self: &Arc<Self>, id: JobId, url: url::Url) {
+    fn probe_in_background(self: &Arc<Self>, id: JobId, target: ProbeTarget) {
         let state = self.clone();
         tokio::spawn(async move {
-            match state.probe_shared(url).await {
+            match state.probe_shared(target).await {
                 Ok(probe) => state.apply_probe_result(id, probe).await,
                 Err(e) => {
                     tracing::debug!(id = %id, error = %e, "background probe found nothing")
@@ -3696,24 +3700,13 @@ impl AppState {
         let _ = self.events.send(DomainEvent::JobUpdated { id, phase });
     }
 
-    pub async fn probe(&self, url: url::Url) -> Result<ProbeResult, JobError> {
+    /// Probe a link the way a job holding the same fields would fetch
+    /// it: its headers, cookies, proxy and sign-in on top of the global
+    /// options.
+    pub async fn probe(&self, target: &ProbeTarget) -> Result<ProbeResult, JobError> {
         let manager = self.manager.read().await.clone();
         let save_dir = self.settings.read().await.fallback_dir();
-        probe_with(&manager, url, save_dir, None).await
-    }
-
-    /// Probe a link the way a job made from `capture` would fetch it:
-    /// with its cookies, user agent and referrer, through the same
-    /// proxy. The extension's mass-select dialog asks before anything
-    /// is captured. Not shared like [`Self::probe_shared`], since the
-    /// answer depends on whose session asked.
-    pub async fn probe_capture(&self, capture: &CaptureRequest) -> Result<ProbeResult, JobError> {
-        let manager = self.manager.read().await.clone();
-        let save_dir = self.settings.read().await.fallback_dir();
-        let options =
-            crate::data::mapping::capture_overlay_options(manager.config().download(), capture)
-                .map_err(JobError::Other)?;
-        probe_with(&manager, capture.url.clone(), save_dir, Some(&options)).await
+        probe_with(&manager, save_dir, target).await
     }
 
     /// Convenience for IPC: build a Job from a `CaptureRequest` and add it.
@@ -5387,21 +5380,39 @@ fn route_agent(settings: &Settings, queue_exists: impl Fn(QueueId) -> bool) -> A
     }
 }
 
-/// What `evaluate` finds at `url`, asked with `options` on top of the
-/// manager's own.
+/// What [`AppState::probe_shared`] files a probe of `target` under: the
+/// link, and a digest of what it is asked with. Hashed, so the map
+/// keeps no cookie or password past its probe; keyed per process, so
+/// no caller can aim a collision at another's answer.
+fn probe_key(target: &ProbeTarget) -> String {
+    use std::hash::BuildHasher;
+    static KEYS: std::sync::OnceLock<std::hash::RandomState> = std::sync::OnceLock::new();
+    // Serializing these plain structs cannot fail; if it ever did,
+    // sharing by link alone is what probes did before.
+    let asked = serde_json::to_string(target).unwrap_or_default();
+    let digest = KEYS.get_or_init(Default::default).hash_one(asked);
+    format!("{} {digest:016x}", target.url)
+}
+
+/// What `evaluate` finds at `target`, asked the way [`AppState::probe`]
+/// says.
 async fn probe_with(
     manager: &DownloadManager,
-    url: url::Url,
     save_dir: PathBuf,
-    options: Option<&odl::config::DownloadOptions>,
+    target: &ProbeTarget,
 ) -> Result<ProbeResult, JobError> {
+    let (options, credentials) =
+        crate::data::mapping::probe_overlay(manager.config().download(), target)
+            .map_err(JobError::Other)?;
     let resolver = ProbeResolver;
-    let mut req = odl::download_manager::EvaluateRequest::new(url, save_dir, &resolver)
-        // Same engine the run will use, or the probe would
-        // describe a file the download never fetches.
-        .engine(crate::data::runner::FORCED_ENGINE);
-    if let Some(o) = options {
-        req = req.options(o);
+    let mut req =
+        odl::download_manager::EvaluateRequest::new(target.url.clone(), save_dir, &resolver)
+            .options(&options)
+            // Same engine the run will use, or the probe would
+            // describe a file the download never fetches.
+            .engine(crate::data::runner::FORCED_ENGINE);
+    if let Some(c) = credentials {
+        req = req.credentials(c);
     }
     let instr = manager
         .evaluate(req)
@@ -7863,9 +7874,13 @@ mod tests {
 
     /// Serves one file the way github.com serves a release asset to a
     /// signed-in browser: a HEAD is refused with 401, and a GET carrying
-    /// the session gets the file. Anything else is a 404. Records the
-    /// head of every request (lowercased).
-    async fn spawn_signed_in_asset(total: usize) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+    /// the session, header line `session` (lowercased), gets the file.
+    /// Anything else is a 404. Records the head of every request
+    /// (lowercased).
+    async fn spawn_signed_in_asset(
+        total: usize,
+        session: &'static str,
+    ) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -7887,7 +7902,7 @@ mod tests {
                     seen.lock().unwrap().push(head.clone());
                     let reply = if head.starts_with("head ") {
                         "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n".to_owned()
-                    } else if head.contains("\r\ncookie: user_session=s3cret\r\n") {
+                    } else if head.contains(&format!("\r\n{session}\r\n")) {
                         let range = head.contains("\r\nrange: bytes=0-0\r\n");
                         let (status, length, extra) = if range {
                             (
@@ -7940,24 +7955,17 @@ mod tests {
     #[tokio::test]
     async fn a_capture_is_probed_with_its_session_the_way_its_download_asks() {
         let total = 15_206_584;
-        let (url, heads) = spawn_signed_in_asset(total).await;
+        let (url, heads) = spawn_signed_in_asset(total, "cookie: user_session=s3cret").await;
         let dir = tempfile::tempdir().unwrap();
         let manager = probe_manager(&dir.path().join("work"));
         let mut capture = CaptureRequest::from_url(url.parse().unwrap());
         capture.cookies = Some("user_session=s3cret".into());
         capture.user_agent = Some("Browser/1".into());
-        let options =
-            crate::data::mapping::capture_overlay_options(manager.config().download(), &capture)
-                .unwrap();
+        let target = ProbeTarget::from_capture(&capture);
 
-        let probe = probe_with(
-            &manager,
-            capture.url.clone(),
-            dir.path().into(),
-            Some(&options),
-        )
-        .await
-        .expect("the session's GET is served");
+        let probe = probe_with(&manager, dir.path().into(), &target)
+            .await
+            .expect("the session's GET is served");
 
         assert_eq!(probe.size, Some(total as u64));
         assert_eq!(probe.filename, "app.tar.gz");
@@ -7979,8 +7987,47 @@ mod tests {
 
         // Without the session the same link is refused, and that is the
         // answer: not metadata read off the error page.
-        let refused = probe_with(&manager, capture.url.clone(), dir.path().into(), None).await;
+        let refused = probe_with(&manager, dir.path().into(), &ProbeTarget::bare(target.url)).await;
         assert_eq!(refused, Err(JobError::UrlBroken));
+    }
+
+    /// A link behind a password, added through the Add dialog with the
+    /// password filled in, is described rather than refused: the probe
+    /// signs in the way the run will.
+    #[tokio::test]
+    async fn a_probe_signs_in_with_the_forms_password() {
+        // `me:pw`, as Basic sends it.
+        let (url, _) = spawn_signed_in_asset(10, "authorization: basic bwu6chc=").await;
+        let dir = tempfile::tempdir().unwrap();
+        let manager = probe_manager(&dir.path().join("work"));
+        let mut target = ProbeTarget::bare(url.parse().unwrap());
+        target.creds.auth = crate::domain::AuthAdv {
+            scheme: crate::domain::AuthScheme::Basic,
+            username: "me".into(),
+            password: "pw".into(),
+            ..Default::default()
+        };
+
+        let probe = probe_with(&manager, dir.path().into(), &target)
+            .await
+            .expect("signed in");
+        assert_eq!(probe.size, Some(10));
+    }
+
+    /// Two sessions asking about one link are two questions; the same
+    /// session asking twice is one. The key holds no secret.
+    #[test]
+    fn probes_are_shared_by_what_they_ask_with() {
+        let url: url::Url = "https://example.com/f.zip".parse().unwrap();
+        let signed_in = |cookie: &str| ProbeTarget {
+            cookies: Some(cookie.to_owned()),
+            ..ProbeTarget::bare(url.clone())
+        };
+        let a = probe_key(&signed_in("sid=alice"));
+        assert_eq!(a, probe_key(&signed_in("sid=alice")));
+        assert_ne!(a, probe_key(&signed_in("sid=bob")));
+        assert_ne!(a, probe_key(&ProbeTarget::bare(url.clone())));
+        assert!(!a.contains("alice"), "{a}");
     }
 
     #[test]

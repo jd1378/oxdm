@@ -612,12 +612,16 @@ impl Client {
 
     /// Outer `Err` = transport failure; inner `Err` = structured probe
     /// error from the daemon (`JobError`).
-    pub async fn probe(&self, url: url::Url) -> Result<Result<ProbeResult, JobError>, String> {
-        match self
-            .request(Request::Probe(url))
-            .await
-            .map_err(|e| e.to_string())?
-        {
+    pub async fn probe(
+        &self,
+        target: crate::domain::ProbeTarget,
+    ) -> Result<Result<ProbeResult, JobError>, String> {
+        let req = if target.is_bare() {
+            Request::Probe(target.url)
+        } else {
+            Request::ProbeAs(Box::new(target))
+        };
+        match self.request(req).await.map_err(|e| e.to_string())? {
             Reply::ProbeResult(v) => Ok(v),
             Reply::Err(e) => Err(e),
             _ => unreachable!("probe reply"),

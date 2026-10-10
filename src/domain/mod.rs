@@ -9,6 +9,7 @@ pub mod filename;
 pub mod headers;
 pub mod job;
 pub mod native_host;
+pub mod probe;
 pub mod progress;
 pub mod queue;
 pub mod save_path;
@@ -32,6 +33,7 @@ pub use native_host::{
     CHROMIUM_EXTENSION_ID, FIREFOX_EXTENSION_ID, Family, HOST_NAME, HostEntry, HostOutcome,
     HostReport, Packaging,
 };
+pub use probe::ProbeTarget;
 pub use queue::{
     CMD_INTERVAL_RANGE, CondCombine, CondCommand, CondKind, CondSet, IDLE_MINUTES_RANGE, Queue,
     QueueHook, QueueId, QueueSchedule, WeekDayMask, finish_summary, finish_title,
