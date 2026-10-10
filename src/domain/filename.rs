@@ -10,8 +10,6 @@
 //! without regard to case. Linux would happily keep `Foo.zip` beside
 //! `foo.zip`; a user looking at the list would not thank it.
 
-use std::path::Path;
-
 /// The form a name is compared in. Two names clash when their keys are
 /// equal.
 pub fn name_key(name: &str) -> String {
@@ -129,11 +127,10 @@ fn truncate_bytes(name: &str, max: usize) -> String {
     if name.len() <= max {
         return name.to_owned();
     }
-    let ext = Path::new(name)
-        .extension()
-        .map(|e| format!(".{}", e.to_string_lossy()))
-        .filter(|e| e.len() <= 16)
-        .unwrap_or_default();
+    let ext = match split_extension(name).1 {
+        ext if ext.len() <= 16 => ext,
+        _ => "",
+    };
     let room = max.saturating_sub(ext.len());
     let mut cut = room.min(name.len());
     while cut > 0 && !name.is_char_boundary(cut) {
@@ -157,18 +154,7 @@ pub fn unique_name(desired: &str, taken: impl Fn(&str) -> bool) -> String {
     if desired.is_empty() || !taken(desired) {
         return desired.to_owned();
     }
-    let path = Path::new(desired);
-    // `file_stem`/`extension` split at the *last* dot, so `foo.tar.gz`
-    // numbers as `foo.tar_1.gz`. That keeps the extension the system
-    // dispatches on intact, which is the part that matters.
-    let stem = path
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| desired.to_owned());
-    let ext = path
-        .extension()
-        .map(|e| format!(".{}", e.to_string_lossy()))
-        .unwrap_or_default();
+    let (stem, ext) = split_extension(desired);
     // Bounded so a pathological taken-set cannot spin forever; the
     // ceiling is far past any real download list, and the last
     // candidate is returned even if it clashes rather than looping.
@@ -179,6 +165,27 @@ pub fn unique_name(desired: &str, taken: impl Fn(&str) -> bool) -> String {
         }
     }
     format!("{stem}_{}{ext}", 10_000)
+}
+
+/// `name` split before its extension, dot included. A compressed
+/// tarball keeps both of its own (`foo.tar.gz` is `foo` and `.tar.gz`):
+/// numbered as `foo.tar_1.gz`, archive tools no longer see a tarball.
+/// A leading dot starts a name, not an extension.
+fn split_extension(name: &str) -> (&str, &str) {
+    let Some(dot) = name.rfind('.').filter(|&i| i > 0) else {
+        return (name, "");
+    };
+    let (stem, ext) = name.split_at(dot);
+    match stem.len().checked_sub(".tar".len()) {
+        Some(tar)
+            if tar > 0
+                && stem.is_char_boundary(tar)
+                && stem[tar..].eq_ignore_ascii_case(".tar") =>
+        {
+            name.split_at(tar)
+        }
+        _ => (stem, ext),
+    }
 }
 
 #[cfg(test)]
@@ -211,13 +218,20 @@ mod tests {
         assert_eq!(unique_name("foo", taken(&["foo"])), "foo_1");
     }
 
-    /// The extension the system dispatches on stays last.
+    /// The extension the system dispatches on stays last, and a
+    /// compressed tarball keeps the `.tar` in front of it.
     #[test]
-    fn only_the_final_extension_is_kept_on_the_end() {
+    fn a_compressed_tarball_is_numbered_before_both_extensions() {
         assert_eq!(
             unique_name("archive.tar.gz", taken(&["archive.tar.gz"])),
-            "archive.tar_1.gz"
+            "archive_1.tar.gz"
         );
+        assert_eq!(
+            unique_name("pkg-1.0.pkg.tar.zst", taken(&["pkg-1.0.pkg.tar.zst"])),
+            "pkg-1.0.pkg_1.tar.zst"
+        );
+        assert_eq!(unique_name("v1.2.zip", taken(&["v1.2.zip"])), "v1.2_1.zip");
+        assert_eq!(unique_name(".bashrc", taken(&[".bashrc"])), ".bashrc_1");
     }
 
     #[test]
@@ -355,6 +369,13 @@ mod tests {
         let out = sanitize(&long).unwrap();
         assert!(out.len() <= 255, "{} bytes", out.len());
         assert!(out.ends_with(".zip"));
+    }
+
+    #[test]
+    fn an_overlong_tarball_keeps_both_extensions() {
+        let out = sanitize(&format!("{}.tar.gz", "a".repeat(400))).unwrap();
+        assert!(out.len() <= 255, "{} bytes", out.len());
+        assert!(out.ends_with("a.tar.gz"), "{out}");
     }
 
     #[test]
