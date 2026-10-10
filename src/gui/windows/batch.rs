@@ -269,6 +269,11 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                     let mut added = Vec::new();
                     let mut failed: Vec<String> = Vec::new();
                     for (req, probed) in reqs {
+                        // Shaped the way a capture added straight away
+                        // is: the browser's UA among the headers, and a
+                        // captured `Cookie` moved to the cookies the
+                        // daemon encrypts rather than stored as a header.
+                        let (headers, cookies) = req.job_headers();
                         let add = AddJobReq {
                             url: req.url.clone(),
                             queue,
@@ -278,13 +283,13 @@ fn update_ready(st: &mut State, msg: Msg) -> Task<Msg> {
                                 .clone()
                                 .or_else(|| probed.as_ref().map(|p| p.filename.clone())),
                             referrer: req.referrer.clone(),
-                            headers: req.headers.clone(),
+                            headers,
                             max_connections: None,
                             // A captured batch carries no credentials
                             // of its own; the extension's headers, if
                             // any, are already above.
                             creds: Default::default(),
-                            cookies: req.cookies.clone(),
+                            cookies,
                             category: None,
                             size: probed.as_ref().and_then(|p| p.size),
                             checksums: probed.map(|p| p.checksums.clone()).unwrap_or_default(),
