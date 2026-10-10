@@ -442,6 +442,18 @@ impl JobEntry {
             }
         }
     }
+
+    /// Stop in `phase`, `Failed` or `Conflict`, because of `err`. The
+    /// error is written first: whoever reads the phase reads why with
+    /// it, where a failure seen without its error reads as one that
+    /// gave no reason.
+    pub fn end_with(&self, phase: Phase, err: crate::domain::JobError) {
+        if let Ok(mut g) = self.last_error.write() {
+            *g = Some(err);
+        }
+        self.set_phase(phase);
+        self.reset_live_speed();
+    }
 }
 
 pub(crate) fn encode_phase(p: Phase) -> u8 {
@@ -2616,11 +2628,7 @@ impl AppState {
         self.move_to_queue_end(id).await;
         let err = JobError::ConflictPending(Box::new(cause));
         if let Some(entry) = self.jobs.read().await.get(&id) {
-            entry.set_phase(Phase::Conflict);
-            entry.reset_live_speed();
-            if let Ok(mut g) = entry.last_error.write() {
-                *g = Some(err.clone());
-            }
+            entry.end_with(Phase::Conflict, err.clone());
         }
         // Written down: the caller persisted the job as `Failed` a
         // moment ago, and a restart in between would lose the fact that
@@ -4492,8 +4500,7 @@ impl AppState {
                     });
                 }
                 Err(err) => {
-                    entry.set_phase(Phase::Failed);
-                    entry.reset_live_speed();
+                    entry.end_with(Phase::Failed, err.clone());
                     // Same as a pause: it stops being the download the
                     // queue is working on. Unlike a pause, the queue
                     // does not pick it up again when it comes round —
@@ -4520,9 +4527,6 @@ impl AppState {
                     // SHA-1 has one of each, and painting them both
                     // with the failure said the MD5 was wrong when it
                     // was the only thing that matched.
-                    if let Ok(mut g) = entry.last_error.write() {
-                        *g = Some(err.clone());
-                    }
                     state.persist_job(id).await;
                     // Questions, not failures: each of these stops the
                     // download on something a person can settle, and
@@ -6916,6 +6920,22 @@ mod tests {
 
         entry.running.store(false, Ordering::Release);
         assert!(!entry.winding_down());
+    }
+
+    /// The CLI's `wait` read a failed download's phase in the gap before
+    /// its error was written, and reported it as stopping without a
+    /// reason. A stop now carries its error by the time its phase says so.
+    #[test]
+    fn a_stopped_download_carries_its_error_with_its_phase() {
+        for phase in [Phase::Failed, Phase::Conflict] {
+            let entry = entry_in(Phase::Evaluating);
+            entry.end_with(phase, crate::domain::JobError::AccessRefused);
+            assert_eq!(entry.phase(), phase);
+            assert_eq!(
+                *entry.last_error.read().unwrap(),
+                Some(crate::domain::JobError::AccessRefused)
+            );
+        }
     }
 
     /// A run nobody told to stop is running, whatever its phase passes
