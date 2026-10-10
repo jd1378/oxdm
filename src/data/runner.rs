@@ -851,8 +851,7 @@ mod tests {
     /// One origin of a redirect, recording the head of every request it
     /// gets (lowercased). With `redirect_to` it answers everything with a
     /// 302 there. Without, it serves `BODY`, except to a request carrying
-    /// a cookie or an `Authorization`, which it refuses with 401 the way
-    /// GitHub's asset host refused a github.com session.
+    /// a cookie or an `Authorization`, which it refuses with 401.
     async fn spawn_origin(
         redirect_to: Option<String>,
     ) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
@@ -1029,9 +1028,10 @@ mod tests {
         (format!("http://{addr}/file.bin"), hits)
     }
 
-    /// Server that answers every GET with `503` + a long `Retry-After`,
-    /// counting the attempts. HEAD still succeeds, so the download gets
-    /// as far as scheduling retries. Returns the URL and the counter.
+    /// Server that answers every part request with `503` + a long
+    /// `Retry-After`, counting the attempts. odl's probe (a GET for the
+    /// first byte) still succeeds, so the download gets as far as
+    /// scheduling a part's retries. Returns the URL and the counter.
     async fn spawn_retry_server() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
         let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -1056,7 +1056,10 @@ mod tests {
                             break;
                         }
                     }
-                    let head = if buf.starts_with(b"HEAD ") {
+                    let probe = String::from_utf8_lossy(&buf)
+                        .to_ascii_lowercase()
+                        .contains("\r\nrange: bytes=0-0\r\n");
+                    let head = if probe {
                         format!(
                             "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: \
                              bytes\r\nConnection: close\r\n\r\n",
@@ -1733,10 +1736,9 @@ mod tests {
     }
 
     /// A link that redirects to another host (a release asset on a CDN)
-    /// takes the site's cookies and token only as far as the site. The
-    /// CDN refusing a github.com session with 401 is how odl handing them
-    /// on surfaced. Nor do they land in the plaintext files beside the
-    /// parts: the daemon encrypts them at rest, and a copy there undid it.
+    /// takes the site's cookies and token only as far as the site. Nor
+    /// do they land in the plaintext files beside the parts: the daemon
+    /// encrypts them at rest, and a copy there undid it.
     #[tokio::test]
     async fn credentials_stay_with_the_host_they_were_given_for() {
         let (cdn, cdn_heads) = spawn_origin(None).await;
