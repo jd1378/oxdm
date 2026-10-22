@@ -114,6 +114,11 @@ windows = { version = "0.62", features = [
     # be enabled together or the imports do not resolve.
     "Win32_UI_Shell",
     "Win32_UI_Shell_Common",
+    # Finding an Explorer window that already shows the folder:
+    # `IShellBrowser` is gated on `_Ole`, and the list of open windows
+    # is indexed by `VARIANT`.
+    "Win32_System_Ole",
+    "Win32_System_Variant",
 ] }
 
 [dev-dependencies]

@@ -44,11 +44,20 @@ pub fn reveal_label() -> &'static str {
 pub fn reveal_in_folder(path: &std::path::Path) {
     #[cfg(target_os = "windows")]
     {
-        // The shell's own verb first. `explorer /select,` spawns a
-        // fresh window every time, even when the folder is already
-        // open, and leaves it behind whichever window had focus;
-        // `SHOpenFolderAndSelectItems` reuses a window already showing
-        // the folder, selects the item in it, and brings it forward.
+        // Explorer shows a window from its own process, and Windows
+        // lets a process take the foreground only when the one holding
+        // it allows that. oxdm holds it, the user having just clicked
+        // in it; without this, a window Explorer opens lands behind
+        // oxdm. Any process rather than Explorer's: folder windows can
+        // run in a process of their own, and the grant ends at the
+        // user's next input anyway.
+        unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(
+                windows_sys::Win32::UI::WindowsAndMessaging::ASFW_ANY,
+            );
+        }
+        // The shell first. `explorer /select,` spawns a fresh window
+        // every time, even when the folder is already open.
         if let Err(e) = shell_reveal(path) {
             tracing::debug!(path = %path.display(), error = %e, "shell reveal failed; falling back");
             // Quoting is the whole reason this is `raw_arg`. Rust
@@ -116,11 +125,11 @@ pub fn reveal_in_folder(path: &std::path::Path) {
 /// Select `path` in Explorer through the shell, rather than by asking
 /// `explorer.exe` to do it on a command line.
 ///
-/// Passing the file's own item id as the *folder* with no selection
-/// list is the documented way to say "show me this one thing": the
-/// shell opens its parent, reuses a window already displaying that
-/// folder instead of adding another, selects the item, and activates
-/// the window.
+/// A window already showing the folder is used when there is one (see
+/// [`select_in_open_window`]). Otherwise `SHOpenFolderAndSelectItems`
+/// gets the file's own item id as the *folder* with no selection list,
+/// the documented way to say "show me this one thing": the shell opens
+/// its parent and selects the item.
 ///
 /// COM is initialised per call and never uninitialised. This runs on
 /// whichever thread the UI happens to call it from, and that thread
@@ -153,6 +162,15 @@ fn shell_reveal(path: &std::path::Path) -> Result<(), String> {
 
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        if let (Some(dir), Some(name)) = (plain.parent(), plain.file_name()) {
+            match select_in_open_window(dir, name) {
+                Ok(true) => return Ok(()),
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::debug!(error = %e, "could not select in an open Explorer window")
+                }
+            }
+        }
         let mut pidl = std::ptr::null_mut();
         // Spelled out rather than a bare `None`: the parameter is
         // generic over anything convertible to an `IBindCtx`, so the
@@ -169,6 +187,128 @@ fn shell_reveal(path: &std::path::Path) -> Result<(), String> {
         CoTaskMemFree(Some(pidl as *const std::ffi::c_void));
         opened.map_err(|e| e.to_string())
     }
+}
+
+/// Select `name` in an Explorer window already showing `dir`, and bring
+/// that window forward. `Ok(false)` when no window is showing it.
+///
+/// `SHOpenFolderAndSelectItems` is meant to reuse such a window itself,
+/// but on Windows 11 it was reported opening another one, behind oxdm,
+/// every time. Asking each open window which folder it shows, by path,
+/// leaves nothing to how the shell matches them.
+///
+/// Expects COM initialised on the calling thread.
+#[cfg(target_os = "windows")]
+fn select_in_open_window(
+    dir: &std::path::Path,
+    name: &std::ffi::OsStr,
+) -> windows::core::Result<bool> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::Com::{
+        CLSCTX_ALL, CoCreateInstance, CoTaskMemFree, IBindCtx, IServiceProvider,
+    };
+    use windows::Win32::System::Variant::{VARIANT, VT_I4};
+    use windows::Win32::UI::Shell::{
+        GPFIDL_DEFAULT, IFolderView, IPersistFolder2, IShellBrowser, IShellFolder, IShellWindows,
+        SHGetPathFromIDListEx, SID_STopLevelBrowser, SVSI_DESELECTOTHERS, SVSI_ENSUREVISIBLE,
+        SVSI_FOCUSED, SVSI_SELECT, ShellWindows,
+    };
+    use windows::core::{Interface, PCWSTR};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        FindWindowExW, GA_ROOT, GetAncestor, IsIconic, SW_RESTORE, SetForegroundWindow, ShowWindow,
+    };
+
+    // Windows paths ignore case, and a share's root may come back with
+    // or without its last separator.
+    let key = |p: &str| p.trim_end_matches('\\').to_lowercase();
+    let want = key(&dir.to_string_lossy());
+    let name: Vec<u16> = name.encode_wide().chain(std::iter::once(0)).collect();
+    let mut shown = vec![0u16; 32_768];
+
+    unsafe {
+        let open: IShellWindows = CoCreateInstance(&ShellWindows, None, CLSCTX_ALL)?;
+        for i in 0..open.Count()? {
+            let mut index = VARIANT::default();
+            (*index.Anonymous.Anonymous).vt = VT_I4;
+            (*index.Anonymous.Anonymous).Anonymous.lVal = i;
+            // A window that cannot answer, such as one closing as we
+            // ask or an Internet Explorer frame, is not the one.
+            let Ok(browser) = open
+                .Item(&index)
+                .and_then(|w| w.cast::<IServiceProvider>())
+                .and_then(|sp| sp.QueryService::<IShellBrowser>(&SID_STopLevelBrowser))
+            else {
+                continue;
+            };
+            let Ok(view) = browser.QueryActiveShellView() else {
+                continue;
+            };
+            let Ok(folder) = view.cast::<IFolderView>() else {
+                continue;
+            };
+            let Ok(pidl) = folder
+                .GetFolder::<IPersistFolder2>()
+                .and_then(|f| f.GetCurFolder())
+            else {
+                continue;
+            };
+            let on_disk = SHGetPathFromIDListEx(pidl, &mut shown, GPFIDL_DEFAULT).as_bool();
+            CoTaskMemFree(Some(pidl as *const std::ffi::c_void));
+            // This PC, Home, a search: nothing with a path to compare.
+            if !on_disk {
+                continue;
+            }
+            let len = shown.iter().position(|&c| c == 0).unwrap_or(shown.len());
+            if key(&std::ffi::OsString::from_wide(&shown[..len]).to_string_lossy()) != want {
+                continue;
+            }
+
+            // Each tab is an entry of its own, and only the one in
+            // front will do: selecting in a tab behind it and raising
+            // the window would show the user some other folder.
+            // Explorer keeps the front tab first among its tabs; a
+            // window without tabs has none.
+            let Ok(tab) = browser.GetWindow() else {
+                continue;
+            };
+            let top = GetAncestor(tab.0, GA_ROOT);
+            let front = FindWindowExW(
+                top,
+                std::ptr::null_mut(),
+                windows_sys::w!("ShellTabWindowClass"),
+                std::ptr::null(),
+            );
+            if !front.is_null() && front != tab.0 {
+                continue;
+            }
+
+            // Parsed by the window's own folder, so the id is one its
+            // view knows, however the folder was reached.
+            let shell_folder: IShellFolder = folder.GetFolder()?;
+            let mut child = std::ptr::null_mut();
+            shell_folder.ParseDisplayName(
+                HWND(std::ptr::null_mut()),
+                Option::<&IBindCtx>::None,
+                PCWSTR(name.as_ptr()),
+                None,
+                &mut child,
+                std::ptr::null_mut(),
+            )?;
+            let flags =
+                SVSI_SELECT.0 | SVSI_DESELECTOTHERS.0 | SVSI_ENSUREVISIBLE.0 | SVSI_FOCUSED.0;
+            let selected = view.SelectItem(child, flags as u32);
+            CoTaskMemFree(Some(child as *const std::ffi::c_void));
+            selected?;
+            if IsIconic(top) != 0 {
+                ShowWindow(top, SW_RESTORE);
+            }
+            SetForegroundWindow(top);
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub fn open_url(url: &str) {
