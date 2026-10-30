@@ -6,7 +6,7 @@
 //!   elsewhere it is the `single-instance` crate's own — a file locked
 //!   with `flock` on macOS (at the absolute path [`lock_path`] gives),
 //!   `CreateMutex` on Windows.
-//! - `interprocess` local socket (a 0600 filesystem socket in the
+//! - `interprocess` local socket (a filesystem socket in the 0700
 //!   per-user runtime dir on Unix, named pipe on Windows) carries a
 //!   one-line `SHOW` ping from secondary launches to the primary. The
 //!   peer's credentials are checked on accept: `SHOW` pops a window on
@@ -26,9 +26,7 @@ use std::io::{Read, Write};
 use std::sync::Arc;
 use std::time::Duration;
 
-use interprocess::local_socket::{
-    ListenerOptions, Stream, prelude::*, traits::tokio::Listener as _,
-};
+use interprocess::local_socket::{Stream, prelude::*, traits::tokio::Listener as _};
 #[cfg(not(target_os = "linux"))]
 use single_instance::SingleInstance;
 
@@ -264,20 +262,10 @@ impl InstanceGuard {
         std::mem::forget(lock);
 
         #[cfg(unix)]
-        let listener = {
-            use interprocess::local_socket::{GenericFilePath, ToFsName};
-            use interprocess::os::unix::local_socket::ListenerOptionsExt as _;
-            let name = show_socket_path()?.to_fs_name::<GenericFilePath>()?;
-            ListenerOptions::new()
-                .name(name)
-                .mode(0o600)
-                .try_overwrite(true)
-                .max_spin_time(Duration::from_secs(2))
-                .create_tokio()?
-        };
+        let listener = crate::ipc_local::auth::bind_private_socket(show_socket_path()?)?;
         #[cfg(not(unix))]
         let listener = {
-            use interprocess::local_socket::{GenericNamespaced, ToNsName};
+            use interprocess::local_socket::{GenericNamespaced, ListenerOptions, ToNsName};
             let name = socket_name().to_ns_name::<GenericNamespaced>()?;
             ListenerOptions::new().name(name).create_tokio()?
         };

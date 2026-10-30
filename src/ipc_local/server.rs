@@ -17,8 +17,7 @@ use std::sync::atomic::Ordering as AtomicOrd;
 use std::time::Duration;
 
 use interprocess::local_socket::{
-    ListenerOptions, tokio::Listener as IpcListener, tokio::Stream as IpcStream,
-    traits::tokio::Listener as _,
+    tokio::Listener as IpcListener, tokio::Stream as IpcStream, traits::tokio::Listener as _,
 };
 use tokio::sync::{Mutex, mpsc};
 
@@ -132,29 +131,17 @@ pub async fn serve(state: Arc<AppState>) -> std::io::Result<()> {
     }
 }
 
-/// Unix: a filesystem socket, mode 0600, inside the 0700 runtime dir.
-/// `try_overwrite` clears the socket file a crashed predecessor left
-/// behind; the single-instance lock is what guarantees no live daemon
-/// is displaced by it.
+/// Unix: a filesystem socket inside the 0700 runtime dir.
 #[cfg(unix)]
 fn bind_listener() -> std::io::Result<IpcListener> {
-    use interprocess::local_socket::{GenericFilePath, ToFsName};
-    use interprocess::os::unix::local_socket::ListenerOptionsExt as _;
-
     let path = super::auth::socket_path()?;
     tracing::info!(socket = %path.display(), "ipc_local listening");
-    let name = path.clone().to_fs_name::<GenericFilePath>()?;
-    ListenerOptions::new()
-        .name(name)
-        .mode(0o600)
-        .try_overwrite(true)
-        .max_spin_time(Duration::from_secs(2))
-        .create_tokio()
+    super::auth::bind_private_socket(path)
 }
 
 #[cfg(not(unix))]
 fn bind_listener() -> std::io::Result<IpcListener> {
-    use interprocess::local_socket::{GenericNamespaced, ToNsName};
+    use interprocess::local_socket::{GenericNamespaced, ListenerOptions, ToNsName};
 
     let name = super::socket_name();
     tracing::info!(socket = %name, "ipc_local listening");

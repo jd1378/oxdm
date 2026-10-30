@@ -9,7 +9,8 @@
 //! platform we ship:
 //!
 //! - **Transport.** On Unix the socket is a filesystem socket inside a
-//!   0700 directory with mode 0600, and every accepted connection has
+//!   0700 directory (mode 0600 too, where the OS can set one on a
+//!   socket; macOS cannot), and every accepted connection has
 //!   its peer credentials checked against our own uid. The abstract
 //!   namespace this used to live in has no permissions at all — any
 //!   local process could derive the name (it is just the uid) and
@@ -121,6 +122,39 @@ fn create_private_dir(dir: &std::path::Path) -> io::Result<()> {
 #[cfg(unix)]
 pub fn socket_path() -> io::Result<PathBuf> {
     Ok(runtime_dir()?.join("gui.sock"))
+}
+
+/// Bind a filesystem socket at `path`, mode 0600 where the OS allows.
+///
+/// `try_overwrite` clears the socket file a crashed predecessor left
+/// behind; the single-instance lock is what guarantees no live daemon
+/// is displaced by it.
+///
+/// The mode is set with `fchmod` on the socket before `bind`, which
+/// macOS refuses with `EINVAL` (surfaced as `Unsupported`). There the
+/// socket is bound without it: the 0700 directory from [`runtime_dir`]
+/// already keeps other users from reaching it, and [`peer_is_self`]
+/// and the token stand behind that.
+#[cfg(unix)]
+pub fn bind_private_socket(
+    path: PathBuf,
+) -> io::Result<interprocess::local_socket::tokio::Listener> {
+    use interprocess::local_socket::{GenericFilePath, ListenerOptions, ToFsName};
+    use interprocess::os::unix::local_socket::ListenerOptionsExt as _;
+
+    let options = || -> io::Result<ListenerOptions<'static>> {
+        Ok(ListenerOptions::new()
+            .name(path.clone().to_fs_name::<GenericFilePath>()?)
+            .try_overwrite(true)
+            .max_spin_time(std::time::Duration::from_secs(2)))
+    };
+    match options()?.mode(0o600).create_tokio() {
+        Err(e) if e.kind() == io::ErrorKind::Unsupported => {
+            tracing::debug!(socket = %path.display(), "socket mode unsupported; relying on the 0700 directory");
+            options()?.create_tokio()
+        }
+        bound => bound,
+    }
 }
 
 fn token_path() -> io::Result<PathBuf> {
@@ -275,5 +309,20 @@ mod tests {
         let path = tmp.path().join("oxdm-run");
         std::fs::write(&path, b"not a dir").unwrap();
         assert!(create_private_dir(&path).is_err());
+    }
+
+    /// Where the OS can set a socket's mode (Linux), the socket still
+    /// gets 0600; the macOS fallback must not widen it here.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_bound_socket_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("t.sock");
+        let _listener = bind_private_socket(path.clone()).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 }
