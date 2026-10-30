@@ -6,26 +6,31 @@
 #   curl -fsSL https://raw.githubusercontent.com/jd1378/oxdm/main/tools/install.sh | sh -s -- --dir /usr/local/bin
 #
 # Env:
-#   OXDM_INSTALL_DIR  install directory (default: $HOME/.local/bin)
-#   OXDM_VERSION      tag to install (default: latest)
-#   OXDM_NO_DESKTOP   set to skip writing the .desktop entry (Linux)
-#   NO_COLOR          disable color output
+#   OXDM_INSTALL_DIR     directory for the `oxdm` command (default: $HOME/.local/bin)
+#   OXDM_APP_DIR         where oxdm.app goes on macOS (default: $HOME/Applications)
+#   OXDM_VERSION         tag to install (default: latest)
+#   OXDM_NO_DESKTOP      set to skip writing the .desktop entry (Linux)
+#   OXDM_NO_MODIFY_PATH  set to leave shell startup files alone
+#   NO_COLOR             disable color output
 
 set -eu
 
 REPO="jd1378/oxdm"
 INSTALL_DIR="${OXDM_INSTALL_DIR:-$HOME/.local/bin}"
+APP_DIR="${OXDM_APP_DIR:-$HOME/Applications}"
 VERSION="${OXDM_VERSION:-latest}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --dir) INSTALL_DIR="$2"; shift 2 ;;
+    --app-dir) APP_DIR="$2"; shift 2 ;;
     --version) VERSION="$2"; shift 2 ;;
     -h|--help)
       cat <<EOF
 oxdm installer
-  --dir <path>     install directory (default: \$HOME/.local/bin)
-  --version <tag>  release tag (default: latest)
+  --dir <path>      directory for the oxdm command (default: \$HOME/.local/bin)
+  --app-dir <path>  macOS: where oxdm.app goes (default: \$HOME/Applications)
+  --version <tag>   release tag (default: latest)
 EOF
       exit 0
       ;;
@@ -156,17 +161,82 @@ OXDM_BIN="$(find "$TMP" -type f -name oxdm | head -n1)"
 HOST_BIN="$(find "$TMP" -type f -name oxdm-native-host | head -n1)"
 [ -n "$OXDM_BIN" ] || err "binary 'oxdm' not found in archive"
 
-step "Installing to $INSTALL_DIR"
-mkdir -p "$INSTALL_DIR"
-install -m 0755 "$OXDM_BIN" "$INSTALL_DIR/oxdm"
-ok "installed: $INSTALL_DIR/oxdm"
-# Not fatal when an archive lacks it: oxdm runs without the browser
-# bridge, minus that integration.
-if [ -n "$HOST_BIN" ]; then
-  install -m 0755 "$HOST_BIN" "$INSTALL_DIR/oxdm-native-host"
-  ok "installed: $INSTALL_DIR/oxdm-native-host"
+# A string as one single-quoted shell word.
+sh_quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+
+if [ "$OS" = "Darwin" ]; then
+  # Finder, Launchpad and Spotlight list application bundles, never a
+  # bare program, so the programs live inside oxdm.app and the `oxdm`
+  # command execs into it. A symlink would not do: oxdm looks for its
+  # browser host and installs updates beside the path it was started
+  # from, which would then be the link's directory.
+  APP="$APP_DIR/oxdm.app"
+  step "Installing $APP"
+  STAGE="$APP_DIR/.oxdm.app.new"
+  rm -rf "$STAGE"
+  mkdir -p "$STAGE/Contents/MacOS" "$STAGE/Contents/Resources"
+  install -m 0755 "$OXDM_BIN" "$STAGE/Contents/MacOS/oxdm"
+  if [ -n "$HOST_BIN" ]; then
+    install -m 0755 "$HOST_BIN" "$STAGE/Contents/MacOS/oxdm-native-host"
+  else
+    warn "'oxdm-native-host' is not in this archive — browser integration will be unavailable."
+  fi
+  ICON_SRC="$(find "$TMP" -type f -name 'oxdm.png' | head -n1)"
+  if [ -n "$ICON_SRC" ]; then
+    sips -s format icns "$ICON_SRC" --out "$STAGE/Contents/Resources/oxdm.icns" >/dev/null 2>&1 \
+      || warn "could not convert the icon; oxdm.app will show a generic one"
+  fi
+  # No version keys: oxdm updates its programs in place, and a version
+  # written here would go stale at the first update.
+  cat > "$STAGE/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key><string>oxdm</string>
+    <key>CFBundleIdentifier</key><string>io.github.jd1378.oxdm</string>
+    <key>CFBundleName</key><string>oxdm</string>
+    <key>CFBundleDisplayName</key><string>oxdm</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleIconFile</key><string>oxdm</string>
+    <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
+    <key>NSHighResolutionCapable</key><true/>
+</dict>
+</plist>
+PLIST
+  rm -rf "$APP"
+  mv "$STAGE" "$APP"
+  # Spotlight finds it on its own, eventually; registering makes it
+  # show up in Launchpad and the Applications list now.
+  LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+  if [ -x "$LSREGISTER" ]; then "$LSREGISTER" -f "$APP" >/dev/null 2>&1 || true; fi
+  ok "installed: $APP"
+
+  step "Installing the oxdm command to $INSTALL_DIR"
+  mkdir -p "$INSTALL_DIR"
+  printf '#!/bin/sh\nexec %s "$@"\n' "$(sh_quote "$APP/Contents/MacOS/oxdm")" > "$INSTALL_DIR/.oxdm.new"
+  chmod 0755 "$INSTALL_DIR/.oxdm.new"
+  mv -f "$INSTALL_DIR/.oxdm.new" "$INSTALL_DIR/oxdm"
+  ok "installed: $INSTALL_DIR/oxdm"
+  # Where an earlier installer put it. The browsers are pointed at the
+  # copy inside oxdm.app the next time oxdm starts.
+  if [ -f "$INSTALL_DIR/oxdm-native-host" ]; then
+    rm -f "$INSTALL_DIR/oxdm-native-host"
+    ok "removed the previous $INSTALL_DIR/oxdm-native-host"
+  fi
 else
-  warn "'oxdm-native-host' is not in this archive — browser integration will be unavailable."
+  step "Installing to $INSTALL_DIR"
+  mkdir -p "$INSTALL_DIR"
+  install -m 0755 "$OXDM_BIN" "$INSTALL_DIR/oxdm"
+  ok "installed: $INSTALL_DIR/oxdm"
+  # Not fatal when an archive lacks it: oxdm runs without the browser
+  # bridge, minus that integration.
+  if [ -n "$HOST_BIN" ]; then
+    install -m 0755 "$HOST_BIN" "$INSTALL_DIR/oxdm-native-host"
+    ok "installed: $INSTALL_DIR/oxdm-native-host"
+  else
+    warn "'oxdm-native-host' is not in this archive — browser integration will be unavailable."
+  fi
 fi
 
 # Linux .desktop entry so the app appears in launchers.
@@ -210,9 +280,36 @@ EOF
   ok "desktop entry: $APPS/oxdm.desktop"
 fi
 
+# macOS puts no per-user directory on PATH, and not every Linux
+# session does either, so without this `oxdm` is "command not found".
+# Appended once to the startup file of the user's shell.
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
-  *) warn "$INSTALL_DIR not in PATH. Add: export PATH=\"$INSTALL_DIR:\$PATH\"" ;;
+  *)
+    case "$(basename "${SHELL:-sh}")" in
+      zsh)  RC="${ZDOTDIR:-$HOME}/.zshrc" ;;
+      # Terminal.app starts bash as a login shell, which skips .bashrc.
+      bash) if [ "$OS" = "Darwin" ]; then RC="$HOME/.bash_profile"; else RC="$HOME/.bashrc"; fi ;;
+      fish) RC="${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d/oxdm.fish" ;;
+      *)    RC="$HOME/.profile" ;;
+    esac
+    case "$RC" in
+      *.fish) PATH_LINE="fish_add_path $(sh_quote "$INSTALL_DIR")" ;;
+      *)      PATH_LINE="export PATH=$(sh_quote "$INSTALL_DIR"):\"\$PATH\"" ;;
+    esac
+    if [ -n "${OXDM_NO_MODIFY_PATH:-}" ]; then
+      warn "$INSTALL_DIR is not in PATH. Add to your shell profile: $PATH_LINE"
+    else
+      if [ -f "$RC" ] && grep -qxF "$PATH_LINE" "$RC"; then
+        info "$RC already adds $INSTALL_DIR to PATH"
+      else
+        mkdir -p "$(dirname "$RC")"
+        printf '\n# Added by the oxdm installer\n%s\n' "$PATH_LINE" >> "$RC"
+        ok "added $INSTALL_DIR to PATH in $RC"
+      fi
+      warn "open a new terminal to use the oxdm command, or run: $PATH_LINE"
+    fi
+    ;;
 esac
 
 VER_OUT="$("$INSTALL_DIR/oxdm" --version 2>/dev/null || true)"

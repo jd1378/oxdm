@@ -8,21 +8,25 @@
 #
 # Env:
 #   OXDM_INSTALL_DIR  override install directory (default: $HOME/.local/bin)
+#   OXDM_APP_DIR      macOS: where oxdm.app is (default: $HOME/Applications)
 
 set -eu
 
 INSTALL_DIR="${OXDM_INSTALL_DIR:-$HOME/.local/bin}"
+APP_DIR="${OXDM_APP_DIR:-$HOME/Applications}"
 PURGE=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --dir) INSTALL_DIR="$2"; shift 2 ;;
+    --app-dir) APP_DIR="$2"; shift 2 ;;
     --purge) PURGE=1; shift ;;
     -h|--help)
       cat <<EOF
 oxdm uninstaller
-  --dir <path>  install directory (default: \$HOME/.local/bin)
-  --purge       also delete user config + queue DB
+  --dir <path>      install directory (default: \$HOME/.local/bin)
+  --app-dir <path>  macOS: where oxdm.app is (default: \$HOME/Applications)
+  --purge           also delete user config + queue DB
 EOF
       exit 0
       ;;
@@ -70,6 +74,9 @@ if [ "$OS" = "Linux" ]; then
 fi
 
 if [ "$OS" = "Darwin" ]; then
+  if [ -d "$APP_DIR/oxdm.app" ]; then
+    rm -rf "$APP_DIR/oxdm.app"; ok "removed $APP_DIR/oxdm.app"
+  fi
   # Login autostart, written when "start with system" is on.
   f="$HOME/Library/LaunchAgents/com.oxdm.app.plist"
   if [ -f "$f" ]; then
@@ -113,4 +120,10 @@ if [ "$PURGE" = 1 ]; then
   done
 else
   warn "user data preserved (run with --purge to also delete settings + queue)"
+fi
+
+if grep -qs '^# Added by the oxdm installer$' \
+    "${ZDOTDIR:-$HOME}/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile" \
+    "${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d/oxdm.fish"; then
+  warn "the PATH line the installer added to your shell profile is left in place"
 fi

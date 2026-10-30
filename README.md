@@ -44,8 +44,18 @@ curl -fsSL https://raw.githubusercontent.com/jd1378/oxdm/main/tools/install.sh |
 ```
 
 Downloads the release archive for your platform, checks it against the
-published SHA-256, installs `oxdm` and `oxdm-native-host` into
-`~/.local/bin`, and adds a launcher entry.
+published SHA-256, and installs it:
+
+- **Linux:** `oxdm` and `oxdm-native-host` into `~/.local/bin`, plus a
+  launcher entry.
+- **macOS:** `oxdm.app` into `~/Applications` (so it shows in Finder,
+  Launchpad and Spotlight), plus an `oxdm` command in `~/.local/bin`
+  that runs it. `--app-dir <path>` puts the app elsewhere.
+
+When that directory is not on your `PATH`, the installer adds it in
+your shell's startup file (`~/.zshrc`, `~/.bashrc` or
+`~/.bash_profile`, fish's `conf.d`, else `~/.profile`). Set
+`OXDM_NO_MODIFY_PATH=1` to skip that.
 
 Custom directory:
 
