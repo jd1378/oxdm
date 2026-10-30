@@ -251,6 +251,70 @@ jobs:
         echo "EXE_SUFFIX=${EXE_suffix}" >> $GITHUB_OUTPUT
         echo "OUT_DIR=${OUT}" >> $GITHUB_OUTPUT
 
+    # macOS Keychain remembers "Always Allow" against the program's
+    # designated requirement. An ad-hoc (linker) signature's requirement
+    # is the code hash, so every release looked like a new app and asked
+    # for the user's password again after each update. Signed with one
+    # long-lived certificate, the requirement is "this identifier, this
+    # certificate", which every later release meets.
+    #
+    # The certificate is self-signed on purpose: the Keychain match does
+    # not consult trust, and Gatekeeper never sees these builds (the
+    # install script's download carries no quarantine flag). Replacing
+    # it costs every user one more prompt, so it is kept, not rotated.
+    - name: Sign macOS binaries
+      if: contains(matrix.job.target, 'apple-darwin')
+      shell: bash
+      env:
+        P12_BASE64: ${{ secrets.MACOS_SIGN_P12_BASE64 }}
+        P12_PASSWORD: ${{ secrets.MACOS_SIGN_P12_PASSWORD }}
+        OUT: ${{ steps.bin.outputs.OUT_DIR }}
+      run: |
+        set -euo pipefail
+        if [ -z "$P12_BASE64" ] || [ -z "$P12_PASSWORD" ]; then
+          echo "::error::MACOS_SIGN_P12_BASE64 / MACOS_SIGN_P12_PASSWORD are not set"
+          exit 1
+        fi
+
+        # A keychain of its own, so nothing lands in the runner's login
+        # keychain and the cleanup step knows exactly what to delete.
+        KC="$RUNNER_TEMP/oxdm-signing.keychain-db"
+        KC_PW="$(openssl rand -hex 24)"
+        P12="$RUNNER_TEMP/oxdm-signing.p12"
+        printf '%s' "$P12_BASE64" | base64 --decode > "$P12"
+        security create-keychain -p "$KC_PW" "$KC"
+        security set-keychain-settings -lut 3600 "$KC"
+        security unlock-keychain -p "$KC_PW" "$KC"
+        security import "$P12" -k "$KC" -P "$P12_PASSWORD" -T /usr/bin/codesign >/dev/null
+        rm -f "$P12"
+        # Without this, codesign asks for the key through a UI prompt
+        # nobody is there to answer, and fails.
+        security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KC_PW" "$KC" >/dev/null
+
+        ID="$(security find-identity -p codesigning "$KC" | awk '/"oxdm release signing"/ { print $2; exit }')"
+        [ -n "$ID" ] || { echo "::error::no 'oxdm release signing' identity in the certificate"; exit 1; }
+
+        # The app keeps the bundle id the installer writes, which is what
+        # the Keychain entry is tied to. The host never touches the
+        # Keychain; it gets an id of its own so the two are not confused.
+        sign() {
+          codesign --force --sign "$ID" --keychain "$KC" --identifier "$2" "$OUT/$1"
+          codesign --verify --strict "$OUT/$1"
+          req="$(codesign -d -r - "$OUT/$1" 2>&1)"
+          case "$req" in
+            *"identifier \"$2\" and certificate leaf"*) ;;
+            *) echo "::error::$1 is not signed with the release certificate: $req"; exit 1 ;;
+          esac
+        }
+        sign oxdm io.github.jd1378.oxdm
+        sign oxdm-native-host io.github.jd1378.oxdm.native-host
+        codesign -d -r - "$OUT/oxdm"
+
+    - name: Remove the signing keychain
+      if: always() && contains(matrix.job.target, 'apple-darwin')
+      shell: bash
+      run: security delete-keychain "$RUNNER_TEMP/oxdm-signing.keychain-db" 2>/dev/null || true
+
     - name: Create archive
       id: package
       shell: bash
