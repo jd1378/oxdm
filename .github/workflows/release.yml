@@ -303,6 +303,17 @@ jobs:
         try "create-keychain" security create-keychain -p "$KC_PW" "$KC"
         try "set-keychain-settings" security set-keychain-settings -lut 3600 "$KC"
         try "unlock-keychain" security unlock-keychain -p "$KC_PW" "$KC"
+        # codesign only resolves an identity in a keychain on the user's
+        # search list; `--keychain` alone is not enough on macOS 14 ("The
+        # specified item could not be found in the keychain"). Deleting
+        # the keychain in the cleanup step drops it from the list again.
+        OLD_KCS=()
+        while IFS= read -r line; do
+          line="${line#"${line%%[![:space:]]*}"}"; line="${line#\"}"; line="${line%\"}"
+          [ -n "$line" ] && OLD_KCS+=("$line")
+        done < <(security list-keychains -d user)
+        try "adding the keychain to the search list" \
+          security list-keychains -d user -s "$KC" ${OLD_KCS[@]+"${OLD_KCS[@]}"}
         try "importing the certificate" \
           security import "$P12" -k "$KC" -P "$P12_PASSWORD" -T /usr/bin/codesign
         rm -f "$P12"
