@@ -2,9 +2,14 @@
 //!
 //! `TrayIcon` is `!Send` on Windows (wraps `Rc<RefCell<…>>`), so it
 //! cannot live behind `Arc<Mutex<…>>` shared across tokio tasks. We
-//! pin it to a dedicated owner thread that drains menu/tray events
-//! and applies rebuilds. A small tokio task watches `AppState` and
-//! forwards the latest job list over an `std::sync::mpsc` channel.
+//! pin it to one owner thread that drains menu/tray events and applies
+//! rebuilds. A small tokio task watches `AppState` and forwards the
+//! latest job list over an `std::sync::mpsc` channel.
+//!
+//! The owner is a dedicated thread on Windows. On macOS it has to be
+//! the main thread: AppKit objects, `muda::Menu` included, may only be
+//! created there, and the status item only receives clicks while the
+//! main thread pumps AppKit events.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -62,6 +67,8 @@ struct ActionIds {
     quit: Option<MenuId>,
 }
 
+/// On macOS this runs the tray on the calling thread, which must be
+/// the main thread, and returns only if the tray could not be built.
 pub fn install(rt: Handle, state: Arc<AppState>) {
     let (jobs_tx, jobs_rx) = mpsc::channel::<Vec<Job>>();
 
@@ -87,16 +94,30 @@ pub fn install(rt: Handle, state: Arc<AppState>) {
         });
     }
 
-    // Owner thread: builds the tray, rebuilds menu, drains events.
-    let rt_handle = rt.clone();
-    let state_owner = state.clone();
+    // Owner: builds the tray, rebuilds menu, drains events.
+    #[cfg(target_os = "macos")]
+    {
+        let Some(mtm) = objc2::MainThreadMarker::new() else {
+            tracing::error!("tray not started: macOS needs it on the main thread");
+            return;
+        };
+        run_owner(rt, state, jobs_rx, mtm);
+    }
+    #[cfg(not(target_os = "macos"))]
     std::thread::Builder::new()
         .name("tray-icon".into())
-        .spawn(move || run_owner(rt_handle, state_owner, jobs_rx))
+        .spawn(move || run_owner(rt, state, jobs_rx))
         .expect("spawn tray thread");
 }
 
-fn run_owner(rt: Handle, state: Arc<AppState>, jobs_rx: mpsc::Receiver<Vec<Job>>) {
+fn run_owner(
+    rt: Handle,
+    state: Arc<AppState>,
+    jobs_rx: mpsc::Receiver<Vec<Job>>,
+    #[cfg(target_os = "macos")] mtm: objc2::MainThreadMarker,
+) {
+    #[cfg(target_os = "macos")]
+    let app = macos::init_app(mtm);
     let icon = crate::gui::app_icon::tray_icon_normal(crate::gui::theme::shell_theme());
     let menu = Menu::new();
     let tray = TrayIconBuilder::new()
@@ -195,7 +216,88 @@ fn run_owner(rt: Handle, state: Arc<AppState>, jobs_rx: mpsc::Receiver<Vec<Job>>
         #[cfg(target_os = "windows")]
         pump_win32_messages();
 
+        #[cfg(not(target_os = "macos"))]
         std::thread::sleep(std::time::Duration::from_millis(50));
+        #[cfg(target_os = "macos")]
+        macos::pump_events(&app.app, std::time::Duration::from_millis(50));
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod macos {
+    use objc2::rc::Retained;
+    use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
+    use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send};
+    use objc2_app_kit::{
+        NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSEventMask,
+    };
+    use objc2_foundation::{NSDate, NSDefaultRunLoopMode};
+
+    define_class!(
+        // SAFETY: NSObject has no subclassing requirements, and the
+        // class implements no `Drop`.
+        #[unsafe(super(NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "OxdmAppDelegate"]
+        struct AppDelegate;
+
+        unsafe impl NSObjectProtocol for AppDelegate {}
+
+        unsafe impl NSApplicationDelegate for AppDelegate {
+            /// Opening oxdm from Finder, Launchpad or Spotlight while
+            /// the daemon runs reaches the daemon as a reopen, since
+            /// it is the process LaunchServices knows as oxdm. With no
+            /// window of its own to bring forward, it opens the main
+            /// one, the same as a second launch from the terminal.
+            #[unsafe(method(applicationShouldHandleReopen:hasVisibleWindows:))]
+            fn should_handle_reopen(&self, _app: &NSApplication, _visible: bool) -> bool {
+                crate::daemon::tray::spawn_main_gui();
+                false
+            }
+        }
+    );
+
+    pub(super) struct App {
+        pub(super) app: Retained<NSApplication>,
+        /// `NSApplication` holds its delegate weakly.
+        _delegate: Retained<AppDelegate>,
+    }
+
+    /// The daemon is a menu-bar presence, not an app with windows of its
+    /// own (those are separate processes), so it stays out of the Dock
+    /// and the app switcher.
+    pub(super) fn init_app(mtm: MainThreadMarker) -> App {
+        let app = NSApplication::sharedApplication(mtm);
+        app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+        // SAFETY: `init` is NSObject's designated initialiser and the
+        // class has no ivars that would need setting first.
+        let delegate: Retained<AppDelegate> = unsafe { msg_send![AppDelegate::alloc(mtm), init] };
+        app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+        app.finishLaunching();
+        App {
+            app,
+            _delegate: delegate,
+        }
+    }
+
+    /// Dispatch AppKit events for up to `budget`, the macOS counterpart
+    /// of the Win32 pump: blocking `-[NSApplication run]` would leave
+    /// no turn for the menu rebuilds. Waiting inside
+    /// `nextEventMatchingMask` doubles as the loop's tick, so a click
+    /// is handled as it arrives rather than on the next tick.
+    pub(super) fn pump_events(app: &NSApplication, budget: std::time::Duration) {
+        let until = NSDate::dateWithTimeIntervalSinceNow(budget.as_secs_f64());
+        // SAFETY: an immutable static AppKit exports; reading it is how
+        // the mode is meant to be named.
+        let mode = unsafe { NSDefaultRunLoopMode };
+        while let Some(event) = app.nextEventMatchingMask_untilDate_inMode_dequeue(
+            NSEventMask::Any,
+            Some(&until),
+            mode,
+            true,
+        ) {
+            app.sendEvent(&event);
+        }
     }
 }
 

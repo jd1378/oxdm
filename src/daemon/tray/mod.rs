@@ -14,6 +14,8 @@ mod ksni_backend;
 #[cfg(not(target_os = "linux"))]
 mod tray_icon_backend;
 
+/// Start the tray. On macOS it takes over the calling thread, which
+/// must be the main one, for as long as the tray lives.
 pub fn install(rt: Handle, state: Arc<AppState>) {
     #[cfg(target_os = "linux")]
     ksni_backend::install(rt, state);

@@ -72,6 +72,11 @@ ksni = "0.3.4"
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# Already in-tree via tray-icon; direct use: the daemon's main thread
+# pumps AppKit events so the menu-bar item works.
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSEvent", "NSResponder", "NSRunningApplication"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSDate", "NSObjCRuntime", "NSRunLoop", "NSString"] }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 tray-icon = "0.24"

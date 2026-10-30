@@ -43,6 +43,9 @@ fn run_inner(guard: Option<InstanceGuard>, force_tray: bool) {
     let rt = Runtime::new().expect("tokio runtime");
     let state = rt.block_on(AppState::load());
     spawn_workers(&rt, state.clone(), guard, force_tray);
+    // Last, because on macOS it keeps the main thread for AppKit and
+    // returns only if the tray failed.
+    tray::install(rt.handle().clone(), state);
 
     // Block forever — the per-task spawns above keep the runtime busy.
     // `Request::DaemonQuit` calls `process::exit` from inside the IPC
@@ -119,7 +122,6 @@ fn spawn_workers(
         update_alerts::spawn(state.clone());
     }
     crate::data::spawn_file_watch(state.clone());
-    tray::install(rt.handle().clone(), state.clone());
 
     // Graceful Ctrl-C / SIGTERM: route through the same Quit path the
     // tray uses so in-flight jobs hit `pause_all` (and thereby
