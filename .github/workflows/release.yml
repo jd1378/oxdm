@@ -181,7 +181,11 @@ jobs:
           # host, not adding a bundle format on top.
           - { target: x86_64-unknown-linux-gnu    , os: ubuntu-latest }
           - { target: aarch64-unknown-linux-gnu   , os: ubuntu-24.04-arm }
-          - { target: x86_64-apple-darwin         , os: macos-15-intel }
+          # Intel macOS is cross-built on Apple Silicon: the SDK carries
+          # both architectures, Apple's clang builds the C dependencies
+          # for either, and the arm64 runners are far faster than the
+          # Intel ones GitHub is phasing out. Its tests run under Rosetta.
+          - { target: x86_64-apple-darwin         , os: macos-14 }
           - { target: aarch64-apple-darwin        , os: macos-14 }
           - { target: x86_64-pc-windows-msvc      , os: windows-2025 }
           - { target: aarch64-pc-windows-msvc     , os: windows-11-arm }
@@ -220,6 +224,15 @@ jobs:
     - name: Build
       shell: bash
       run: cargo build --locked --release --target=${{ matrix.job.target }} --bins
+
+    # The x86_64 macOS tests are Intel binaries on an Apple Silicon
+    # runner. Installed only when missing; the image normally has it.
+    - name: Ensure Rosetta
+      if: matrix.job.target == 'x86_64-apple-darwin'
+      shell: bash
+      run: |
+        arch -x86_64 /usr/bin/true 2>/dev/null \
+          || sudo softwareupdate --install-rosetta --agree-to-license
 
     - name: Run tests
       shell: bash
