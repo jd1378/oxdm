@@ -52,6 +52,71 @@ function Install-Binary($src, $name) {
   Ok "installed: $dst"
 }
 
+# A .NET task, waited on in short slices: a blocking wait would hold
+# off Ctrl+C until the network answered, which may be never. Gives up
+# after a minute without progress.
+function Wait-Task($task) {
+  $idle = [Diagnostics.Stopwatch]::StartNew()
+  while (-not $task.AsyncWaitHandle.WaitOne(100)) {
+    if ($idle.Elapsed.TotalSeconds -ge 60) { throw 'no data received for 60 seconds' }
+  }
+  $task.GetAwaiter().GetResult()
+}
+
+# Streamed by hand for a progress bar: Windows PowerShell 5.1's
+# `Invoke-WebRequest` shows only a byte count, and redraws it so often
+# that it slows the download down several times over.
+function Get-File($uri, $out) {
+  Add-Type -AssemblyName System.Net.Http
+  $client = New-Object System.Net.Http.HttpClient
+  $cancel = New-Object System.Threading.CancellationTokenSource
+  $activity = "Downloading $(Split-Path $out -Leaf)"
+  $err = $null
+  try {
+    $resp = Wait-Task ($client.GetAsync($uri, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead, $cancel.Token))
+    if (-not $resp.IsSuccessStatusCode) {
+      $err = "HTTP $([int]$resp.StatusCode)"
+    } else {
+      $total = $resp.Content.Headers.ContentLength
+      $in = Wait-Task ($resp.Content.ReadAsStreamAsync())
+      $fs = [IO.File]::Create($out)
+      try {
+        $buf = New-Object byte[] 65536
+        $done = 0L
+        $tick = [Diagnostics.Stopwatch]::StartNew()
+        while (($n = Wait-Task ($in.ReadAsync($buf, 0, $buf.Length, $cancel.Token))) -gt 0) {
+          $fs.Write($buf, 0, $n)
+          $done += $n
+          if ($tick.ElapsedMilliseconds -lt 200) { continue }
+          $tick.Restart()
+          if ($total) {
+            $status = '{0:N1} of {1:N1} MB' -f ($done / 1MB), ($total / 1MB)
+            Write-Progress -Activity $activity -Status $status -PercentComplete ([int](100 * $done / $total))
+          } else {
+            Write-Progress -Activity $activity -Status ('{0:N1} MB' -f ($done / 1MB))
+          }
+        }
+      } finally {
+        $fs.Dispose()
+        $in.Dispose()
+        Write-Progress -Activity $activity -Completed
+      }
+      Info ('{0:N1} MB' -f ($done / 1MB))
+    }
+  } catch {
+    # The base exception: on .NET Framework the outer one says only
+    # "An error occurred while sending the request".
+    $err = $_.Exception.GetBaseException().Message
+  } finally {
+    # Also reached on Ctrl+C, which leaves the request running unless
+    # it is cancelled here.
+    $cancel.Cancel()
+    $client.Dispose()
+    $cancel.Dispose()
+  }
+  if ($err) { Fail "download failed: $err ($uri)" }
+}
+
 Step 'Detecting platform'
 $arch = (Get-CimInstance Win32_OperatingSystem).OSArchitecture
 switch -Wildcard ($arch) {
@@ -88,7 +153,7 @@ $pkg = Join-Path $tmp $asset
 try {
   Step "Downloading $asset"
   Info $url
-  Invoke-WebRequest -Uri $url -OutFile $pkg -UseBasicParsing
+  Get-File $url $pkg
 
   # Every asset is published with its digest beside it; checking it is
   # the difference between "downloaded from GitHub" and "downloaded
