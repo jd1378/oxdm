@@ -185,8 +185,8 @@ jobs:
           # both architectures, Apple's clang builds the C dependencies
           # for either, and the arm64 runners are far faster than the
           # Intel ones GitHub is phasing out. Its tests run under Rosetta.
-          - { target: x86_64-apple-darwin         , os: macos-14 }
-          - { target: aarch64-apple-darwin        , os: macos-14 }
+          - { target: x86_64-apple-darwin         , os: macos-15 }
+          - { target: aarch64-apple-darwin        , os: macos-15 }
           - { target: x86_64-pc-windows-msvc      , os: windows-2025 }
           - { target: aarch64-pc-windows-msvc     , os: windows-11-arm }
     steps:
