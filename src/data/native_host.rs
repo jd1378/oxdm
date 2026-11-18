@@ -851,6 +851,42 @@ pub fn targets(home: &Path) -> Vec<Target> {
     out
 }
 
+/// The manifests browsers are pointed at, each listed once. `None` is
+/// a browser that has not been told where to look: on Windows, a
+/// missing registry value, kept per vendor key whether or not that
+/// browser is installed.
+///
+/// [`targets`] is empty on Windows, so anything asking "is oxdm
+/// registered?" has to ask here instead, or it hears "nothing to do"
+/// on a machine where nothing was ever registered.
+pub fn registered_manifests(home: &Path) -> Vec<Option<PathBuf>> {
+    #[cfg(windows)]
+    let manifests = {
+        let _ = home;
+        windows_registry::registered()
+    };
+    #[cfg(not(windows))]
+    let manifests = targets(home)
+        .into_iter()
+        // Parent absent = browser not installed.
+        .filter(|t| t.dir.parent().is_some_and(|p| p.is_dir()))
+        .map(|t| Some(t.dir.join(format!("{HOST_NAME}.json"))))
+        .collect();
+    unique_manifests(manifests)
+}
+
+/// Drops repeats of a path, keeping every `None`. On Windows every
+/// vendor of a family names the same manifest, and counting it once
+/// per vendor would tell the user about seven files where there are
+/// two.
+fn unique_manifests(manifests: Vec<Option<PathBuf>>) -> Vec<Option<PathBuf>> {
+    let mut seen = std::collections::HashSet::new();
+    manifests
+        .into_iter()
+        .filter(|m| m.as_ref().is_none_or(|p| seen.insert(p.clone())))
+        .collect()
+}
+
 /// Windows keeps native-messaging registrations in HKCU rather than in
 /// per-browser directories: one manifest anywhere readable, and a
 /// registry value per browser naming it.
@@ -858,8 +894,8 @@ pub fn targets(home: &Path) -> Vec<Target> {
 mod windows_registry {
     use super::*;
     use windows_sys::Win32::System::Registry::{
-        HKEY, HKEY_CURRENT_USER, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
-        RegCreateKeyExW, RegSetValueExW,
+        HKEY, HKEY_CURRENT_USER, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RRF_RT_REG_SZ,
+        RegCloseKey, RegCreateKeyExW, RegGetValueW, RegSetValueExW,
     };
 
     const CHROMIUM_VENDORS: &[(&str, &str)] = &[
@@ -916,6 +952,63 @@ mod windows_registry {
                 });
             }
         }
+    }
+
+    /// The manifest path every vendor key names, in the order
+    /// [`register`] writes them. Written for every vendor whether or
+    /// not that browser is installed, so a complete registration with
+    /// ids for both families reads back with no `None` in it.
+    pub fn registered() -> Vec<Option<PathBuf>> {
+        CHROMIUM_VENDORS
+            .iter()
+            .chain(FIREFOX_VENDORS)
+            .map(|(_, key)| {
+                get_default(&format!(r"{key}\NativeMessagingHosts\{HOST_NAME}")).map(PathBuf::from)
+            })
+            .collect()
+    }
+
+    /// The key's default value, or `None` when the key or value is
+    /// absent or not a string.
+    fn get_default(subkey: &str) -> Option<String> {
+        let path = wide(subkey);
+        let mut bytes: u32 = 0;
+        // SAFETY: `path` is NUL-terminated and outlives the call; a
+        // null buffer asks only for the size, which `bytes` receives.
+        let rc = unsafe {
+            RegGetValueW(
+                HKEY_CURRENT_USER,
+                path.as_ptr(),
+                std::ptr::null(),
+                RRF_RT_REG_SZ,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut bytes,
+            )
+        };
+        if rc != 0 || bytes == 0 {
+            return None;
+        }
+        let mut buf = vec![0u16; (bytes as usize).div_ceil(2)];
+        let mut size = (buf.len() * 2) as u32;
+        // SAFETY: `buf` holds `size` bytes, and RegGetValueW writes no
+        // more than that, NUL included.
+        let rc = unsafe {
+            RegGetValueW(
+                HKEY_CURRENT_USER,
+                path.as_ptr(),
+                std::ptr::null(),
+                RRF_RT_REG_SZ,
+                std::ptr::null_mut(),
+                buf.as_mut_ptr().cast(),
+                &mut size,
+            )
+        };
+        if rc != 0 {
+            return None;
+        }
+        let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        Some(String::from_utf16_lossy(&buf[..len])).filter(|s| !s.is_empty())
     }
 
     fn failed(browser: &str, reason: &str) -> HostEntry {
@@ -981,6 +1074,16 @@ mod windows_registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_manifest_shared_by_several_browsers_is_listed_once() {
+        let a = Some(PathBuf::from("a.json"));
+        let b = Some(PathBuf::from("b.json"));
+        assert_eq!(
+            unique_manifests(vec![a.clone(), None, a.clone(), b.clone(), None, b.clone()]),
+            vec![a, None, b, None]
+        );
+    }
 
     /// The Flatpak wrapper hands this path to the host with
     /// `--db-path`. If it names anywhere but the database the daemon

@@ -7,8 +7,9 @@
 //! go wrong for a hostile reason: anything that can write to the
 //! user's home can point the manifest at a binary of its own, and the
 //! browser will launch that instead. The manifest directories live
-//! under `~/.config/<browser>/` and are writable by the user account;
-//! the OS gives us nothing automatic here.
+//! under `~/.config/<browser>/`, and on Windows the registry values
+//! naming the manifest under HKCU; both are writable by the user
+//! account, and the OS gives us nothing automatic here.
 //!
 //! So on startup: read every manifest we would have written, and if
 //! one is missing or names something that is not our host, write ours
@@ -24,7 +25,6 @@
 use std::path::{Path, PathBuf};
 
 use crate::data::native_host;
-use crate::domain::HOST_NAME;
 
 /// Run the check in the background. Logs on its own. Never panics.
 pub fn spawn() {
@@ -70,21 +70,7 @@ fn run() -> Result<(), String> {
             return Ok(());
         }
     };
-    let mut missing = 0usize;
-    let mut wrong: Vec<(PathBuf, String)> = Vec::new();
-
-    for target in native_host::targets(&home) {
-        // Parent absent = browser not installed. Nothing to register.
-        if !target.dir.parent().is_some_and(|p| p.is_dir()) {
-            continue;
-        }
-        let path = target.dir.join(format!("{HOST_NAME}.json"));
-        match inspect(&path, &expected) {
-            State::Ours => {}
-            State::Missing => missing += 1,
-            State::Wrong(reason) => wrong.push((path, reason)),
-        }
-    }
+    let (missing, wrong) = classify(native_host::registered_manifests(&home), &expected);
     if missing == 0 && wrong.is_empty() {
         tracing::debug!("browser manifests are current");
         return Ok(());
@@ -101,13 +87,17 @@ fn run() -> Result<(), String> {
         "browser manifests refreshed"
     );
     for (path, reason) in &wrong {
-        tracing::warn!(?path, %reason, "manifest did not point at oxdm; rewritten");
+        tracing::warn!(?path, %reason, "manifest did not point at oxdm");
     }
     // Only a wrong path is worth interrupting for. A missing one is
     // the normal state of a fresh install, and the first thing this
     // function does about it is fix it.
     if !wrong.is_empty() {
-        notify_repaired(&wrong);
+        // Read back rather than trust the report: on Windows a failed
+        // entry names our manifest, not the foreign one a registry
+        // value still points at.
+        let (_, still_wrong) = classify(native_host::registered_manifests(&home), &expected);
+        notify_repaired(&wrong, still_wrong.is_empty());
     }
     Ok(())
 }
@@ -118,9 +108,9 @@ fn run() -> Result<(), String> {
 /// install nobody has set up yet, and starting the app is not the
 /// moment to nag about that.
 fn report_missing_host(home: &Path, reason: &str) {
-    let registered: Vec<PathBuf> = native_host::targets(home)
+    let registered: Vec<PathBuf> = native_host::registered_manifests(home)
         .into_iter()
-        .map(|t| t.dir.join(format!("{HOST_NAME}.json")))
+        .flatten()
         .filter(|p| p.is_file())
         .collect();
     if registered.is_empty() {
@@ -135,10 +125,32 @@ fn report_missing_host(home: &Path, reason: &str) {
     crate::platform::show_notification(
         "oxdm cannot capture browser downloads".to_owned(),
         format!(
-            "{reason}\n\n{} browser registration(s) point at it.",
+            "{reason}\n\n{} browser manifest(s) still name it.",
             registered.len()
         ),
     );
+}
+
+/// How many browsers have no manifest yet, and which manifests name
+/// something other than `expected`.
+fn classify(
+    manifests: impl IntoIterator<Item = Option<PathBuf>>,
+    expected: &Path,
+) -> (usize, Vec<(PathBuf, String)>) {
+    let mut missing = 0usize;
+    let mut wrong = Vec::new();
+    for manifest in manifests {
+        let Some(path) = manifest else {
+            missing += 1;
+            continue;
+        };
+        match inspect(&path, expected) {
+            State::Ours => {}
+            State::Missing => missing += 1,
+            State::Wrong(reason) => wrong.push((path, reason)),
+        }
+    }
+    (missing, wrong)
 }
 
 fn inspect(manifest: &Path, expected: &Path) -> State {
@@ -190,8 +202,22 @@ fn wrapper_execs(script: &Path, expected: &Path) -> bool {
     })
 }
 
-fn notify_repaired(wrong: &[(PathBuf, String)]) {
-    let summary = "oxdm restored its browser integration";
+/// `restored` is false when a manifest still names something else
+/// after the rewrite, so the user is not told it was fixed when it
+/// was not.
+fn notify_repaired(wrong: &[(PathBuf, String)], restored: bool) {
+    let (summary, outcome) = if restored {
+        (
+            "oxdm restored its browser integration",
+            "oxdm has put its own back.",
+        )
+    } else {
+        (
+            "oxdm could not restore its browser integration",
+            "oxdm could not put its own back everywhere; see the log, or \
+             run `oxdm --install-native-host`.",
+        )
+    };
     let first = wrong
         .first()
         .map(|(p, r)| format!("{}\n{r}", p.display()))
@@ -202,7 +228,7 @@ fn notify_repaired(wrong: &[(PathBuf, String)]) {
     };
     let body = format!(
         "A browser was pointed at something other than oxdm's helper. \
-         oxdm has put its own back.\n\n{first}{more}\n\nIf you did not move or \
+         {outcome}\n\n{first}{more}\n\nIf you did not move or \
          reinstall oxdm, check what changed."
     );
     crate::platform::show_notification(summary.to_owned(), body);
@@ -211,6 +237,7 @@ fn notify_repaired(wrong: &[(PathBuf, String)]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::HOST_NAME;
 
     /// Built through serde, not by hand: every path on Windows is
     /// full of backslashes, and `"C:\Users\..."` spliced into JSON
@@ -260,6 +287,23 @@ mod tests {
             inspect(&dir.path().join("absent.json"), Path::new("/opt/host")),
             State::Missing
         );
+    }
+
+    /// A browser that was never told where to look (on Windows, no
+    /// registry value) needs registering, the same as a manifest file
+    /// that is not there yet.
+    #[test]
+    fn an_unregistered_browser_counts_as_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = dir.path().join("oxdm-native-host");
+        std::fs::write(&host, b"binary").unwrap();
+        let host = std::fs::canonicalize(&host).unwrap();
+        let ours = manifest(dir.path(), &host.display().to_string());
+
+        let (missing, wrong) = classify([None, Some(ours.clone())], &host);
+        assert_eq!((missing, wrong.len()), (1, 0));
+        let (missing, wrong) = classify([Some(ours)], &host);
+        assert_eq!((missing, wrong.len()), (0, 0));
     }
 
     /// A Flatpak browser is pointed at the shim, and the shim is ours
