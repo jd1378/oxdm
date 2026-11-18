@@ -154,6 +154,20 @@ try {
   # bridge, minus that integration.
   if ($host_) {
     Install-Binary $host_.FullName 'oxdm-native-host.exe'
+    # Lets the extension reach oxdm before its first launch. Start-Process
+    # because oxdm.exe is a GUI program, which `&` does not wait for.
+    Step 'Registering with browsers'
+    $log = Join-Path $tmp 'native-host.txt'
+    try {
+      $p = Start-Process -FilePath (Join-Path $Dir 'oxdm.exe') -ArgumentList '--install-native-host' `
+        -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput $log -RedirectStandardError "$log.err"
+      # oxdm writes UTF-8, which PS 5.1 would otherwise read as ANSI.
+      Get-Content -Path $log, "$log.err" -Encoding UTF8 -ErrorAction SilentlyContinue | ForEach-Object { Info $_ }
+      if ($p.ExitCode -eq 0) { Ok 'browser integration registered' }
+      else { Warn "registration exited with $($p.ExitCode); run 'oxdm --install-native-host' to retry" }
+    } catch {
+      Warn "could not register with browsers: $($_.Exception.Message); run 'oxdm --install-native-host' to retry"
+    }
   } else {
     Warn "'oxdm-native-host.exe' is not in this archive - browser integration will be unavailable."
   }
