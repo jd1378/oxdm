@@ -66,7 +66,7 @@ function Wait-Task($task) {
 # Streamed by hand for a progress bar: Windows PowerShell 5.1's
 # `Invoke-WebRequest` shows only a byte count, and redraws it so often
 # that it slows the download down several times over.
-function Get-File($uri, $out) {
+function Get-File($uri, $out, [switch]$Quiet) {
   Add-Type -AssemblyName System.Net.Http
   $client = New-Object System.Net.Http.HttpClient
   $cancel = New-Object System.Threading.CancellationTokenSource
@@ -87,7 +87,7 @@ function Get-File($uri, $out) {
         while (($n = Wait-Task ($in.ReadAsync($buf, 0, $buf.Length, $cancel.Token))) -gt 0) {
           $fs.Write($buf, 0, $n)
           $done += $n
-          if ($tick.ElapsedMilliseconds -lt 200) { continue }
+          if ($Quiet -or $tick.ElapsedMilliseconds -lt 200) { continue }
           $tick.Restart()
           if ($total) {
             $status = '{0:N1} of {1:N1} MB' -f ($done / 1MB), ($total / 1MB)
@@ -99,9 +99,9 @@ function Get-File($uri, $out) {
       } finally {
         $fs.Dispose()
         $in.Dispose()
-        Write-Progress -Activity $activity -Completed
+        if (-not $Quiet) { Write-Progress -Activity $activity -Completed }
       }
-      Info ('{0:N1} MB' -f ($done / 1MB))
+      if (-not $Quiet) { Info ('{0:N1} MB' -f ($done / 1MB)) }
     }
   } catch {
     # The base exception: on .NET Framework the outer one says only
@@ -157,31 +157,18 @@ try {
 
   # Every asset is published with its digest beside it; checking it is
   # the difference between "downloaded from GitHub" and "downloaded
-  # what the release actually built".
+  # what the release actually built". No digest means no install: an
+  # unverified archive is the one case this check exists for.
   Step 'Verifying'
-  $want = $null
-  try {
-    # To a file, then read it as text. `Invoke-WebRequest` hands back
-    # `Content` as a byte array whenever the server does not call the
-    # response text — GitHub serves .sha256 as application/octet-stream
-    # — and splitting a byte array stringifies it to "51 49 ...", so
-    # the digest came out as the decimal value of its first character.
-    $shaFile = "$pkg.sha256"
-    Invoke-WebRequest -Uri "$url.sha256" -OutFile $shaFile -UseBasicParsing
-    $sums = (Get-Content -Raw -Path $shaFile).Trim()
-    # `<hash>  <name>`, or `<hash> *<name>` when it was written in
-    # binary mode; the digest is the first field either way.
-    $want = ($sums -split '\s+')[0]
-  } catch {
-    Warn "could not verify the download: $($_.Exception.Message)"
-  }
-  # Outside the try: `Fail` throws, and the catch above would turn a
-  # mismatch into a warning.
-  if ($want) {
-    $got = (Get-FileHash -Path $pkg -Algorithm SHA256).Hash.ToLower()
-    if ($want.ToLower() -ne $got) { Fail "checksum mismatch: expected $want, got $got" }
-    Ok 'sha256 matches'
-  }
+  $shaFile = "$pkg.sha256"
+  Get-File "$url.sha256" $shaFile -Quiet
+  # `<hash>  <name>`, or `<hash> *<name>` when it was written in
+  # binary mode; the digest is the first field either way.
+  $want = @((Get-Content -Raw -Path $shaFile) -split '\s+' | Where-Object { $_ })[0]
+  if ($want -notmatch '^[0-9a-fA-F]{64}$') { Fail "no sha256 digest in $url.sha256" }
+  $got = (Get-FileHash -Path $pkg -Algorithm SHA256).Hash.ToLower()
+  if ($want.ToLower() -ne $got) { Fail "checksum mismatch: expected $want, got $got" }
+  Ok 'sha256 matches'
 
   Step 'Extracting'
   tar -xzf $pkg -C $tmp

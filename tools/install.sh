@@ -134,25 +134,25 @@ download "$URL" "$TMP/$ASSET" || err "download failed: $URL"
 
 # Every asset is published with its digest beside it. Checking it costs
 # one small request and is the difference between "downloaded from
-# GitHub" and "downloaded what the release actually built".
+# GitHub" and "downloaded what the release actually built". No digest
+# means no install: an unverified archive is the one case this check
+# exists for.
 step "Verifying"
-if fetch "${URL}.sha256" > "$TMP/$ASSET.sha256" 2>/dev/null && [ -s "$TMP/$ASSET.sha256" ]; then
-  WANT="$(cut -d' ' -f1 < "$TMP/$ASSET.sha256")"
-  if command -v sha256sum >/dev/null 2>&1; then
-    GOT="$(sha256sum "$TMP/$ASSET" | cut -d' ' -f1)"
-  elif command -v shasum >/dev/null 2>&1; then
-    GOT="$(shasum -a 256 "$TMP/$ASSET" | cut -d' ' -f1)"
-  else
-    GOT=""
-    warn "no sha256 tool found — skipping verification"
-  fi
-  if [ -n "$GOT" ]; then
-    [ "$WANT" = "$GOT" ] || err "checksum mismatch: expected $WANT, got $GOT"
-    ok "sha256 matches"
-  fi
+fetch "${URL}.sha256" > "$TMP/$ASSET.sha256" 2>/dev/null || err "could not download the checksum: ${URL}.sha256"
+WANT="$(cut -d' ' -f1 < "$TMP/$ASSET.sha256" | tr 'A-F' 'a-f')"
+case "$WANT" in
+  *[!0-9a-f]* | "") err "no sha256 digest in ${URL}.sha256" ;;
+esac
+[ "${#WANT}" -eq 64 ] || err "no sha256 digest in ${URL}.sha256"
+if command -v sha256sum >/dev/null 2>&1; then
+  GOT="$(sha256sum "$TMP/$ASSET" | cut -d' ' -f1)"
+elif command -v shasum >/dev/null 2>&1; then
+  GOT="$(shasum -a 256 "$TMP/$ASSET" | cut -d' ' -f1)"
 else
-  warn "no published checksum for $ASSET — skipping verification"
+  err "need sha256sum or shasum to verify the download"
 fi
+[ "$WANT" = "$GOT" ] || err "checksum mismatch: expected $WANT, got $GOT"
+ok "sha256 matches"
 
 step "Extracting"
 tar -xzf "$TMP/$ASSET" -C "$TMP"
