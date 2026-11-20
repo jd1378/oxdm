@@ -1238,14 +1238,14 @@ impl AppState {
         // notification reports is this run — but only when the queue was
         // not already running, or restarting a running queue would
         // discard the counts it has accumulated.
-        let was_running = {
+        let (was_running, had_tally) = {
             let mut active = self.active_queues.write().await;
             match active.get_mut(&id) {
                 Some(tally) if tally.queue_run => {
                     // Start on a run Pause all had suspended is the
                     // user asking for it back.
                     tally.paused = false;
-                    true
+                    (true, true)
                 }
                 // A hand-started download in this queue may have opened
                 // a tally already; this run takes it over rather than
@@ -1253,7 +1253,7 @@ impl AppState {
                 Some(tally) => {
                     tally.queue_run = true;
                     tally.paused = false;
-                    false
+                    (false, true)
                 }
                 None => {
                     active.insert(
@@ -1263,7 +1263,7 @@ impl AppState {
                             ..QueueRunTally::default()
                         },
                     );
-                    false
+                    (false, false)
                 }
             }
         };
@@ -1294,11 +1294,20 @@ impl AppState {
             }
         }
 
-        if !started_any {
+        if !queue_run_stands(started_any, running_now) {
             // Nothing to run: undo the declaration rather than leaving a
-            // queue that shows Stop with nothing to stop.
+            // queue that shows Stop with nothing to stop. A tally a
+            // hand-started download opened goes back to being only
+            // that, still counting its outcome.
             if !was_running {
-                self.active_queues.write().await.remove(&id);
+                let mut active = self.active_queues.write().await;
+                if had_tally {
+                    if let Some(tally) = active.get_mut(&id) {
+                        tally.queue_run = false;
+                    }
+                } else {
+                    active.remove(&id);
+                }
             }
             return Ok(());
         }
@@ -5967,6 +5976,17 @@ fn clear_queue_deferrals(jobs: &IndexMap<JobId, Arc<JobEntry>>, queue: QueueId) 
     }
 }
 
+/// Does a Start queue press leave the queue running?
+///
+/// Yes when it started something, and also when something in the queue
+/// is already downloading. A download the user started by hand fills
+/// the slot the queue would have used, so the press starts nothing, but
+/// the user still asked for the queue: the run is declared and picks up
+/// the next download when that one ends.
+fn queue_run_stands(started_any: bool, running_now: usize) -> bool {
+    started_any || running_now > 0
+}
+
 fn queue_stop_targets(jobs: &IndexMap<JobId, Arc<JobEntry>>, queue: QueueId) -> Vec<JobId> {
     jobs.values()
         .filter(|e| {
@@ -7283,6 +7303,18 @@ mod tests {
         // A job with no name yet claims nothing, and neither does a
         // blank enquiry.
         assert!(!name_is_taken(&jobs, "   ", None));
+    }
+
+    /// Starting a queue whose only slot a hand-started download holds
+    /// starts nothing, and the queue still counts as running, so it
+    /// carries on once that download ends. Only a queue with nothing
+    /// started and nothing going is left stopped.
+    #[test]
+    fn a_queue_started_beside_a_running_download_stays_started() {
+        assert!(queue_run_stands(false, 1), "the slot is taken, not empty");
+        assert!(queue_run_stands(true, 0));
+        assert!(queue_run_stands(true, 2));
+        assert!(!queue_run_stands(false, 0), "nothing to run");
     }
 
     /// Stop queue ends the queue's run. A download the user started by
